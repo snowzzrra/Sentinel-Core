@@ -1,0 +1,4 @@
+LIBRARY msimg32
+EXPORTS
+    sc_bootstrap_inspect @6
+    sc_bootstrap_shutdown @7

@@ -1,0 +1,8 @@
+// Native Windows absolute forwarders. Keep this separate from the Core ABI.
+#pragma comment(linker, "/export:vSetDdrawflag=@SC_SYSTEM_FORWARDER_C@.vSetDdrawflag,@1")
+#pragma comment(linker, "/export:AlphaBlend=@SC_SYSTEM_FORWARDER_C@.AlphaBlend,@2")
+// LINK reserves this spelling; leave ordinal 3 as the sole unassigned slot.
+// The harness checks the emitted ordinal as well as the export name.
+#pragma comment(linker, "/export:DllInitialize=@SC_SYSTEM_FORWARDER_C@.DllInitialize,PRIVATE")
+#pragma comment(linker, "/export:GradientFill=@SC_SYSTEM_FORWARDER_C@.GradientFill,@4")
+#pragma comment(linker, "/export:TransparentBlt=@SC_SYSTEM_FORWARDER_C@.TransparentBlt,@5")

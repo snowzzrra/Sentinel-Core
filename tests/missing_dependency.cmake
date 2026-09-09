@@ -1,0 +1,11 @@
+file(MAKE_DIRECTORY "${STAGE}")
+file(COPY "${PROXY}" "${HARNESS}" DESTINATION "${STAGE}")
+if(EXISTS "${STAGE}/sentinel_core.dll")
+  message(FATAL_ERROR "Missing-dependency fixture is contaminated; choose a new build directory.")
+endif()
+execute_process(COMMAND "${STAGE}/sentinel_harness.exe" --missing "${STAGE}/msimg32.dll"
+  WORKING_DIRECTORY "${STAGE}" RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+  message(FATAL_ERROR "Missing Core dependency check failed: ${result}\n${output}${error}")
+endif()
+message(STATUS "${output}")
