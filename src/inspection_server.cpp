@@ -1,16 +1,36 @@
 #include "inspection_server.h"
 #include "pipe_io.h"
 #include "protocol.h"
+#include "engine_observer.h"
 #include <sddl.h>
 #include <vector>
 
 namespace sentinel {
 namespace {
-HANDLE pipe = INVALID_HANDLE_VALUE, stop = nullptr, worker = nullptr;
+HANDLE pipe = INVALID_HANDLE_VALUE, stop = nullptr, worker = nullptr, observer = nullptr;
 
+DWORD observe(void*) {
+    engine::LocalMemory memory;
+    engine::Binding binding;
+    uint64_t sequence = 0;
+    try {
+        if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return 0;
+        binding = engine::bind_host(memory, stop);
+        do {
+            publish_engine(engine::sample(memory, binding, ++sequence));
+        } while (WaitForSingleObject(stop, 100) == WAIT_TIMEOUT);
+    } catch (...) {
+        binding.metadata = engine::unavailable(SC_REASON_INTERNAL_ERROR);
+        publish_engine(binding.metadata);
+    }
+    return 0;
+}
 DWORD serve(void*) {
     Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!event) { inspection_failed(GetLastError()); return 1; }
+    // One sampler owns all engine reads. Resolver startup never blocks basic IPC.
+    observer = CreateThread(nullptr, 0, observe, nullptr, 0, nullptr);
+    if (!observer) publish_engine(engine::unavailable(SC_REASON_INTERNAL_ERROR));
     while (WaitForSingleObject(stop, 0) == WAIT_TIMEOUT) {
         ResetEvent(event.value);
         OVERLAPPED ov{}; ov.hEvent = event.value;
@@ -29,8 +49,11 @@ DWORD serve(void*) {
         Message data{};
         if (transfer(pipe, false, data.data(), static_cast<DWORD>(data.size()), count, stop,
                      remaining(deadline)) == ERROR_SUCCESS) {
-            const auto result = decode_request(data, count);
-            const DWORD size = static_cast<DWORD>(encode_response(data, result, current_snapshot()));
+            uint16_t operation = inspect_operation;
+            const auto result = decode_request(data, count, &operation);
+            const DWORD size = static_cast<DWORD>(operation == engine_operation ?
+                encode_engine_response(data, result, current_snapshot(), current_engine_snapshot()) :
+                encode_response(data, result, current_snapshot()));
             if (transfer(pipe, true, data.data(), size, count, stop, remaining(deadline)) == ERROR_SUCCESS) {
                 // Wait for client close (or reject extra input), so DisconnectNamedPipe
                 // cannot discard the reply before it is read. Never FlushFileBuffers.
@@ -94,8 +117,15 @@ DWORD start_inspection() {
 DWORD stop_inspection() {
     if (!worker) return ERROR_SUCCESS;
     SetEvent(stop); // Worker cancels/drains its own overlapped I/O.
-    const DWORD wait = WaitForSingleObject(worker, 5000);
+    const auto deadline = GetTickCount64() + 5000;
+    DWORD wait = WaitForSingleObject(worker, remaining(deadline));
     if (wait != WAIT_OBJECT_0) return wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+    // Joining the service first also synchronizes its observer-handle publication.
+    if (observer) {
+        wait = WaitForSingleObject(observer, remaining(deadline));
+        if (wait != WAIT_OBJECT_0) return wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+        CloseHandle(observer); observer = nullptr;
+    }
     CloseHandle(worker); CloseHandle(stop); CloseHandle(pipe);
     worker = nullptr; stop = nullptr; pipe = INVALID_HANDLE_VALUE;
     return ERROR_SUCCESS;

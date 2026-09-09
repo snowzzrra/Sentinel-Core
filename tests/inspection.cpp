@@ -7,6 +7,7 @@
 #include <cstring>
 #include <thread>
 #include <vector>
+#include <algorithm>
 
 #define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL line %d: %s (win32=%lu)\n", __LINE__, #c, GetLastError()); std::exit(1); } } while (0)
 using namespace sentinel;
@@ -59,12 +60,12 @@ struct Host {
 std::string probe(const std::wstring& path, const std::wstring& args, DWORD expected) {
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     Handle read, write;
-    CHECK(CreatePipe(&read.value, &write.value, &sa, 4096));
+    CHECK(CreatePipe(&read.value, &write.value, &sa, 16384));
     CHECK(SetHandleInformation(read.value, HANDLE_FLAG_INHERIT, 0));
     Child child(quote(path) + L" " + args, write.value);
     CHECK(child.wait() == expected);
     CloseHandle(write.value); write.value = nullptr;
-    char buffer[4096]{}; DWORD size = 0;
+    char buffer[16384]{}; DWORD size = 0;
     CHECK(ReadFile(read.value, buffer, sizeof(buffer), &size, nullptr));
     return std::string(buffer, size);
 }
@@ -136,7 +137,8 @@ void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int
             forged.pid = GetCurrentProcessId();
             CHECK(process_time(GetCurrentProcess(), forged.process_created));
             if (variant == 1) ++forged.process_created;
-            auto code = variant == 2 ? WireResult::incompatible_protocol : WireResult::ok;
+            auto code = variant == 2 ? WireResult::incompatible_protocol :
+                (variant == 4 ? WireResult::unsupported_operation : WireResult::ok);
             DWORD size = static_cast<DWORD>(encode_response(request, code, forged));
             if (variant == 3) size = 7;
             CHECK(transfer(pipe.value, true, request.data(), size, count, nullptr, 2000) == ERROR_SUCCESS);
@@ -144,9 +146,10 @@ void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int
         }
         DisconnectNamedPipe(pipe.value);
     });
-    const DWORD expected[] = {5, 6, 7, 9};
+    const DWORD expected[] = {5, 6, 7, 9, 8};
     const auto start = GetTickCount64();
-    const auto output = probe(probe_path, L"--pid " + std::to_wstring(GetCurrentProcessId()) + L" --timeout-ms 150 --json", expected[variant]);
+    const auto output = probe(probe_path, L"--pid " + std::to_wstring(GetCurrentProcessId()) +
+        L" --timeout-ms 150 --json" + (variant == 4 ? L" --engine" : L""), expected[variant]);
     CHECK(!output.empty() && GetTickCount64() - start < 4000);
     server.join();
 }
@@ -185,7 +188,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(initial.snapshot.core.abi_version == SC_ABI_VERSION && initial.snapshot.core.capabilities == 3);
     CHECK(initial.snapshot.core.state == SC_READY && initial.snapshot.service == ServiceState::listening);
     CHECK(initial.snapshot.core.initialization_count == 1 && std::strlen(initial.snapshot.core.build_id) == 64);
-    CHECK(std::strcmp(initial.snapshot.core.version, "0.2.0-phase3.2") == 0);
+    CHECK(std::strcmp(initial.snapshot.core.version, "0.3.0-phase4.1") == 0);
     uint64_t created = 0; CHECK(process_time(first.child.process.value, created));
     CHECK(initial.snapshot.process_created == created);
     const auto other = query(second.child.pid, 2000);
@@ -202,7 +205,42 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(json.find("\"host_kind\":\"non_game_host\"") != std::string::npos);
     CHECK(json.find("\"engine_integration\":\"unavailable\"") != std::string::npos);
     CHECK(json.find(instance_text(initial.snapshot.instance)) != std::string::npos);
+    auto engine = query_engine(first.child.pid, 2000);
+    const auto observe_deadline = GetTickCount64() + 5000;
+    while (engine.result == ProbeResult::ok && engine.engine.pe_reason == SC_REASON_NOT_SAMPLED && GetTickCount64() < observe_deadline) {
+        CHECK(query(first.child.pid, 150).result == ProbeResult::ok);
+        Sleep(100); engine = query_engine(first.child.pid, 2000);
+    }
+    CHECK(engine.result == ProbeResult::ok && engine.snapshot.instance == initial.snapshot.instance);
+    CHECK(engine.engine.pe_reason == SC_REASON_NONE && engine.engine.profile == SC_PROFILE_NONE);
+    CHECK(engine.engine.root_locator_reason == SC_REASON_SIGNATURE_MISSING);
+    CHECK(engine.engine.fields[SC_ENGINE_PLAYER_PRESENT].validity == SC_OBSERVATION_UNKNOWN);
+    Sleep(150);
+    const auto fresh_engine = query_engine(first.child.pid, 2000);
+    CHECK(fresh_engine.result == ProbeResult::ok && fresh_engine.engine.sequence > engine.engine.sequence);
+    CHECK(query(first.child.pid, 2000).result == ProbeResult::ok);
+    const auto engine_json = probe(probe_path, args + L" --engine --json", 0);
+    CHECK(engine_json.find("\"operation\":\"engine\"") != std::string::npos);
+    CHECK(engine_json.find("\"profile\":\"unrecognized\"") != std::string::npos);
+    CHECK(engine_json.find("\"value\":null") != std::string::npos);
+    const auto watch_started = GetTickCount64();
+    const auto watch = probe(probe_path, args + L" --engine --watch-count 2 --interval-ms 100 --json", 0);
+    CHECK(std::count(watch.begin(), watch.end(), '\n') == 2 && GetTickCount64() - watch_started < 3000);
+    CHECK(GetTickCount64() - watch_started >= 90);
+    { // Target exits between capture records; no retries against a replacement process.
+        Host exiting(dll, 5);
+        std::thread exit_host([&] { Sleep(200); exiting.shutdown(); });
+        const auto stopped_watch = probe(probe_path, L"--pid " + std::to_wstring(exiting.child.pid) +
+            L" --engine --watch-count 2 --interval-ms 1000 --json", 3);
+        exit_host.join();
+        CHECK(stopped_watch.find("endpoint_absent") != std::string::npos);
+    }
+    probe(probe_path, args + L" --watch-count 2 --json", 2);
+    probe(probe_path, args + L" --engine --watch-count 601 --json", 2);
+    probe(probe_path, args + L" --engine --watch-count 2 --interval-ms 1 --json", 2);
     std::printf("HARNESS_JSON %s", json.c_str());
+    std::printf("HARNESS_ENGINE_JSON %s", engine_json.c_str());
+    std::printf("HARNESS_WATCH_JSON %s", watch.c_str());
     CHECK(probe(probe_path, L"--help", 0).find("--timeout-ms") != std::string::npos);
     probe(probe_path, L"--pid 0 --json", 2);
     probe(probe_path, L"--pid 1 --timeout-ms 10001 --json", 2);
@@ -262,7 +300,7 @@ int wmain(int argc, wchar_t** argv) {
         CHECK(denied);
         probe(probe_path, L"--pid " + std::to_wstring(GetCurrentProcessId()) + L" --json", 4);
     }
-    for (int i = 0; i < 4; ++i) fake_response(probe_path, initial.snapshot, i);
+    for (int i = 0; i < 5; ++i) fake_response(probe_path, initial.snapshot, i);
     CHECK(GetModuleHandleW(L"sentinel_core.dll") == nullptr); // Test client never hosts Core.
     std::puts("PASS separate hosts/CLI, OS PID+creation, identity, ACL, reconnect, malformed/capability/version, timeouts, shutdown; HARNESS ONLY");
     return 0;

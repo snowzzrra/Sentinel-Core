@@ -1,5 +1,6 @@
 #include "inspection_server.h"
 #include "pipe_io.h"
+#include "engine_observer.h"
 #include <bcrypt.h>
 
 namespace {
@@ -8,6 +9,7 @@ SRWLOCK lifecycle = SRWLOCK_INIT;
 constexpr uint64_t capabilities = SC_CAP_INSPECTION | SC_CAP_LIFECYCLE;
 sentinel::Snapshot current{{sizeof(sc_status), SC_ABI_VERSION, capabilities, SC_COLD,
                            SC_OK, 0, 0, SC_VERSION, SC_BUILD_ID}};
+sc_engine_snapshot current_engine = sentinel::engine::unavailable(SC_REASON_NOT_SAMPLED);
 
 sc_result record(sc_result result, const char* message) {
     current.core.last_result = result;
@@ -20,6 +22,18 @@ sc_result record(sc_result result, const char* message) {
 }
 
 namespace sentinel {
+sc_engine_snapshot current_engine_snapshot() {
+    AcquireSRWLockShared(&lock);
+    const auto result = current_engine;
+    ReleaseSRWLockShared(&lock);
+    return engine::freshness(result, GetTickCount64());
+}
+void publish_engine(const sc_engine_snapshot& snapshot) {
+    AcquireSRWLockExclusive(&lock);
+    if (current.core.state == SC_READY && current.service == ServiceState::listening)
+        current_engine = snapshot;
+    ReleaseSRWLockExclusive(&lock);
+}
 Snapshot current_snapshot() {
     AcquireSRWLockShared(&lock);
     const auto result = current;
@@ -28,11 +42,19 @@ Snapshot current_snapshot() {
 }
 void inspection_failed(DWORD error) {
     AcquireSRWLockExclusive(&lock);
+    current_engine = engine::unavailable(SC_REASON_INTERNAL_ERROR);
     current.service = ServiceState::failed;
     current.service_error = error;
     record(SC_INSPECTION_FAILURE, "[Sentinel Core] inspection service failed; engine unavailable\n");
     ReleaseSRWLockExclusive(&lock);
 }
+}
+
+sc_result sc_engine_inspect(uint32_t abi, uint32_t size, sc_engine_snapshot* snapshot) {
+    if (abi != SC_ENGINE_ABI_VERSION) return SC_ABI_MISMATCH;
+    if (!snapshot || size != sizeof(sc_engine_snapshot)) return SC_INVALID_ARGUMENT;
+    *snapshot = sentinel::current_engine_snapshot();
+    return SC_OK;
 }
 
 sc_result sc_inspect(uint32_t abi, uint32_t size, sc_status* status) {
@@ -59,6 +81,7 @@ sc_result sc_initialize(uint32_t abi, uint64_t required) {
             ++current.core.initialization_count;
         }
         if (current.service != sentinel::ServiceState::listening) {
+            current_engine = sentinel::engine::unavailable(SC_REASON_NOT_SAMPLED);
             current.pid = GetCurrentProcessId();
             DWORD error = ERROR_SUCCESS;
             if (!sentinel::process_time(GetCurrentProcess(), current.process_created)) error = GetLastError();
@@ -68,7 +91,7 @@ sc_result sc_initialize(uint32_t abi, uint64_t required) {
             current.service_error = error;
             current.service = error == ERROR_SUCCESS ? sentinel::ServiceState::listening : sentinel::ServiceState::failed;
             result = record(error == ERROR_SUCCESS ? SC_OK : SC_INSPECTION_FAILURE,
-                error == ERROR_SUCCESS ? "[Sentinel Core " SC_VERSION " build=" SC_BUILD_ID "] ready: local inspection; engine unavailable, gameplay unprobed\n" :
+                error == ERROR_SUCCESS ? "[Sentinel Core " SC_VERSION " build=" SC_BUILD_ID "] ready: local inspection; read-only observer pending, gameplay unprobed\n" :
                     "[Sentinel Core] initialized; inspection start failed\n");
         } else current.core.last_result = SC_OK;
     }
@@ -81,6 +104,7 @@ sc_result sc_shutdown(void) {
     AcquireSRWLockExclusive(&lifecycle);
     AcquireSRWLockExclusive(&lock);
     current.service = sentinel::ServiceState::stopping;
+    current_engine = sentinel::engine::unavailable(SC_REASON_STOPPED);
     ReleaseSRWLockExclusive(&lock);
     // Never hold the snapshot lock while joining an admitted reader.
     const DWORD error = sentinel::stop_inspection();

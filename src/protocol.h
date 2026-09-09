@@ -6,7 +6,11 @@ using Message = std::array<uint8_t, max_message>;
 constexpr size_t header_size = 16;
 size_t encode_request(Message& out, uint64_t required, uint16_t version = wire_version,
                       uint16_t operation = inspect_operation);
-WireResult decode_request(const Message& in, size_t size);
+WireResult decode_request(const Message& in, size_t size, uint16_t* operation = nullptr);
 size_t encode_response(Message& out, WireResult result, const Snapshot& snapshot);
 bool decode_response(const Message& in, size_t size, WireResult& result, Snapshot& snapshot);
+size_t encode_engine_response(Message& out, WireResult result, const Snapshot& snapshot,
+                              const sc_engine_snapshot& engine);
+bool decode_engine_response(const Message& in, size_t size, WireResult& result,
+                            Snapshot& snapshot, sc_engine_snapshot& engine);
 }

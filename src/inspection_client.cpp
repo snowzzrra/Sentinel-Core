@@ -15,7 +15,7 @@ ProbeResult classify(DWORD error) {
     }
 }
 }
-Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required) {
+static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t required, uint16_t operation) {
     Inspection result;
     auto fail = [&](DWORD error) { result.win32_error = error; result.result = classify(error); return result; };
     if (!pid || timeout_ms < min_timeout_ms || timeout_ms > max_timeout_ms) {
@@ -49,7 +49,7 @@ Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required) {
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(encode_request(data, required));
+    const DWORD size = static_cast<DWORD>(encode_request(data, required, wire_version, operation));
     DWORD count = 0;
     DWORD error = transfer(pipe.value, true, data.data(), size, count, nullptr, remaining(deadline));
     if (error != ERROR_SUCCESS) return fail(error);
@@ -57,11 +57,16 @@ Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required) {
                      nullptr, remaining(deadline));
     if (error != ERROR_SUCCESS) return fail(error);
     WireResult code{};
-    if (!decode_response(data, count, code, result.snapshot)) {
+    // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
+    bool decoded = operation == engine_operation ? decode_engine_response(data, count, code, result.snapshot, result.engine) :
+        decode_response(data, count, code, result.snapshot);
+    if (!decoded && operation == engine_operation && count == header_size)
+        decoded = decode_response(data, count, code, result.snapshot) && code != WireResult::ok;
+    if (!decoded) {
         result.result = ProbeResult::invalid_response; return result;
     }
     if (code != WireResult::ok) {
-        result.result = code == WireResult::capability_unavailable ? ProbeResult::capability_unavailable :
+        result.result = code == WireResult::capability_unavailable || code == WireResult::unsupported_operation ? ProbeResult::capability_unavailable :
             (code == WireResult::incompatible_protocol ? ProbeResult::incompatible_protocol : ProbeResult::invalid_response);
         return result;
     }
@@ -71,5 +76,11 @@ Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required) {
     }
     result.result = ProbeResult::ok;
     return result;
+}
+Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required) {
+    return query_operation(pid, timeout_ms, required, inspect_operation);
+}
+Inspection query_engine(uint32_t pid, uint32_t timeout_ms) {
+    return query_operation(pid, timeout_ms, engine_capability, engine_operation);
 }
 }

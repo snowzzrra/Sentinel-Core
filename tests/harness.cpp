@@ -1,4 +1,5 @@
 #include "sentinel_bootstrap.h"
+#include "sentinel_engine.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
@@ -7,6 +8,7 @@
 #include <vector>
 
 extern "C" int sentinel_c_status_size(void);
+extern "C" int sentinel_c_engine_size(void);
 #define CHECK(condition) do { if (!(condition)) { \
     std::fprintf(stderr, "FAIL line %d: %s (win32=%lu)\n", __LINE__, #condition, GetLastError()); \
     std::exit(1); } } while (0)
@@ -24,6 +26,13 @@ void core_test(HMODULE module) {
     const auto inspect = symbol<decltype(&sc_inspect)>(module, "sc_inspect");
     const auto initialize = symbol<decltype(&sc_initialize)>(module, "sc_initialize");
     const auto shutdown = symbol<decltype(&sc_shutdown)>(module, "sc_shutdown");
+    const auto engine = symbol<decltype(&sc_engine_inspect)>(module, "sc_engine_inspect");
+    sc_engine_snapshot observation{};
+    CHECK(sentinel_c_engine_size() == sizeof(observation));
+    CHECK(engine(99, sizeof(observation), &observation) == SC_ABI_MISMATCH);
+    CHECK(engine(1, sizeof(observation) - 1, &observation) == SC_INVALID_ARGUMENT);
+    CHECK(engine(1, sizeof(observation), nullptr) == SC_INVALID_ARGUMENT);
+    CHECK(engine(1, sizeof(observation), &observation) == SC_OK && observation.fields[0].reason == SC_REASON_NOT_SAMPLED);
     sc_status status{};
     CHECK(sentinel_c_status_size() == sizeof(status));
     CHECK(inspect(SC_ABI_VERSION, sizeof(status), &status) == SC_OK);
@@ -57,6 +66,8 @@ void core_test(HMODULE module) {
     CHECK(shutdown() == SC_OK && shutdown() == SC_OK);
     CHECK(inspect(SC_ABI_VERSION, sizeof(status), &status) == SC_OK);
     CHECK(status.state == SC_STOPPED && status.initialization_count == 25);
+    CHECK(engine(1, sizeof(observation), &observation) == SC_OK);
+    CHECK(observation.sampled_at_ms == 0 && observation.fields[0].reason == SC_REASON_STOPPED);
     CHECK(status.diagnostic_count == SC_DIAGNOSTIC_LIMIT);
     std::printf("PASS core ABI, failures, concurrent/idempotent init, restart, diagnostic cap; version=%s build=%s\n",
                 status.version, status.build_id);

@@ -1,6 +1,7 @@
 #ifndef SENTINEL_INSPECTION_H
 #define SENTINEL_INSPECTION_H
 #include "sentinel_core.h"
+#include "sentinel_engine.h"
 #include <array>
 #include <cstddef>
 #include <string>
@@ -10,6 +11,8 @@ namespace sentinel {
 constexpr uint16_t wire_version = 1;
 constexpr uint16_t inspect_operation = 1;
 constexpr uint64_t inspect_capability = 1;
+constexpr uint16_t engine_operation = 2;
+constexpr uint64_t engine_capability = 2; // Operation 2 only; basic op 1 is unchanged.
 constexpr size_t max_message = 512;
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
 enum class WireResult : uint32_t { ok, incompatible_protocol, capability_unavailable,
@@ -33,8 +36,13 @@ struct Inspection {
     uint32_t server_pid = 0;
     std::wstring host_path; // Obtained from the OS, not the reply.
     Snapshot snapshot{};
+    sc_engine_snapshot engine{};
 };
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required = inspect_capability);
+Inspection query_engine(uint32_t pid, uint32_t timeout_ms);
+const char* reason_name(uint32_t reason);
+const char* validity_name(uint32_t validity);
+const char* field_name(size_t field);
 const char* result_name(ProbeResult result);
 const char* service_name(ServiceState state);
 std::string instance_text(const std::array<uint8_t, 16>& instance);
