@@ -2,6 +2,7 @@
 #define SENTINEL_INSPECTION_H
 #include "sentinel_core.h"
 #include "sentinel_engine.h"
+#include "sentinel_context.h"
 #include <array>
 #include <cstddef>
 #include <string>
@@ -13,7 +14,9 @@ constexpr uint16_t inspect_operation = 1;
 constexpr uint64_t inspect_capability = 1;
 constexpr uint16_t engine_operation = 2;
 constexpr uint64_t engine_capability = 2; // Operation 2 only; basic op 1 is unchanged.
-constexpr size_t max_message = 512;
+constexpr uint16_t context_operation = 3;
+constexpr uint64_t context_capability = 4;
+constexpr size_t max_request = 512, max_message = 1024; // Larger replies are op 3 only.
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
 enum class WireResult : uint32_t { ok, incompatible_protocol, capability_unavailable,
     unsupported_operation, malformed };
@@ -37,9 +40,13 @@ struct Inspection {
     std::wstring host_path; // Obtained from the OS, not the reply.
     Snapshot snapshot{};
     sc_engine_snapshot engine{};
+    sc_context_snapshot context{};
 };
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required = inspect_capability);
 Inspection query_engine(uint32_t pid, uint32_t timeout_ms);
+Inspection query_context(uint32_t pid, uint32_t timeout_ms);
+const char* context_field_name(size_t field);
+const char* context_reason_name(uint32_t reason);
 const char* reason_name(uint32_t reason);
 const char* validity_name(uint32_t validity);
 const char* field_name(size_t field);

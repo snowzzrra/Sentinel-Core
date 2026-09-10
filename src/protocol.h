@@ -13,4 +13,8 @@ size_t encode_engine_response(Message& out, WireResult result, const Snapshot& s
                               const sc_engine_snapshot& engine);
 bool decode_engine_response(const Message& in, size_t size, WireResult& result,
                             Snapshot& snapshot, sc_engine_snapshot& engine);
+size_t encode_context_response(Message& out, WireResult result, const Snapshot& snapshot,
+                               const sc_context_snapshot& context);
+bool decode_context_response(const Message& in, size_t size, WireResult& result,
+                             Snapshot& snapshot, sc_context_snapshot& context);
 }

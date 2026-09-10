@@ -1,6 +1,8 @@
 #include "inspection_server.h"
 #include "pipe_io.h"
 #include "engine_observer.h"
+#include "context_observer.h"
+#include <cstring>
 #include <bcrypt.h>
 
 namespace {
@@ -10,6 +12,7 @@ constexpr uint64_t capabilities = SC_CAP_INSPECTION | SC_CAP_LIFECYCLE;
 sentinel::Snapshot current{{sizeof(sc_status), SC_ABI_VERSION, capabilities, SC_COLD,
                            SC_OK, 0, 0, SC_VERSION, SC_BUILD_ID}};
 sc_engine_snapshot current_engine = sentinel::engine::unavailable(SC_REASON_NOT_SAMPLED);
+sc_context_snapshot current_context = sentinel::context::unavailable(SC_REASON_NOT_SAMPLED);
 
 sc_result record(sc_result result, const char* message) {
     current.core.last_result = result;
@@ -22,6 +25,19 @@ sc_result record(sc_result result, const char* message) {
 }
 
 namespace sentinel {
+sc_context_snapshot current_context_snapshot() {
+    AcquireSRWLockShared(&lock);
+    auto result = current_context;
+    result.pid = current.pid; result.process_created = current.process_created;
+    std::memcpy(result.instance, current.instance.data(), sizeof(result.instance));
+    ReleaseSRWLockShared(&lock);
+    return context::freshness(result, GetTickCount64());
+}
+void publish_context(const sc_context_snapshot& snapshot) {
+    AcquireSRWLockExclusive(&lock);
+    if (current.core.state == SC_READY && current.service == ServiceState::listening) current_context = snapshot;
+    ReleaseSRWLockExclusive(&lock);
+}
 sc_engine_snapshot current_engine_snapshot() {
     AcquireSRWLockShared(&lock);
     const auto result = current_engine;
@@ -43,11 +59,19 @@ Snapshot current_snapshot() {
 void inspection_failed(DWORD error) {
     AcquireSRWLockExclusive(&lock);
     current_engine = engine::unavailable(SC_REASON_INTERNAL_ERROR);
+    current_context = context::unavailable(SC_REASON_INTERNAL_ERROR);
     current.service = ServiceState::failed;
     current.service_error = error;
     record(SC_INSPECTION_FAILURE, "[Sentinel Core] inspection service failed; engine unavailable\n");
     ReleaseSRWLockExclusive(&lock);
 }
+}
+
+sc_result sc_context_inspect(uint32_t abi, uint32_t size, sc_context_snapshot* snapshot) {
+    if (abi != SC_CONTEXT_ABI_VERSION) return SC_ABI_MISMATCH;
+    if (!snapshot || size != sizeof(sc_context_snapshot)) return SC_INVALID_ARGUMENT;
+    *snapshot = sentinel::current_context_snapshot();
+    return SC_OK;
 }
 
 sc_result sc_engine_inspect(uint32_t abi, uint32_t size, sc_engine_snapshot* snapshot) {
@@ -82,6 +106,7 @@ sc_result sc_initialize(uint32_t abi, uint64_t required) {
         }
         if (current.service != sentinel::ServiceState::listening) {
             current_engine = sentinel::engine::unavailable(SC_REASON_NOT_SAMPLED);
+            current_context = sentinel::context::unavailable(SC_REASON_NOT_SAMPLED);
             current.pid = GetCurrentProcessId();
             DWORD error = ERROR_SUCCESS;
             if (!sentinel::process_time(GetCurrentProcess(), current.process_created)) error = GetLastError();
@@ -105,6 +130,7 @@ sc_result sc_shutdown(void) {
     AcquireSRWLockExclusive(&lock);
     current.service = sentinel::ServiceState::stopping;
     current_engine = sentinel::engine::unavailable(SC_REASON_STOPPED);
+    current_context = sentinel::context::unavailable(SC_REASON_STOPPED);
     ReleaseSRWLockExclusive(&lock);
     // Never hold the snapshot lock while joining an admitted reader.
     const DWORD error = sentinel::stop_inspection();

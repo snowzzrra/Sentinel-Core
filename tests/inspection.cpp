@@ -120,7 +120,7 @@ HANDLE fake_pipe(DWORD pid) {
         PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS,
         1, 512, 512, 1000, nullptr);
 }
-void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int variant) {
+void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int variant, bool context_query = false) {
     Handle pipe(fake_pipe(GetCurrentProcessId())); CHECK(pipe);
     std::thread server([&] {
         Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr)); CHECK(event);
@@ -149,7 +149,7 @@ void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int
     const DWORD expected[] = {5, 6, 7, 9, 8};
     const auto start = GetTickCount64();
     const auto output = probe(probe_path, L"--pid " + std::to_wstring(GetCurrentProcessId()) +
-        L" --timeout-ms 150 --json" + (variant == 4 ? L" --engine" : L""), expected[variant]);
+        L" --timeout-ms 150 --json" + (context_query ? L" --context" : (variant == 4 ? L" --engine" : L"")), expected[variant]);
     CHECK(!output.empty() && GetTickCount64() - start < 4000);
     server.join();
 }
@@ -164,6 +164,12 @@ int wmain(int argc, wchar_t** argv) {
         if (!idle) {
             core = LoadLibraryExW(argv[2], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32); CHECK(core);
             CHECK(symbol<decltype(&sc_initialize)>(core, "sc_initialize")(SC_ABI_VERSION, 0) == SC_OK);
+            const auto inspect_context = symbol<decltype(&sc_context_inspect)>(core, "sc_context_inspect");
+            sc_context_snapshot context{};
+            CHECK(inspect_context(2, sizeof(context), &context) == SC_ABI_MISMATCH);
+            CHECK(inspect_context(1, sizeof(context) - 1, &context) == SC_INVALID_ARGUMENT);
+            CHECK(inspect_context(1, sizeof(context), nullptr) == SC_INVALID_ARGUMENT);
+            CHECK(inspect_context(1, sizeof(context), &context) == SC_OK && context.pid == GetCurrentProcessId());
         }
         CHECK(SetEvent(ready.value));
         CHECK(WaitForSingleObject(stop.value, 30000) == WAIT_OBJECT_0);
@@ -188,7 +194,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(initial.snapshot.core.abi_version == SC_ABI_VERSION && initial.snapshot.core.capabilities == 3);
     CHECK(initial.snapshot.core.state == SC_READY && initial.snapshot.service == ServiceState::listening);
     CHECK(initial.snapshot.core.initialization_count == 1 && std::strlen(initial.snapshot.core.build_id) == 64);
-    CHECK(std::strcmp(initial.snapshot.core.version, "0.3.0-phase4.1") == 0);
+    CHECK(std::strcmp(initial.snapshot.core.version, "0.4.0") == 0);
     uint64_t created = 0; CHECK(process_time(first.child.process.value, created));
     CHECK(initial.snapshot.process_created == created);
     const auto other = query(second.child.pid, 2000);
@@ -223,6 +229,21 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(engine_json.find("\"operation\":\"engine\"") != std::string::npos);
     CHECK(engine_json.find("\"profile\":\"unrecognized\"") != std::string::npos);
     CHECK(engine_json.find("\"value\":null") != std::string::npos);
+    const auto context = query_context(first.child.pid, 2000);
+    CHECK(context.result == ProbeResult::ok && context.snapshot.instance == initial.snapshot.instance);
+    CHECK(context.context.current_map.reason == SC_REASON_PROFILE_UNRECOGNIZED);
+    CHECK(context.context.fields[SC_CONTEXT_LOAD_SERIAL].reason == SC_CONTEXT_UNSUPPORTED);
+    const auto context_json = probe(probe_path, args + L" --context --json", 0);
+    CHECK(context_json.find("\"operation\":\"context\"") != std::string::npos);
+    CHECK(context_json.find("\"core_version\":\"0.4.0\"") != std::string::npos);
+    CHECK(context_json.find("\"current_map\":{\"validity\":\"unknown\",\"reason\":\"profile_unrecognized\",\"value\":null") != std::string::npos);
+    CHECK(probe(probe_path, args + L" --context", 0).find("not a load serial") != std::string::npos);
+    const auto context_watch = probe(probe_path, args + L" --context --watch-count 2 --interval-ms 100 --json", 0);
+    CHECK(std::count(context_watch.begin(), context_watch.end(), '\n') == 2);
+    probe(probe_path, args + L" --context --engine", 2);
+    probe(probe_path, args + L" --context --context", 2);
+    std::printf("HARNESS_CONTEXT_JSON %s", context_json.c_str());
+    std::printf("HARNESS_CONTEXT_WATCH_JSON %s", context_watch.c_str());
     const auto watch_started = GetTickCount64();
     const auto watch = probe(probe_path, args + L" --engine --watch-count 2 --interval-ms 100 --json", 0);
     CHECK(std::count(watch.begin(), watch.end(), '\n') == 2 && GetTickCount64() - watch_started < 3000);
@@ -301,6 +322,7 @@ int wmain(int argc, wchar_t** argv) {
         probe(probe_path, L"--pid " + std::to_wstring(GetCurrentProcessId()) + L" --json", 4);
     }
     for (int i = 0; i < 5; ++i) fake_response(probe_path, initial.snapshot, i);
+    fake_response(probe_path, initial.snapshot, 4, true); // Old server's op-1 rejection envelope.
     CHECK(GetModuleHandleW(L"sentinel_core.dll") == nullptr); // Test client never hosts Core.
     std::puts("PASS separate hosts/CLI, OS PID+creation, identity, ACL, reconnect, malformed/capability/version, timeouts, shutdown; HARNESS ONLY");
     return 0;

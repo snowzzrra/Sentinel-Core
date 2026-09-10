@@ -2,6 +2,7 @@
 #include "pipe_io.h"
 #include "protocol.h"
 #include "engine_observer.h"
+#include "context_observer.h"
 #include <sddl.h>
 #include <vector>
 
@@ -18,10 +19,12 @@ DWORD observe(void*) {
         binding = engine::bind_host(memory, stop);
         do {
             publish_engine(engine::sample(memory, binding, ++sequence));
+            publish_context(context::sample(memory, binding, sequence, stop));
         } while (WaitForSingleObject(stop, 100) == WAIT_TIMEOUT);
     } catch (...) {
         binding.metadata = engine::unavailable(SC_REASON_INTERNAL_ERROR);
         publish_engine(binding.metadata);
+        publish_context(context::unavailable(SC_REASON_INTERNAL_ERROR));
     }
     return 0;
 }
@@ -30,7 +33,10 @@ DWORD serve(void*) {
     if (!event) { inspection_failed(GetLastError()); return 1; }
     // One sampler owns all engine reads. Resolver startup never blocks basic IPC.
     observer = CreateThread(nullptr, 0, observe, nullptr, 0, nullptr);
-    if (!observer) publish_engine(engine::unavailable(SC_REASON_INTERNAL_ERROR));
+    if (!observer) {
+        publish_engine(engine::unavailable(SC_REASON_INTERNAL_ERROR));
+        publish_context(context::unavailable(SC_REASON_INTERNAL_ERROR));
+    }
     while (WaitForSingleObject(stop, 0) == WAIT_TIMEOUT) {
         ResetEvent(event.value);
         OVERLAPPED ov{}; ov.hEvent = event.value;
@@ -47,13 +53,14 @@ DWORD serve(void*) {
         if (connection != ERROR_SUCCESS) { inspection_failed(connection); return 1; }
         const auto deadline = GetTickCount64() + 1000;
         Message data{};
-        if (transfer(pipe, false, data.data(), static_cast<DWORD>(data.size()), count, stop,
+        if (transfer(pipe, false, data.data(), static_cast<DWORD>(max_request), count, stop,
                      remaining(deadline)) == ERROR_SUCCESS) {
             uint16_t operation = inspect_operation;
             const auto result = decode_request(data, count, &operation);
-            const DWORD size = static_cast<DWORD>(operation == engine_operation ?
+            const DWORD size = static_cast<DWORD>(operation == context_operation ?
+                encode_context_response(data, result, current_snapshot(), current_context_snapshot()) : (operation == engine_operation ?
                 encode_engine_response(data, result, current_snapshot(), current_engine_snapshot()) :
-                encode_response(data, result, current_snapshot()));
+                encode_response(data, result, current_snapshot())));
             if (transfer(pipe, true, data.data(), size, count, stop, remaining(deadline)) == ERROR_SUCCESS) {
                 // Wait for client close (or reject extra input), so DisconnectNamedPipe
                 // cannot discard the reply before it is read. Never FlushFileBuffers.

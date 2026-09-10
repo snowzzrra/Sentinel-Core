@@ -58,9 +58,10 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     if (error != ERROR_SUCCESS) return fail(error);
     WireResult code{};
     // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
-    bool decoded = operation == engine_operation ? decode_engine_response(data, count, code, result.snapshot, result.engine) :
-        decode_response(data, count, code, result.snapshot);
-    if (!decoded && operation == engine_operation && count == header_size)
+    bool decoded = operation == context_operation ? decode_context_response(data, count, code, result.snapshot, result.context) :
+        (operation == engine_operation ? decode_engine_response(data, count, code, result.snapshot, result.engine) :
+        decode_response(data, count, code, result.snapshot));
+    if (!decoded && operation != inspect_operation && count == header_size)
         decoded = decode_response(data, count, code, result.snapshot) && code != WireResult::ok;
     if (!decoded) {
         result.result = ProbeResult::invalid_response; return result;
@@ -82,5 +83,8 @@ Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required) {
 }
 Inspection query_engine(uint32_t pid, uint32_t timeout_ms) {
     return query_operation(pid, timeout_ms, engine_capability, engine_operation);
+}
+Inspection query_context(uint32_t pid, uint32_t timeout_ms) {
+    return query_operation(pid, timeout_ms, context_capability, context_operation);
 }
 }

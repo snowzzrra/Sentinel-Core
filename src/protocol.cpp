@@ -47,16 +47,17 @@ size_t encode_request(Message& out, uint64_t required, uint16_t version, uint16_
 }
 WireResult decode_request(const Message& in, size_t size, uint16_t* operation) {
     if (operation) *operation = inspect_operation;
-    if (size < header_size || size > max_message) return WireResult::malformed;
+    if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && op == engine_operation) *operation = engine_operation;
+    if (operation && (op == engine_operation || op == context_operation)) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op != inspect_operation && op != engine_operation) return WireResult::unsupported_operation;
+    if (op != inspect_operation && op != engine_operation && op != context_operation) return WireResult::unsupported_operation;
     if (length != 8) return WireResult::malformed;
-    const auto supported = op == engine_operation ? engine_capability : inspect_capability;
+    const auto supported = op == context_operation ? context_capability :
+        (op == engine_operation ? engine_capability : inspect_capability);
     return (r.number(8) & ~supported) ? WireResult::capability_unavailable : WireResult::ok;
 }
 size_t encode_response(Message& out, WireResult result, const Snapshot& s) {
@@ -172,6 +173,88 @@ bool decode_engine_response(const Message& in, size_t size, WireResult& result, 
 const char* field_name(size_t field) {
     constexpr const char* names[] = {"root_available", "loading", "in_game", "map_present", "player_present", "cutscene_id"};
     return field < SC_ENGINE_FIELD_COUNT ? names[field] : "invalid_field";
+}
+size_t encode_context_response(Message& out, WireResult result, const Snapshot& s, const sc_context_snapshot& c) {
+    Writer w{out}; header(w, wire_version, context_operation, 0, result);
+    if (result == WireResult::ok) {
+        w.number(context_capability, 8);
+        w.number(s.pid, 4); w.number(s.process_created, 8);
+        for (auto byte : s.instance) w.number(byte, 1);
+        w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id);
+        w.number(c.abi_version, 4); w.number(c.sequence, 8); w.number(c.sampled_at_ms, 8);
+        w.number(c.duration_ms, 4); w.number(c.sample_reason, 4);
+        w.number(c.profile, 4); w.number(c.locator_revision, 4); w.number(c.layout_revision, 4);
+        w.number(c.root_locator_reason, 4); w.number(c.disk_hash_reason, 4);
+        for (size_t i = 0; i < 64; ++i) w.number(static_cast<uint8_t>(c.disk_sha256[i]), 1);
+        const auto& map = c.current_map;
+        w.number(map.validity, 4); w.number(map.reason, 4); w.number(map.win32_error, 4); w.number(map.length, 2);
+        for (size_t i = 0; i < map.length; ++i) w.number(static_cast<uint8_t>(map.bytes[i]), 1);
+        for (const auto& f : c.fields) {
+            w.number(f.validity, 4); w.number(f.reason, 4); w.number(f.value, 8); w.number(f.win32_error, 4);
+        }
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.pos;
+}
+bool decode_context_response(const Message& in, size_t size, WireResult& result, Snapshot& s, sc_context_snapshot& c) {
+    if (size < header_size || size > max_message) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != context_operation ||
+        r.number(4) != size - header_size) return false;
+    const auto code = r.number(4);
+    if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code);
+    if (result != WireResult::ok) return size == header_size;
+    s = {}; c = {}; s.core.size = sizeof(sc_status); c.size = sizeof(c);
+    auto u32 = [&] { return static_cast<uint32_t>(r.number(4)); };
+    if (r.number(8) != context_capability) return false;
+    c.pid = s.pid = u32(); c.process_created = s.process_created = r.number(8);
+    for (size_t i = 0; i < s.instance.size(); ++i) c.instance[i] = s.instance[i] = static_cast<uint8_t>(r.number(1));
+    s.core.abi_version = u32(); r.text(s.core.version); r.text(s.core.build_id);
+    c.abi_version = u32();
+    if (s.core.abi_version != SC_ABI_VERSION || c.abi_version != SC_CONTEXT_ABI_VERSION) return false;
+    c.sequence = r.number(8); c.sampled_at_ms = r.number(8); c.duration_ms = u32(); c.sample_reason = u32();
+    c.profile = u32(); c.locator_revision = u32(); c.layout_revision = u32();
+    c.root_locator_reason = u32(); c.disk_hash_reason = u32();
+    if (c.sample_reason > SC_CONTEXT_EMPTY_NAME || c.profile > SC_PROFILE_STEAM_20260818 ||
+        c.locator_revision > 1 || c.layout_revision > 1 || c.root_locator_reason > SC_REASON_STALE ||
+        c.disk_hash_reason > SC_REASON_STALE || (c.layout_revision && c.profile != SC_PROFILE_STEAM_20260818)) return false;
+    for (size_t i = 0; i < 64; ++i) {
+        const char ch = static_cast<char>(r.number(1));
+        if (c.disk_hash_reason == SC_REASON_NONE ? !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) : ch != 0) return false;
+        c.disk_sha256[i] = ch;
+    }
+    auto& map = c.current_map;
+    map.validity = u32(); map.reason = u32(); map.win32_error = u32(); map.length = static_cast<uint32_t>(r.number(2));
+    if (map.validity > SC_OBSERVATION_OBSERVED || map.reason > SC_CONTEXT_EMPTY_NAME || map.length >= SC_CONTEXT_MAP_CAPACITY) return false;
+    if (map.validity == SC_OBSERVATION_UNKNOWN) { if (!map.reason || map.length) return false; }
+    else if (map.reason || map.win32_error || !map.length) return false;
+    for (size_t i = 0; i < map.length; ++i) {
+        const auto ch = r.number(1); if (ch < 32 || ch > 126) return false; map.bytes[i] = static_cast<char>(ch);
+    }
+    for (size_t i = 0; i < SC_CONTEXT_FIELD_COUNT; ++i) {
+        auto& f = c.fields[i]; f.validity = u32(); f.reason = u32(); f.value = r.number(8); f.win32_error = u32();
+        if (f.validity > SC_OBSERVATION_OBSERVED || f.reason > SC_CONTEXT_EMPTY_NAME) return false;
+        if (f.validity == SC_OBSERVATION_UNKNOWN) { if (!f.reason || f.value) return false; }
+        else if (f.reason || f.win32_error || !c.layout_revision || c.root_locator_reason ||
+                 i >= SC_CONTEXT_LOAD_SERIAL || f.value > (i == SC_CONTEXT_GAME_STATE ? SC_GAME_IN_GAME : UINT32_MAX)) return false;
+    }
+    if (map.validity == SC_OBSERVATION_OBSERVED && (!c.layout_revision || c.root_locator_reason ||
+        c.fields[SC_CONTEXT_GAME_STATE].validity != SC_OBSERVATION_OBSERVED ||
+        c.fields[SC_CONTEXT_GAME_STATE].value != SC_GAME_IN_GAME)) return false;
+    return r.valid && r.pos == size;
+}
+const char* context_field_name(size_t field) {
+    constexpr const char* names[] = {"game_state", "state_changed_ms", "native_load_serial", "cutscene_active", "native_entry_mode"};
+    return field < SC_CONTEXT_FIELD_COUNT ? names[field] : "invalid_field";
+}
+const char* context_reason_name(uint32_t reason) {
+    switch (reason) {
+    case SC_CONTEXT_UNSUPPORTED: return "unsupported";
+    case SC_CONTEXT_MENU_WORLD: return "menu_world";
+    case SC_CONTEXT_NAME_TOO_LONG: return "name_too_long";
+    case SC_CONTEXT_EMPTY_NAME: return "empty_name";
+    default: return reason_name(reason);
+    }
 }
 const char* validity_name(uint32_t validity) {
     return validity == SC_OBSERVATION_OBSERVED ? "observed" :
