@@ -100,7 +100,7 @@ sc_context_snapshot unavailable(uint32_t reason) {
     for (auto& field : s.fields) field = unknown(reason);
     return s;
 }
-sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uint64_t sequence, HANDLE stop) {
+sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uint64_t sequence, HANDLE stop, uint32_t budget_ms) {
     const auto start = GetTickCount64();
     auto s = unavailable(SC_REASON_NOT_SAMPLED);
     s.sequence = sequence; s.profile = b.metadata.profile; s.locator_revision = b.metadata.locator_revision;
@@ -118,7 +118,7 @@ sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uin
         auto map_error = first.map_result.reason ? first.map_result : second.map_result;
         if (!state_error.reason && !same_state(first, second)) state_error.reason = SC_REASON_TRANSITION;
         if (!map_error.reason && !same_map(first, second)) map_error.reason = SC_REASON_TRANSITION;
-        if (GetTickCount64() - start > 50) state_error.reason = map_error.reason = SC_REASON_BUDGET;
+        if (GetTickCount64() - start > budget_ms) state_error.reason = map_error.reason = SC_REASON_BUDGET;
         if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) state_error.reason = map_error.reason = SC_REASON_CANCELLED;
         s.fields[SC_CONTEXT_GAME_STATE] = state_error.reason ? unknown(state_error.reason, state_error.error) : observed(second.state.value);
         s.fields[SC_CONTEXT_STATE_CHANGED_MS] = state_error.reason ? unknown(state_error.reason, state_error.error) : observed(second.state.changed_ms);

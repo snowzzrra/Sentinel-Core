@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(SentinelCore VERSION 0.4.0 LANGUAGES C CXX)
+project(SentinelCore VERSION 0.5.0 LANGUAGES C CXX)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Sentinel Core currently requires Windows x64 and MSVC.")
 endif()
@@ -25,6 +25,14 @@ configure_file(bootstrap/forwarders.cpp.in forwarders.cpp @ONLY)
 set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_bootstrap.h
   include/sentinel_engine.h src/engine_observer.h src/engine_observer.cpp
   include/sentinel_context.h src/context_observer.h src/context_observer.cpp
+  include/sentinel_native.h src/native_model.h src/native_model.cpp
+  src/native_target.h src/native_target.cpp src/native_runtime.h src/native_runtime.cpp
+  third_party/minhook/include/MinHook.h third_party/minhook/src/hook.c
+  third_party/minhook/src/buffer.c third_party/minhook/src/buffer.h
+  third_party/minhook/src/trampoline.c third_party/minhook/src/trampoline.h
+  third_party/minhook/src/hde/hde64.c third_party/minhook/src/hde/hde64.h
+  third_party/minhook/src/hde/table64.h third_party/minhook/src/hde/pstdint.h
+  third_party/minhook/LICENSE.txt third_party/minhook/NOTICE
   include/sentinel_inspection.h src/core.cpp src/inspection_server.h src/inspection_server.cpp
   src/inspection_client.cpp src/pipe_io.h src/protocol.h src/protocol.cpp tools/probe.cpp
   bootstrap/proxy.cpp bootstrap/msimg32.def.in bootstrap/forwarders.cpp.in)
@@ -41,12 +49,23 @@ target_include_directories(sentinel_protocol PUBLIC include src)
 add_library(sentinel_inspection_client STATIC src/inspection_client.cpp)
 target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
 add_executable(sentinel_probe tools/probe.cpp)
-target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client)
+target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client bcrypt)
 add_library(sentinel_observer STATIC src/engine_observer.cpp src/context_observer.cpp)
 target_include_directories(sentinel_observer PUBLIC include src)
 target_link_libraries(sentinel_observer PUBLIC bcrypt)
+add_library(sentinel_minhook STATIC third_party/minhook/src/hook.c
+  third_party/minhook/src/buffer.c third_party/minhook/src/trampoline.c
+  third_party/minhook/src/hde/hde64.c)
+target_include_directories(sentinel_minhook PUBLIC third_party/minhook/include third_party/minhook/src)
+# Pinned upstream uses intentional byte casts/anonymous unions; HDE initializes
+# its prefix byte in the loop. Keep upstream unchanged and Core warnings strict.
+target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
+add_library(sentinel_native_model STATIC src/native_model.cpp)
+target_include_directories(sentinel_native_model PUBLIC include src)
+add_library(sentinel_native STATIC src/native_target.cpp src/native_runtime.cpp)
+target_link_libraries(sentinel_native PUBLIC sentinel_native_model sentinel_observer sentinel_minhook)
 add_library(sentinel_core SHARED src/core.cpp src/inspection_server.cpp)
-target_link_libraries(sentinel_core PRIVATE sentinel_protocol sentinel_observer advapi32 bcrypt)
+target_link_libraries(sentinel_core PRIVATE sentinel_protocol sentinel_native advapi32 bcrypt)
 target_include_directories(sentinel_core PUBLIC include)
 target_compile_definitions(sentinel_core PRIVATE SC_BUILDING_CORE
   SC_VERSION="${PROJECT_VERSION}" SC_BUILD_ID="${SC_BUILD_ID}")
@@ -62,6 +81,25 @@ add_executable(sentinel_import_host tests/import_host.cpp)
 target_include_directories(sentinel_import_host PRIVATE include)
 target_link_libraries(sentinel_import_host PRIVATE sentinel_bootstrap gdi32)
 enable_testing()
+add_executable(sentinel_native_model_tests tests/native_model.cpp)
+target_link_libraries(sentinel_native_model_tests PRIVATE sentinel_native_model sentinel_protocol)
+add_test(NAME native_lifecycle_dispatch_model COMMAND sentinel_native_model_tests)
+set_tests_properties(native_lifecycle_dispatch_model PROPERTIES TIMEOUT 10)
+# Separate test executable with explicit fixture adapters. The production Core
+# never compiles SC_NATIVE_TESTING or accepts an address/callback through IPC.
+add_executable(sentinel_native_host tests/native_host.cpp src/core.cpp src/inspection_server.cpp
+  src/native_runtime.cpp src/native_target.cpp)
+target_include_directories(sentinel_native_host PRIVATE tests)
+target_link_libraries(sentinel_native_host PRIVATE sentinel_native_model sentinel_observer sentinel_minhook
+  sentinel_inspection_client advapi32 bcrypt)
+target_compile_definitions(sentinel_native_host PRIVATE SC_BUILDING_CORE SC_NATIVE_TESTING
+  SC_VERSION="${PROJECT_VERSION}" SC_BUILD_ID="${SC_BUILD_ID}")
+add_dependencies(sentinel_native_host sentinel_probe)
+add_test(NAME native_hook_dispatch_host COMMAND sentinel_native_host "$<TARGET_FILE:sentinel_probe>" basic)
+add_test(NAME native_wrong_thread_host COMMAND sentinel_native_host "$<TARGET_FILE:sentinel_probe>" wrong-thread)
+add_test(NAME native_unobserved_map_host COMMAND sentinel_native_host "$<TARGET_FILE:sentinel_probe>" unobserved-map)
+add_test(NAME native_unobserved_loading_host COMMAND sentinel_native_host "$<TARGET_FILE:sentinel_probe>" unobserved-loading)
+set_tests_properties(native_hook_dispatch_host native_wrong_thread_host native_unobserved_map_host native_unobserved_loading_host PROPERTIES TIMEOUT 60)
 add_executable(sentinel_context_tests tests/context.cpp)
 target_link_libraries(sentinel_context_tests PRIVATE sentinel_observer sentinel_protocol)
 add_test(NAME runtime_context_contract COMMAND sentinel_context_tests)

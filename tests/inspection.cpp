@@ -194,7 +194,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(initial.snapshot.core.abi_version == SC_ABI_VERSION && initial.snapshot.core.capabilities == 3);
     CHECK(initial.snapshot.core.state == SC_READY && initial.snapshot.service == ServiceState::listening);
     CHECK(initial.snapshot.core.initialization_count == 1 && std::strlen(initial.snapshot.core.build_id) == 64);
-    CHECK(std::strcmp(initial.snapshot.core.version, "0.4.0") == 0);
+    CHECK(std::strcmp(initial.snapshot.core.version, "0.5.0") == 0);
     uint64_t created = 0; CHECK(process_time(first.child.process.value, created));
     CHECK(initial.snapshot.process_created == created);
     const auto other = query(second.child.pid, 2000);
@@ -235,7 +235,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(context.context.fields[SC_CONTEXT_LOAD_SERIAL].reason == SC_CONTEXT_UNSUPPORTED);
     const auto context_json = probe(probe_path, args + L" --context --json", 0);
     CHECK(context_json.find("\"operation\":\"context\"") != std::string::npos);
-    CHECK(context_json.find("\"core_version\":\"0.4.0\"") != std::string::npos);
+    CHECK(context_json.find("\"core_version\":\"0.5.0\"") != std::string::npos);
     CHECK(context_json.find("\"current_map\":{\"validity\":\"unknown\",\"reason\":\"profile_unrecognized\",\"value\":null") != std::string::npos);
     CHECK(probe(probe_path, args + L" --context", 0).find("not a load serial") != std::string::npos);
     const auto context_watch = probe(probe_path, args + L" --context --watch-count 2 --interval-ms 100 --json", 0);

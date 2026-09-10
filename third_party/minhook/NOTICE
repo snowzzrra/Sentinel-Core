@@ -1,0 +1,7 @@
+MinHook v1.3.4, upstream commit c3fcafdc10146beb5919319d0683e44e3c30d537
+https://github.com/TsudaKageyu/minhook
+
+Vendored Windows x64 source subset, without algorithm/API changes.
+Text line endings are normalized to LF. The complete upstream LICENSE.txt
+is included, covering MinHook and the bundled HDE disassembler notices.
+Include this notice and LICENSE.txt with any binary distribution.

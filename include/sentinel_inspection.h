@@ -3,6 +3,7 @@
 #include "sentinel_core.h"
 #include "sentinel_engine.h"
 #include "sentinel_context.h"
+#include "sentinel_native.h"
 #include <array>
 #include <cstddef>
 #include <string>
@@ -16,7 +17,10 @@ constexpr uint16_t engine_operation = 2;
 constexpr uint64_t engine_capability = 2; // Operation 2 only; basic op 1 is unchanged.
 constexpr uint16_t context_operation = 3;
 constexpr uint64_t context_capability = 4;
-constexpr size_t max_request = 512, max_message = 1024; // Larger replies are op 3 only.
+constexpr uint16_t native_operation = 4, diagnostic_submit_operation = 5,
+    diagnostic_result_operation = 6, diagnostic_cancel_operation = 7;
+constexpr uint64_t native_capability = 8, diagnostic_capability = 16;
+constexpr size_t max_request = 512, max_message = 1024;
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
 enum class WireResult : uint32_t { ok, incompatible_protocol, capability_unavailable,
     unsupported_operation, malformed };
@@ -41,10 +45,17 @@ struct Inspection {
     Snapshot snapshot{};
     sc_engine_snapshot engine{};
     sc_context_snapshot context{};
+    sc_native_snapshot native{};
+    sc_diagnostic_result diagnostic{};
 };
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required = inspect_capability);
 Inspection query_engine(uint32_t pid, uint32_t timeout_ms);
 Inspection query_context(uint32_t pid, uint32_t timeout_ms);
+Inspection query_native(uint32_t pid, uint32_t timeout_ms, uint64_t after_event = 0);
+Inspection query_diagnostic(uint32_t pid, uint32_t timeout_ms, uint16_t operation,
+                            const sc_diagnostic_request& request);
+const char* native_reason_name(uint32_t reason);
+const char* diagnostic_state_name(uint32_t state);
 const char* context_field_name(size_t field);
 const char* context_reason_name(uint32_t reason);
 const char* reason_name(uint32_t reason);

@@ -6,6 +6,8 @@
 #include <cwchar>
 #include <cerrno>
 #include <algorithm>
+#include <bcrypt.h>
+#include <cstring>
 
 namespace {
 HANDLE interrupt_event = nullptr;
@@ -20,6 +22,27 @@ bool number(const wchar_t* value, uint32_t& result) {
     const auto parsed = std::wcstoull(value, &end, 10);
     if (errno || *end || parsed > UINT32_MAX) return false;
     result = static_cast<uint32_t>(parsed); return true;
+}
+bool number64(const wchar_t* value, uint64_t& result) {
+    if (!*value) return false;
+    for (auto p = value; *p; ++p) if (*p < L'0' || *p > L'9') return false;
+    wchar_t* end = nullptr; errno = 0; result = std::wcstoull(value, &end, 10);
+    return !errno && !*end;
+}
+bool hex16(const wchar_t* value, uint8_t (&out)[16]) {
+    if (std::wcslen(value) != 32) return false;
+    for (unsigned i = 0; i < 32; ++i) {
+        const auto c = value[i]; const int n = c >= L'0' && c <= L'9' ? c - L'0' :
+            (c >= L'a' && c <= L'f' ? c - L'a' + 10 : -1);
+        if (n < 0) return false;
+        if (i % 2) out[i / 2] |= static_cast<uint8_t>(n);
+        else out[i / 2] = static_cast<uint8_t>(n << 4);
+    }
+    return true;
+}
+std::string hex_text(const uint8_t (&bytes)[16]) {
+    std::array<uint8_t, 16> a{}; std::copy(std::begin(bytes), std::end(bytes), a.begin());
+    return sentinel::instance_text(a);
 }
 std::string quoted(const std::string& text) {
     std::string out = "\"";
@@ -36,6 +59,79 @@ std::string utf8(const std::wstring& text) {
     WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), out.data(), size, nullptr, nullptr);
     return out;
 }
+}
+void print_native(const sentinel::Inspection& r, bool json) {
+    const auto& n = r.native; const auto& s = r.snapshot;
+    constexpr const char* availability[] = {"pending", "enabled", "disabled", "retained"};
+    constexpr const char* lifecycle[] = {"unobserved", "transition", "active", "menu", "failed", "invalid"};
+    const auto name = n.current_map.length ? quoted(std::string(n.current_map.bytes, n.current_map.length)) : "null";
+    if (json) {
+        std::printf("{\"result\":\"ok\",\"operation\":\"native\",\"native_abi\":1,\"core_version\":%s,\"build_id\":%s,"
+            "\"target_pid\":%u,\"server_pid\":%u,\"process_created\":\"%llu\",\"instance_id\":\"%s\",\"host_path\":%s,"
+            "\"availability\":\"%s\",\"reason\":\"%s\",\"site_revision\":%u,\"site_rva\":%u,\"phase\":%u,"
+            "\"installed_hooks\":%u,\"validator_reasons\":[\"%s\",\"%s\",\"%s\"],\"retained_module\":%s,"
+            "\"coverage_bits\":%u,\"coverage_complete\":false,\"native_load_serial\":null,\"gameplay_authorization\":\"unvalidated\","
+            "\"lifecycle_generation\":\"%llu\",\"lifecycle\":\"%s\",\"depth\":%u,\"checkpoint_flag_known\":%s,\"checkpoint_flag\":%s,"
+            "\"event_sequence\":\"%llu\",\"event_gap_count\":\"%llu\",\"history_oldest\":\"%llu\",\"history_overwritten\":\"%llu\","
+            "\"callback_sequence\":\"%llu\",\"callback_at_ms\":\"%llu\",\"callback_thread_id\":%u,\"native_owner_thread_id\":%u,"
+            "\"context_generation\":\"%llu\",\"context_sampled_at_ms\":\"%llu\",\"context_reason\":\"%s\",\"game_state\":%u,"
+            "\"current_map\":%s,\"queued\":%u,\"claimed\":%u,\"retained_results\":%u,\"history_gap\":%s,\"events\":[",
+            quoted(s.core.version).c_str(), quoted(s.core.build_id).c_str(), s.pid, r.server_pid, s.process_created,
+            sentinel::instance_text(s.instance).c_str(), quoted(utf8(r.host_path)).c_str(), availability[n.availability],
+            sentinel::native_reason_name(n.reason), n.site_revision, n.site_rva, n.phase, n.installed_hooks,
+            sentinel::native_reason_name(n.validator_reasons[0]), sentinel::native_reason_name(n.validator_reasons[1]),
+            sentinel::native_reason_name(n.validator_reasons[2]), n.retained_module ? "true" : "false", n.coverage,
+            n.scope.lifecycle_generation, lifecycle[n.lifecycle], n.depth, n.checkpoint_flag_known ? "true" : "false",
+            n.checkpoint_flag ? "true" : "false", n.event_sequence, n.event_gap_count, n.history_oldest, n.history_overwritten,
+            n.callback_sequence, n.callback_at_ms, n.callback_thread_id, n.native_owner_thread_id,
+            n.context_generation, n.context_sampled_at_ms, sentinel::native_reason_name(n.context_reason), n.game_state,
+            name.c_str(), n.queued, n.claimed, n.retained_results, n.history_gap ? "true" : "false");
+        for (uint32_t i = 0; i < n.event_count; ++i) {
+            const auto& e = n.events[i];
+            std::printf("%s{\"sequence\":\"%llu\",\"generation\":\"%llu\",\"at_ms\":\"%llu\",\"kind\":%u,\"lifecycle\":%u,\"thread_id\":%u,\"depth\":%u}",
+                i ? "," : "", e.sequence, e.generation, e.at_ms, e.kind, e.lifecycle, e.thread_id, e.depth);
+        }
+        std::puts("]}");
+    } else {
+        std::printf("Sentinel %s | native ABI=1 | PID=%u (OS server verified)\nbuild=%s\n"
+            "process_created=%llu instance_id=%s\nnative=%s reason=%s hooks=%u retained=%u\n"
+            "site RVA=0x%x revision=%u phase=%u | callback=%llu thread=%u native_owner=%u\n"
+            "generation=%llu lifecycle=%s depth=%u context_generation=%llu context=%s map=%s\n"
+            "events=%llu gaps=%llu history_oldest=%llu overwritten=%llu consumer_gap=%u | queued=%u claimed=%u results=%u\n"
+            "Coverage=%u (partial); native_load_serial unsupported; gameplay authorization unvalidated.\n",
+            s.core.version, s.pid, s.core.build_id, s.process_created, sentinel::instance_text(s.instance).c_str(),
+            availability[n.availability], sentinel::native_reason_name(n.reason), n.installed_hooks, n.retained_module,
+            n.site_rva, n.site_revision, n.phase, n.callback_sequence, n.callback_thread_id, n.native_owner_thread_id,
+            n.scope.lifecycle_generation, lifecycle[n.lifecycle], n.depth, n.context_generation,
+            sentinel::native_reason_name(n.context_reason), name.c_str(), n.event_sequence, n.event_gap_count,
+            n.history_oldest, n.history_overwritten, n.history_gap, n.queued, n.claimed, n.retained_results, n.coverage);
+    }
+}
+void print_diagnostic(const sentinel::Inspection& r, const sc_diagnostic_request& request, bool json) {
+    const auto& d = r.diagnostic;
+    const auto name = d.current_map.length ? quoted(std::string(d.current_map.bytes, d.current_map.length)) : "null";
+    if (json) {
+        std::printf("{\"result\":\"ok\",\"operation\":\"diagnostic\",\"core_version\":%s,\"build_id\":%s,"
+            "\"target_pid\":%u,\"server_pid\":%u,\"process_created\":\"%llu\",\"instance_id\":\"%s\","
+            "\"request_id\":\"%llu\",\"nonce\":\"%s\",\"expected_generation\":\"%llu\",\"lifecycle_generation\":\"%llu\","
+            "\"state\":\"%s\",\"reason\":\"%s\",\"cancel_requested\":%s,\"retrieved\":%s,\"deadline_ms\":%u,"
+            "\"admitted_at_ms\":\"%llu\",\"deadline_at_ms\":\"%llu\",\"claimed_at_ms\":\"%llu\","
+            "\"observed_at_ms\":\"%llu\",\"executed_at_ms\":\"%llu\",\"completed_at_ms\":\"%llu\",\"retrieved_at_ms\":\"%llu\","
+            "\"thread_id\":%u,\"site_revision\":%u,\"phase\":%u,\"lifecycle\":%u,\"game_state\":%u,\"current_map\":%s}\n",
+            quoted(r.snapshot.core.version).c_str(), quoted(r.snapshot.core.build_id).c_str(), r.snapshot.pid, r.server_pid,
+            r.snapshot.process_created, sentinel::instance_text(r.snapshot.instance).c_str(), d.request_id,
+            hex_text(d.nonce).c_str(), request.expected.lifecycle_generation, d.scope.lifecycle_generation,
+            sentinel::diagnostic_state_name(d.state), sentinel::native_reason_name(d.reason), d.cancel_requested ? "true" : "false",
+            d.retrieved ? "true" : "false", request.deadline_ms, d.admitted_at_ms, d.deadline_at_ms, d.claimed_at_ms,
+            d.observed_at_ms, d.executed_at_ms, d.completed_at_ms, d.retrieved_at_ms, d.thread_id, d.site_revision, d.phase, d.lifecycle,
+            d.game_state, name.c_str());
+    } else std::printf("diagnostic request=%llu nonce=%s state=%s reason=%s cancel_requested=%u retrieved=%u\n"
+        "expected_generation=%llu observed_generation=%llu thread=%u phase=%u map=%s\n"
+        "admitted=%llu claimed=%llu executed=%llu completed=%llu retrieved=%llu deadline=%llu ms\n"
+        "observation_started=%llu ms\n",
+        d.request_id, hex_text(d.nonce).c_str(), sentinel::diagnostic_state_name(d.state), sentinel::native_reason_name(d.reason),
+        d.cancel_requested, d.retrieved, request.expected.lifecycle_generation, d.scope.lifecycle_generation, d.thread_id, d.phase,
+        name.c_str(), d.admitted_at_ms, d.claimed_at_ms, d.executed_at_ms, d.completed_at_ms, d.retrieved_at_ms, d.deadline_at_ms, d.observed_at_ms);
 }
 void print_context(const sentinel::Inspection& r, uint32_t pid, bool json) {
     const auto& s = r.snapshot; const auto& c = r.context; const auto& m = c.current_map;
@@ -169,12 +265,18 @@ int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool en
 }
 int wmain(int argc, wchar_t** argv) {
     uint32_t pid = 0, timeout = 2000, count = 1, interval = 1000;
-    bool json = false, engine = false, context = false, valid = true;
+    bool json = false, engine = false, context = false, native = false, valid = true;
+    uint16_t diagnostic_op = 0;
+    sc_diagnostic_request request{}; request.deadline_ms = 1000;
+    bool saw_created = false, saw_instance = false, saw_generation = false, saw_nonce = false, saw_id = false, saw_deadline = false;
     bool saw_pid = false, saw_timeout = false, saw_count = false, saw_interval = false;
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--help") == 0 && argc == 2) {
-            std::puts("sentinel_probe --pid PID [--timeout-ms 50..10000] [--json] [--engine | --context]\n"
-                "Capture: --context (or --engine) --watch-count 1..600 [--interval-ms 100..10000]\n"
+            std::puts("sentinel_probe --pid PID [--timeout-ms 50..10000] [--json] [--engine | --context | --native]\n"
+                "Capture: --context, --engine or --native --watch-count 1..600 [--interval-ms 100..10000]\n"
+                "Harmless diagnostic: --diagnostic [--deadline-ms 1..5000] (submit then retrieve; no engine commands).\n"
+                "Retrieve/cancel: --diagnostic-result or --diagnostic-cancel, with --request-id N --nonce HEX32\n"
+                "  --expect-created N --expect-instance HEX32 --expect-generation N (from the prepared request).\n"
                 "Defaults: timeout 2000 ms, interval 1000 ms. Capture scheduling window <= 10 minutes.\n"
                 "One fresh query per record; stop on first error, target exit/restart, or Ctrl+C.\n"
                 "Read-only query of an already loaded Core; --json capture emits JSON Lines.");
@@ -183,6 +285,23 @@ int wmain(int argc, wchar_t** argv) {
         if (wcscmp(argv[i], L"--json") == 0 && !json) json = true;
         else if (wcscmp(argv[i], L"--engine") == 0 && !engine) engine = true;
         else if (wcscmp(argv[i], L"--context") == 0 && !context) context = true;
+        else if (wcscmp(argv[i], L"--native") == 0 && !native) native = true;
+        else if (wcscmp(argv[i], L"--diagnostic") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_submit_operation;
+        else if (wcscmp(argv[i], L"--diagnostic-result") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_result_operation;
+        else if (wcscmp(argv[i], L"--diagnostic-cancel") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_cancel_operation;
+        else if (wcscmp(argv[i], L"--deadline-ms") == 0 && !saw_deadline && i + 1 < argc) {
+            saw_deadline = true; valid = number(argv[++i], request.deadline_ms) && valid;
+        } else if (wcscmp(argv[i], L"--expect-created") == 0 && !saw_created && i + 1 < argc) {
+            saw_created = true; valid = number64(argv[++i], request.expected.process_created) && valid;
+        } else if (wcscmp(argv[i], L"--expect-instance") == 0 && !saw_instance && i + 1 < argc) {
+            saw_instance = true; valid = hex16(argv[++i], request.expected.instance_id) && valid;
+        } else if (wcscmp(argv[i], L"--expect-generation") == 0 && !saw_generation && i + 1 < argc) {
+            saw_generation = true; valid = number64(argv[++i], request.expected.lifecycle_generation) && valid;
+        } else if (wcscmp(argv[i], L"--request-id") == 0 && !saw_id && i + 1 < argc) {
+            saw_id = true; valid = number64(argv[++i], request.request_id) && valid;
+        } else if (wcscmp(argv[i], L"--nonce") == 0 && !saw_nonce && i + 1 < argc) {
+            saw_nonce = true; valid = hex16(argv[++i], request.nonce) && valid;
+        }
         else if (wcscmp(argv[i], L"--pid") == 0 && !saw_pid && i + 1 < argc) {
             saw_pid = true; valid = number(argv[++i], pid) && valid;
         } else if (wcscmp(argv[i], L"--timeout-ms") == 0 && !saw_timeout && i + 1 < argc) {
@@ -195,7 +314,11 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (!valid || !pid || timeout < sentinel::min_timeout_ms || timeout > sentinel::max_timeout_ms ||
         !count || count > 600 || interval < 100 || interval > 10000 || uint64_t(count) * interval > 600000 ||
-        (engine && context) || (saw_count && !engine && !context) || (saw_interval && !saw_count)) {
+        (unsigned(engine) + unsigned(context) + unsigned(native) + unsigned(diagnostic_op != 0) > 1) ||
+        (saw_count && !engine && !context && !native) || (saw_interval && !saw_count) ||
+        (saw_deadline && !diagnostic_op) || !request.deadline_ms || request.deadline_ms > SC_DIAGNOSTIC_MAX_DEADLINE_MS ||
+        ((saw_created || saw_instance || saw_generation || saw_id || saw_nonce) && diagnostic_op <= sentinel::diagnostic_submit_operation) ||
+        (diagnostic_op > sentinel::diagnostic_submit_operation && !(saw_created && saw_instance && saw_generation && saw_id && saw_nonce))) {
         sentinel::Inspection error; error.result = sentinel::ProbeResult::usage;
         return print_result(error, pid, json, engine, context);
     }
@@ -203,19 +326,60 @@ int wmain(int argc, wchar_t** argv) {
     if (!stop) { sentinel::Inspection error; error.win32_error = GetLastError(); return print_result(error, pid, json, engine, context); }
     interrupt_event = stop.value;
     SetConsoleCtrlHandler(interrupt, TRUE);
+    if (diagnostic_op) {
+        request.expected.pid = pid;
+        if (diagnostic_op == sentinel::diagnostic_submit_operation) {
+            const auto initial = sentinel::query_native(pid, timeout);
+            if (initial.result != sentinel::ProbeResult::ok) return print_result(initial, pid, json, false, false);
+            if (!initial.native.context_generation || initial.native.availability != SC_NATIVE_ENABLED) {
+                print_native(initial, json); return static_cast<int>(sentinel::ProbeResult::capability_unavailable);
+            }
+            request.expected = initial.native.scope; request.request_id = GetTickCount64();
+            if (BCryptGenRandom(nullptr, request.nonce, sizeof(request.nonce), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) return 10;
+            if (json) std::printf("{\"operation\":\"diagnostic_request\",\"state\":\"prepared\",\"target_pid\":%u,"
+                "\"process_created\":\"%llu\",\"instance_id\":\"%s\",\"expected_generation\":\"%llu\",\"request_id\":\"%llu\",\"nonce\":\"%s\",\"deadline_ms\":%u}\n",
+                pid, request.expected.process_created, hex_text(request.expected.instance_id).c_str(),
+                request.expected.lifecycle_generation, request.request_id, hex_text(request.nonce).c_str(), request.deadline_ms);
+            else std::printf("prepared request=%llu nonce=%s process_created=%llu instance=%s generation=%llu deadline_ms=%u\n",
+                request.request_id, hex_text(request.nonce).c_str(), request.expected.process_created,
+                hex_text(request.expected.instance_id).c_str(), request.expected.lifecycle_generation, request.deadline_ms);
+            std::fflush(stdout);
+        }
+        auto r = sentinel::query_diagnostic(pid, timeout, diagnostic_op, request);
+        const auto until = GetTickCount64() + request.deadline_ms + timeout;
+        for (;;) {
+            if (r.result != sentinel::ProbeResult::ok) return print_result(r, pid, json, false, false);
+            print_diagnostic(r, request, json); std::fflush(stdout);
+            if (diagnostic_op != sentinel::diagnostic_submit_operation || r.diagnostic.state >= SC_DIAGNOSTIC_EXECUTED ||
+                r.diagnostic.state == SC_DIAGNOSTIC_UNKNOWN || GetTickCount64() >= until) break;
+            if (WaitForSingleObject(stop.value, 100) != WAIT_TIMEOUT) {
+                r = sentinel::query_diagnostic(pid, timeout, sentinel::diagnostic_cancel_operation, request);
+                if (r.result != sentinel::ProbeResult::ok) return print_result(r, pid, json, false, false);
+                print_diagnostic(r, request, json); break;
+            }
+            r = sentinel::query_diagnostic(pid, timeout, sentinel::diagnostic_result_operation, request);
+        }
+        SetConsoleCtrlHandler(interrupt, FALSE);
+        return r.diagnostic.state == SC_DIAGNOSTIC_EXECUTED ? 0 : 8;
+    }
     sentinel::Snapshot first{};
+    uint64_t after_event = 0;
     const auto deadline = GetTickCount64() + uint64_t(count) * interval;
     int result = 0;
     for (uint32_t i = 0; i < count; ++i) {
         if (WaitForSingleObject(stop.value, 0) != WAIT_TIMEOUT) break;
         const auto started = GetTickCount64();
-        auto r = context ? sentinel::query_context(pid, timeout) :
-            (engine ? sentinel::query_engine(pid, timeout) : sentinel::query(pid, timeout));
+        auto r = native ? sentinel::query_native(pid, timeout, after_event) : (context ? sentinel::query_context(pid, timeout) :
+            (engine ? sentinel::query_engine(pid, timeout) : sentinel::query(pid, timeout)));
         if (r.result == sentinel::ProbeResult::ok && i &&
             (r.snapshot.process_created != first.process_created || r.snapshot.instance != first.instance))
             r.result = sentinel::ProbeResult::process_mismatch;
         if (!i) first = r.snapshot;
-        result = print_result(r, pid, json, engine, context); std::fflush(stdout);
+        if (native && r.result == sentinel::ProbeResult::ok) {
+            print_native(r, json);
+            if (r.native.event_count) after_event = r.native.events[r.native.event_count - 1].sequence;
+        } else result = print_result(r, pid, json, engine, context);
+        std::fflush(stdout);
         if (result || i + 1 == count || GetTickCount64() >= deadline) break;
         const auto next = std::min(deadline, started + interval);
         WaitForSingleObject(stop.value, sentinel::remaining(next));

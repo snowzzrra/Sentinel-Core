@@ -16,7 +16,7 @@ extern "C" {
 /* These are foundation capabilities only. No game capabilities exist in ABI 1. */
 typedef uint32_t sc_result;
 enum { SC_OK, SC_INVALID_ARGUMENT, SC_ABI_MISMATCH, SC_CAPABILITY_UNAVAILABLE,
-       SC_BOOTSTRAP_FAILURE, SC_INSPECTION_FAILURE };
+       SC_BOOTSTRAP_FAILURE, SC_INSPECTION_FAILURE, SC_UNLOAD_RETAINED };
 enum { SC_COLD, SC_READY, SC_STOPPED };
 typedef struct sc_status {
     uint32_t size;
@@ -35,6 +35,9 @@ typedef struct sc_status {
    not IPC/game readiness. Failed shutdown requires retaining the module and retrying. */
 SC_API sc_result sc_inspect(uint32_t abi, uint32_t size, sc_status* status);
 SC_API sc_result sc_initialize(uint32_t abi, uint64_t required_capabilities);
+/* SC_UNLOAD_RETAINED: admission/service stopped, but native detours, Core and
+   trampolines remain pinned until process exit. This is NOT successful unload;
+   retry cannot make hot unload supported or create another Core instance. */
 SC_API sc_result sc_shutdown(void);
 #ifdef __cplusplus
 }

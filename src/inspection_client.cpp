@@ -1,6 +1,7 @@
 #include "sentinel_inspection.h"
 #include "pipe_io.h"
 #include "protocol.h"
+#include <cstring>
 
 namespace sentinel {
 namespace {
@@ -15,7 +16,8 @@ ProbeResult classify(DWORD error) {
     }
 }
 }
-static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t required, uint16_t operation) {
+static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t required, uint16_t operation,
+                                   const sc_diagnostic_request* request = nullptr, uint64_t after_event = 0) {
     Inspection result;
     auto fail = [&](DWORD error) { result.win32_error = error; result.result = classify(error); return result; };
     if (!pid || timeout_ms < min_timeout_ms || timeout_ms > max_timeout_ms) {
@@ -27,6 +29,9 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     if (WaitForSingleObject(process.value, 0) == WAIT_OBJECT_0) return fail(ERROR_FILE_NOT_FOUND);
     uint64_t created = 0;
     if (!process_time(process.value, created)) return fail(GetLastError());
+    if (request && (request->expected.pid != pid || request->expected.process_created != created)) {
+        result.result = ProbeResult::process_mismatch; return result;
+    }
     wchar_t path[32768]{}; DWORD path_size = static_cast<DWORD>(std::size(path));
     if (!QueryFullProcessImageNameW(process.value, 0, path, &path_size)) return fail(GetLastError());
     result.host_path.assign(path, path_size);
@@ -49,7 +54,9 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(encode_request(data, required, wire_version, operation));
+    const DWORD size = static_cast<DWORD>(operation >= native_operation ?
+        encode_native_request(data, operation, request ? *request : sc_diagnostic_request{}, after_event) :
+        encode_request(data, required, wire_version, operation));
     DWORD count = 0;
     DWORD error = transfer(pipe.value, true, data.data(), size, count, nullptr, remaining(deadline));
     if (error != ERROR_SUCCESS) return fail(error);
@@ -58,9 +65,10 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     if (error != ERROR_SUCCESS) return fail(error);
     WireResult code{};
     // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
-    bool decoded = operation == context_operation ? decode_context_response(data, count, code, result.snapshot, result.context) :
+    bool decoded = operation >= native_operation ? decode_native_response(data, count, code, operation, result.snapshot, result.native, result.diagnostic) :
+        (operation == context_operation ? decode_context_response(data, count, code, result.snapshot, result.context) :
         (operation == engine_operation ? decode_engine_response(data, count, code, result.snapshot, result.engine) :
-        decode_response(data, count, code, result.snapshot));
+        decode_response(data, count, code, result.snapshot)));
     if (!decoded && operation != inspect_operation && count == header_size)
         decoded = decode_response(data, count, code, result.snapshot) && code != WireResult::ok;
     if (!decoded) {
@@ -72,8 +80,13 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         return result;
     }
     if (result.snapshot.pid != pid || result.snapshot.process_created != created ||
+        (request && std::memcmp(request->expected.instance_id, result.snapshot.instance.data(), result.snapshot.instance.size())) ||
         WaitForSingleObject(process.value, 0) != WAIT_TIMEOUT) {
         result.result = ProbeResult::process_mismatch; return result;
+    }
+    if (request && (result.diagnostic.request_id != request->request_id ||
+        std::memcmp(result.diagnostic.nonce, request->nonce, sizeof(request->nonce)))) {
+        result.result = ProbeResult::invalid_response; return result;
     }
     result.result = ProbeResult::ok;
     return result;
@@ -86,5 +99,14 @@ Inspection query_engine(uint32_t pid, uint32_t timeout_ms) {
 }
 Inspection query_context(uint32_t pid, uint32_t timeout_ms) {
     return query_operation(pid, timeout_ms, context_capability, context_operation);
+}
+Inspection query_native(uint32_t pid, uint32_t timeout_ms, uint64_t after_event) {
+    return query_operation(pid, timeout_ms, native_capability, native_operation, nullptr, after_event);
+}
+Inspection query_diagnostic(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_diagnostic_request& request) {
+    if (operation < diagnostic_submit_operation || operation > diagnostic_cancel_operation) {
+        Inspection result; result.result = ProbeResult::usage; return result;
+    }
+    return query_operation(pid, timeout_ms, diagnostic_capability, operation, &request);
 }
 }

@@ -7,9 +7,14 @@ constexpr uint32_t magic = 0x50494353; // "SCIP", little endian.
 struct Writer {
     Message& data;
     size_t pos = 0;
+    bool valid = true;
     void number(uint64_t n, size_t width) {
+        if (pos + width > data.size()) { valid = false; return; }
         for (size_t i = 0; i < width; ++i) { data[pos++] = static_cast<uint8_t>(n); n >>= 8; }
     }
+    void u32(uint32_t& n) { number(n, 4); }
+    void u64(uint64_t& n) { number(n, 8); }
+    void byte(uint8_t& n) { number(n, 1); }
     void text(const char* value) {
         const size_t size = std::strlen(value);
         number(size, 2);
@@ -26,6 +31,9 @@ struct Reader {
         for (size_t i = 0; i < width; ++i) result |= uint64_t(data[pos++]) << (i * 8);
         return result;
     }
+    void u32(uint32_t& n) { n = static_cast<uint32_t>(number(4)); }
+    void u64(uint64_t& n) { n = number(8); }
+    void byte(uint8_t& n) { n = static_cast<uint8_t>(number(1)); }
     template<size_t N> void text(char (&out)[N]) {
         const size_t count = static_cast<size_t>(number(2));
         if (count == 0 || count >= N || pos + count > size) { valid = false; return; }
@@ -45,16 +53,40 @@ void header(Writer& w, uint16_t version, uint16_t op, size_t payload, WireResult
 size_t encode_request(Message& out, uint64_t required, uint16_t version, uint16_t op) {
     Writer w{out}; header(w, version, op, 8, WireResult::ok); w.number(required, 8); return w.pos;
 }
-WireResult decode_request(const Message& in, size_t size, uint16_t* operation) {
+WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
+                          sc_diagnostic_request* diagnostic, uint64_t* after_event) {
     if (operation) *operation = inspect_operation;
     if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && (op == engine_operation || op == context_operation)) *operation = static_cast<uint16_t>(op);
+    if (operation && op >= engine_operation && op <= diagnostic_cancel_operation) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op != inspect_operation && op != engine_operation && op != context_operation) return WireResult::unsupported_operation;
+    if (op < inspect_operation || op > diagnostic_cancel_operation) return WireResult::unsupported_operation;
+    if (op >= native_operation) {
+        if (length != (op == native_operation ? 16u : 72u)) return WireResult::malformed;
+        const auto supported = op == native_operation ? native_capability : diagnostic_capability;
+        if (r.number(8) != supported) return WireResult::capability_unavailable;
+        if (op == native_operation) {
+            const auto after = r.number(8); if (after_event) *after_event = after;
+        } else {
+            sc_diagnostic_request request{};
+            request.expected.pid = static_cast<uint32_t>(r.number(4)); request.expected.process_created = r.number(8);
+            for (auto& b : request.expected.instance_id) r.byte(b);
+            request.expected.lifecycle_generation = r.number(8); request.request_id = r.number(8);
+            for (auto& b : request.nonce) r.byte(b);
+            request.deadline_ms = static_cast<uint32_t>(r.number(4));
+            bool nonce = false, instance = false;
+            for (auto b : request.nonce) nonce |= b != 0;
+            for (auto b : request.expected.instance_id) instance |= b != 0;
+            if (!nonce || !instance || !request.request_id || !request.expected.pid || !request.expected.process_created ||
+                !request.expected.lifecycle_generation || !request.deadline_ms || request.deadline_ms > SC_DIAGNOSTIC_MAX_DEADLINE_MS)
+                return WireResult::malformed;
+            if (diagnostic) *diagnostic = request;
+        }
+        return r.valid && r.pos == size ? WireResult::ok : WireResult::malformed;
+    }
     if (length != 8) return WireResult::malformed;
     const auto supported = op == context_operation ? context_capability :
         (op == engine_operation ? engine_capability : inspect_capability);
@@ -242,6 +274,131 @@ bool decode_context_response(const Message& in, size_t size, WireResult& result,
         c.fields[SC_CONTEXT_GAME_STATE].validity != SC_OBSERVATION_OBSERVED ||
         c.fields[SC_CONTEXT_GAME_STATE].value != SC_GAME_IN_GAME)) return false;
     return r.valid && r.pos == size;
+}
+namespace {
+template<class C> void scope_values(C& c, sc_native_scope& s) {
+    c.u32(s.pid); c.u64(s.process_created);
+    for (auto& b : s.instance_id) c.byte(b);
+    c.u64(s.lifecycle_generation);
+}
+template<class C> bool map_values(C& c, sc_context_map& m) {
+    c.u32(m.validity); c.u32(m.reason); c.u32(m.win32_error); c.u32(m.length);
+    if (m.length >= SC_CONTEXT_MAP_CAPACITY || m.reason > SC_CONTEXT_EMPTY_NAME ||
+        (m.validity != SC_OBSERVATION_UNKNOWN && m.validity != SC_OBSERVATION_OBSERVED)) return false;
+    if (m.validity == SC_OBSERVATION_UNKNOWN ? m.length != 0 : (!m.length || m.reason || m.win32_error)) return false;
+    for (size_t i = 0; i < m.length; ++i) {
+        auto b = static_cast<uint8_t>(m.bytes[i]); c.byte(b);
+        if (b < 32 || b > 126) return false;
+        m.bytes[i] = static_cast<char>(b);
+    }
+    m.bytes[m.length] = 0; return true;
+}
+template<class C> bool native_values(C& c, sc_native_snapshot& n) {
+    scope_values(c, n.scope);
+    c.u32(n.availability); c.u32(n.reason); c.u32(n.site_revision); c.u32(n.site_rva); c.u32(n.phase);
+    c.u32(n.installed_hooks); for (auto& v : n.validator_reasons) c.u32(v);
+    c.u32(n.retained_module); c.u32(n.coverage); c.u32(n.lifecycle); c.u32(n.depth);
+    c.u32(n.checkpoint_flag_known); c.u32(n.checkpoint_flag);
+    c.u64(n.event_sequence); c.u64(n.event_gap_count); c.u64(n.history_oldest); c.u64(n.history_overwritten);
+    c.u64(n.callback_sequence); c.u64(n.callback_at_ms); c.u32(n.callback_thread_id); c.u32(n.native_owner_thread_id);
+    c.u64(n.context_generation); c.u64(n.context_sampled_at_ms); c.u32(n.context_reason); c.u32(n.game_state);
+    if (!map_values(c, n.current_map)) return false;
+    c.u32(n.queued); c.u32(n.claimed); c.u32(n.retained_results); c.u32(n.history_gap); c.u32(n.event_count);
+    if (n.event_count > SC_NATIVE_EVENT_PAGE || n.availability > SC_NATIVE_RETAINED || n.reason > SC_NATIVE_EXCEPTION ||
+        n.context_reason > SC_NATIVE_EXCEPTION || n.lifecycle > SC_LIFETIME_INVALID || n.site_revision > 1 || n.phase > 1 ||
+        n.installed_hooks > 7 || n.coverage > 7 || n.retained_module > 1 || n.checkpoint_flag_known > 1 || n.checkpoint_flag > 1 ||
+        (n.checkpoint_flag && !n.checkpoint_flag_known) || n.history_gap > 1 || n.game_state > SC_GAME_IN_GAME ||
+        n.queued > SC_DIAGNOSTIC_CAPACITY || n.claimed > SC_DIAGNOSTIC_CAPACITY || n.retained_results > SC_DIAGNOSTIC_CAPACITY ||
+        n.queued + n.claimed + n.retained_results > SC_DIAGNOSTIC_CAPACITY) return false;
+    for (auto v : n.validator_reasons) if (v > SC_NATIVE_EXCEPTION) return false;
+    if (n.context_generation && (n.context_generation != n.scope.lifecycle_generation || n.lifecycle != SC_LIFETIME_ACTIVE ||
+        n.depth || n.context_reason || n.game_state != SC_GAME_IN_GAME || n.current_map.validity != SC_OBSERVATION_OBSERVED ||
+        n.event_gap_count || n.availability != SC_NATIVE_ENABLED)) return false;
+    if (!n.context_generation && n.current_map.length) return false;
+    for (uint32_t i = 0; i < n.event_count; ++i) {
+        auto& e = n.events[i]; c.u64(e.sequence); c.u64(e.generation); c.u64(e.at_ms);
+        c.u32(e.kind); c.u32(e.lifecycle); c.u32(e.thread_id); c.u32(e.depth);
+        if (!e.sequence || e.sequence > n.event_sequence || e.generation > n.scope.lifecycle_generation ||
+            e.kind < SC_EVENT_CHANGE_BEGIN || e.kind > SC_EVENT_GAP || e.lifecycle > SC_LIFETIME_INVALID ||
+            (i && e.sequence <= n.events[i - 1].sequence)) return false;
+    }
+    return true;
+}
+template<class C> bool diagnostic_values(C& c, sc_diagnostic_result& d) {
+    c.u32(d.state); c.u32(d.reason); c.u32(d.cancel_requested); c.u32(d.retrieved); scope_values(c, d.scope);
+    c.u64(d.request_id); for (auto& b : d.nonce) c.byte(b);
+    c.u64(d.admitted_at_ms); c.u64(d.deadline_at_ms); c.u64(d.claimed_at_ms); c.u64(d.observed_at_ms); c.u64(d.executed_at_ms);
+    c.u64(d.completed_at_ms); c.u64(d.retrieved_at_ms);
+    c.u32(d.thread_id); c.u32(d.site_revision); c.u32(d.phase); c.u32(d.lifecycle); c.u32(d.game_state);
+    if (!map_values(c, d.current_map) || d.state > SC_DIAGNOSTIC_CANCELLED || d.reason > SC_NATIVE_EXCEPTION ||
+        d.cancel_requested > 1 || d.retrieved > 1 || d.site_revision > 1 || d.phase > 1 ||
+        d.lifecycle > SC_LIFETIME_INVALID || d.game_state > SC_GAME_IN_GAME) return false;
+    if (d.state == SC_DIAGNOSTIC_EXECUTED) {
+        if (d.reason || !d.observed_at_ms || !d.executed_at_ms || !d.claimed_at_ms || !d.admitted_at_ms || !d.thread_id ||
+            !d.scope.lifecycle_generation || d.phase != 1 || d.site_revision != 1 || d.lifecycle != SC_LIFETIME_ACTIVE ||
+            d.current_map.validity != SC_OBSERVATION_OBSERVED || d.game_state != SC_GAME_IN_GAME ||
+            d.observed_at_ms < d.claimed_at_ms || d.executed_at_ms < d.observed_at_ms || d.claimed_at_ms < d.admitted_at_ms ||
+            d.executed_at_ms >= d.deadline_at_ms || d.completed_at_ms < d.executed_at_ms) return false;
+    } else if (d.observed_at_ms || d.executed_at_ms || d.current_map.length) return false;
+    return true;
+}
+}
+size_t encode_native_request(Message& out, uint16_t op, const sc_diagnostic_request& request, uint64_t after) {
+    Writer w{out}; header(w, wire_version, op, 0, WireResult::ok);
+    w.number(op == native_operation ? native_capability : diagnostic_capability, 8);
+    if (op == native_operation) w.number(after, 8);
+    else {
+        auto r = request; scope_values(w, r.expected); w.u64(r.request_id);
+        for (auto& b : r.nonce) w.byte(b); w.u32(r.deadline_ms);
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.valid ? w.pos : 0;
+}
+size_t encode_native_response(Message& out, WireResult result, uint16_t op, const Snapshot& s,
+                              const sc_native_snapshot& native, const sc_diagnostic_result& diagnostic) {
+    Writer w{out}; header(w, wire_version, op, 0, result);
+    if (result == WireResult::ok) {
+        w.number(op == native_operation ? native_capability : diagnostic_capability, 8);
+        w.number(s.pid, 4); w.number(s.process_created, 8); for (auto b : s.instance) w.number(b, 1);
+        w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id); w.number(SC_NATIVE_ABI_VERSION, 4);
+        auto n = native; auto d = diagnostic;
+        if (!(op == native_operation ? native_values(w, n) : diagnostic_values(w, d))) return 0;
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.valid ? w.pos : 0;
+}
+bool decode_native_response(const Message& in, size_t size, WireResult& result, uint16_t op,
+                             Snapshot& s, sc_native_snapshot& n, sc_diagnostic_result& d) {
+    if (size < header_size || size > max_message || op < native_operation || op > diagnostic_cancel_operation) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != op || r.number(4) != size - header_size) return false;
+    const auto code = r.number(4); if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code); if (result != WireResult::ok) return size == header_size;
+    if (r.number(8) != (op == native_operation ? native_capability : diagnostic_capability)) return false;
+    s = {}; n = {}; d = {}; s.core.size = sizeof(sc_status); n.size = sizeof(n); n.abi_version = SC_NATIVE_ABI_VERSION;
+    r.u32(s.pid); r.u64(s.process_created); for (auto& b : s.instance) r.byte(b);
+    r.u32(s.core.abi_version); r.text(s.core.version); r.text(s.core.build_id);
+    if (s.core.abi_version != SC_ABI_VERSION || r.number(4) != SC_NATIVE_ABI_VERSION || !s.pid || !s.process_created ||
+        std::strlen(s.core.build_id) != 64) return false;
+    for (size_t i = 0; i < 64; ++i) {
+        const auto ch = s.core.build_id[i]; if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return false;
+    }
+    if (!(op == native_operation ? native_values(r, n) : diagnostic_values(r, d))) return false;
+    if (op == native_operation && (n.scope.pid != s.pid || n.scope.process_created != s.process_created ||
+        std::memcmp(n.scope.instance_id, s.instance.data(), s.instance.size()))) return false;
+    if (op != native_operation && d.state == SC_DIAGNOSTIC_EXECUTED &&
+        (d.scope.pid != s.pid || d.scope.process_created != s.process_created ||
+         std::memcmp(d.scope.instance_id, s.instance.data(), s.instance.size()))) return false;
+    return r.valid && r.pos == size;
+}
+const char* native_reason_name(uint32_t reason) {
+    constexpr const char* names[] = {"none", "not_started", "unknown_build", "target_bytes", "target_not_unique",
+        "target_boundary", "binding_failed", "hook_failed", "pin_failed", "wrong_thread", "wrong_caller", "reentrant",
+        "event_gap", "unobserved", "transition", "context_unavailable", "stale", "scope_mismatch", "queue_full",
+        "duplicate_mismatch", "deadline", "cancelled", "stopped", "not_found", "read_failed", "budget", "exception"};
+    return reason <= SC_NATIVE_EXCEPTION ? names[reason] : "invalid_reason";
+}
+const char* diagnostic_state_name(uint32_t state) {
+    constexpr const char* names[] = {"unknown", "queued", "claimed", "callback_executed", "rejected", "expired", "cancelled"};
+    return state <= SC_DIAGNOSTIC_CANCELLED ? names[state] : "invalid_state";
 }
 const char* context_field_name(size_t field) {
     constexpr const char* names[] = {"game_state", "state_changed_ms", "native_load_serial", "cutscene_active", "native_entry_mode"};

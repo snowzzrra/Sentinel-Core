@@ -2,6 +2,7 @@
 #include "pipe_io.h"
 #include "engine_observer.h"
 #include "context_observer.h"
+#include "native_runtime.h"
 #include <cstring>
 #include <bcrypt.h>
 
@@ -67,6 +68,13 @@ void inspection_failed(DWORD error) {
 }
 }
 
+sc_result sc_native_inspect(uint32_t abi, uint32_t size, sc_native_snapshot* snapshot) {
+    if (abi != SC_NATIVE_ABI_VERSION) return SC_ABI_MISMATCH;
+    if (!snapshot || size != sizeof(sc_native_snapshot)) return SC_INVALID_ARGUMENT;
+    *snapshot = sentinel::native::inspect();
+    return SC_OK;
+}
+
 sc_result sc_context_inspect(uint32_t abi, uint32_t size, sc_context_snapshot* snapshot) {
     if (abi != SC_CONTEXT_ABI_VERSION) return SC_ABI_MISMATCH;
     if (!snapshot || size != sizeof(sc_context_snapshot)) return SC_INVALID_ARGUMENT;
@@ -97,6 +105,8 @@ sc_result sc_initialize(uint32_t abi, uint64_t required) {
     } else if ((required & ~capabilities) != 0) {
         result = record(SC_CAPABILITY_UNAVAILABLE,
             "[Sentinel Core] initialize: required capability unavailable; no game capabilities implemented\n");
+    } else if (sentinel::native::retained() && current.service != sentinel::ServiceState::listening) {
+        result = record(SC_UNLOAD_RETAINED, "[Sentinel Core] native hooks retained until process exit\n");
     } else if (current.service == sentinel::ServiceState::stopping) {
         result = record(SC_INSPECTION_FAILURE, "[Sentinel Core] initialize: retry shutdown first\n");
     } else {
@@ -112,7 +122,10 @@ sc_result sc_initialize(uint32_t abi, uint64_t required) {
             if (!sentinel::process_time(GetCurrentProcess(), current.process_created)) error = GetLastError();
             else if (BCryptGenRandom(nullptr, current.instance.data(), static_cast<ULONG>(current.instance.size()),
                                     BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) error = ERROR_GEN_FAILURE;
-            if (error == ERROR_SUCCESS) error = sentinel::start_inspection();
+            if (error == ERROR_SUCCESS) {
+                sentinel::native::prepare(current);
+                error = sentinel::start_inspection();
+            }
             current.service_error = error;
             current.service = error == ERROR_SUCCESS ? sentinel::ServiceState::listening : sentinel::ServiceState::failed;
             result = record(error == ERROR_SUCCESS ? SC_OK : SC_INSPECTION_FAILURE,
@@ -133,7 +146,9 @@ sc_result sc_shutdown(void) {
     current_context = sentinel::context::unavailable(SC_REASON_STOPPED);
     ReleaseSRWLockExclusive(&lock);
     // Never hold the snapshot lock while joining an admitted reader.
+    sentinel::native::stop();
     const DWORD error = sentinel::stop_inspection();
+    const bool retained = sentinel::native::stop(); // Observer startup is now joined.
     AcquireSRWLockExclusive(&lock);
     current.service_error = error;
     sc_result result;
@@ -145,7 +160,7 @@ sc_result sc_shutdown(void) {
             current.core.state = SC_STOPPED;
             record(SC_OK, "[Sentinel Core] stopped\n");
         }
-        result = current.core.last_result = SC_OK;
+        result = current.core.last_result = retained ? SC_UNLOAD_RETAINED : SC_OK;
     }
     ReleaseSRWLockExclusive(&lock);
     ReleaseSRWLockExclusive(&lifecycle);

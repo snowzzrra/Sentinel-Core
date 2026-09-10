@@ -3,6 +3,7 @@
 #include "protocol.h"
 #include "engine_observer.h"
 #include "context_observer.h"
+#include "native_runtime.h"
 #include <sddl.h>
 #include <vector>
 
@@ -17,9 +18,13 @@ DWORD observe(void*) {
     try {
         if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return 0;
         binding = engine::bind_host(memory, stop);
+        native::start(binding, current_snapshot(), stop);
         do {
             publish_engine(engine::sample(memory, binding, ++sequence));
-            publish_context(context::sample(memory, binding, sequence, stop));
+            const auto before = native::observation_stamp();
+            const auto observed = context::sample(memory, binding, sequence, stop);
+            native::publish_context(observed, before);
+            publish_context(observed);
         } while (WaitForSingleObject(stop, 100) == WAIT_TIMEOUT);
     } catch (...) {
         binding.metadata = engine::unavailable(SC_REASON_INTERNAL_ERROR);
@@ -56,11 +61,19 @@ DWORD serve(void*) {
         if (transfer(pipe, false, data.data(), static_cast<DWORD>(max_request), count, stop,
                      remaining(deadline)) == ERROR_SUCCESS) {
             uint16_t operation = inspect_operation;
-            const auto result = decode_request(data, count, &operation);
-            const DWORD size = static_cast<DWORD>(operation == context_operation ?
+            sc_diagnostic_request diagnostic{}; uint64_t after_event = 0;
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event);
+            sc_diagnostic_result diagnostic_result{};
+            if (result == WireResult::ok && operation >= diagnostic_submit_operation) {
+                diagnostic_result = operation == diagnostic_submit_operation ? native::submit(diagnostic) :
+                    native::result(diagnostic, operation == diagnostic_cancel_operation);
+            }
+            const DWORD size = static_cast<DWORD>(operation >= native_operation ?
+                encode_native_response(data, result, operation, current_snapshot(), native::inspect(after_event), diagnostic_result) :
+                (operation == context_operation ?
                 encode_context_response(data, result, current_snapshot(), current_context_snapshot()) : (operation == engine_operation ?
                 encode_engine_response(data, result, current_snapshot(), current_engine_snapshot()) :
-                encode_response(data, result, current_snapshot())));
+                encode_response(data, result, current_snapshot()))));
             if (transfer(pipe, true, data.data(), size, count, stop, remaining(deadline)) == ERROR_SUCCESS) {
                 // Wait for client close (or reject extra input), so DisconnectNamedPipe
                 // cannot discard the reply before it is read. Never FlushFileBuffers.

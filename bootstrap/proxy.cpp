@@ -20,8 +20,8 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         worker = CreateThread(nullptr, 0, start_core, nullptr, 0, nullptr);
         if (!worker) startup_error = GetLastError();
     }
-    // At process termination there are no hooks, files or persistent game state to
-    // restore. Never join or call into other DLLs during DLL_PROCESS_DETACH.
+    // Native hooks/state, if installed, remain pinned until process exit.
+    // Never restore hooks, join or call other DLLs during DLL_PROCESS_DETACH.
     return TRUE;
 }
 
