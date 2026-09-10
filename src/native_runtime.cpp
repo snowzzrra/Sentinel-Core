@@ -147,7 +147,7 @@ void post_frame() {
     if (owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); return; }
     // Missing this diagnostic opportunity is harmless; unlike a lifecycle event,
     // it need not be fabricated or become a gap when IPC briefly holds the lock.
-    if (!TryAcquireSRWLockExclusive(&lock)) return;
+    if (!TryAcquireSRWLockExclusive(&lock)) { diagnostics.note_claim_contention(); return; }
     ++status.callback_sequence; status.callback_at_ms = GetTickCount64();
     status.callback_thread_id = GetCurrentThreadId(); status.native_owner_thread_id = status.callback_thread_id;
     auto* slot = diagnostics.claim(status.callback_at_ms);
@@ -163,47 +163,73 @@ void post_frame() {
     if (fixture_active) fixture.gate(false);
 #endif
     auto result = slot->result; // This callback now exclusively owns the result.
+    auto detail = slot->detail;
+    detail.stage = why ? SC_STAGE_CLAIM_CONTEXT : SC_STAGE_NONE;
     result.scope = scope; result.thread_id = GetCurrentThreadId();
     result.site_revision = 1; result.phase = 1; result.lifecycle = life;
-    if (!same_scope(slot->request.expected, scope)) why = SC_NATIVE_SCOPE_MISMATCH;
+    auto reject = [&](uint32_t reason, uint32_t stage) { why = reason; detail.stage = stage; };
+    if (!same_scope(slot->request.expected, scope)) reject(SC_NATIVE_SCOPE_MISMATCH, SC_STAGE_SCOPE);
     uint8_t pending = 1, pending_after = 1;
     engine::LocalMemory memory;
     sc_context_snapshot facts{};
     if (!why) {
-        bool pending_read = false;
+        engine::ReadResult pending_read{};
 #ifdef SC_NATIVE_TESTING
-        if (fixture_active) { pending = fixture.pending(); pending_read = true; }
+        if (fixture_active) pending = fixture.pending();
         else
 #endif
-        pending_read = read(binding.root + 0xb8, pending);
-        if (!pending_read || pending) why = SC_NATIVE_TRANSITION;
+        pending_read = memory.copy(binding.root + 0xb8, &pending, sizeof(pending));
+        detail.pending_before = pending_read.reason ? 3u : (pending ? 2u : 1u);
+        detail.pending_before_reason = pending_read.reason;
+        detail.pending_before_error = pending_read.error;
+        if (pending_read.reason || pending) reject(pending_read.reason ? SC_NATIVE_READ_FAILED : SC_NATIVE_TRANSITION, SC_STAGE_PENDING_BEFORE);
         else {
-            bool after_read = false;
+            engine::ReadResult after_read{};
+            context::Evidence measured{};
+            detail.observation_attempted = 1;
 #ifdef SC_NATIVE_TESTING
-            if (fixture_active) { facts = fixture.context(); pending_after = fixture.pending(); after_read = true; }
+            if (fixture_active) { facts = fixture.observe(measured); pending_after = fixture.pending(); }
             else
 #endif
-            { facts = context::sample(memory, binding, status.callback_sequence, nullptr, 2);
-              after_read = read(binding.root + 0xb8, pending_after); }
-            if (!after_read || pending_after) why = SC_NATIVE_TRANSITION;
+            { facts = context::sample(memory, binding, status.callback_sequence, nullptr, 2, &measured);
+              after_read = memory.copy(binding.root + 0xb8, &pending_after, sizeof(pending_after)); }
+            detail.observation_started_at_ms = measured.started_at_ms;
+            detail.observation_elapsed_ns = measured.elapsed_ns; detail.observation_budget_ns = measured.budget_ns;
+            detail.timing_valid = measured.timing_valid; detail.timing_error = measured.timing_error;
+            detail.sample_reason = facts.sample_reason;
+            detail.state_validity = facts.fields[SC_CONTEXT_GAME_STATE].validity;
+            detail.state_reason = measured.state.reason; detail.state_error = measured.state.error;
+            detail.map_validity = facts.current_map.validity;
+            detail.map_reason = measured.map.reason; detail.map_error = measured.map.error;
+            detail.pending_after = after_read.reason ? 3u : (pending_after ? 2u : 1u);
+            detail.pending_after_reason = after_read.reason;
+            detail.pending_after_error = after_read.error;
+            if (after_read.reason || pending_after) reject(after_read.reason ? SC_NATIVE_READ_FAILED : SC_NATIVE_TRANSITION, SC_STAGE_PENDING_AFTER);
+            else if (facts.sample_reason == SC_REASON_BUDGET) reject(SC_NATIVE_BUDGET, SC_STAGE_OBSERVATION_BUDGET);
             else if (facts.current_map.validity != SC_OBSERVATION_OBSERVED ||
                      facts.fields[SC_CONTEXT_GAME_STATE].validity != SC_OBSERVATION_OBSERVED ||
-                     facts.fields[SC_CONTEXT_GAME_STATE].value != SC_GAME_IN_GAME) why = SC_NATIVE_CONTEXT_UNAVAILABLE;
+                     facts.fields[SC_CONTEXT_GAME_STATE].value != SC_GAME_IN_GAME)
+                reject(SC_NATIVE_CONTEXT_UNAVAILABLE, SC_STAGE_FRESH_CONTEXT);
+            // Accepted reader facts alone do not authorize the diagnostic body.
+            detail.observation_accepted = facts.current_map.validity == SC_OBSERVATION_OBSERVED &&
+                facts.fields[SC_CONTEXT_GAME_STATE].validity == SC_OBSERVATION_OBSERVED &&
+                facts.fields[SC_CONTEXT_GAME_STATE].value == SC_GAME_IN_GAME;
         }
     }
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
-        why = SC_NATIVE_EVENT_GAP;
+        reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
     if (!why && (map_address() != expected_map_address || !same_map(facts.current_map, expected_map_name))) {
-        invalidate(SC_NATIVE_EVENT_GAP); why = SC_NATIVE_EVENT_GAP;
+        invalidate(SC_NATIVE_EVENT_GAP); reject(SC_NATIVE_EVENT_GAP, SC_STAGE_MAP_BINDING);
     }
-    if (!why && owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); why = SC_NATIVE_WRONG_THREAD; }
-    if (!why && !accepting.load(std::memory_order_acquire)) why = SC_NATIVE_STOPPED;
-    if (!why && slot->cancel.load(std::memory_order_acquire)) why = SC_NATIVE_CANCELLED;
+    if (!why && owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); reject(SC_NATIVE_WRONG_THREAD, SC_STAGE_NATIVE_FAULT); }
+    if (!why && !accepting.load(std::memory_order_acquire)) reject(SC_NATIVE_STOPPED, SC_STAGE_NATIVE_FAULT);
+    if (!why && slot->cancel.load(std::memory_order_acquire)) reject(SC_NATIVE_CANCELLED, SC_STAGE_CANCELLATION);
     const auto execution_at = GetTickCount64();
-    if (!why && execution_at >= result.deadline_at_ms) why = SC_NATIVE_DEADLINE;
+    if (!why && execution_at >= result.deadline_at_ms) reject(SC_NATIVE_DEADLINE, SC_STAGE_DEADLINE);
     // Linearization point of the only diagnostic body. Cancellation after this
     // check may coexist with EXECUTED; a caller timeout is never proof otherwise.
     if (!why) {
+        detail.stage = SC_STAGE_EXECUTED;
         result.observed_at_ms = facts.sampled_at_ms;
         result.executed_at_ms = execution_at;
         result.current_map = facts.current_map;
@@ -218,7 +244,7 @@ void post_frame() {
     if (fixture_active && result.state == SC_DIAGNOSTIC_EXECUTED) fixture.gate(true);
 #endif
     result.completed_at_ms = GetTickCount64();
-    Diagnostics::finish(*slot, result);
+    Diagnostics::finish(*slot, result, detail);
 }
 void frame_detour(uintptr_t self) {
     const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
@@ -265,6 +291,7 @@ void prepare(const Snapshot& identity) {
     ReleaseSRWLockExclusive(&lock);
 }
 void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_event) {
+    (void)context::observation_clock(); // Cache QPC frequency before any hook is reachable.
     AcquireSRWLockExclusive(&startup);
     if (pinned.load(std::memory_order_acquire) || stopping.load(std::memory_order_acquire)) {
         ReleaseSRWLockExclusive(&startup); return;
@@ -397,17 +424,17 @@ sc_native_snapshot inspect(uint64_t after) {
     lifetime.page(out, after); diagnostics.counts(out, GetTickCount64());
     ReleaseSRWLockExclusive(&lock); return out;
 }
-sc_diagnostic_result submit(const sc_diagnostic_request& request) {
+sc_diagnostic_result submit(const sc_diagnostic_request& request, sc_diagnostic_detail* detail) {
     AcquireSRWLockExclusive(&lock);
     const auto now = GetTickCount64(); auto why = prerequisite(now);
     auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
     if (!why && !same_scope(scope, request.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
-    auto out = diagnostics.submit(request, why, now);
+    auto out = diagnostics.submit(request, why, now, detail);
     ReleaseSRWLockExclusive(&lock); return out;
 }
-sc_diagnostic_result result(const sc_diagnostic_request& request, bool cancel) {
+sc_diagnostic_result result(const sc_diagnostic_request& request, bool cancel, sc_diagnostic_detail* detail) {
     AcquireSRWLockExclusive(&lock);
-    auto out = diagnostics.retrieve(request, cancel, GetTickCount64());
+    auto out = diagnostics.retrieve(request, cancel, GetTickCount64(), detail);
     ReleaseSRWLockExclusive(&lock); return out;
 }
 bool stop() {

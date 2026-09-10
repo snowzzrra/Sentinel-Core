@@ -1,4 +1,5 @@
 #include "native_model.h"
+#include <Windows.h>
 #include "protocol.h"
 #include <cstdio>
 #include <cstdlib>
@@ -51,7 +52,13 @@ int main() {
     CHECK(queue.retrieve(r, true, 112).state == SC_DIAGNOSTIC_CANCELLED);
     CHECK(queue.claim(113) == nullptr);
     r = request(2, 5); CHECK(queue.submit(r, 0, 120).state == SC_DIAGNOSTIC_QUEUED);
-    CHECK(queue.retrieve(r, false, 125).state == SC_DIAGNOSTIC_EXPIRED);
+    queue.note_claim_contention();
+    sc_diagnostic_detail detail{};
+    CHECK(queue.retrieve(r, false, 125, &detail).state == SC_DIAGNOSTIC_EXPIRED);
+    CHECK(detail.stage == SC_STAGE_QUEUE && detail.claim_lock_missed && !detail.observation_attempted);
+    const auto terminal_detail = detail;
+    queue.note_claim_contention(); queue.retrieve(r, false, 126, &detail);
+    CHECK(std::memcmp(&terminal_detail, &detail, sizeof(detail)) == 0);
     CHECK(!queue.claim(125));
     for (uint64_t i = 3; i <= SC_DIAGNOSTIC_CAPACITY; ++i) CHECK(queue.submit(request(i), 0, 130).state == SC_DIAGNOSTIC_QUEUED);
     CHECK(queue.submit(request(9), 0, 130).reason == SC_NATIVE_QUEUE_FULL);
@@ -71,7 +78,8 @@ int main() {
         Diagnostics::finish(*slot, value);
     });
     { std::unique_lock<std::mutex> hold(mutex); cv.wait(hold, [&] { return ready; }); }
-    auto claimed = race.retrieve(r, true, 1002);
+    auto claimed = race.retrieve(r, true, 1002, &detail);
+    CHECK(detail.revision == 1 && detail.stage == SC_STAGE_NONE && !detail.observation_attempted);
     CHECK(claimed.state == SC_DIAGNOSTIC_CLAIMED && claimed.cancel_requested && !claimed.executed_at_ms);
     { std::lock_guard<std::mutex> hold(mutex); finish = true; cv.notify_one(); }
     callback.join();
@@ -102,5 +110,31 @@ int main() {
     CHECK(roundtrip.current_map.length == 255 && roundtrip.event_count == 6);
     CHECK(!decode_native_response(wire, size - 1, code, native_operation, s, roundtrip, d));
     ++n.context_generation; CHECK(encode_native_response(wire, WireResult::ok, native_operation, host, n, {}) == 0);
+    // Explicit extension round-trip, old payload size unchanged, and strict
+    // rejection of mismatched/truncated/unknown detail revisions.
+    d = {}; d.scope = r.expected; d.request_id = r.request_id; std::memcpy(d.nonce, r.nonce, 16);
+    d.state = SC_DIAGNOSTIC_REJECTED; d.reason = SC_NATIVE_BUDGET;
+    detail = {}; detail.revision = 1; detail.stage = SC_STAGE_OBSERVATION_BUDGET;
+    detail.observation_attempted = detail.timing_valid = 1;
+    detail.observation_started_at_ms = 1000; detail.observation_elapsed_ns = 2000001;
+    detail.observation_budget_ns = 2000000; detail.sample_reason = SC_REASON_BUDGET;
+    size = encode_native_request(wire, diagnostic_detail_submit_operation, r);
+    CHECK(size == 88 && decode_request(wire, size, &op, &decoded) == WireResult::ok && op == diagnostic_detail_submit_operation);
+    const auto old_size = encode_native_response(wire, WireResult::ok, diagnostic_result_operation, host, {}, d);
+    size = encode_native_response(wire, WireResult::ok, diagnostic_detail_result_operation, host, {}, d, detail);
+    CHECK(size > old_size && size <= max_message);
+    sc_diagnostic_detail restored{};
+    CHECK(decode_native_response(wire, size, code, diagnostic_detail_result_operation, s, roundtrip, d, &restored));
+    CHECK(restored.observation_elapsed_ns == 2000001 && restored.stage == SC_STAGE_OBSERVATION_BUDGET);
+    CHECK(!decode_native_response(wire, size, code, diagnostic_result_operation, s, roundtrip, d));
+    CHECK(!decode_native_response(wire, size - 1, code, diagnostic_detail_result_operation, s, roundtrip, d));
+    wire[size] = 0; CHECK(!decode_native_response(wire, size + 1, code, diagnostic_detail_result_operation, s, roundtrip, d));
+    ++detail.revision; CHECK(!encode_native_response(wire, WireResult::ok, diagnostic_detail_result_operation, host, {}, d, detail));
+    detail = {}; detail.revision = 1; detail.stage = SC_STAGE_PENDING_BEFORE;
+    detail.pending_before = 3; detail.pending_before_reason = SC_REASON_PARTIAL_READ;
+    detail.pending_before_error = ERROR_PARTIAL_COPY; d.reason = SC_NATIVE_READ_FAILED;
+    size = encode_native_response(wire, WireResult::ok, diagnostic_detail_result_operation, host, {}, d, detail);
+    CHECK(size && decode_native_response(wire, size, code, diagnostic_detail_result_operation, s, roundtrip, d, &restored));
+    CHECK(restored.pending_before_reason == SC_REASON_PARTIAL_READ && restored.pending_before_error == ERROR_PARTIAL_COPY);
     std::puts("PASS native lifecycle, nested/free/failure/menu, same-name generation, history gaps, queue bounds/deadlines/retention, claimed cancellation race, strict bounded wire; HARNESS ONLY");
 }

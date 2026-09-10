@@ -19,6 +19,7 @@ std::atomic<uintptr_t> caller{0}, map{42};
 std::atomic<uint64_t> originals{0}, changes{0}, frees{0}, last_return{0};
 std::atomic<bool> pause_frames{false}, finish_thread{false}, pending{false}, recurse{false};
 std::atomic<unsigned> gate_stage{0};
+std::atomic<unsigned> observation_case{0};
 HANDLE parked = nullptr, wake = nullptr, gate_entered = nullptr, gate_release = nullptr;
 int root_object = 0, common_object = 0, slot_object = 0;
 struct Descriptor { uint8_t checkpoint; bool success; uint32_t destination; };
@@ -55,6 +56,48 @@ sc_context_snapshot facts() {
     }
     return c;
 }
+// Real production double-read/budget function on explicit fake memory. These
+// fixtures are not native semantic proof and no controls enter production IPC.
+sc_context_snapshot observe(context::Evidence& measured) {
+    const auto mode = observation_case.load();
+    struct Memory final : engine::Memory {
+        unsigned mode, state_reads = 0;
+        explicit Memory(unsigned value) : mode(value) {}
+        engine::ReadResult copy(uintptr_t address, void* out, size_t size) override {
+            constexpr uintptr_t root = 0x1445ea6f0ULL, object = 0x200000000ULL, data = 0x300000000ULL;
+            const char name[] = "fixture/same-name-and-address";
+            const uintptr_t root_table = 0x142aaa730ULL, map_table = 0x142ab30c8ULL;
+            uint32_t state[2]{SC_GAME_IN_GAME, 12};
+            struct String { uintptr_t table, data; int32_t length; uint32_t allocation; };
+            const String text{0x142a67478ULL, data, static_cast<int32_t>(sizeof(name) - 1), 4096};
+            const void* source = nullptr; size_t width = 0;
+            if (address == root) { source = &root_table; width = sizeof(root_table); }
+            if (address == root + 0x44) {
+                if (mode == 6 && ++state_reads == 2) state[0] = SC_GAME_LOADING;
+                source = state; width = sizeof(state);
+            }
+            if (address == root + 0x50) { source = &object; width = sizeof(object); }
+            if (address == object) { source = &map_table; width = sizeof(map_table); }
+            if (address == object + 0x9a060) { source = &text; width = sizeof(text); }
+            if (address == data) {
+                if (mode == 5) return {SC_REASON_PARTIAL_READ, ERROR_PARTIAL_COPY};
+                source = name; width = sizeof(name);
+            }
+            if (!source || size != width) return {SC_REASON_READ_FAILED, ERROR_NOACCESS};
+            std::memcpy(out, source, size); return {};
+        }
+    } memory(mode);
+    engine::Binding b{}; b.image.base = 0x140000000ULL; b.root = 0x1445ea6f0ULL;
+    b.metadata.profile = SC_PROFILE_STEAM_20260818;
+    static thread_local int64_t ticks = 0, delta = 0;
+    ticks = 0; delta = mode == 3 ? 2000001 : (mode == 4 ? 15000000 : 100000);
+    const context::Clock clock{
+        [](int64_t& out) { out = ticks; ticks += delta; return true; },
+        []() -> uint64_t { return GetTickCount64(); }, 1000000000};
+    auto c = context::sample(memory, b, 1, nullptr, 2, &measured, mode ? &clock : nullptr);
+    if (mode == 8) pending.store(true);
+    return c;
+}
 void gate(bool executed) {
     const unsigned expected = executed ? 2u : 1u;
     if (gate_stage.load() != expected) return;
@@ -73,7 +116,7 @@ struct Child {
     Handle process, output;
     Child(const wchar_t* probe, const std::wstring& args) {
         SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE}; Handle writer;
-        CHECK(CreatePipe(&output.value, &writer.value, &sa, 0));
+        CHECK(CreatePipe(&output.value, &writer.value, &sa, 32768));
         CHECK(SetHandleInformation(output.value, HANDLE_FLAG_INHERIT, 0));
         STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES;
         si.hStdOutput = si.hStdError = writer.value; si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
@@ -108,7 +151,7 @@ std::wstring retrieve_args(const sc_diagnostic_request& r, bool cancel) {
 }
 }
 int wmain(int argc, wchar_t** argv) {
-    CHECK(argc == 3); const wchar_t* probe = argv[1]; const bool wrong_thread = std::wcscmp(argv[2], L"wrong-thread") == 0;
+    CHECK(argc == 3); const wchar_t* probe = argv[1];
     parked = CreateEventW(nullptr, TRUE, FALSE, nullptr); wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     gate_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr); gate_release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     CHECK(parked && wake && gate_entered && gate_release);
@@ -138,7 +181,7 @@ int wmain(int argc, wchar_t** argv) {
     adapter.root = reinterpret_cast<uintptr_t>(&root_object); adapter.common = reinterpret_cast<uintptr_t>(&common_object);
     adapter.caller = caller.load();
     adapter.owner = [] { return owner.load(); }; adapter.game = [] { return game.load(); };
-    adapter.pending = [] { return static_cast<uint8_t>(pending.load()); }; adapter.context = facts;
+    adapter.pending = [] { return static_cast<uint8_t>(pending.load()); }; adapter.context = facts; adapter.observe = observe;
     adapter.map = [] { return map.load(); };
     adapter.checkpoint = [](uintptr_t p, uint8_t& value) { value = reinterpret_cast<const Descriptor*>(p)->checkpoint; return true; };
     adapter.primary = [](uintptr_t p, uintptr_t& value) { value = map.load(); return p == reinterpret_cast<uintptr_t>(&slot_object); };
@@ -173,12 +216,14 @@ int wmain(int argc, wchar_t** argv) {
     const auto successful = normal.complete(0);
     CHECK(successful.find("callback_executed") != std::string::npos);
     CHECK(native::inspect().callback_thread_id == owner.load() && owner.load() != GetCurrentThreadId());
-    if (!wrong_thread) {
+    if (std::wcscmp(argv[2], L"basic") == 0) {
         park(); Child stale(probe, L"--diagnostic --deadline-ms 1500");
         until([] { return native::inspect().queued == 1; });
         command.store(1); resume();
         CHECK(stale.complete(8).find("scope_mismatch") != std::string::npos); ready();
         CHECK(native::inspect().scope.lifecycle_generation == 2);
+        Child fresh(probe, L"--diagnostic --deadline-ms 1500");
+        CHECK(fresh.complete(0).find("callback_executed") != std::string::npos);
         park(); Child expired(probe, L"--diagnostic --deadline-ms 150");
         CHECK(expired.complete(8).find("\"state\":\"expired\"") != std::string::npos);
         resume(); ready();
@@ -212,6 +257,30 @@ int wmain(int argc, wchar_t** argv) {
         park(); command.store(1); resume(); ready();
         recurse.store(true); until([] { return native::inspect().reason == SC_NATIVE_REENTRANT; });
     } else if (std::wcscmp(argv[2], L"wrong-thread") == 0) {
+        for (const unsigned mode : {1u, 3u, 4u, 5u, 6u, 8u}) {
+            park(); observation_case.store(mode);
+            const auto req = request(300 + mode);
+            const auto admitted = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_submit_operation, req);
+            CHECK(admitted.diagnostic.state == SC_DIAGNOSTIC_QUEUED);
+            resume(); until([&] { return native::result(req, false).state >= SC_DIAGNOSTIC_EXECUTED; });
+            const auto out = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, req);
+            CHECK(out.result == ProbeResult::ok && out.detail.revision == 1 && out.detail.observation_attempted);
+            CHECK(out.detail.timing_valid && out.detail.observation_budget_ns == 2000000);
+            CHECK(out.detail.observation_elapsed_ns == (mode == 3 ? 2000001u : (mode == 4 ? 15000000u : 100000u)));
+            if (mode == 1) CHECK(out.diagnostic.state == SC_DIAGNOSTIC_EXECUTED && out.detail.observation_accepted);
+            else {
+                CHECK(out.diagnostic.state == SC_DIAGNOSTIC_REJECTED && !out.diagnostic.current_map.length && !out.diagnostic.observed_at_ms);
+                if (mode == 3 || mode == 4) CHECK(out.diagnostic.reason == SC_NATIVE_BUDGET && out.detail.stage == SC_STAGE_OBSERVATION_BUDGET);
+                if (mode == 5) CHECK(out.detail.map_reason == SC_REASON_PARTIAL_READ && out.detail.map_error == ERROR_PARTIAL_COPY);
+                if (mode == 6) CHECK(out.detail.state_reason == SC_REASON_TRANSITION && out.detail.stage == SC_STAGE_FRESH_CONTEXT);
+                if (mode == 8) CHECK(out.detail.stage == SC_STAGE_PENDING_AFTER && out.detail.pending_before == 1 && out.detail.pending_after == 2);
+            }
+            Child captured(probe, retrieve_args(req, false));
+            CHECK(captured.complete(mode == 1 ? 0 : 8).find("\"observation_attempted\":true") != std::string::npos);
+            const auto again = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, req);
+            CHECK(std::memcmp(&out.detail, &again.detail, sizeof(out.detail)) == 0);
+            observation_case.store(0); pending.store(false); ready();
+        }
         park(); owner.store(0); resume(); until([] { return native::inspect().reason == SC_NATIVE_WRONG_THREAD; });
     } else {
         park();

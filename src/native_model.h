@@ -27,18 +27,24 @@ public:
         std::atomic<bool> cancel{false};
         sc_diagnostic_request request{};
         sc_diagnostic_result result{};
+        sc_diagnostic_detail detail{};
+        uint64_t admitted_lock_misses = 0;
     };
     // admission/retrieval/claim/housekeeping run under the caller's short lock.
     sc_diagnostic_result submit(const sc_diagnostic_request& request,
-                                uint32_t reject, uint64_t now);
-    sc_diagnostic_result retrieve(const sc_diagnostic_request& request, bool cancel, uint64_t now);
+                                uint32_t reject, uint64_t now, sc_diagnostic_detail* detail = nullptr);
+    sc_diagnostic_result retrieve(const sc_diagnostic_request& request, bool cancel, uint64_t now,
+                                  sc_diagnostic_detail* detail = nullptr);
+    void note_claim_contention() { claim_lock_misses_.fetch_add(1, std::memory_order_relaxed); }
     Slot* claim(uint64_t now);
     void cancel_pending(uint64_t now);
     void counts(sc_native_snapshot& out, uint64_t now);
     // Only the native callback calls finish. Timeout/cancel of CLAIMED requests
     // requests cancellation, never asserts that the callback did not execute.
-    static void finish(Slot& slot, sc_diagnostic_result result);
+    static void finish(Slot& slot, sc_diagnostic_result result, sc_diagnostic_detail detail = {});
 private:
+    std::atomic<uint64_t> claim_lock_misses_{0};
+    void queue_detail(Slot& slot);
     std::array<Slot, SC_DIAGNOSTIC_CAPACITY> slots_{};
     void collect(uint64_t now);
 };

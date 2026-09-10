@@ -64,12 +64,14 @@ DWORD serve(void*) {
             sc_diagnostic_request diagnostic{}; uint64_t after_event = 0;
             const auto result = decode_request(data, count, &operation, &diagnostic, &after_event);
             sc_diagnostic_result diagnostic_result{};
+            sc_diagnostic_detail detail{};
             if (result == WireResult::ok && operation >= diagnostic_submit_operation) {
-                diagnostic_result = operation == diagnostic_submit_operation ? native::submit(diagnostic) :
-                    native::result(diagnostic, operation == diagnostic_cancel_operation);
+                diagnostic_result = operation == diagnostic_submit_operation || operation == diagnostic_detail_submit_operation ?
+                    native::submit(diagnostic, &detail) : native::result(diagnostic,
+                        operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
             const DWORD size = static_cast<DWORD>(operation >= native_operation ?
-                encode_native_response(data, result, operation, current_snapshot(), native::inspect(after_event), diagnostic_result) :
+                encode_native_response(data, result, operation, current_snapshot(), native::inspect(after_event), diagnostic_result, detail) :
                 (operation == context_operation ?
                 encode_context_response(data, result, current_snapshot(), current_context_snapshot()) : (operation == engine_operation ?
                 encode_engine_response(data, result, current_snapshot(), current_engine_snapshot()) :

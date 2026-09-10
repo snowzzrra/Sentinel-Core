@@ -32,6 +32,10 @@ struct Fake final : engine::Memory {
     }
 };
 struct NativeString { uintptr_t vtable, data; int32_t length; uint32_t allocation; };
+int64_t counter_value = 0, counter_delta = 0;
+uint64_t uptime_value = 0;
+bool controlled_counter(int64_t& value) { value = counter_value; counter_value += counter_delta; return true; }
+uint64_t controlled_uptime() { const auto value = uptime_value; uptime_value += 16; return value; }
 struct Fixture {
     Fake memory;
     engine::Binding binding;
@@ -57,6 +61,19 @@ void unknown_map(const sc_context_snapshot& s, uint32_t reason) {
     for (char c : s.current_map.bytes) CHECK(c == 0);
 }
 int main() {
+    // Actual double-read acceptance path, not a detached clock predicate. A 0.1 ms
+    // observation crosses a simulated 16 ms uptime tick. Old guard rejected it.
+    for (const int64_t elapsed : {100000LL, 2000000LL, 2000001LL, 15000000LL}) {
+        Fixture timed; counter_value = 0; counter_delta = elapsed; uptime_value = 1000;
+        const context::Clock clock{controlled_counter, controlled_uptime, 1000000000};
+        context::Evidence measured{};
+        const auto sample = context::sample(timed.memory, timed.binding, 1, nullptr, 2, &measured, &clock);
+        CHECK(sample.duration_ms == 16 && sample.sampled_at_ms == 1016);
+        CHECK(measured.timing_valid && measured.elapsed_ns == static_cast<uint64_t>(elapsed));
+        CHECK(measured.budget_ns == 2000000 && measured.started_at_ms == 1000);
+        CHECK(sample.sample_reason == static_cast<uint32_t>(elapsed > 2000000 ? SC_REASON_BUDGET : SC_REASON_NONE));
+        CHECK(!measured.map.reason && !measured.state.reason);
+    }
     Fixture f; auto s = f.sample();
     CHECK(s.current_map.validity == SC_OBSERVATION_OBSERVED);
     CHECK(std::strcmp(s.current_map.bytes, "game/sp/e3m2_hell_b/e3m2_hell_b") == 0);

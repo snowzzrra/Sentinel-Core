@@ -117,21 +117,52 @@ void print_diagnostic(const sentinel::Inspection& r, const sc_diagnostic_request
             "\"state\":\"%s\",\"reason\":\"%s\",\"cancel_requested\":%s,\"retrieved\":%s,\"deadline_ms\":%u,"
             "\"admitted_at_ms\":\"%llu\",\"deadline_at_ms\":\"%llu\",\"claimed_at_ms\":\"%llu\","
             "\"observed_at_ms\":\"%llu\",\"executed_at_ms\":\"%llu\",\"completed_at_ms\":\"%llu\",\"retrieved_at_ms\":\"%llu\","
-            "\"thread_id\":%u,\"site_revision\":%u,\"phase\":%u,\"lifecycle\":%u,\"game_state\":%u,\"current_map\":%s}\n",
+            "\"thread_id\":%u,\"site_revision\":%u,\"phase\":%u,\"lifecycle\":%u,\"game_state\":%s,\"current_map\":%s",
             quoted(r.snapshot.core.version).c_str(), quoted(r.snapshot.core.build_id).c_str(), r.snapshot.pid, r.server_pid,
             r.snapshot.process_created, sentinel::instance_text(r.snapshot.instance).c_str(), d.request_id,
             hex_text(d.nonce).c_str(), request.expected.lifecycle_generation, d.scope.lifecycle_generation,
             sentinel::diagnostic_state_name(d.state), sentinel::native_reason_name(d.reason), d.cancel_requested ? "true" : "false",
             d.retrieved ? "true" : "false", request.deadline_ms, d.admitted_at_ms, d.deadline_at_ms, d.claimed_at_ms,
             d.observed_at_ms, d.executed_at_ms, d.completed_at_ms, d.retrieved_at_ms, d.thread_id, d.site_revision, d.phase, d.lifecycle,
-            d.game_state, name.c_str());
+            d.state == SC_DIAGNOSTIC_EXECUTED ? std::to_string(d.game_state).c_str() : "null", name.c_str());
+        const auto& e = r.detail;
+        std::printf(",\"game_state_observed\":%s,\"detail\":{\"revision\":%u,\"stage\":\"%s\","
+            "\"observation_attempted\":%s,\"observation_accepted\":%s,\"timing_clock\":\"QPC_wall_elapsed\","
+            "\"timing_valid\":%s,\"timing_error\":%u,\"claim_lock_missed_since_admission\":%s,"
+            "\"observation_started_at_ms\":\"%llu\",\"observation_elapsed_ns\":\"%llu\",\"observation_budget_ns\":\"%llu\","
+            "\"sample_reason\":\"%s\",\"state_validity\":\"%s\",\"state_reason\":\"%s\",\"state_win32_error\":%u,"
+            "\"map_validity\":\"%s\",\"map_reason\":\"%s\",\"map_win32_error\":%u,"
+            "\"pending_before\":%u,\"pending_before_reason\":\"%s\",\"pending_before_win32_error\":%u,"
+            "\"pending_after\":%u,\"pending_after_reason\":\"%s\",\"pending_after_win32_error\":%u}}\n",
+            d.state == SC_DIAGNOSTIC_EXECUTED ? "true" : "false", e.revision, sentinel::diagnostic_stage_name(e.stage),
+            e.observation_attempted ? "true" : "false", e.observation_accepted ? "true" : "false",
+            e.timing_valid ? "true" : "false", e.timing_error, e.claim_lock_missed ? "true" : "false",
+            e.observation_started_at_ms, e.observation_elapsed_ns, e.observation_budget_ns,
+            sentinel::context_reason_name(e.sample_reason), sentinel::validity_name(e.state_validity),
+            sentinel::context_reason_name(e.state_reason), e.state_error, sentinel::validity_name(e.map_validity),
+            sentinel::context_reason_name(e.map_reason), e.map_error,
+            e.pending_before, sentinel::reason_name(e.pending_before_reason), e.pending_before_error,
+            e.pending_after, sentinel::reason_name(e.pending_after_reason), e.pending_after_error);
     } else std::printf("diagnostic request=%llu nonce=%s state=%s reason=%s cancel_requested=%u retrieved=%u\n"
         "expected_generation=%llu observed_generation=%llu thread=%u phase=%u map=%s\n"
         "admitted=%llu claimed=%llu executed=%llu completed=%llu retrieved=%llu deadline=%llu ms\n"
-        "observation_started=%llu ms\n",
+        "accepted_observation_completed=%llu ms\n",
         d.request_id, hex_text(d.nonce).c_str(), sentinel::diagnostic_state_name(d.state), sentinel::native_reason_name(d.reason),
         d.cancel_requested, d.retrieved, request.expected.lifecycle_generation, d.scope.lifecycle_generation, d.thread_id, d.phase,
         name.c_str(), d.admitted_at_ms, d.claimed_at_ms, d.executed_at_ms, d.completed_at_ms, d.retrieved_at_ms, d.deadline_at_ms, d.observed_at_ms);
+    if (!json) {
+        const auto& e = r.detail;
+        std::printf("detail revision=%u stage=%s observation_attempted=%u accepted=%u QPC_elapsed_ns=%llu budget_ns=%llu timing_valid=%u error=%u\n"
+            "observation_started_uptime_ms=%llu claim_lock_missed=%u sample=%s state=%s/%s win32=%u map=%s/%s win32=%u\n"
+            "pending_before=%u reason=%s win32=%u pending_after=%u reason=%s win32=%u (0=unknown,1=clear,2=set,3=unreadable); result game_state_observed=%u\n",
+            e.revision, sentinel::diagnostic_stage_name(e.stage), e.observation_attempted, e.observation_accepted,
+            e.observation_elapsed_ns, e.observation_budget_ns, e.timing_valid, e.timing_error,
+            e.observation_started_at_ms, e.claim_lock_missed, sentinel::context_reason_name(e.sample_reason),
+            sentinel::validity_name(e.state_validity), sentinel::context_reason_name(e.state_reason), e.state_error,
+            sentinel::validity_name(e.map_validity), sentinel::context_reason_name(e.map_reason), e.map_error,
+            e.pending_before, sentinel::reason_name(e.pending_before_reason), e.pending_before_error,
+            e.pending_after, sentinel::reason_name(e.pending_after_reason), e.pending_after_error, d.state == SC_DIAGNOSTIC_EXECUTED);
+    }
 }
 void print_context(const sentinel::Inspection& r, uint32_t pid, bool json) {
     const auto& s = r.snapshot; const auto& c = r.context; const auto& m = c.current_map;
@@ -185,8 +216,11 @@ void print_context(const sentinel::Inspection& r, uint32_t pid, bool json) {
 int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool engine, bool context) {
     const char* result = sentinel::result_name(r.result);
     if (r.result != sentinel::ProbeResult::ok) {
-        if (json) std::printf("{\"result\":\"%s\",\"target_pid\":%u,\"win32_error\":%u}\n", result, pid, r.win32_error);
-        else std::printf("Sentinel inspection: %s (PID %u, win32=%u). Use --help for usage.\n", result, pid, r.win32_error);
+        if (json) std::printf("{\"result\":\"%s\",\"target_pid\":%u,\"win32_error\":%u,\"failure_stage\":\"%s\","
+            "\"target_state\":\"%s\",\"target_wait_error\":%u,\"verified_process_created\":\"%llu\"}\n",
+            result, pid, r.win32_error, r.failure_stage, r.target_state, r.target_wait_error, r.verified_process_created);
+        else std::printf("Sentinel inspection: %s (PID %u, win32=%u stage=%s target=%s wait_error=%u created=%llu). Use --help for usage.\n",
+            result, pid, r.win32_error, r.failure_stage, r.target_state, r.target_wait_error, r.verified_process_created);
         return static_cast<int>(r.result);
     }
     const auto& s = r.snapshot;
@@ -286,9 +320,9 @@ int wmain(int argc, wchar_t** argv) {
         else if (wcscmp(argv[i], L"--engine") == 0 && !engine) engine = true;
         else if (wcscmp(argv[i], L"--context") == 0 && !context) context = true;
         else if (wcscmp(argv[i], L"--native") == 0 && !native) native = true;
-        else if (wcscmp(argv[i], L"--diagnostic") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_submit_operation;
-        else if (wcscmp(argv[i], L"--diagnostic-result") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_result_operation;
-        else if (wcscmp(argv[i], L"--diagnostic-cancel") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_cancel_operation;
+        else if (wcscmp(argv[i], L"--diagnostic") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_detail_submit_operation;
+        else if (wcscmp(argv[i], L"--diagnostic-result") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_detail_result_operation;
+        else if (wcscmp(argv[i], L"--diagnostic-cancel") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_detail_cancel_operation;
         else if (wcscmp(argv[i], L"--deadline-ms") == 0 && !saw_deadline && i + 1 < argc) {
             saw_deadline = true; valid = number(argv[++i], request.deadline_ms) && valid;
         } else if (wcscmp(argv[i], L"--expect-created") == 0 && !saw_created && i + 1 < argc) {
@@ -317,8 +351,8 @@ int wmain(int argc, wchar_t** argv) {
         (unsigned(engine) + unsigned(context) + unsigned(native) + unsigned(diagnostic_op != 0) > 1) ||
         (saw_count && !engine && !context && !native) || (saw_interval && !saw_count) ||
         (saw_deadline && !diagnostic_op) || !request.deadline_ms || request.deadline_ms > SC_DIAGNOSTIC_MAX_DEADLINE_MS ||
-        ((saw_created || saw_instance || saw_generation || saw_id || saw_nonce) && diagnostic_op <= sentinel::diagnostic_submit_operation) ||
-        (diagnostic_op > sentinel::diagnostic_submit_operation && !(saw_created && saw_instance && saw_generation && saw_id && saw_nonce))) {
+        ((saw_created || saw_instance || saw_generation || saw_id || saw_nonce) && diagnostic_op <= sentinel::diagnostic_detail_submit_operation) ||
+        (diagnostic_op > sentinel::diagnostic_detail_submit_operation && !(saw_created && saw_instance && saw_generation && saw_id && saw_nonce))) {
         sentinel::Inspection error; error.result = sentinel::ProbeResult::usage;
         return print_result(error, pid, json, engine, context);
     }
@@ -328,7 +362,7 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleCtrlHandler(interrupt, TRUE);
     if (diagnostic_op) {
         request.expected.pid = pid;
-        if (diagnostic_op == sentinel::diagnostic_submit_operation) {
+        if (diagnostic_op == sentinel::diagnostic_detail_submit_operation) {
             const auto initial = sentinel::query_native(pid, timeout);
             if (initial.result != sentinel::ProbeResult::ok) return print_result(initial, pid, json, false, false);
             if (!initial.native.context_generation || initial.native.availability != SC_NATIVE_ENABLED) {
@@ -350,14 +384,14 @@ int wmain(int argc, wchar_t** argv) {
         for (;;) {
             if (r.result != sentinel::ProbeResult::ok) return print_result(r, pid, json, false, false);
             print_diagnostic(r, request, json); std::fflush(stdout);
-            if (diagnostic_op != sentinel::diagnostic_submit_operation || r.diagnostic.state >= SC_DIAGNOSTIC_EXECUTED ||
+            if (diagnostic_op != sentinel::diagnostic_detail_submit_operation || r.diagnostic.state >= SC_DIAGNOSTIC_EXECUTED ||
                 r.diagnostic.state == SC_DIAGNOSTIC_UNKNOWN || GetTickCount64() >= until) break;
             if (WaitForSingleObject(stop.value, 100) != WAIT_TIMEOUT) {
-                r = sentinel::query_diagnostic(pid, timeout, sentinel::diagnostic_cancel_operation, request);
+                r = sentinel::query_diagnostic(pid, timeout, sentinel::diagnostic_detail_cancel_operation, request);
                 if (r.result != sentinel::ProbeResult::ok) return print_result(r, pid, json, false, false);
                 print_diagnostic(r, request, json); break;
             }
-            r = sentinel::query_diagnostic(pid, timeout, sentinel::diagnostic_result_operation, request);
+            r = sentinel::query_diagnostic(pid, timeout, sentinel::diagnostic_detail_result_operation, request);
         }
         SetConsoleCtrlHandler(interrupt, FALSE);
         return r.diagnostic.state == SC_DIAGNOSTIC_EXECUTED ? 0 : 8;

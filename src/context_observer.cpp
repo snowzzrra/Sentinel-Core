@@ -1,5 +1,6 @@
 #include "context_observer.h"
 #include <cstring>
+#include <cmath>
 
 namespace sentinel::context {
 namespace {
@@ -100,8 +101,21 @@ sc_context_snapshot unavailable(uint32_t reason) {
     for (auto& field : s.fields) field = unknown(reason);
     return s;
 }
-sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uint64_t sequence, HANDLE stop, uint32_t budget_ms) {
-    const auto start = GetTickCount64();
+const Clock& observation_clock() {
+    static const Clock clock{
+        [](int64_t& value) { LARGE_INTEGER q{}; const bool ok = QueryPerformanceCounter(&q) != FALSE; value = q.QuadPart; return ok; },
+        []() -> uint64_t { return GetTickCount64(); },
+        []() -> int64_t { LARGE_INTEGER f{}; return QueryPerformanceFrequency(&f) ? f.QuadPart : 0; }()};
+    return clock;
+}
+sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uint64_t sequence, HANDLE stop,
+                           uint32_t budget_ms, Evidence* evidence, const Clock* supplied_clock) {
+    const auto& clock = supplied_clock ? *supplied_clock : observation_clock();
+    Evidence measured{};
+    const auto start = clock.uptime(); measured.started_at_ms = start;
+    measured.budget_ns = uint64_t(budget_ms) * 1000000;
+    int64_t begin = 0, end = 0;
+    const bool started = clock.frequency > 0 && clock.counter(begin);
     auto s = unavailable(SC_REASON_NOT_SAMPLED);
     s.sequence = sequence; s.profile = b.metadata.profile; s.locator_revision = b.metadata.locator_revision;
     s.root_locator_reason = b.metadata.root_locator_reason; s.disk_hash_reason = b.metadata.disk_hash_reason;
@@ -118,7 +132,19 @@ sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uin
         auto map_error = first.map_result.reason ? first.map_result : second.map_result;
         if (!state_error.reason && !same_state(first, second)) state_error.reason = SC_REASON_TRANSITION;
         if (!map_error.reason && !same_map(first, second)) map_error.reason = SC_REASON_TRANSITION;
-        if (GetTickCount64() - start > budget_ms) state_error.reason = map_error.reason = SC_REASON_BUDGET;
+        measured.state = state_error; measured.map = map_error;
+        measured.timing_valid = started && clock.counter(end) && end >= begin;
+        if (!measured.timing_valid) {
+            measured.timing_error = ERROR_INVALID_DATA;
+            state_error = map_error = {SC_REASON_INTERNAL_ERROR, measured.timing_error};
+        } else {
+            const double ticks = static_cast<double>(end - begin);
+            measured.elapsed_ns = static_cast<uint64_t>(std::ceil(ticks * 1000000000.0 / static_cast<double>(clock.frequency)));
+            // Compare in the counter's domain; never compare uptime quantization
+            // against a 2 ms guard, round down an overrun, or exclude descheduling.
+            if (ticks > static_cast<double>(clock.frequency) * budget_ms / 1000.0)
+                state_error = map_error = {SC_REASON_BUDGET, 0};
+        }
         if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) state_error.reason = map_error.reason = SC_REASON_CANCELLED;
         s.fields[SC_CONTEXT_GAME_STATE] = state_error.reason ? unknown(state_error.reason, state_error.error) : observed(second.state.value);
         s.fields[SC_CONTEXT_STATE_CHANGED_MS] = state_error.reason ? unknown(state_error.reason, state_error.error) : observed(second.state.changed_ms);
@@ -126,11 +152,13 @@ sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uin
         else s.current_map = second.name;
         s.sample_reason = state_error.reason ? state_error.reason : map_error.reason;
     } else {
+        measured.state = measured.map = {reason, 0};
         invalidate_map(s.current_map, reason);
         s.fields[SC_CONTEXT_GAME_STATE] = s.fields[SC_CONTEXT_STATE_CHANGED_MS] = unknown(reason);
         s.sample_reason = reason;
     }
-    s.sampled_at_ms = GetTickCount64(); s.duration_ms = static_cast<uint32_t>(s.sampled_at_ms - start);
+    s.sampled_at_ms = clock.uptime(); s.duration_ms = static_cast<uint32_t>(s.sampled_at_ms - start);
+    if (evidence) *evidence = measured;
     return s;
 }
 sc_context_snapshot freshness(sc_context_snapshot s, uint64_t now) {

@@ -48,10 +48,16 @@ sc_diagnostic_result initial(const sc_diagnostic_request& r) {
     std::memcpy(out.nonce, r.nonce, sizeof(out.nonce)); return out;
 }
 }
+void Diagnostics::queue_detail(Slot& s) {
+    s.detail.revision = SC_DIAGNOSTIC_DETAIL_REVISION;
+    s.detail.stage = SC_STAGE_QUEUE;
+    s.detail.claim_lock_missed = claim_lock_misses_.load(std::memory_order_relaxed) != s.admitted_lock_misses;
+}
 void Diagnostics::collect(uint64_t now) {
     for (auto& s : slots_) {
         auto state = s.state.load(std::memory_order_acquire);
         if (state == SC_DIAGNOSTIC_QUEUED && now >= s.result.deadline_at_ms) {
+            queue_detail(s);
             s.result.state = SC_DIAGNOSTIC_EXPIRED; s.result.reason = SC_NATIVE_DEADLINE;
             s.result.completed_at_ms = now; s.state.store(SC_DIAGNOSTIC_EXPIRED, std::memory_order_release);
         } else if (state >= SC_DIAGNOSTIC_EXECUTED && now >= s.result.completed_at_ms &&
@@ -60,25 +66,30 @@ void Diagnostics::collect(uint64_t now) {
         }
     }
 }
-sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_t reject, uint64_t now) {
+sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_t reject, uint64_t now, sc_diagnostic_detail* detail) {
+    if (detail) { *detail = {}; detail->revision = SC_DIAGNOSTIC_DETAIL_REVISION; detail->stage = SC_STAGE_ADMISSION; }
     collect(now);
     auto out = initial(r);
     for (auto& s : slots_) if (s.state.load(std::memory_order_acquire) != SC_DIAGNOSTIC_UNKNOWN && key(s.request, r)) {
         if (!same_scope(s.request.expected, r.expected) || s.request.deadline_ms != r.deadline_ms) {
             out.state = SC_DIAGNOSTIC_REJECTED; out.reason = SC_NATIVE_DUPLICATE_MISMATCH; return out;
         }
-        return retrieve(r, false, now);
+        return retrieve(r, false, now, detail);
     }
     if (!reject && (r.deadline_ms == 0 || r.deadline_ms > SC_DIAGNOSTIC_MAX_DEADLINE_MS)) reject = SC_NATIVE_DEADLINE;
     if (reject) { out.state = SC_DIAGNOSTIC_REJECTED; out.reason = reject; return out; }
     for (auto& s : slots_) if (s.state.load(std::memory_order_acquire) == SC_DIAGNOSTIC_UNKNOWN) {
         s.request = r; s.cancel.store(false, std::memory_order_relaxed);
+        s.detail = {}; s.detail.revision = SC_DIAGNOSTIC_DETAIL_REVISION;
+        s.admitted_lock_misses = claim_lock_misses_.load(std::memory_order_relaxed);
+        s.detail.stage = SC_STAGE_QUEUE; if (detail) *detail = s.detail;
         out.state = SC_DIAGNOSTIC_QUEUED; out.admitted_at_ms = now; out.deadline_at_ms = now + r.deadline_ms;
         s.result = out; s.state.store(SC_DIAGNOSTIC_QUEUED, std::memory_order_release); return out;
     }
     out.state = SC_DIAGNOSTIC_REJECTED; out.reason = SC_NATIVE_QUEUE_FULL; return out;
 }
-sc_diagnostic_result Diagnostics::retrieve(const sc_diagnostic_request& r, bool cancel, uint64_t now) {
+sc_diagnostic_result Diagnostics::retrieve(const sc_diagnostic_request& r, bool cancel, uint64_t now, sc_diagnostic_detail* detail) {
+    if (detail) { *detail = {}; detail->revision = SC_DIAGNOSTIC_DETAIL_REVISION; }
     collect(now);
     for (auto& s : slots_) {
         auto state = s.state.load(std::memory_order_acquire);
@@ -86,6 +97,7 @@ sc_diagnostic_result Diagnostics::retrieve(const sc_diagnostic_request& r, bool 
         if (cancel && (state == SC_DIAGNOSTIC_QUEUED || state == SC_DIAGNOSTIC_CLAIMED)) {
             s.cancel.store(true, std::memory_order_release);
             if (state == SC_DIAGNOSTIC_QUEUED) {
+                queue_detail(s);
                 s.result.state = SC_DIAGNOSTIC_CANCELLED; s.result.reason = SC_NATIVE_CANCELLED;
                 s.result.completed_at_ms = now; state = SC_DIAGNOSTIC_CANCELLED;
                 s.state.store(state, std::memory_order_release);
@@ -94,6 +106,7 @@ sc_diagnostic_result Diagnostics::retrieve(const sc_diagnostic_request& r, bool 
         // During CLAIMED, result belongs to the callback. Return only immutable
         // admission fields copied from the request; never race its result writes.
         auto out = state == SC_DIAGNOSTIC_CLAIMED ? initial(s.request) : s.result;
+        if (detail && state != SC_DIAGNOSTIC_CLAIMED) *detail = s.detail;
         out.state = state; out.cancel_requested = s.cancel.load(std::memory_order_acquire);
         out.retrieved = 1; out.retrieved_at_ms = now; return out;
     }
@@ -102,20 +115,23 @@ sc_diagnostic_result Diagnostics::retrieve(const sc_diagnostic_request& r, bool 
 Diagnostics::Slot* Diagnostics::claim(uint64_t now) {
     collect(now);
     for (auto& s : slots_) if (s.state.load(std::memory_order_acquire) == SC_DIAGNOSTIC_QUEUED) {
+        queue_detail(s);
         s.result.state = SC_DIAGNOSTIC_CLAIMED; s.result.claimed_at_ms = now;
         s.state.store(SC_DIAGNOSTIC_CLAIMED, std::memory_order_release); return &s;
     }
     return nullptr;
 }
-void Diagnostics::finish(Slot& s, sc_diagnostic_result result) {
+void Diagnostics::finish(Slot& s, sc_diagnostic_result result, sc_diagnostic_detail detail) {
     result.cancel_requested = s.cancel.load(std::memory_order_acquire);
-    s.result = result; s.state.store(result.state, std::memory_order_release);
+    detail.revision = SC_DIAGNOSTIC_DETAIL_REVISION;
+    s.detail = detail; s.result = result; s.state.store(result.state, std::memory_order_release);
 }
 void Diagnostics::cancel_pending(uint64_t now) {
     for (auto& s : slots_) {
         const auto state = s.state.load(std::memory_order_acquire);
         if (state == SC_DIAGNOSTIC_CLAIMED) s.cancel.store(true, std::memory_order_release);
         if (state == SC_DIAGNOSTIC_QUEUED) {
+            queue_detail(s);
             s.result.state = SC_DIAGNOSTIC_CANCELLED; s.result.reason = SC_NATIVE_STOPPED;
             s.result.completed_at_ms = now; s.state.store(SC_DIAGNOSTIC_CANCELLED, std::memory_order_release);
         }

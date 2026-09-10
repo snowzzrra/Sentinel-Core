@@ -61,12 +61,13 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && op >= engine_operation && op <= diagnostic_cancel_operation) *operation = static_cast<uint16_t>(op);
+    if (operation && op >= engine_operation && op <= diagnostic_detail_cancel_operation) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op < inspect_operation || op > diagnostic_cancel_operation) return WireResult::unsupported_operation;
+    if (op < inspect_operation || op > diagnostic_detail_cancel_operation) return WireResult::unsupported_operation;
     if (op >= native_operation) {
         if (length != (op == native_operation ? 16u : 72u)) return WireResult::malformed;
-        const auto supported = op == native_operation ? native_capability : diagnostic_capability;
+        const auto supported = op == native_operation ? native_capability :
+            (op >= diagnostic_detail_submit_operation ? diagnostic_detail_capability : diagnostic_capability);
         if (r.number(8) != supported) return WireResult::capability_unavailable;
         if (op == native_operation) {
             const auto after = r.number(8); if (after_event) *after_event = after;
@@ -343,9 +344,40 @@ template<class C> bool diagnostic_values(C& c, sc_diagnostic_result& d) {
     return true;
 }
 }
+namespace {
+uint64_t native_wire_capability(uint16_t op) {
+    return op == native_operation ? native_capability :
+        (op >= diagnostic_detail_submit_operation ? diagnostic_detail_capability : diagnostic_capability);
+}
+template<class C> bool detail_values(C& c, sc_diagnostic_detail& d, const sc_diagnostic_result& result) {
+    c.u32(d.revision); c.u32(d.stage); c.u32(d.observation_attempted); c.u32(d.observation_accepted);
+    c.u32(d.timing_valid); c.u32(d.timing_error); c.u32(d.claim_lock_missed);
+    c.u64(d.observation_started_at_ms); c.u64(d.observation_elapsed_ns); c.u64(d.observation_budget_ns);
+    c.u32(d.sample_reason); c.u32(d.state_validity); c.u32(d.state_reason); c.u32(d.state_error);
+    c.u32(d.map_validity); c.u32(d.map_reason); c.u32(d.map_error);
+    c.u32(d.pending_before); c.u32(d.pending_before_reason); c.u32(d.pending_before_error);
+    c.u32(d.pending_after); c.u32(d.pending_after_reason); c.u32(d.pending_after_error);
+    if (d.revision != SC_DIAGNOSTIC_DETAIL_REVISION || d.stage > SC_STAGE_EXECUTED ||
+        d.observation_attempted > 1 || d.observation_accepted > d.observation_attempted || d.timing_valid > 1 ||
+        d.claim_lock_missed > 1 || d.sample_reason > SC_CONTEXT_EMPTY_NAME || d.state_reason > SC_CONTEXT_EMPTY_NAME ||
+        d.map_reason > SC_CONTEXT_EMPTY_NAME || d.state_validity > SC_OBSERVATION_OBSERVED ||
+        d.map_validity > SC_OBSERVATION_OBSERVED || d.pending_before > 3 || d.pending_after > 3 ||
+        d.pending_before_reason > SC_REASON_STALE || d.pending_after_reason > SC_REASON_STALE) return false;
+    if ((d.pending_before == 3) != (d.pending_before_reason != 0) ||
+        (d.pending_after == 3) != (d.pending_after_reason != 0)) return false;
+    if (!d.observation_attempted && (d.observation_started_at_ms || d.observation_elapsed_ns ||
+        d.observation_budget_ns || d.timing_valid || d.sample_reason || d.state_validity || d.map_validity)) return false;
+    if (d.observation_attempted && (!d.observation_started_at_ms || d.observation_budget_ns != 2000000)) return false;
+    if (d.observation_accepted && (!d.timing_valid || d.sample_reason ||
+        d.state_validity != SC_OBSERVATION_OBSERVED || d.map_validity != SC_OBSERVATION_OBSERVED)) return false;
+    if (result.state == SC_DIAGNOSTIC_CLAIMED && (d.stage || d.observation_attempted)) return false;
+    if (result.state == SC_DIAGNOSTIC_EXECUTED && (!d.observation_accepted || d.stage != SC_STAGE_EXECUTED)) return false;
+    return true;
+}
+}
 size_t encode_native_request(Message& out, uint16_t op, const sc_diagnostic_request& request, uint64_t after) {
     Writer w{out}; header(w, wire_version, op, 0, WireResult::ok);
-    w.number(op == native_operation ? native_capability : diagnostic_capability, 8);
+    w.number(native_wire_capability(op), 8);
     if (op == native_operation) w.number(after, 8);
     else {
         auto r = request; scope_values(w, r.expected); w.u64(r.request_id);
@@ -354,25 +386,28 @@ size_t encode_native_request(Message& out, uint16_t op, const sc_diagnostic_requ
     Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.valid ? w.pos : 0;
 }
 size_t encode_native_response(Message& out, WireResult result, uint16_t op, const Snapshot& s,
-                              const sc_native_snapshot& native, const sc_diagnostic_result& diagnostic) {
+                              const sc_native_snapshot& native, const sc_diagnostic_result& diagnostic,
+                              const sc_diagnostic_detail& detail) {
     Writer w{out}; header(w, wire_version, op, 0, result);
     if (result == WireResult::ok) {
-        w.number(op == native_operation ? native_capability : diagnostic_capability, 8);
+        w.number(native_wire_capability(op), 8);
         w.number(s.pid, 4); w.number(s.process_created, 8); for (auto b : s.instance) w.number(b, 1);
         w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id); w.number(SC_NATIVE_ABI_VERSION, 4);
         auto n = native; auto d = diagnostic;
         if (!(op == native_operation ? native_values(w, n) : diagnostic_values(w, d))) return 0;
+        if (op >= diagnostic_detail_submit_operation) { auto e = detail; if (!detail_values(w, e, d)) return 0; }
     }
     Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.valid ? w.pos : 0;
 }
 bool decode_native_response(const Message& in, size_t size, WireResult& result, uint16_t op,
-                             Snapshot& s, sc_native_snapshot& n, sc_diagnostic_result& d) {
-    if (size < header_size || size > max_message || op < native_operation || op > diagnostic_cancel_operation) return false;
+                             Snapshot& s, sc_native_snapshot& n, sc_diagnostic_result& d, sc_diagnostic_detail* detail) {
+    if (detail) *detail = {};
+    if (size < header_size || size > max_message || op < native_operation || op > diagnostic_detail_cancel_operation) return false;
     Reader r{in, size};
     if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != op || r.number(4) != size - header_size) return false;
     const auto code = r.number(4); if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
     result = static_cast<WireResult>(code); if (result != WireResult::ok) return size == header_size;
-    if (r.number(8) != (op == native_operation ? native_capability : diagnostic_capability)) return false;
+    if (r.number(8) != native_wire_capability(op)) return false;
     s = {}; n = {}; d = {}; s.core.size = sizeof(sc_status); n.size = sizeof(n); n.abi_version = SC_NATIVE_ABI_VERSION;
     r.u32(s.pid); r.u64(s.process_created); for (auto& b : s.instance) r.byte(b);
     r.u32(s.core.abi_version); r.text(s.core.version); r.text(s.core.build_id);
@@ -382,6 +417,10 @@ bool decode_native_response(const Message& in, size_t size, WireResult& result, 
         const auto ch = s.core.build_id[i]; if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return false;
     }
     if (!(op == native_operation ? native_values(r, n) : diagnostic_values(r, d))) return false;
+    if (op >= diagnostic_detail_submit_operation) {
+        sc_diagnostic_detail e{}; if (!detail_values(r, e, d)) return false;
+        if (detail) *detail = e;
+    }
     if (op == native_operation && (n.scope.pid != s.pid || n.scope.process_created != s.process_created ||
         std::memcmp(n.scope.instance_id, s.instance.data(), s.instance.size()))) return false;
     if (op != native_operation && d.state == SC_DIAGNOSTIC_EXECUTED &&
@@ -399,6 +438,12 @@ const char* native_reason_name(uint32_t reason) {
 const char* diagnostic_state_name(uint32_t state) {
     constexpr const char* names[] = {"unknown", "queued", "claimed", "callback_executed", "rejected", "expired", "cancelled"};
     return state <= SC_DIAGNOSTIC_CANCELLED ? names[state] : "invalid_state";
+}
+const char* diagnostic_stage_name(uint32_t stage) {
+    constexpr const char* names[] = {"none", "admission", "queue", "claim_context", "scope", "pending_before",
+        "fresh_context", "observation_budget", "pending_after", "event_stamp", "map_binding", "native_fault",
+        "cancellation", "deadline", "executed"};
+    return stage <= SC_STAGE_EXECUTED ? names[stage] : "invalid_stage";
 }
 const char* context_field_name(size_t field) {
     constexpr const char* names[] = {"game_state", "state_changed_ms", "native_load_serial", "cutscene_active", "native_entry_mode"};

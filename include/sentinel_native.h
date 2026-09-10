@@ -82,11 +82,33 @@ typedef struct sc_diagnostic_result {
     uint64_t request_id;
     uint8_t nonce[16];
     uint64_t admitted_at_ms, deadline_at_ms, claimed_at_ms;
-    uint64_t observed_at_ms; // Start of fresh bounded observation, distinct from execution/publication.
+    uint64_t observed_at_ms; // Accepted sample completion (legacy uptime epoch); detail exposes start separately.
     uint64_t executed_at_ms, completed_at_ms, retrieved_at_ms;
     uint32_t thread_id, site_revision, phase, lifecycle, game_state;
     sc_context_map current_map;
 } sc_diagnostic_result;
+
+// Separate detail revision, carried only by explicit detail wire operations.
+// Existing sc_diagnostic_result, native ABI 1 and operations 1-7 stay exact.
+#define SC_DIAGNOSTIC_DETAIL_REVISION 1u
+enum {
+    SC_STAGE_NONE, SC_STAGE_ADMISSION, SC_STAGE_QUEUE, SC_STAGE_CLAIM_CONTEXT,
+    SC_STAGE_SCOPE, SC_STAGE_PENDING_BEFORE, SC_STAGE_FRESH_CONTEXT,
+    SC_STAGE_OBSERVATION_BUDGET, SC_STAGE_PENDING_AFTER, SC_STAGE_EVENT_STAMP,
+    SC_STAGE_MAP_BINDING, SC_STAGE_NATIVE_FAULT, SC_STAGE_CANCELLATION,
+    SC_STAGE_DEADLINE, SC_STAGE_EXECUTED
+};
+typedef struct sc_diagnostic_detail {
+    uint32_t revision, stage, observation_attempted, observation_accepted;
+    uint32_t timing_valid, timing_error, claim_lock_missed;
+    uint64_t observation_started_at_ms; // GetTickCount64 uptime epoch.
+    uint64_t observation_elapsed_ns, observation_budget_ns; // QPC wall interval.
+    uint32_t sample_reason, state_validity, state_reason, state_error;
+    uint32_t map_validity, map_reason, map_error;
+    // 0 unknown/not attempted, 1 clear, 2 set, 3 unreadable.
+    uint32_t pending_before, pending_before_reason, pending_before_error;
+    uint32_t pending_after, pending_after_reason, pending_after_error;
+} sc_diagnostic_detail;
 
 #ifdef __cplusplus
 extern "C" {

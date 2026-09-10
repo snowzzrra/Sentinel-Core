@@ -12,10 +12,11 @@ size_t encode_native_request(Message& out, uint16_t operation,
                               const sc_diagnostic_request& request, uint64_t after_event = 0);
 size_t encode_native_response(Message& out, WireResult result, uint16_t operation,
                               const Snapshot& snapshot, const sc_native_snapshot& native,
-                              const sc_diagnostic_result& diagnostic);
+                              const sc_diagnostic_result& diagnostic, const sc_diagnostic_detail& detail = {});
 bool decode_native_response(const Message& in, size_t size, WireResult& result,
                              uint16_t operation, Snapshot& snapshot,
-                             sc_native_snapshot& native, sc_diagnostic_result& diagnostic);
+                             sc_native_snapshot& native, sc_diagnostic_result& diagnostic,
+                             sc_diagnostic_detail* detail = nullptr);
 size_t encode_response(Message& out, WireResult result, const Snapshot& snapshot);
 bool decode_response(const Message& in, size_t size, WireResult& result, Snapshot& snapshot);
 size_t encode_engine_response(Message& out, WireResult result, const Snapshot& snapshot,

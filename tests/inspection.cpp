@@ -194,7 +194,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(initial.snapshot.core.abi_version == SC_ABI_VERSION && initial.snapshot.core.capabilities == 3);
     CHECK(initial.snapshot.core.state == SC_READY && initial.snapshot.service == ServiceState::listening);
     CHECK(initial.snapshot.core.initialization_count == 1 && std::strlen(initial.snapshot.core.build_id) == 64);
-    CHECK(std::strcmp(initial.snapshot.core.version, "0.5.0") == 0);
+    CHECK(std::strcmp(initial.snapshot.core.version, "0.5.1") == 0);
     uint64_t created = 0; CHECK(process_time(first.child.process.value, created));
     CHECK(initial.snapshot.process_created == created);
     const auto other = query(second.child.pid, 2000);
@@ -235,7 +235,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(context.context.fields[SC_CONTEXT_LOAD_SERIAL].reason == SC_CONTEXT_UNSUPPORTED);
     const auto context_json = probe(probe_path, args + L" --context --json", 0);
     CHECK(context_json.find("\"operation\":\"context\"") != std::string::npos);
-    CHECK(context_json.find("\"core_version\":\"0.5.0\"") != std::string::npos);
+    CHECK(context_json.find("\"core_version\":\"0.5.1\"") != std::string::npos);
     CHECK(context_json.find("\"current_map\":{\"validity\":\"unknown\",\"reason\":\"profile_unrecognized\",\"value\":null") != std::string::npos);
     CHECK(probe(probe_path, args + L" --context", 0).find("not a load serial") != std::string::npos);
     const auto context_watch = probe(probe_path, args + L" --context --watch-count 2 --interval-ms 100 --json", 0);
@@ -270,7 +270,7 @@ int wmain(int argc, wchar_t** argv) {
     Message request{};
     auto size = static_cast<DWORD>(encode_request(request, 1, 99));
     exchange(first.child.pid, request, size, WireResult::incompatible_protocol);
-    size = static_cast<DWORD>(encode_request(request, 1, wire_version, 9));
+    size = static_cast<DWORD>(encode_request(request, 1, wire_version, 99));
     exchange(first.child.pid, request, size, WireResult::unsupported_operation);
     size = static_cast<DWORD>(encode_request(request, 1)); request[0] = 0;
     exchange(first.child.pid, request, size, WireResult::malformed);
@@ -309,6 +309,24 @@ int wmain(int argc, wchar_t** argv) {
     { // A same-user impostor occupying another PID's name is rejected by OS PID.
         Handle imposter(fake_pipe(idle.child.pid)); CHECK(imposter);
         CHECK(query(idle.child.pid, 150).result == ProbeResult::process_mismatch);
+    }
+    { // Actual denied pipe access to a live task-owned target: never relabel as exit.
+        ACL empty{}; CHECK(InitializeAcl(&empty, sizeof(empty), ACL_REVISION));
+        SECURITY_DESCRIPTOR descriptor{};
+        CHECK(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
+        CHECK(SetSecurityDescriptorDacl(&descriptor, TRUE, &empty, FALSE));
+        SECURITY_ATTRIBUTES attributes{sizeof(attributes), &descriptor, FALSE};
+        Handle denied(CreateNamedPipeW(pipe_name(idle.child.pid).c_str(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS, 1, 512, 512, 1000, &attributes));
+        CHECK(denied);
+        const auto response = query(idle.child.pid, 150);
+        CHECK(response.result == ProbeResult::access_denied && response.win32_error == ERROR_ACCESS_DENIED);
+        CHECK(std::strcmp(response.failure_stage, "pipe_open") == 0 && std::strcmp(response.target_state, "live") == 0);
+        CHECK(response.verified_process_created != 0);
+        const auto captured = probe(probe_path, L"--pid " + std::to_wstring(idle.child.pid) + L" --json", 4);
+        CHECK(captured.find("\"failure_stage\":\"pipe_open\"") != std::string::npos);
+        std::printf("HARNESS_DENIED_JSON %s", captured.c_str());
     }
     idle.shutdown();
     { // Empty explicit DACL distinguishes access denial from endpoint absence.
