@@ -176,6 +176,75 @@ class RetestWorkflowTests(unittest.TestCase):
             if entry["name"] == name: entry["sha256"] = retest.sha(self.candidate / name)
         retest.write_json(self.candidate / "manifest.json", self.manifest)
 
+    def configure_campaign_fixture(self):
+        self.manifest['milestone_b_options'] = {'provenance': 'synthetic-fixture', 'campaign': 'base', 'starting_stage': 'base_start', 'difficulty': 3}
+        retest.write_json(self.candidate / 'manifest.json', self.manifest)
+        def observed(config, prefix):
+            if 'discovery-resume' in str(prefix):
+                self.observed['pid'] = 45679; self.observed['process_created'] = '134077788800000001'
+            return self.closed_after_capture(config, prefix)
+        self.process_mock.side_effect = observed
+        def admitted(response, code):
+            response['instance_id'] = ('c' if self.observed['pid'] == 45679 else 'b') * 32
+            if response['operation'] == 'save_admission':
+                namespace = self.state()[0]['namespace_id']
+                response.update(state='admitted', fault='none', prepared_routes=63, required_routes=63, namespace_id=namespace, native_root='ap-' + namespace[:40])
+            if response['operation'] == 'save_installation': response['installation'] = {'phase': 'ready', 'primary_failure': None}
+            return response, 0
+        self.query_responses.update({query: admitted for query in retest.QUERIES})
+        def automatic(run):
+            resumed = run.state['campaign_case']['phase'] == 'resume'
+            campaign = {'enabled': True, 'resumed': resumed, 'phase': 'reopened' if resumed else 'checkpoint_saved', 'reason': 'none',
+                'difficulty': 3, 'effective_difficulty': 3, 'loaded_difficulty': 3 if resumed else 4, 'native_saved': not resumed, 'readback_verified': not resumed,
+                'continuity_persisted': True, 'native_factory_matched': not resumed, 'source_verified': resumed, 'parser_completed': resumed, 'map_active': True,
+                'checkpoint': 1, 'source_checkpoint': 1 if resumed else 0, 'map': 'game/sp/initial'}
+            run.state['automatic_log'] = {'state': 'recorded', 'records': [{'campaign': campaign,
+                'admission': {'state': 3, 'fault': 0, 'flags': 7, 'prepared_routes': 63, 'required_routes': 63, 'namespace_id': run.state['namespace_id']}}]}
+        return automatic
+
+    def test_campaign_two_launches_keep_options_identity_and_compare_each_reference(self):
+        with mock.patch.object(retest.Run, 'collect_startup_log', self.configure_campaign_fixture()):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        state, directory = self.state()
+        self.assertEqual(code, 0, output)
+        case = state['campaign_case']; self.assertEqual(case['phase'], 'completed')
+        self.assertEqual([v['phase'] for v in case['launches']], ['create', 'resume'])
+        self.assertTrue(all(v['comparison']['response']['result'] == 'vanilla_campaign_unchanged' for v in case['launches']))
+        descriptors = [Path(case['descriptors'][phase]['path']).read_text() for phase in ('create', 'resume')]
+        self.assertEqual(descriptors[0].replace('intent=create', 'intent=resume'), descriptors[1])
+        self.assertIn('difficulty=3\n', descriptors[0])
+        self.assertNotEqual(case['launches'][0]['process'], case['launches'][1]['process'])
+        self.assertFalse((self.game / 'sentinel-prelaunch.txt').exists())
+        self.assertEqual(len(list(directory.glob('*-shareable.zip'))), 1)
+        report = self.report(directory)
+        self.assertEqual(report['campaign_case']['phase'], 'completed')
+        self.assertIn('backup_verified', report['campaign_case'])
+
+    def test_campaign_interruption_continues_exact_case_without_second_creation(self):
+        automatic = self.configure_campaign_fixture()
+        complete = retest.Run.complete_campaign_launch
+        def interrupted(run):
+            complete(run)
+            if run.state['campaign_case']['phase'] == 'prepare_resume': raise KeyboardInterrupt()
+        with mock.patch.object(retest.Run, 'collect_startup_log', automatic), mock.patch.object(retest.Run, 'complete_campaign_launch', interrupted):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        first, directory = self.state()
+        self.assertNotEqual(code, 0, output)
+        self.assertEqual(first['campaign_case']['phase'], 'prepare_resume')
+        identity = first['campaign_case']['generation_fingerprint']
+        first_evidence = (directory / 'private/campaign-create.private.json').read_bytes()
+        blocked, _ = self.stage('RUN', '--scenario', 'B')
+        self.assertNotEqual(blocked, 0)
+        with mock.patch.object(retest.Run, 'collect_startup_log', automatic):
+            _, output = self.stage('RUN', '--scenario', 'B', '--resume-case', first['run_id'])
+        current, current_directory = self.state()
+        self.assertEqual(current_directory, directory)
+        self.assertEqual(current['campaign_case']['phase'], 'completed', output)
+        self.assertEqual(current['campaign_case']['generation_fingerprint'], identity)
+        self.assertEqual((directory / 'private/campaign-create.private.json').read_bytes(), first_evidence)
+        self.assertEqual(len(current['campaign_case']['launches']), 2)
+        self.assertEqual(current['captures'], 2)
+
     def test_run_protection_native_refusal_all_queries_and_one_report(self):
         self.process_mock.side_effect = self.closed_after_capture
         self.query_responses["save_admission"] = lambda response, code: ({**response, "state": "rejected"}, 8)
@@ -210,6 +279,32 @@ class RetestWorkflowTests(unittest.TestCase):
         self.assertEqual(state['collection_health']['operations']['process_identity']['recoveries'], 1)
         self.assertEqual(self.report(directory)['comparison']['response']['result'], 'vanilla_campaign_unchanged')
         self.assertFalse((self.game / 'sentinel-prelaunch.txt').exists())
+
+    def test_run_null_path_retains_alive_identity_then_compares_confirmed_exit(self):
+        observations = iter([{**self.observed, 'path': None}] * 3 + [self.observed, None])
+        def command(argv, prefix, timeout):
+            if argv[-1] == retest.PROCESS_SCRIPT:
+                value = next(observations) if 'observation-' in prefix.name else self.observed
+                return {'exit_code': 0, 'cancelled': False, 'stdout_truncated': False,
+                        'stdout': json.dumps([value] if value else []), 'stderr': ''}
+            return self.fixture_command(argv, prefix, timeout)
+        self.process_mock.side_effect = self.actual_observe_game
+        with mock.patch.object(retest, 'run_command', side_effect=command), mock.patch.object(retest.time, 'sleep'):
+            code, output = self.stage('RUN')
+        state, directory = self.state()
+        self.assertEqual(code, 1)  # The unrelated native refusal remains visible.
+        self.assertEqual(state['process']['path'], self.observed['path'], output)
+        health = state['collection_health']['operations']['process_identity']
+        self.assertEqual(health['failures'], 3)
+        self.assertTrue(health['last_failure']['original_process_alive'])
+        self.assertEqual(health['recoveries'], 1)
+        self.assertEqual(self.report(directory)['comparison']['response']['result'], 'vanilla_campaign_unchanged')
+        changed = {**self.observed, 'path': None, 'process_created': '134077788800000001'}
+        run = retest.Run(self.config_path, 'EXPORT')
+        with mock.patch.object(retest, 'run_command', return_value={'exit_code': 0, 'cancelled': False,
+             'stdout_truncated': False, 'stdout': json.dumps([changed])}):
+            with self.assertRaisesRegex(retest.Refused, 'replaced_while_path_unavailable'):
+                run.observe_identity(directory / 'private/null-replaced')
 
     def test_successive_runs_refresh_current_metadata_preserve_first_and_compare_current(self):
         self.assertEqual(self.stage("PREPARE")[0], 0)

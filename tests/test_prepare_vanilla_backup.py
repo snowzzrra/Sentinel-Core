@@ -88,6 +88,20 @@ class ProtectionTests(unittest.TestCase):
             self.assertEqual(by_handle[4], stamp)
         self.assertEqual(protection.protect(self.args)["result"], "protective_backup_ready")
 
+    def test_directory_allocation_size_is_not_file_payload_size(self):
+        before = protection.inventory({'local_provider': self.local})
+        check = protection.check_node
+        class DirectoryAllocation:
+            def __init__(self, info): self.info = info
+            def __getattr__(self, name): return 8192 if name == 'st_size' else getattr(self.info, name)
+        with mock.patch.object(protection, 'check_node', side_effect=lambda path:
+             DirectoryAllocation(check(path)) if path == self.local else check(path)):
+            self.assertEqual(protection.inventory({'local_provider': self.local}), before)
+            protection.inventory_guard({'local_provider': self.local}, before, {}, {}, 'fixture', 'changed')
+            (self.local / 'added').write_bytes(b'actual membership change')
+            with self.assertRaises(protection.Refused):
+                protection.inventory_guard({'local_provider': self.local}, before, {}, {}, 'fixture', 'changed')
+
     def test_interrupted_copy_retained_and_never_resumed(self):
         original = self.snapshot()
         real_copy = protection.copy_file

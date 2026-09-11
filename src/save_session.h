@@ -3,6 +3,7 @@
 #include "save_installation.h"
 #include "save_storage.h"
 #include "save_sdk_write.h"
+#include "save_campaign.h"
 #include "sentinel_save.h"
 #include <atomic>
 #include <array>
@@ -18,7 +19,7 @@ enum class SessionFault {
     none, descriptor, installation, incomplete_routes, startup_context,
     repeated_startup, missed_startup, provider_identity, foreign_collector,
     malformed_entry, native_collection, native_copy, unscoped_delete, delete_indeterminate,
-    native_write, native_profile, native_read
+    native_write, native_profile, native_read, native_campaign
 };
 enum Route : uint32_t {
     startup_route = 1, collector_route = 2, campaign_routes = 4,
@@ -69,6 +70,7 @@ class Session final {
 public:
     Installation installation;
     NativeWrites native_writes;
+    Campaign campaign_run;
     ~Session();
     storage::Result configure(const storage::Descriptor&, std::unique_ptr<storage::Namespace>);
     void reject(SessionFault);

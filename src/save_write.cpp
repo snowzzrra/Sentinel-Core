@@ -53,9 +53,14 @@ SaveResult* poll_access(SaveFuture* base, SaveResult* out, void* task) {
     if (result.state == -1) { *out = result; return out; }
     if (!result.state && !result.outcome && result.value == 1 && future.readback) {
         future.readback->vtable->poll(future.readback, &result, task);
-        if (result.state == -1) { *out = result; return out; }
+        if (result.state == -1) {
+            engine::LocalMemory memory; future.owner.campaign_run.write_observed(future.operation, false, false, memory);
+            *out = result; return out;
+        }
     }
     future.terminal = true;
+    { engine::LocalMemory memory;
+      future.owner.campaign_run.write_observed(future.operation, true, !result.state && !result.outcome && result.value == 1, memory); }
     if (result.state != 0 || result.outcome != 0 || result.value != 1) {
         future.owner.fail(future.failure); result = {0, 1, 1, 0};
     } else if (future.selection.sequence) {
@@ -177,12 +182,15 @@ SaveFuture** access_scoped(Session& owner, engine::Memory& memory, uintptr_t pro
         SessionFault::native_write : SessionFault::unscoped_delete;
     try { prepared = prepare_name(owner, memory, reference, calls, access, profile, selection, data, name); }
     catch (const std::bad_alloc&) {} // No native operation was created yet.
+    if (prepared) prepared = owner.campaign_run.allow_access(data, name, access == Access::write,
+        access == Access::erase || access == Access::erase_auxiliary);
     if (prepared) {
         if (profile && access == Access::read && calls.profile_read) return calls.profile_read(provider, out, identity, reference);
         auto future = std::unique_ptr<AccessFuture>(new (std::nothrow) AccessFuture(owner, failure));
         if (future && access == Access::write) {
             future->operation = owner.native_writes.open_provider(data, name);
             if (!future->operation || (!profile && !capture_submission(owner.native_writes, future->operation, name))) future.reset();
+            if (future && !owner.campaign_run.write_started(future->operation, name, capture_native_checkpoint(owner.native_writes))) future.reset();
         }
         if (future) {
             if (access == Access::write && calls.readback) {

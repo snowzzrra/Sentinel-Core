@@ -1,6 +1,7 @@
 #include "prelaunch.h"
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #include "save_native_hooks.h"
+#include "save_campaign_native.h"
 #include "save_collector.h"
 #include "save_delete.h"
 #include "save_write.h"
@@ -392,6 +393,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     const bool published = session().inspect().prepared_routes == steam_20260818_routes;
     record.finish(event, published ? SC_NATIVE_NONE : SC_NATIVE_CANCELLED);
     if (!published) { session().reject(SessionFault::installation); return; }
+    if (!install_campaign_hooks(binding, stop)) { session().reject(SessionFault::installation); return; }
     // All immutable pointers and policy are ready BEFORE the one-time startup
     // hook is reachable. The existing observer accepting flag is independent.
     for (unsigned index : {1u, 4u, 6u, 8u, 9u, 13u, 14u, 15u, 16u, 17u, 18u, 23u, 24u, 25u, 26u, 27u, 28u, 29u, 30u, 32u, 33u, 34u, 35u, 37u, 38u, 40u, 41u, 42u, 43u, 44u, 0u}) {

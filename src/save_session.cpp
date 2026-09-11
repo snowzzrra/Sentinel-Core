@@ -49,7 +49,7 @@ bool steam_name_equal(std::string_view a, std::string_view b) {
 }
 storage::Result Session::configure(const storage::Descriptor& descriptor,
                                   std::unique_ptr<storage::Namespace> lease) {
-    std::lock_guard<std::mutex> guard(mutex_);
+    std::unique_lock<std::mutex> guard(mutex_);
     if (attempted_) return {storage::Outcome::ownership_conflict, 0};
     attempted_ = true;
     std::string hash;
@@ -71,6 +71,8 @@ storage::Result Session::configure(const storage::Descriptor& descriptor,
         "\ngeneration_fingerprint=" + descriptor.identity.generation_fingerprint +
         "\nprovenance=synthetic-fixture\n";
     lease_ = std::move(lease);
+    guard.unlock(); // Campaign refusal records a Session fault through its own lock.
+    if (!campaign_run.configure(*this, descriptor, *lease_)) return {storage::Outcome::invalid_descriptor, 0};
     state_.store(SessionState::prepared, std::memory_order_release);
     return {storage::Outcome::ok, 0};
 }

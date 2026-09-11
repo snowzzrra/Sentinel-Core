@@ -46,9 +46,10 @@ class Refused(Exception):
 
 
 class CollectionUnavailable(Refused):
-    def __init__(self, operation, result):
+    def __init__(self, operation, result, observed_identity=None):
         super().__init__(operation + "_unavailable")
         self.operation, self.result = operation, result
+        self.observed_identity = observed_identity
 
 
 def utc():
@@ -282,6 +283,9 @@ def observe_game(config, prefix):
     if not isinstance(items, list) or len(items) != 1:
         raise Refused("no_game_process" if items == [] else "ambiguous_game_processes")
     observed = items[0]
+    if not isinstance(observed, dict): raise CollectionUnavailable('process_identity_JSON', result)
+    if not isinstance(observed.get('path'), str) or not observed['path']:
+        raise CollectionUnavailable('process_path', result, observed)
     expected = Path(config["GameInstall"]) / "DOOMEternalx64vk.exe"
     if Path(observed["path"]) != expected:
         raise Refused("game_executable_path_mismatch")
@@ -372,7 +376,10 @@ class Handoff:
             self.close()
             raise Refused("prelaunch_live_lease_creation_failed")
         try:
-            write_json(run.directory / "private/handoff.private.json", {"text": self.text, "owner": os.getpid(), "created": created}, create=True)
+            phase = run.state.get('campaign_case', {}).get('phase')
+            record_name = 'handoff-' + phase + '.private.json' if phase else 'handoff.private.json'
+            write_json(run.directory / 'private' / record_name, {"text": self.text, "owner": os.getpid(), "created": created}, create=True)
+            run.state['handoff_record'] = record_name
             with self.path.open("x", encoding="utf-8", newline="\n") as stream:
                 stream.write(self.text)
             self.published = True
@@ -416,7 +423,7 @@ def safe_failure(error, config, stage):
 
 def redact(text, config):
     text = str(text)[:4096]
-    replacements = [(str(value), "<" + name.upper() + ">") for name, value in config.items() if isinstance(value, str)]
+    replacements = [(str(value), "<" + name.upper() + ">") for name, value in config.items() if isinstance(value, str) and name != 'Scenario']
     replacements += [(str(value), "<UNINSTALL_ROOT>") for value in config["UninstallRoots"]]
     replacements += [(str(config["SteamAccount32"]), "<STEAM_ACCOUNT>")]
     for value, replacement in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
@@ -465,10 +472,25 @@ def safe_response(query, value):
 
 
 class Run:
-    def __init__(self, config_path, stage):
+    def __init__(self, config_path, stage, scenario=None, resume_case=None):
         self.config_path = Path(config_path)
         current = load_config(self.config_path)
+        current['Scenario'] = scenario or current.get('Scenario', 'A')
         self.reference = Path(current["ActiveRun"])
+        if resume_case:
+            if stage != 'RUN' or current['Scenario'] != 'B' or not re.fullmatch(r'retest-[0-9a-f]{32}', resume_case):
+                raise Refused('invalid_explicit_campaign_case')
+            self.directory = Path(current['EvidenceRoot']) / resume_case
+            self.config = read_json(self.directory / 'private/config.json')
+            self.state = read_json(self.directory / 'private/state.json')
+            if self.config != current or self.state['run_id'] != resume_case or not self.state.get('campaign_case'):
+                raise Refused('campaign_case_configuration_mismatch')
+            if self.state['campaign_case']['phase'] == 'completed': raise Refused('campaign_case_already_completed')
+            protection.require_stopped()
+            # Only the exact operator-selected case may continue. No identity,
+            # reservation, native payload or previous evidence is recreated.
+            self.state['finished'] = False
+            return
         if stage in ("START", "RUN", "PREPARE"):
             completed_reference = False
             prior = list(current.get("PriorRuns", []))
@@ -478,6 +500,9 @@ class Run:
                 if previous_directory.parent != Path(current["EvidenceRoot"]) or previous_directory.name != previous["run_id"]:
                     raise Refused("previous_exact_run_reference_mismatch")
                 prior.append(str(previous_directory))
+                previous_state = read_json(previous_directory / 'private/state.json')
+                if stage == 'RUN' and previous_state.get('campaign_case', {}).get('phase') not in (None, 'completed'):
+                    raise Refused('pending_campaign_case_requires_explicit_ResumeCase_' + previous['run_id'])
                 completed_reference = True
             self.config = current
             self.directory = Path(current["EvidenceRoot"]) / ("retest-" + uuid.uuid4().hex)
@@ -559,6 +584,11 @@ class Run:
                 self.save()
                 return value
             except CollectionUnavailable as error:
+                observed, previous = error.observed_identity, self.state.get('process')
+                if observed and previous:
+                    if (observed.get('pid') is not None and str(observed['pid']) != str(previous['pid'])) or (
+                        observed.get('process_created') is not None and str(observed['process_created']) != str(previous['process_created'])):
+                        raise Refused('game_process_replaced_while_path_unavailable')
                 raw = error.result
                 detail = {k: raw.get(k) for k in ('exit_code', 'timed_out', 'cancelled', 'launch_error', 'win32_error', 'duration_ms', 'stdout_truncated', 'stderr_truncated')}
                 # Full stderr and exact paths remain in the individual private receipts.
@@ -567,6 +597,8 @@ class Run:
                 phases = [line for line in raw.get('stderr', '').splitlines() if line in
                           ('module_enumeration', 'module_disk_hash', 'system_forwarder_disk_hash')]
                 detail['operation'] = phases[-1] if phases else error.operation
+                if observed and previous:
+                    detail['original_process_alive'] = all(observed.get(k) is not None and str(observed[k]) == str(previous[k]) for k in ('pid', 'process_created'))
                 detail['private_receipt'] = target.name + '.result.private.json'
                 entry['failures'] += 1
                 entry['last_failure'] = detail
@@ -669,7 +701,10 @@ class Run:
             # A previous published descriptor is retired only with exact retained bytes
             # and stopped game/Steam; a stale file alone never grants a new lease.
             publication = Path(self.config["GameInstall"]) / "sentinel-prelaunch.txt"
-            private_handoff = directory / "private/handoff.private.json"
+            handoff_name = previous.get('handoff_record', 'handoff.private.json')
+            if handoff_name not in ('handoff.private.json', 'handoff-create.private.json', 'handoff-resume.private.json'):
+                raise Refused('previous_handoff_record_mismatch')
+            private_handoff = directory / 'private' / handoff_name
             if publication.exists() and private_handoff.exists():
                 retained = read_json(private_handoff)["text"]
                 if publication.read_text(encoding="utf-8") == retained:
@@ -702,6 +737,9 @@ class Run:
             raise Refused("prelaunch_conflicting_environment_descriptor")
         root = protection.explicit_path(self.config["APRoot"])
         root.mkdir(exist_ok=True)
+        if self.config['Scenario'] == 'B':
+            self.prepare_campaign_descriptor(root)
+            return
         seed = "sentinel-a-" + self.state["run_id"]
         descriptor = root / (seed + ".txt")
         text = "sentinel-test-session-v1\nseed_hex=" + seed.encode().hex() + "\nteam=0\nslot=1\ngeneration_fingerprint=" + uuid.uuid4().hex + uuid.uuid4().hex + "\nprovenance=synthetic-fixture\nroot=" + str(root) + "\n"
@@ -738,6 +776,131 @@ class Run:
         self.state["process"] = next(iter(matches.values())); self.save()
         return True
 
+    def prepare_campaign_descriptor(self, root):
+        options = self.state['manifest'].get('milestone_b_options')
+        if (not isinstance(options, dict) or options.get('provenance') != 'synthetic-fixture' or
+            options.get('campaign') != 'base' or options.get('starting_stage') != 'base_start' or
+            type(options.get('difficulty')) is not int or options['difficulty'] not in range(4)):
+            raise Refused('immutable_generated_slot_options_required')
+        seed = 'sentinel-b-' + self.state['run_id']
+        generated = {**options, 'seed': seed, 'team': 0, 'slot': 1}
+        source = self.directory / 'private/generated-slot.private.json'
+        write_json(source, generated, create=True)
+        fingerprint = sha(source)
+        base = ('sentinel-test-session-v2\nseed_hex=' + seed.encode().hex() + '\nteam=0\nslot=1\ngeneration_fingerprint=' +
+                fingerprint + '\nprovenance=synthetic-fixture\nroot=' + str(root) + '\ncampaign=base\nstarting_stage=base_start\ndifficulty=' +
+                str(options['difficulty']) + '\nintent=')
+        descriptors = {}
+        for phase in ('create', 'resume'):
+            path = root / (seed + '-' + phase + '.txt')
+            with path.open('x', encoding='utf-8', newline='\n') as stream: stream.write(base + phase + '\n')
+            descriptors[phase] = {'path': str(path), 'sha256': sha(path)}
+        self.state['campaign_case'] = {'phase': 'create', 'options': options, 'generation_fingerprint': fingerprint,
+            'descriptors': descriptors, 'launches': [], 'runtime_proof': 'pending_maintainer_smoke'}
+        self.state['descriptor'] = descriptors['create']['path']
+        self.save()
+        probe = Path(self.config['CandidateManifest']).parent / 'sentinel_probe.exe'
+        record, _, response = self.execute('namespace_prepare', [str(probe), '--save-session-prepare', self.state['descriptor']], 20)
+        if record['exit_code'] != 0 or not isinstance(response, dict) or not re.fullmatch('[0-9a-f]{64}', response.get('namespace_id', '')):
+            raise Refused('campaign_namespace_prepare_refused')
+        self.state['namespace_id'] = response['namespace_id']
+        self.state['preparation']['state'] = 'prepared'
+        self.save()
+
+    def campaign_progress(self):
+        case = self.state['campaign_case']
+        records = self.state.get('automatic_log', {}).get('records', [])
+        current = next((row['campaign'] for row in reversed(records) if row.get('campaign', {}).get('enabled')), {})
+        if not current: return {}
+        if current.get('reason') != 'none': raise Refused('native_campaign_' + str(current.get('reason')))
+        if current.get('difficulty') != case['options']['difficulty']: raise Refused('native_campaign_options_mismatch')
+        if current.get('continuity_persisted') and not current.get('resumed') and current.get('phase') == 'checkpoint_saved':
+            message = 'Checkpoint nativo confirmado e verificado. Pode fechar DOOM e Steam normalmente; a segunda abertura usara a mesma identidade.'
+        elif current.get('resumed') and current.get('source_verified') and current.get('parser_completed') and current.get('map_active'):
+            message = 'Checkpoint correspondente reaberto pelo caminho nativo. Confirme controle jogavel, dificuldade e configuracoes; depois feche DOOM e Steam.'
+        else: return current
+        if case.get('prompt_phase') != case['phase']:
+            print(message); case['prompt_phase'] = case['phase']; self.save()
+        return current
+
+    def complete_campaign_launch(self):
+        case = self.state['campaign_case']; phase = case['phase']
+        current = self.campaign_progress()
+        self.compare_campaign_launch()
+        records = self.state.get('automatic_log', {}).get('records', [])
+        admission = records[-1].get('admission', {}) if records else {}
+        valid = (current.get('effective_difficulty') == case['options']['difficulty'] and
+            self.state.get('capture_health', {}).get('module_state') == 'verified' and self.state.get('process', {}).get('instance_id') and
+            admission.get('state') == 3 and admission.get('fault') == 0 and admission.get('flags', 0) & 7 == 7 and
+            admission.get('prepared_routes') == admission.get('required_routes') == 63 and admission.get('namespace_id') == self.state['namespace_id'])
+        if phase == 'create':
+            valid = valid and all(current.get(k) for k in ('native_saved', 'readback_verified', 'continuity_persisted', 'native_factory_matched'))
+        else:
+            first = case['launches'][0]['campaign']
+            valid = valid and all(current.get(k) for k in ('resumed', 'source_verified', 'parser_completed', 'map_active'))
+            valid = valid and current.get('source_checkpoint') == first['checkpoint'] and current.get('map') == first['map'] and current.get('loaded_difficulty') == case['options']['difficulty']
+            previous = case['launches'][0]['process']; observed = self.state['process']
+            valid = valid and observed['process_created'] != previous['process_created'] and observed['instance_id'] != previous['instance_id']
+        if not valid: raise Refused('campaign_' + phase + '_proof_incomplete_do_not_recreate')
+        launch = {'phase': phase, 'campaign': current, 'protection_manifest_sha256': self.state['protection']['reference_manifest_sha256'],
+            'process': scalars(self.state['process'], ('pid', 'process_created', 'instance_id')),
+            'automatic_startup': self.state.get('automatic_log'), 'comparison': self.state['comparison']}
+        record = self.directory / ('private/campaign-' + phase + '.private.json')
+        private_launch = {**launch, 'full_process': self.state['process'], 'protection': self.state['protection']}
+        if record.exists():
+            if read_json(record) != private_launch: raise Refused('retained_campaign_launch_evidence_conflict')
+        else: write_json(record, private_launch, create=True)
+        case['launches'].append(launch)
+        case['phase'] = 'prepare_resume' if phase == 'create' else 'completed'
+        self.save()
+
+    def compare_campaign_launch(self):
+        protection.require_stopped()
+        reference = self.state['protection']
+        if sha(Path(reference['reference_directory']) / protection.MANIFEST) != reference['reference_manifest_sha256']:
+            raise Refused('run_reference_manifest_changed')
+        response = self.compare_reference(reference['reference_directory'], 'campaign_' + self.state['campaign_case']['phase'] + '_comparison')
+        self.state['comparison'] = {'state': 'completed', 'response': response}
+        self.save()
+        if response['result'] != 'vanilla_campaign_unchanged': raise Refused('campaign_original_regression')
+
+    def run_campaign(self):
+        if not self.state.get('campaign_case'): self.prepare()
+        case = self.state['campaign_case']
+        # A resumed shell observes the exact retained attempt first; it cannot
+        # turn an ambiguous native create into a retry of New Game.
+        if self.state.get('handoff_armed') and case['phase'] in ('create', 'resume'):
+            if not self.state.get('process') and not self.discover_recorded_process():
+                raise Refused('interrupted_campaign_attempt_not_observed_do_not_recreate')
+            self.collect_startup_log()
+            self.complete_campaign_launch()
+            self.state.pop('handoff_armed', None)
+        while case['phase'] != 'completed':
+            if sha(self.directory / 'private/generated-slot.private.json') != case['generation_fingerprint']:
+                raise Refused('generated_slot_options_changed')
+            if case['phase'] == 'prepare_resume':
+                params = self.source_arguments(self.config['OriginalBackupDirectory'])
+                params += ['--ap-root', self.config['APRoot'], '--reference-directory', self.state['protection']['reference_directory'],
+                    '--diagnostic-file', str(self.directory / 'private/second-protection.private.json')]
+                for root in self.config['UninstallRoots']: params += ['--uninstall-root', root]
+                self.state['protection'] = self.helper('second_launch_protection', 'prepare_vanilla_backup.py', ['prepare', *params])
+                self.state['process'] = None
+                for key in ('automatic_log', 'capture_health', 'profile_failure_reported', 'comparison', 'handoff_armed'):
+                    self.state.pop(key, None)
+                case['phase'] = 'resume'; self.save()
+            descriptor = case['descriptors'][case['phase']]
+            if sha(descriptor['path']) != descriptor['sha256']: raise Refused('campaign_descriptor_changed')
+            validate_candidate(self.config, installed=True)
+            self.state['descriptor'] = descriptor['path']; self.save()
+            instruction = ('Protecao pronta. Internet ligada: abra Steam e DOOM. Escolha New Game na campanha Base; a dificuldade da sala e fixa. '
+                'Jogue ate o primeiro checkpoint e aguarde a confirmacao abaixo antes de sair.' if case['phase'] == 'create' else
+                'Segunda protecao pronta. Abra Steam e DOOM novamente e escolha Continue no mesmo slot AP. Confirme que o checkpoint e jogavel.')
+            self.observe_launch(prepare=False, instruction=instruction)
+            self.complete_campaign_launch()
+            self.state.pop('handoff_armed', None)
+        case['runtime_proof'] = 'native_create_save_reopen_observed_playability_requires_operator_confirmation'
+        self.save()
+
     def collect_startup_log(self):
         process = self.state.get("process")
         if not process: return
@@ -761,6 +924,9 @@ class Run:
                 "steps": {key: scalars(trace.get("steps", {}).get(key, {}), step_keys) for key in
                     ("request", "profile_created", "catalog_created", "first_poll", "prepare", "decode", "transport", "catalog_poll", "catalog", "reader", "framing", "checksum", "parse", "overlay", "application", "root", "admission", "write_after_refusal", "output_validation")}}
             rows.append({**scalars(item, ("schema", "control_sha256", "pid", "process_created", "build_id", "at_ms", "engine_reason")), "profile": profile,
+                'campaign': scalars(item.get('campaign', {}), ('enabled', 'resumed', 'phase', 'reason', 'slot', 'map', 'difficulty',
+                    'effective_difficulty', 'loaded_difficulty', 'changes_blocked', 'source_verified', 'parser_completed', 'parser_result', 'native_saved',
+                    'readback_verified', 'continuity_persisted', 'native_factory_matched', 'operation', 'checkpoint', 'source_checkpoint', 'generation_before', 'generation_after', 'map_active')),
                 "admission": scalars(item.get("admission", {}), ("state", "fault", "flags", "prepared_routes", "required_routes", "namespace_id")),
                 "installation": {**scalars(item.get("installation", {}), ("phase", "sequence", "startup_observation", "last_completed_stage", "validated", "created", "enabled")),
                     **{key: scalars(item.get("installation", {}).get(key) or {},
@@ -785,18 +951,23 @@ class Run:
                     distinction="original_stage_and_reason_in_automatic_installation_record", win32_error=failure.get("win32_error")), "automatic_startup")
 
     def run(self):
+        if self.config['Scenario'] == 'B': return self.run_campaign()
+        return self.observe_launch()
+
+    def observe_launch(self, prepare=True, instruction=None):
         handoff = None
         try:
-            self.prepare()
+            if prepare: self.prepare()
             protection.require_stopped()
             handoff = Handoff(self)
-            print("Protecao pronta. Abra Steam e DOOM normalmente, fique no menu e depois feche DOOM e Steam. A coleta e automatica; Ctrl+C exporta o que estiver disponivel.")
+            print(instruction or "Protecao pronta. Abra Steam e DOOM normalmente, fique no menu e depois feche DOOM e Steam. A coleta e automatica; Ctrl+C exporta o que estiver disponivel.")
+            launch = self.state.get('campaign_case', {}).get('phase', '')
             deadline = time.monotonic() + self.config.get("DiscoverySeconds", 180)
             attempt = 0
             while True:
                 attempt += 1
                 try:
-                    observed = self.observe_identity(self.directory / "private" / ("discovery-" + str(attempt)))
+                    observed = self.observe_identity(self.directory / "private" / ("discovery-" + launch + str(attempt)))
                     if observed:
                         self.state["process"] = {**observed, "instance_id": None}
                         self.save()
@@ -810,6 +981,7 @@ class Run:
             captures = 0; last_log = None; next_capture = 0
             while self.state["process"].get("source") != "automatic_record_only":
                 self.collect_startup_log()
+                if launch: self.campaign_progress()
                 signature = json.dumps(self.state.get("automatic_log"), sort_keys=True)
                 retry_modules = self.state.get('capture_health', {}).get('module_state') != 'verified'
                 if captures < 8 and (captures == 0 or signature != last_log or (retry_modules and time.monotonic() >= next_capture)):
@@ -821,7 +993,7 @@ class Run:
                     next_capture = time.monotonic() + 30
                 attempt += 1
                 try:
-                    observed = self.observe_identity(self.directory / "private" / ("observation-" + str(attempt)))
+                    observed = self.observe_identity(self.directory / "private" / ("observation-" + launch + str(attempt)))
                     if observed and any(str(observed[k]) != str(self.state["process"][k]) for k in ("pid", "process_created", "path")):
                         raise Refused("game_process_replaced")
                 except Refused as error:
@@ -925,13 +1097,15 @@ class Run:
             if item["query"] == "save_admission" and item.get("response", {}).get("state") in ("rejected", "faulted"):
                 raise protection.Refused("AP admission refused: " + str(item["response"].get("fault")), stage="native_admission",
                     distinction="native_session_refusal_all_safe_queries_collected")
-        print("Consultas seguras coletadas; feche DOOM e Steam normalmente quando concluir a observacao do menu.")
+        if not self.state.get('campaign_case'):
+            print("Consultas seguras coletadas; feche DOOM e Steam normalmente quando concluir a observacao do menu.")
 
     def finish(self, args):
         if args.stage == "EXPORT" and (self.state.get("comparison") or {}).get("state") == "completed":
             return  # Export cannot reattribute later legitimate changes to a completed test.
         self.state["operator"] = {"attribution": "operator_supplied_not_script_verified", "catalog": args.catalog,
                                   "selection": args.selection, "rollback": args.rollback, "note": redact(args.note, self.config)}
+        if self.state.get('campaign_case') and self.state.get('comparison', {}).get('state') == 'completed': return
         if self.state.get("process") and self.state.get("capture_health", {}).get("module_state") in ('not_yet_observable', 'collection_unavailable'):
             self.fail(Refused("loaded_module_identity_not_established"), "capture_health")
         comparison = {"state": "not_performed", "reason": "game_not_observed_and_no_activation"}
@@ -1018,9 +1192,21 @@ class Run:
         report["hook_installation"] = installations[-1].get("phase", "not_established") if installations else "NOT_TESTED" if not process else "not_established"
         if not installations and any(r.get("installation", {}).get("primary_failure") for r in logged):
             report["hook_installation"] = "native_failure_in_automatic_record"
-        summary = ["Milestone A RUN", "", "Preparation: " + report["preparation"]["state"],
+        case = self.state.get('campaign_case')
+        if case:
+            report['campaign_case'] = scalars(case, ('phase', 'generation_fingerprint', 'runtime_proof'))
+            report['campaign_case'].update(options=case['options'], launches=case['launches'])
+            report['campaign_case']['namespace_id'] = self.state.get('namespace_id')
+            report['campaign_case']['backup_verified'] = 'not_requested_or_required'
+        summary = ["Milestone " + self.config['Scenario'] + " RUN", "", "Preparation: " + report["preparation"]["state"],
                    "Game: " + report["game_observation"], "Hook installation: " + report["hook_installation"], "AP admission: " + report["admission_observation"],
                    "Expected routes: " + str(report["expected"]["required_routes"]), "Runtime PASS: not claimed.", ""]
+        if case:
+            summary += ['Campaign case: ' + case['phase'], 'Immutable synthetic slot difficulty: ' + str(case['options']['difficulty']),
+                'Native create/save/reopen evidence: ' + case['runtime_proof'], 'Playable checkpoint and settings require maintainer confirmation.']
+            if case['phase'] != 'completed':
+                summary.append('Explicit continuation: the same RUN command with -ResumeCase ' + self.state['run_id'] +
+                    '; close DOOM and Steam first. Unproved creation is never retried or overwritten.')
         if report["native_failure"]:
             summary.append("Native game failure: " + json.dumps(report["native_failure"], sort_keys=True))
         summary.append("Capture health: " + json.dumps(report["capture_health"], sort_keys=True))
@@ -1070,6 +1256,8 @@ def main(argv=None):
     parser.add_argument("--rollback", default="not_performed")
     parser.add_argument("--note", default="")
     parser.add_argument("--comparison-cancelled", action="store_true")
+    parser.add_argument('--scenario', choices=('A', 'B'))
+    parser.add_argument('--resume-case')
     args = parser.parse_args(argv)
     run = None
     try:
@@ -1081,7 +1269,7 @@ def main(argv=None):
         except FileExistsError: pass
         # An OS-held exclusive handle survives shell boundaries but never a crash.
         with protection.pinned(lock_path):
-            run = Run(args.config, args.stage)
+            run = Run(args.config, args.stage, args.scenario, args.resume_case)
             stage = {"stage": args.stage, "started_utc": utc(), "state": "running", "failure": None}
             run.state["stages"].append(stage)
             try:

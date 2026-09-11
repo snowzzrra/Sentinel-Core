@@ -177,6 +177,7 @@ ReadWorkerResult* verify_readback(Session& owner, engine::Memory& memory, uintpt
     if (!at(memory, context, 0, control) || !at(memory, control, 8, data)) return original(context, out);
     const auto id = owner.native_writes.readback_operation(data);
     if (!id) {
+        if (!owner.campaign_run.verify_source(memory, data, image)) { *out = {1, 1, 0}; return out; }
         const bool profile = owner.is_profile_request(data);
         if (profile) owner.profile_step(ProfileStage::decode, ProfileStatus::entered, "native_decode_entered");
         auto* result = original(context, out);

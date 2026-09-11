@@ -56,6 +56,7 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   tools/retest_milestone_a.py tools/Retest-MilestoneA.ps1
   tools/prepare_vanilla_backup.py tools/compare_vanilla_campaign.py
   src/save_profile.h src/save_profile.cpp
+  src/save_campaign.h src/save_campaign.cpp src/save_campaign_native.h src/save_campaign_native.cpp
   src/save_provider.h src/save_provider.cpp
   src/save_catalog.h src/save_catalog.cpp
   src/save_profile_prerequisite.h src/save_profile_prerequisite.cpp
@@ -98,10 +99,12 @@ target_include_directories(sentinel_minhook PUBLIC third_party/minhook/include t
 target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
 add_library(sentinel_native_model STATIC src/native_model.cpp)
 target_include_directories(sentinel_native_model PUBLIC include src)
-add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp)
+add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp src/save_campaign.cpp)
 target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
+add_executable(sentinel_campaign_tests tests/save_campaign.cpp)
+target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_save_session)
 target_link_libraries(sentinel_native_model PUBLIC sentinel_save_session)
-add_library(sentinel_native STATIC src/native_target.cpp src/native_runtime.cpp src/save_native_hooks.cpp)
+add_library(sentinel_native STATIC src/native_target.cpp src/native_runtime.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp)
 target_link_libraries(sentinel_native PUBLIC sentinel_native_model sentinel_observer sentinel_minhook sentinel_save_session)
 add_library(sentinel_core SHARED src/core.cpp src/inspection_server.cpp src/startup_log.cpp)
 target_link_libraries(sentinel_core PRIVATE sentinel_protocol sentinel_native advapi32 bcrypt)
@@ -159,7 +162,7 @@ set_tests_properties(native_lifecycle_dispatch_model PROPERTIES TIMEOUT 10)
 # Separate test executable with explicit fixture adapters. The production Core
 # never compiles SC_NATIVE_TESTING or accepts an address/callback through IPC.
 add_executable(sentinel_native_host tests/native_host.cpp src/core.cpp src/inspection_server.cpp src/startup_log.cpp
-  src/native_runtime.cpp src/native_target.cpp src/save_native_hooks.cpp)
+  src/native_runtime.cpp src/native_target.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp)
 target_include_directories(sentinel_native_host PRIVATE tests)
 target_link_libraries(sentinel_native_host PRIVATE sentinel_native_model sentinel_observer sentinel_minhook
   sentinel_inspection_client sentinel_save_session advapi32 bcrypt)

@@ -16,7 +16,12 @@ struct Identity {
     std::optional<uint32_t> slot;
     std::string generation_fingerprint;
 };
-struct Descriptor { Identity identity; std::wstring root; };
+enum class CampaignIntent { none, create, resume };
+struct CampaignOptions {
+    CampaignIntent intent = CampaignIntent::none;
+    uint32_t difficulty = 4; // No default gameplay difficulty; 4 is unsupported Ultra-Nightmare.
+};
+struct Descriptor { Identity identity; std::wstring root; CampaignOptions campaign; };
 enum class Outcome {
     ok, storage_prepared, storage_reopened, offline_backup_complete,
     invalid_descriptor, invalid_identity, invalid_root, unsafe_path,
@@ -100,6 +105,11 @@ public:
     // Exact, bounded complete manifest and payload hashes; pins directories and
     // payload handles through later reads. Accepts only a generated basename.
     Result reopen_transport(std::wstring_view basename, std::unique_ptr<TransportArchive>&);
+    // Owned namespace only, under its retained exclusive lease. Contract is
+    // create-only; checkpoint publication is flushed and rejects partial data on
+    // reopen. This is continuity metadata, never native payload or an archive.
+    Result campaign_record(bool checkpoint, std::string& text) const;
+    Result publish_campaign_record(bool checkpoint, std::string_view text, bool create);
 private:
     struct Impl;
     explicit Namespace(std::unique_ptr<Impl> impl);

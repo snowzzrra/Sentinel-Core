@@ -295,10 +295,10 @@ Result open_file(const std::wstring& path, DWORD access, DWORD sharing, DWORD di
     // omitting an alternate stream would make the offline backup incomplete.
     return validate_streams(handle.value, false);
 }
-Result read_metadata(HANDLE file, std::string& text) {
+Result read_metadata(HANDLE file, std::string& text, size_t limit = metadata_limit) {
     LARGE_INTEGER length{};
     if (!GetFileSizeEx(file, &length)) return io_error();
-    if (length.QuadPart <= 0 || length.QuadPart > static_cast<LONGLONG>(metadata_limit))
+    if (length.QuadPart <= 0 || length.QuadPart > static_cast<LONGLONG>(limit))
         return {Outcome::corrupt_manifest};
     LARGE_INTEGER start{};
     if (!SetFilePointerEx(file, start, nullptr, FILE_BEGIN)) return io_error();
@@ -479,15 +479,26 @@ const char* outcome_name(Outcome outcome) {
 Result parse_descriptor(std::string_view text, Descriptor& descriptor) {
     descriptor = {};
     constexpr std::string_view magic = "sentinel-test-session-v1\n";
-    if (text.size() > metadata_limit || text.substr(0, magic.size()) != magic ||
+    const bool campaign = text.substr(0, magic.size()) == "sentinel-test-session-v2\n";
+    if (text.size() > metadata_limit || (!campaign && text.substr(0, magic.size()) != magic) ||
         text.find('\r') != std::string_view::npos || text.find('\0') != std::string_view::npos)
         return {Outcome::invalid_descriptor};
     text.remove_prefix(magic.size());
     Descriptor parsed;
     std::string_view value;
     if (!identity_fields(text, parsed.identity) || !line(text, "provenance=", value) ||
-        value != "synthetic-fixture" || !line(text, "root=", value) || !utf8(value, parsed.root) || !text.empty())
+        value != "synthetic-fixture" || !line(text, "root=", value) || !utf8(value, parsed.root))
         return {Outcome::invalid_descriptor};
+    if (campaign) {
+        if (!line(text, "campaign=", value) || value != "base" ||
+            !line(text, "starting_stage=", value) || value != "base_start" ||
+            !line(text, "difficulty=", value) || value.size() != 1 || value[0] < '0' || value[0] > '3')
+            return {Outcome::invalid_descriptor};
+        parsed.campaign.difficulty = static_cast<uint32_t>(value[0] - '0');
+        if (!line(text, "intent=", value) || (value != "create" && value != "resume")) return {Outcome::invalid_descriptor};
+        parsed.campaign.intent = value == "create" ? CampaignIntent::create : CampaignIntent::resume;
+    }
+    if (!text.empty()) return {Outcome::invalid_descriptor};
     std::string id;
     auto result = namespace_id(parsed.identity, id);
     if (!result.ok()) return result;
@@ -517,6 +528,24 @@ struct Namespace::Impl { Lease lease; };
 Namespace::Namespace(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 Namespace::~Namespace() = default;
 const Metadata& Namespace::metadata() const { return impl_->lease.metadata; }
+Result Namespace::campaign_record(bool checkpoint, std::string& text) const {
+    text.clear(); Handle file;
+    const auto path = impl_->lease.metadata.path + (checkpoint ? L"\\campaign.checkpoint" : L"\\campaign.contract");
+    auto result = open_file(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, file);
+    if (!result.ok()) return result;
+    return read_metadata(file.value, text, 32768);
+}
+Result Namespace::publish_campaign_record(bool checkpoint, std::string_view text, bool create) {
+    if (text.empty() || text.size() > 32768 || (!checkpoint && !create)) return {Outcome::invalid_descriptor};
+    Handle file;
+    const auto path = impl_->lease.metadata.path + (checkpoint ? L"\\campaign.checkpoint" : L"\\campaign.contract");
+    auto result = open_file(path, GENERIC_WRITE, 0, create ? CREATE_NEW : OPEN_EXISTING, file);
+    if (!result.ok()) return result;
+    result = write_bytes(file.value, text.data(), static_cast<DWORD>(text.size()));
+    if (!result.ok()) return result;
+    if (!SetEndOfFile(file.value) || !FlushFileBuffers(file.value)) return io_error();
+    return {};
+}
 Result prepare(const Descriptor& descriptor, std::unique_ptr<Namespace>& output) {
     output.reset();
     auto impl = std::make_unique<Namespace::Impl>();

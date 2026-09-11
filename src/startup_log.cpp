@@ -72,6 +72,20 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
         if (file != INVALID_HANDLE_VALUE && count < 128) {
             const auto install = save::session().installation.inspect();
             const auto session = save::session().inspect();
+            const auto campaign = save::session().campaign_run.snapshot();
+            const auto flag=[](bool v){return v?"true":"false";};
+            const auto campaign_json = std::string("{\"enabled\":")+flag(campaign.enabled)+
+                ",\"resumed\":"+flag(campaign.resumed)+",\"phase\":\""+campaign.phase+"\",\"reason\":\""+campaign.reason+
+                "\",\"slot\":\""+campaign.slot+"\",\"map\":\""+campaign.map+"\",\"difficulty\":"+std::to_string(campaign.difficulty)+
+                ",\"effective_difficulty\":"+std::to_string(campaign.effective_difficulty)+",\"changes_blocked\":"+std::to_string(campaign.changes_blocked)+
+                ",\"source_verified\":"+flag(campaign.source_verified)+",\"parser_completed\":"+flag(campaign.parser_completed)+
+                ",\"parser_result\":"+std::to_string(campaign.parser_result)+",\"loaded_difficulty\":"+std::to_string(campaign.loaded_difficulty)+",\"native_saved\":"+flag(campaign.native_saved)+
+                ",\"readback_verified\":"+flag(campaign.readback_verified)+",\"continuity_persisted\":"+flag(campaign.continuity_persisted)+
+                ",\"native_factory_matched\":"+flag(campaign.native_factory_matched)+
+                ",\"operation\":"+std::to_string(campaign.operation)+",\"checkpoint\":"+std::to_string(campaign.checkpoint)+
+                ",\"source_checkpoint\":"+std::to_string(campaign.source_checkpoint)+
+                ",\"generation_before\":"+std::to_string(campaign.generation_before)+",\"generation_after\":"+std::to_string(campaign.generation_after)+
+                ",\"map_active\":"+flag(campaign.map_active)+"}";
             const auto facts = "\"engine_reason\":" + std::to_string(engine_reason) + ",\"installation\":{\"phase\":" + std::to_string(install.phase) +
                 ",\"sequence\":" + std::to_string(install.sequence) + ",\"startup_observation\":" + std::to_string(install.startup_observation) +
                 ",\"last_completed_stage\":" + std::to_string(install.last_completed_stage) + ",\"validated\":" + std::to_string(install.validated) +
@@ -80,7 +94,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"active\":" + event(install.active) + "},\"admission\":{\"state\":" + std::to_string(session.state) +
                 ",\"fault\":" + std::to_string(session.fault) + ",\"flags\":" + std::to_string(session.flags) +
                 ",\"prepared_routes\":" + std::to_string(session.prepared_routes) + ",\"required_routes\":" + std::to_string(session.required_routes) +
-                ",\"namespace_id\":\"" + session.namespace_id + "\"},\"profile\":" + profile(save::session().profile_trace());
+                ",\"namespace_id\":\"" + session.namespace_id + "\"},\"profile\":" + profile(save::session().profile_trace())+",\"campaign\":"+campaign_json;
             if (facts != last) {
                 const auto& wide_key = prelaunch::diagnostic_key();
                 std::string control;

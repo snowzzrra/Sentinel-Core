@@ -212,7 +212,7 @@ def inventory(sources):
             info = check_node(path)
             relative = path.relative_to(root).as_posix()
             result[(label, relative)] = (info.st_ino, info.st_dev, info.st_mode,
-                                         info.st_size, info.st_mtime_ns)
+                                         0 if stat.S_ISDIR(info.st_mode) else info.st_size, info.st_mtime_ns)
             if stat.S_ISDIR(info.st_mode):
                 for child in sorted(path.iterdir()):
                     visit(child)

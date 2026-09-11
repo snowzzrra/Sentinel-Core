@@ -16,6 +16,8 @@ struct Invocation {
 struct Factory { Invocation* invocation; Factory* previous; };
 thread_local Invocation* submitting = nullptr;
 thread_local Factory* factory = nullptr;
+struct Checkpoint { NativeWrites* owner; Checkpoint* previous; unsigned captures=0; };
+thread_local Checkpoint* checkpoint=nullptr;
 
 SaveReference* invoke_factory(Factory* scope, uintptr_t manager, SaveReference* out,
         uint32_t user, uintptr_t request, NativeSaveFactory original) {
@@ -64,11 +66,20 @@ SubmissionResult submit_native_save(NativeWrites& owner, const std::shared_ptr<B
 }
 SaveReference* native_save_factory(NativeWrites& owner, uintptr_t caller, uintptr_t expected_caller,
         uintptr_t manager, SaveReference* out, uint32_t user, uintptr_t request, NativeSaveFactory original) {
-    if (!submitting || &submitting->owner != &owner) return original(manager, out, user, request);
-    auto& scope = *submitting;
-    if (caller != expected_caller || ++scope.factories != 1 || factory) scope.valid = false;
-    Factory current{&scope, factory};
-    return invoke_factory(&current, manager, out, user, request, original);
+    // RVA 0x1495a80 constructs its job context with mode1. Provider creation is
+    // synchronous; the returned future may complete later under its own refs.
+    Checkpoint current_checkpoint{caller==expected_caller?&owner:nullptr,checkpoint};
+    checkpoint=&current_checkpoint;
+    __try {
+        if (!submitting || &submitting->owner != &owner) return original(manager, out, user, request);
+        auto& scope = *submitting;
+        if (caller != expected_caller || ++scope.factories != 1 || factory) scope.valid = false;
+        Factory current{&scope, factory};
+        return invoke_factory(&current, manager, out, user, request, original);
+    } __finally { checkpoint=current_checkpoint.previous; }
+}
+bool capture_native_checkpoint(NativeWrites& owner) {
+    return checkpoint && checkpoint->owner==&owner && ++checkpoint->captures==1;
 }
 bool capture_submission(NativeWrites& owner, uint64_t operation, std::string_view directory) {
     if (!factory || &factory->invocation->owner != &owner) return true;

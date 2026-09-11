@@ -497,7 +497,7 @@ const char* save_session_state_name(uint32_t state) {
 const char* save_session_fault_name(uint32_t fault) {
     constexpr const char* names[] = {"none", "descriptor", "installation", "incomplete_routes", "startup_context",
         "repeated_startup", "missed_startup", "provider_identity", "foreign_collector", "malformed_entry",
-        "native_collection", "native_copy", "unscoped_delete", "delete_indeterminate", "native_write", "native_profile", "native_read"};
+        "native_collection", "native_copy", "unscoped_delete", "delete_indeterminate", "native_write", "native_profile", "native_read", "native_campaign"};
     return fault < std::size(names) ? names[fault] : "invalid";
 }
 const char* save_field_name(size_t field) {

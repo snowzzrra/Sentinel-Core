@@ -1,6 +1,7 @@
 #include "native_runtime.h"
 #include "native_target.h"
 #include "save_native_hooks.h"
+#include "save_campaign_native.h"
 #include "save_session.h"
 #include "context_observer.h"
 #include "MinHook.h"
@@ -286,10 +287,15 @@ void frame_detour(uintptr_t self) {
     }
 }
 uint64_t change_detour(uintptr_t root, uintptr_t descriptor, uintptr_t files) {
+    if (!save::campaign_change_begin(root, descriptor, inspect().scope.lifecycle_generation)) return 0;
     const bool observe = begin_event(root, true, descriptor);
     uint64_t result = 0;
     __try { result = original_change(root, descriptor, files); }
-    __finally { if (observe) end_event(true, result != 0, AbnormalTermination() != FALSE); }
+    __finally {
+        if (observe) end_event(true, result != 0, AbnormalTermination() != FALSE);
+        const auto current = inspect();
+        save::campaign_change_end(result != 0 && AbnormalTermination() == FALSE, current.scope.lifecycle_generation, current.game_state);
+    }
     return result;
 }
 void free_detour(uintptr_t root, uintptr_t slot) {
