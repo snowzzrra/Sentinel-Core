@@ -11,5 +11,7 @@ sc_engine_snapshot current_engine_snapshot();
 void publish_engine(const sc_engine_snapshot& snapshot);
 sc_context_snapshot current_context_snapshot();
 void publish_context(const sc_context_snapshot& snapshot);
+sc_save_snapshot current_save_snapshot();
+void publish_save(const sc_save_snapshot& snapshot);
 void inspection_failed(DWORD error);
 }

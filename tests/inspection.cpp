@@ -1,6 +1,7 @@
 #include "sentinel_inspection.h"
 #include "pipe_io.h"
 #include "protocol.h"
+#include "save_storage.h"
 #include <aclapi.h>
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +9,8 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 
 #define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL line %d: %s (win32=%lu)\n", __LINE__, #c, GetLastError()); std::exit(1); } } while (0)
 using namespace sentinel;
@@ -153,7 +156,155 @@ void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int
     CHECK(!output.empty() && GetTickCount64() - start < 4000);
     server.join();
 }
+void write_codec() {
+    static_assert(sizeof(sc_save_write_snapshot) == 160 && sizeof(sc_save_snapshot) == 368 && sizeof(sc_save_admission_snapshot) == 160);
+    Snapshot original{}, decoded{}; original.core.abi_version = SC_ABI_VERSION;
+    strcpy_s(original.core.version, "0.6.0"); strcpy_s(original.core.build_id, "synthetic-write");
+    sc_save_write_snapshot value{}, received{}; value.size = sizeof(value); value.abi_version = SC_SAVE_WRITE_ABI_VERSION;
+    Message data{}; WireResult code{};
+    const auto check = [&](bool valid) {
+        const auto size = encode_save_write_response(data, WireResult::ok, original, value);
+        CHECK(decode_save_write_response(data, size, code, decoded, received) == valid);
+        if (valid) CHECK(std::memcmp(&value, &received, sizeof(value)) == 0);
+        return size;
+    };
+    const auto size = check(true);
+    for (size_t n = 0; n < size; ++n) CHECK(!decode_save_write_response(data, n, code, decoded, received));
+    value.state = SC_SAVE_WRITE_NOT_RETAINED; value.operation_id = UINT64_MAX; check(true);
+    value.state = SC_SAVE_WRITE_PENDING; value.flags = SC_SAVE_WRITE_PROVIDER_ALIVE | SC_SAVE_WRITE_SOURCE_VALID;
+    strcpy_s(value.directory, "PROFILE"); check(true);
+    value.state = SC_SAVE_WRITE_INDETERMINATE; value.flags &= ~SC_SAVE_WRITE_PROVIDER_ALIVE; check(true);
+    value.flags |= SC_SAVE_WRITE_PROVIDER_TERMINAL; value.native_state = 1;
+    value.state = SC_SAVE_WRITE_NATIVE_FAILED; check(true);
+    value.native_state = 0; value.native_outcome = 1; value.native_value = 0x40; check(true);
+    value.native_outcome = 0; value.native_value = 1; value.state = SC_SAVE_WRITE_NATIVE_SUCCEEDED; check(true);
+    value.sdk_sequence = 99; value.file_count = value.submitted = value.completed = 2;
+    value.flags |= SC_SAVE_WRITE_PAYLOADS_PREPARED | SC_SAVE_WRITE_PAYLOADS_CAPTURED |
+        SC_SAVE_WRITE_CALLBACKS_SUCCEEDED | SC_SAVE_WRITE_SDK_SUCCEEDED;
+    value.state = SC_SAVE_WRITE_SDK_CONFIRMED; check(true);
+    const auto confirmed = value;
+    value.flags |= SC_SAVE_WRITE_READBACK_REQUIRED | SC_SAVE_WRITE_READBACK_ACTIVE;
+    check(false); value.state = SC_SAVE_WRITE_READBACK_PENDING; check(true);
+    value.flags |= SC_SAVE_WRITE_READBACK_HASHES; check(true);
+    value.flags |= SC_SAVE_WRITE_READBACK_TERMINAL;
+    check(false); value.state = SC_SAVE_WRITE_READBACK_CONFIRMED; check(true);
+    value.flags &= ~SC_SAVE_WRITE_READBACK_ACTIVE; check(true);
+    value.flags &= ~SC_SAVE_WRITE_READBACK_HASHES; check(false);
+    value.flags |= SC_SAVE_WRITE_READBACK_ERROR; value.state = SC_SAVE_WRITE_READBACK_FAILED; check(true);
+    value.flags &= ~SC_SAVE_WRITE_READBACK_REQUIRED; check(false); value = confirmed;
+    value.flags |= SC_SAVE_WRITE_TRACKING_LOST; check(false);
+    value.state = SC_SAVE_WRITE_NATIVE_SUCCEEDED; check(true); value = confirmed;
+    value.flags |= SC_SAVE_WRITE_UNPROVEN; check(false);
+    value.state = SC_SAVE_WRITE_NATIVE_SUCCEEDED; check(true); value = confirmed;
+    value.native_value = 0; check(false); value = confirmed;
+    value.flags &= ~SC_SAVE_WRITE_PROVIDER_TERMINAL; check(false); value = confirmed;
+    value.flags &= ~SC_SAVE_WRITE_CALLBACKS_SUCCEEDED; check(false); value = confirmed;
+    value.pending_handles = 1; check(false); value = confirmed;
+    value.completed = 1; check(false); value = confirmed;
+    value.submitted = 3; check(false); value = confirmed;
+    value.sdk_sequence = 0; check(false); value = confirmed;
+    value.file_count = 1025; check(false); value = confirmed;
+    value.preparation_jobs = 129; check(false); value = confirmed;
+    value.reserved = 1; check(false); value = confirmed;
+    value.reserved_bytes[15] = 1; check(false); value = confirmed;
+    value.flags |= 32768; check(false); value = confirmed;
+    value.abi_version = 2; check(false); value = confirmed;
+    value.directory[63] = 'x'; check(false); value = confirmed;
+    value.directory[0] = '\n'; check(false); value = confirmed;
+    const auto request_size = encode_save_write_request(data, UINT64_MAX);
+    uint16_t operation = 0; uint64_t id = 0;
+    CHECK(decode_request(data, request_size, &operation, nullptr, nullptr, &id) == WireResult::ok);
+    CHECK(operation == save_write_operation && id == UINT64_MAX);
+    CHECK(decode_request(data, request_size - 1) == WireResult::malformed);
+    data[16] = 1; CHECK(decode_request(data, request_size) == WireResult::capability_unavailable);
+    const auto error_size = encode_save_write_response(data, WireResult::capability_unavailable, original, value);
+    CHECK(decode_save_write_response(data, error_size, code, decoded, received) && code == WireResult::capability_unavailable);
+}
+void admission_codec() {
+    Snapshot original{}, decoded{};
+    original.core.abi_version = SC_ABI_VERSION;
+    strcpy_s(original.core.version, "0.6.0"); strcpy_s(original.core.build_id, "synthetic-admission");
+    sc_save_admission_snapshot value{}, received{};
+    value.size = sizeof(value); value.abi_version = SC_SAVE_ADMISSION_ABI_VERSION; value.required_routes = 63;
+    Message data{}; WireResult code{};
+    const auto check = [&](bool valid) {
+        const auto size = encode_save_admission_response(data, WireResult::ok, original, value);
+        CHECK(decode_save_admission_response(data, size, code, decoded, received) == valid);
+        if (valid) CHECK(std::memcmp(&value, &received, sizeof(value)) == 0);
+        return size;
+    };
+    const auto size = check(true);
+    for (size_t n = 0; n < size; ++n) CHECK(!decode_save_admission_response(data, n, code, decoded, received));
+    value.flags = SC_SAVE_SESSION_ROUTED; check(false); value.flags = 0;
+    ++value.abi_version; check(false); --value.abi_version;
+    value.state = SC_SAVE_SESSION_PREPARED; check(false);
+    std::memset(value.namespace_id, 'a', 64); std::memcpy(value.native_root, "ap-", 3);
+    std::memset(value.native_root + 3, 'a', 40); value.prepared_routes = 3; check(true);
+    value.native_root[3] = 'b'; check(false); value.native_root[3] = 'a';
+    value.state = SC_SAVE_SESSION_REJECTED; value.fault = 3;
+    value.flags = SC_SAVE_SESSION_STARTUP_QUALIFIED; check(true);
+    value.flags |= SC_SAVE_SESSION_ACCEPTING; check(false);
+    value.state = SC_SAVE_SESSION_ADMITTED; value.fault = 0; value.prepared_routes = 63;
+    value.flags |= SC_SAVE_SESSION_ROUTED; check(true);
+    value.state = SC_SAVE_SESSION_BINDING; check(false);
+    value.flags &= ~SC_SAVE_SESSION_ACCEPTING; check(true);
+    value.fault = 1; check(false); value.fault = 0;
+    value.state = SC_SAVE_SESSION_BINDING + 1; check(false);
+    value.state = SC_SAVE_SESSION_FAULTED; value.fault = 11;
+    value.flags &= ~SC_SAVE_SESSION_ACCEPTING; check(true);
+    value.fault = 16; check(true); value.fault = 17; check(false); value.fault = 11;
+    value.namespace_id[64] = 'a'; check(false);
+    uint16_t operation = 0;
+    const auto request = encode_request(data, save_admission_capability, wire_version, save_admission_operation);
+    CHECK(decode_request(data, request, &operation) == WireResult::ok && operation == save_admission_operation);
+}
+void prelaunch_contract(const std::wstring& dll, const std::wstring& probe_path) {
+    namespace fs = std::filesystem;
+    wchar_t temporary[MAX_PATH]{}; CHECK(GetTempPathW(MAX_PATH, temporary));
+    const auto parent = fs::canonical(temporary);
+    const auto root = parent / ("sentinel-admission-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
+    CHECK(fs::create_directory(root));
+    const auto fixture_file = root / "fixture.txt";
+    storage::Descriptor descriptor;
+    descriptor.identity = {"admission-fixture", 0u, 1u, std::string(64, 'a')};
+    descriptor.root = root.wstring();
+    std::unique_ptr<storage::Namespace> lease;
+    CHECK(storage::prepare(descriptor, lease).ok());
+    const auto namespace_id = lease->metadata().namespace_id;
+    lease.reset();
+    {
+        std::ofstream out(fixture_file, std::ios::binary);
+        out << "sentinel-test-session-v1\nseed_hex=61646d697373696f6e2d66697874757265\nteam=0\nslot=1\n"
+            "generation_fingerprint=" << std::string(64, 'a') <<
+            "\nprovenance=synthetic-fixture\nroot=" << root.u8string() << '\n';
+        out.close(); CHECK(out.good());
+    }
+    CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", fixture_file.c_str()));
+    Host prepared(dll, 30);
+    CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", nullptr));
+    const auto status = query_save_admission(prepared.child.pid, 2000);
+    CHECK(status.result == ProbeResult::ok && status.admission.state == SC_SAVE_SESSION_PREPARED);
+    CHECK(status.admission.namespace_id == namespace_id && status.admission.flags == 0);
+    storage::Metadata metadata;
+    CHECK(storage::inspect(descriptor, metadata).outcome == storage::Outcome::ownership_conflict);
+    const auto capture = probe(probe_path, L"--pid " + std::to_wstring(prepared.child.pid) + L" --save-admission --json", 8);
+    CHECK(capture.find("\"state\":\"prepared\"") != std::string::npos);
+    prepared.shutdown(); // Child verifies retained module, sticky refusal, and no reinitialization.
+    CHECK(storage::reopen(descriptor, lease).ok()); lease.reset();
+    { std::ofstream out(fixture_file, std::ios::binary | std::ios::trunc); out << "invalid-fixture\n"; }
+    CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", fixture_file.c_str()));
+    Host invalid(dll, 31);
+    CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", nullptr));
+    const auto rejected = query_save_admission(invalid.child.pid, 2000);
+    CHECK(rejected.result == ProbeResult::ok && rejected.admission.state == SC_SAVE_SESSION_REJECTED);
+    CHECK(rejected.admission.fault == 1 && rejected.admission.namespace_id[0] == 0);
+    invalid.shutdown();
+    CHECK(fs::canonical(root).parent_path() == parent && root.filename().u8string().find("sentinel-admission-") == 0);
+    fs::remove_all(root);
+    std::puts("PASS production prelaunch reader/lease, DLL retention before hooks, sticky shutdown and probe refusal; synthetic hosts only");
+}
 int wmain(int argc, wchar_t** argv) {
+    admission_codec(); write_codec();
     executable = argv[0];
     if (argc == 4 && (wcscmp(argv[1], L"--host") == 0 || wcscmp(argv[1], L"--idle") == 0)) {
         const bool idle = wcscmp(argv[1], L"--idle") == 0;
@@ -170,21 +321,54 @@ int wmain(int argc, wchar_t** argv) {
             CHECK(inspect_context(1, sizeof(context) - 1, &context) == SC_INVALID_ARGUMENT);
             CHECK(inspect_context(1, sizeof(context), nullptr) == SC_INVALID_ARGUMENT);
             CHECK(inspect_context(1, sizeof(context), &context) == SC_OK && context.pid == GetCurrentProcessId());
+            const auto inspect_save = symbol<decltype(&sc_save_inspect)>(core, "sc_save_inspect");
+            sc_save_snapshot save{};
+            CHECK(inspect_save(2, sizeof(save), &save) == SC_ABI_MISMATCH);
+            CHECK(inspect_save(1, sizeof(save) - 1, &save) == SC_INVALID_ARGUMENT);
+            CHECK(inspect_save(1, sizeof(save), nullptr) == SC_INVALID_ARGUMENT);
+            CHECK(inspect_save(1, sizeof(save), &save) == SC_OK && save.pid == GetCurrentProcessId());
+            CHECK(save.mutation_available == 0 && save.mutation_reason == SC_SAVE_NATIVE_NAMESPACE_ROUTE_UNPROVEN);
+            const auto inspect_admission = symbol<decltype(&sc_save_admission_inspect)>(core, "sc_save_admission_inspect");
+            sc_save_admission_snapshot admission{};
+            CHECK(inspect_admission(2, sizeof(admission), &admission) == SC_ABI_MISMATCH);
+            CHECK(inspect_admission(1, sizeof(admission) - 1, &admission) == SC_INVALID_ARGUMENT);
+            CHECK(inspect_admission(1, sizeof(admission), nullptr) == SC_INVALID_ARGUMENT);
+            CHECK(inspect_admission(1, sizeof(admission), &admission) == SC_OK && admission.size == 160);
+            const auto inspect_write = symbol<decltype(&sc_save_write_inspect)>(core, "sc_save_write_inspect");
+            sc_save_write_snapshot write{};
+            CHECK(inspect_write(2, sizeof(write), 0, &write) == SC_ABI_MISMATCH);
+            CHECK(inspect_write(1, sizeof(write) - 1, 0, &write) == SC_INVALID_ARGUMENT);
+            CHECK(inspect_write(1, sizeof(write), 0, nullptr) == SC_INVALID_ARGUMENT);
+            CHECK(inspect_write(1, sizeof(write), 0, &write) == SC_OK && write.size == 160 && write.state == SC_SAVE_WRITE_NONE);
+            CHECK(inspect_write(1, sizeof(write), UINT64_MAX, &write) == SC_OK &&
+                write.state == SC_SAVE_WRITE_NOT_RETAINED && write.operation_id == UINT64_MAX);
         }
         CHECK(SetEvent(ready.value));
         CHECK(WaitForSingleObject(stop.value, 30000) == WAIT_OBJECT_0);
         if (core) {
-            CHECK(symbol<decltype(&sc_shutdown)>(core, "sc_shutdown")() == SC_OK);
+            const auto inspect_admission = symbol<decltype(&sc_save_admission_inspect)>(core, "sc_save_admission_inspect");
+            sc_save_admission_snapshot admission{};
+            CHECK(inspect_admission(1, sizeof(admission), &admission) == SC_OK);
+            const bool retained = admission.namespace_id[0] != 0;
+            CHECK(symbol<decltype(&sc_shutdown)>(core, "sc_shutdown")() == static_cast<sc_result>(retained ? SC_UNLOAD_RETAINED : SC_OK));
             CHECK(FreeLibrary(core));
+            if (retained) {
+                CHECK(GetModuleHandleW(L"sentinel_core.dll") == core);
+                CHECK(inspect_admission(1, sizeof(admission), &admission) == SC_OK);
+                CHECK(admission.state == SC_SAVE_SESSION_REJECTED && admission.fault == 6);
+                CHECK(symbol<decltype(&sc_initialize)>(core, "sc_initialize")(SC_ABI_VERSION, 0) == SC_UNLOAD_RETAINED);
+            }
         }
         return 0;
     }
-    CHECK(argc == 3);
+    CHECK(argc == 3 || (argc == 4 && wcscmp(argv[3], L"--prelaunch") == 0));
+    CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", nullptr));
     test_job.value = CreateJobObjectW(nullptr, nullptr); CHECK(test_job);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     CHECK(SetInformationJobObject(test_job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits)));
     const std::wstring dll = argv[1], probe_path = argv[2];
+    if (argc == 4) { prelaunch_contract(dll, probe_path); return 0; }
     Host first(dll, 1), second(dll, 2);
     const auto initial = query(first.child.pid, 2000);
     if (initial.result != ProbeResult::ok) std::fprintf(stderr, "initial query=%s win32=%u server_pid=%u\n",
@@ -194,7 +378,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(initial.snapshot.core.abi_version == SC_ABI_VERSION && initial.snapshot.core.capabilities == 3);
     CHECK(initial.snapshot.core.state == SC_READY && initial.snapshot.service == ServiceState::listening);
     CHECK(initial.snapshot.core.initialization_count == 1 && std::strlen(initial.snapshot.core.build_id) == 64);
-    CHECK(std::strcmp(initial.snapshot.core.version, "0.5.1") == 0);
+    CHECK(std::strcmp(initial.snapshot.core.version, "0.6.0") == 0);
     uint64_t created = 0; CHECK(process_time(first.child.process.value, created));
     CHECK(initial.snapshot.process_created == created);
     const auto other = query(second.child.pid, 2000);
@@ -235,7 +419,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(context.context.fields[SC_CONTEXT_LOAD_SERIAL].reason == SC_CONTEXT_UNSUPPORTED);
     const auto context_json = probe(probe_path, args + L" --context --json", 0);
     CHECK(context_json.find("\"operation\":\"context\"") != std::string::npos);
-    CHECK(context_json.find("\"core_version\":\"0.5.1\"") != std::string::npos);
+    CHECK(context_json.find("\"core_version\":\"0.6.0\"") != std::string::npos);
     CHECK(context_json.find("\"current_map\":{\"validity\":\"unknown\",\"reason\":\"profile_unrecognized\",\"value\":null") != std::string::npos);
     CHECK(probe(probe_path, args + L" --context", 0).find("not a load serial") != std::string::npos);
     const auto context_watch = probe(probe_path, args + L" --context --watch-count 2 --interval-ms 100 --json", 0);
@@ -244,6 +428,41 @@ int wmain(int argc, wchar_t** argv) {
     probe(probe_path, args + L" --context --context", 2);
     std::printf("HARNESS_CONTEXT_JSON %s", context_json.c_str());
     std::printf("HARNESS_CONTEXT_WATCH_JSON %s", context_watch.c_str());
+    const auto save = query_save(first.child.pid, 2000);
+    const auto write = query_save_write(first.child.pid, 2000);
+    CHECK(write.result == ProbeResult::ok && write.snapshot.instance == initial.snapshot.instance && write.write.state == SC_SAVE_WRITE_NONE);
+    const auto absent_write = query_save_write(first.child.pid, 2000, UINT64_MAX);
+    CHECK(absent_write.result == ProbeResult::ok && absent_write.write.state == SC_SAVE_WRITE_NOT_RETAINED && absent_write.write.operation_id == UINT64_MAX);
+    const auto write_json = probe(probe_path, args + L" --save-write --json", 0);
+    CHECK(write_json.find("\"operation\":\"save_write\"") != std::string::npos && write_json.find("\"state\":\"none\"") != std::string::npos);
+    CHECK(write_json.find("\"native_result\":null") != std::string::npos && write_json.find("\"persistence_verified\":false") != std::string::npos);
+    const auto missing_write = probe(probe_path, args + L" --save-write --write-id 18446744073709551615 --json", 0);
+    CHECK(missing_write.find("\"state\":\"not_retained\"") != std::string::npos && missing_write.find("\"operation_id\":\"18446744073709551615\"") != std::string::npos);
+    const auto write_watch = probe(probe_path, args + L" --save-write --watch-count 2 --interval-ms 100 --json", 0);
+    CHECK(std::count(write_watch.begin(), write_watch.end(), '\n') == 2);
+    probe(probe_path, args + L" --save-write --save-admission", 2);
+    probe(probe_path, args + L" --save-write --save-write", 2);
+    probe(probe_path, args + L" --write-id 1", 2);
+    probe(probe_path, args + L" --save-write --write-id 0", 2);
+    probe(probe_path, args + L" --save-write --write-id 18446744073709551616", 2);
+    std::printf("HARNESS_SAVE_WRITE_JSON %s", write_json.c_str());
+    const auto admission = query_save_admission(first.child.pid, 2000);
+    CHECK(admission.result == ProbeResult::ok && admission.snapshot.instance == initial.snapshot.instance);
+    CHECK(admission.admission.size == 160 && admission.admission.state == SC_SAVE_SESSION_DISABLED);
+    CHECK(admission.admission.flags == 0 && admission.admission.required_routes == 63);
+    const auto admission_json = probe(probe_path, args + L" --save-admission --json", 8);
+    CHECK(admission_json.find("\"state\":\"disabled\"") != std::string::npos);
+    CHECK(admission_json.find("\"route_retained\":false") != std::string::npos);
+    probe(probe_path, args + L" --save-admission --save-context", 2);
+    probe(probe_path, args + L" --save-admission --watch-count 2", 2);
+    CHECK(save.result == ProbeResult::ok && save.snapshot.instance == initial.snapshot.instance);
+    CHECK(save.save.mutation_available == 0 && save.save.mutation_reason == SC_SAVE_NATIVE_NAMESPACE_ROUTE_UNPROVEN);
+    CHECK(save.save.fields[SC_SAVE_NATIVE_COMPLETION].validity == SC_OBSERVATION_UNKNOWN);
+    const auto save_json = probe(probe_path, args + L" --save-context --json", 0);
+    CHECK(save_json.find("\"operation\":\"save_context\"") != std::string::npos);
+    CHECK(save_json.find("native_namespace_route_unproven") != std::string::npos);
+    probe(probe_path, args + L" --save-context --context", 2);
+    std::printf("HARNESS_SAVE_JSON %s", save_json.c_str());
     const auto watch_started = GetTickCount64();
     const auto watch = probe(probe_path, args + L" --engine --watch-count 2 --interval-ms 100 --json", 0);
     CHECK(std::count(watch.begin(), watch.end(), '\n') == 2 && GetTickCount64() - watch_started < 3000);

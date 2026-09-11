@@ -2,6 +2,8 @@
 #include "pipe_io.h"
 #include "engine_observer.h"
 #include "context_observer.h"
+#include "save_observer.h"
+#include "save_session.h"
 #include "native_runtime.h"
 #include <cstring>
 #include <bcrypt.h>
@@ -14,6 +16,7 @@ sentinel::Snapshot current{{sizeof(sc_status), SC_ABI_VERSION, capabilities, SC_
                            SC_OK, 0, 0, SC_VERSION, SC_BUILD_ID}};
 sc_engine_snapshot current_engine = sentinel::engine::unavailable(SC_REASON_NOT_SAMPLED);
 sc_context_snapshot current_context = sentinel::context::unavailable(SC_REASON_NOT_SAMPLED);
+sc_save_snapshot current_save = sentinel::save::unavailable(SC_REASON_NOT_SAMPLED);
 
 sc_result record(sc_result result, const char* message) {
     current.core.last_result = result;
@@ -26,6 +29,19 @@ sc_result record(sc_result result, const char* message) {
 }
 
 namespace sentinel {
+sc_save_snapshot current_save_snapshot() {
+    AcquireSRWLockShared(&lock);
+    auto result = current_save;
+    result.pid = current.pid; result.process_created = current.process_created;
+    std::memcpy(result.instance, current.instance.data(), sizeof(result.instance));
+    ReleaseSRWLockShared(&lock);
+    return save::freshness(result, GetTickCount64());
+}
+void publish_save(const sc_save_snapshot& snapshot) {
+    AcquireSRWLockExclusive(&lock);
+    if (current.core.state == SC_READY && current.service == ServiceState::listening) current_save = snapshot;
+    ReleaseSRWLockExclusive(&lock);
+}
 sc_context_snapshot current_context_snapshot() {
     AcquireSRWLockShared(&lock);
     auto result = current_context;
@@ -61,6 +77,7 @@ void inspection_failed(DWORD error) {
     AcquireSRWLockExclusive(&lock);
     current_engine = engine::unavailable(SC_REASON_INTERNAL_ERROR);
     current_context = context::unavailable(SC_REASON_INTERNAL_ERROR);
+    current_save = save::unavailable(SC_REASON_INTERNAL_ERROR);
     current.service = ServiceState::failed;
     current.service_error = error;
     record(SC_INSPECTION_FAILURE, "[Sentinel Core] inspection service failed; engine unavailable\n");
@@ -68,6 +85,25 @@ void inspection_failed(DWORD error) {
 }
 }
 
+sc_result sc_save_inspect(uint32_t abi, uint32_t size, sc_save_snapshot* snapshot) {
+    if (abi != SC_SAVE_ABI_VERSION) return SC_ABI_MISMATCH;
+    if (!snapshot || size != sizeof(sc_save_snapshot)) return SC_INVALID_ARGUMENT;
+    *snapshot = sentinel::current_save_snapshot();
+    return SC_OK;
+}
+
+sc_result sc_save_admission_inspect(uint32_t abi, uint32_t size, sc_save_admission_snapshot* snapshot) {
+    if (abi != SC_SAVE_ADMISSION_ABI_VERSION) return SC_ABI_MISMATCH;
+    if (!snapshot || size != sizeof(sc_save_admission_snapshot)) return SC_INVALID_ARGUMENT;
+    *snapshot = sentinel::save::session().inspect();
+    return SC_OK;
+}
+sc_result sc_save_write_inspect(uint32_t abi, uint32_t size, uint64_t operation_id, sc_save_write_snapshot* snapshot) {
+    if (abi != SC_SAVE_WRITE_ABI_VERSION) return SC_ABI_MISMATCH;
+    if (!snapshot || size != sizeof(sc_save_write_snapshot)) return SC_INVALID_ARGUMENT;
+    *snapshot = sentinel::save::session().native_writes.snapshot(operation_id);
+    return SC_OK;
+}
 sc_result sc_native_inspect(uint32_t abi, uint32_t size, sc_native_snapshot* snapshot) {
     if (abi != SC_NATIVE_ABI_VERSION) return SC_ABI_MISMATCH;
     if (!snapshot || size != sizeof(sc_native_snapshot)) return SC_INVALID_ARGUMENT;
@@ -117,6 +153,7 @@ sc_result sc_initialize(uint32_t abi, uint64_t required) {
         if (current.service != sentinel::ServiceState::listening) {
             current_engine = sentinel::engine::unavailable(SC_REASON_NOT_SAMPLED);
             current_context = sentinel::context::unavailable(SC_REASON_NOT_SAMPLED);
+            current_save = sentinel::save::unavailable(SC_REASON_NOT_SAMPLED);
             current.pid = GetCurrentProcessId();
             DWORD error = ERROR_SUCCESS;
             if (!sentinel::process_time(GetCurrentProcess(), current.process_created)) error = GetLastError();
@@ -144,6 +181,7 @@ sc_result sc_shutdown(void) {
     current.service = sentinel::ServiceState::stopping;
     current_engine = sentinel::engine::unavailable(SC_REASON_STOPPED);
     current_context = sentinel::context::unavailable(SC_REASON_STOPPED);
+    current_save = sentinel::save::unavailable(SC_REASON_STOPPED);
     ReleaseSRWLockExclusive(&lock);
     // Never hold the snapshot lock while joining an admitted reader.
     sentinel::native::stop();

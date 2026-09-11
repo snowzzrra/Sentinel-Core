@@ -1,8 +1,25 @@
 cmake_minimum_required(VERSION 3.24)
-project(SentinelCore VERSION 0.5.1 LANGUAGES C CXX)
+project(SentinelCore VERSION 0.6.0 LANGUAGES C CXX)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Sentinel Core currently requires Windows x64 and MSVC.")
 endif()
+# Detect /showIncludes as UTF-8, matching the compiler's piped output. CMake's
+# console-codepage detection can corrupt the localized prefix and lose all
+# header dependencies. VSLANG also falls back when English resources are absent.
+file(WRITE "${CMAKE_BINARY_DIR}/sentinel-dependency-probe.h" "\n")
+file(WRITE "${CMAKE_BINARY_DIR}/sentinel-dependency-probe.c" "#include \"sentinel-dependency-probe.h\"\n")
+execute_process(COMMAND "${CMAKE_COMMAND}" -E env VSLANG=1033 -- "${CMAKE_C_COMPILER}"
+  /nologo /showIncludes /Zs "${CMAKE_BINARY_DIR}/sentinel-dependency-probe.c"
+  OUTPUT_VARIABLE sc_dep_output ERROR_VARIABLE sc_dep_error RESULT_VARIABLE sc_dep_result ENCODING UTF-8)
+string(REGEX MATCH "([^\r\n]*: )[^\r\n]*sentinel-dependency-probe[.]h" sc_dep_match "${sc_dep_output}\n${sc_dep_error}")
+if(NOT sc_dep_result EQUAL 0 OR NOT sc_dep_match)
+  message(FATAL_ERROR "Cannot determine the MSVC header dependency prefix.")
+endif()
+set(CMAKE_CL_SHOWINCLUDES_PREFIX "${CMAKE_MATCH_1}")
+foreach(language C CXX)
+  set(CMAKE_${language}_COMPILER_LAUNCHER "${CMAKE_COMMAND}" -E env VSLANG=1033 --
+    ${CMAKE_${language}_COMPILER_LAUNCHER})
+endforeach()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -27,6 +44,16 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   include/sentinel_context.h src/context_observer.h src/context_observer.cpp
   include/sentinel_native.h src/native_model.h src/native_model.cpp
   src/native_target.h src/native_target.cpp src/native_runtime.h src/native_runtime.cpp
+  include/sentinel_save.h src/save_observer.h src/save_observer.cpp
+  src/save_storage.h src/save_storage.cpp tools/save_probe.h tools/save_probe.cpp
+  src/save_session.h src/save_session.cpp src/save_collector.h src/save_collector.cpp
+  src/save_delete.h src/save_delete.cpp src/save_write.h src/save_write.cpp
+  src/save_sdk_write.h src/save_sdk_write.cpp
+  src/save_profile.h src/save_profile.cpp
+  src/save_provider.h src/save_provider.cpp
+  src/save_catalog.h src/save_catalog.cpp
+  src/save_profile_prerequisite.h src/save_profile_prerequisite.cpp
+  src/save_native_hooks.h src/save_native_hooks.cpp
   third_party/minhook/include/MinHook.h third_party/minhook/src/hook.c
   third_party/minhook/src/buffer.c third_party/minhook/src/buffer.h
   third_party/minhook/src/trampoline.c third_party/minhook/src/trampoline.h
@@ -48,9 +75,12 @@ add_library(sentinel_protocol STATIC src/protocol.cpp)
 target_include_directories(sentinel_protocol PUBLIC include src)
 add_library(sentinel_inspection_client STATIC src/inspection_client.cpp)
 target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
-add_executable(sentinel_probe tools/probe.cpp)
-target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client bcrypt)
-add_library(sentinel_observer STATIC src/engine_observer.cpp src/context_observer.cpp)
+add_library(sentinel_save_storage STATIC src/save_storage.cpp)
+target_include_directories(sentinel_save_storage PUBLIC src)
+target_link_libraries(sentinel_save_storage PUBLIC bcrypt)
+add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp)
+target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client sentinel_save_storage bcrypt)
+add_library(sentinel_observer STATIC src/engine_observer.cpp src/context_observer.cpp src/save_observer.cpp)
 target_include_directories(sentinel_observer PUBLIC include src)
 target_link_libraries(sentinel_observer PUBLIC bcrypt)
 add_library(sentinel_minhook STATIC third_party/minhook/src/hook.c
@@ -62,8 +92,10 @@ target_include_directories(sentinel_minhook PUBLIC third_party/minhook/include t
 target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
 add_library(sentinel_native_model STATIC src/native_model.cpp)
 target_include_directories(sentinel_native_model PUBLIC include src)
-add_library(sentinel_native STATIC src/native_target.cpp src/native_runtime.cpp)
-target_link_libraries(sentinel_native PUBLIC sentinel_native_model sentinel_observer sentinel_minhook)
+add_library(sentinel_save_session STATIC src/save_session.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp)
+target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
+add_library(sentinel_native STATIC src/native_target.cpp src/native_runtime.cpp src/save_native_hooks.cpp)
+target_link_libraries(sentinel_native PUBLIC sentinel_native_model sentinel_observer sentinel_minhook sentinel_save_session)
 add_library(sentinel_core SHARED src/core.cpp src/inspection_server.cpp)
 target_link_libraries(sentinel_core PRIVATE sentinel_protocol sentinel_native advapi32 bcrypt)
 target_include_directories(sentinel_core PUBLIC include)
@@ -81,6 +113,30 @@ add_executable(sentinel_import_host tests/import_host.cpp)
 target_include_directories(sentinel_import_host PRIVATE include)
 target_link_libraries(sentinel_import_host PRIVATE sentinel_bootstrap gdi32)
 enable_testing()
+add_executable(sentinel_save_session_tests tests/save_session.cpp tests/save_profile.cpp tests/save_provider.cpp tests/save_sdk_write.cpp tests/save_readback.cpp)
+target_link_libraries(sentinel_save_session_tests PRIVATE sentinel_save_session)
+add_test(NAME native_save_session_collector_contract COMMAND sentinel_save_session_tests)
+set_tests_properties(native_save_session_collector_contract PROPERTIES TIMEOUT 15)
+add_test(NAME native_profile_selection_contract COMMAND sentinel_save_session_tests --profile)
+add_test(NAME native_sdk_write_ownership_contract COMMAND sentinel_save_session_tests --sdk-write)
+add_test(NAME native_write_readback_contract COMMAND sentinel_save_session_tests --readback)
+set_tests_properties(native_write_readback_contract PROPERTIES TIMEOUT 15)
+set_tests_properties(native_sdk_write_ownership_contract PROPERTIES TIMEOUT 15)
+set_tests_properties(native_profile_selection_contract PROPERTIES TIMEOUT 15)
+  add_test(NAME native_provider_identity_contract COMMAND sentinel_save_session_tests --provider)
+  set_tests_properties(native_provider_identity_contract PROPERTIES TIMEOUT 15)
+  add_test(NAME native_catalog_selection_contract COMMAND sentinel_save_session_tests --catalog)
+  set_tests_properties(native_catalog_selection_contract PROPERTIES TIMEOUT 15)
+  add_test(NAME native_profile_prerequisite_contract COMMAND sentinel_save_session_tests --prerequisite)
+  set_tests_properties(native_profile_prerequisite_contract PROPERTIES TIMEOUT 15)
+add_executable(sentinel_save_observer_tests tests/save_observer.cpp)
+target_link_libraries(sentinel_save_observer_tests PRIVATE sentinel_observer sentinel_protocol sentinel_core)
+add_test(NAME native_save_observation_contract COMMAND sentinel_save_observer_tests)
+set_tests_properties(native_save_observation_contract PROPERTIES TIMEOUT 10)
+add_executable(sentinel_save_storage_tests tests/save_storage.cpp)
+target_link_libraries(sentinel_save_storage_tests PRIVATE sentinel_save_storage)
+add_test(NAME isolated_save_storage_contract COMMAND sentinel_save_storage_tests)
+set_tests_properties(isolated_save_storage_contract PROPERTIES TIMEOUT 30)
 add_executable(sentinel_native_model_tests tests/native_model.cpp)
 target_link_libraries(sentinel_native_model_tests PRIVATE sentinel_native_model sentinel_protocol)
 add_test(NAME native_lifecycle_dispatch_model COMMAND sentinel_native_model_tests)
@@ -88,10 +144,10 @@ set_tests_properties(native_lifecycle_dispatch_model PROPERTIES TIMEOUT 10)
 # Separate test executable with explicit fixture adapters. The production Core
 # never compiles SC_NATIVE_TESTING or accepts an address/callback through IPC.
 add_executable(sentinel_native_host tests/native_host.cpp src/core.cpp src/inspection_server.cpp
-  src/native_runtime.cpp src/native_target.cpp)
+  src/native_runtime.cpp src/native_target.cpp src/save_native_hooks.cpp)
 target_include_directories(sentinel_native_host PRIVATE tests)
 target_link_libraries(sentinel_native_host PRIVATE sentinel_native_model sentinel_observer sentinel_minhook
-  sentinel_inspection_client advapi32 bcrypt)
+  sentinel_inspection_client sentinel_save_session advapi32 bcrypt)
 target_compile_definitions(sentinel_native_host PRIVATE SC_BUILDING_CORE SC_NATIVE_TESTING
   SC_VERSION="${PROJECT_VERSION}" SC_BUILD_ID="${SC_BUILD_ID}")
 add_dependencies(sentinel_native_host sentinel_probe)
@@ -109,10 +165,12 @@ target_link_libraries(sentinel_engine_tests PRIVATE sentinel_observer sentinel_p
 add_test(NAME engine_observation_contract COMMAND sentinel_engine_tests)
 set_tests_properties(engine_observation_contract PROPERTIES TIMEOUT 10)
 add_executable(sentinel_inspection_tests tests/inspection.cpp)
-target_link_libraries(sentinel_inspection_tests PRIVATE sentinel_inspection_client advapi32)
+target_link_libraries(sentinel_inspection_tests PRIVATE sentinel_inspection_client sentinel_save_storage advapi32)
 add_dependencies(sentinel_inspection_tests sentinel_core sentinel_probe)
 add_test(NAME live_inspection_contract COMMAND sentinel_inspection_tests "$<TARGET_FILE:sentinel_core>" "$<TARGET_FILE:sentinel_probe>")
 set_tests_properties(live_inspection_contract PROPERTIES TIMEOUT 40)
+add_test(NAME save_prelaunch_owner_contract COMMAND sentinel_inspection_tests "$<TARGET_FILE:sentinel_core>" "$<TARGET_FILE:sentinel_probe>" --prelaunch)
+set_tests_properties(save_prelaunch_owner_contract PROPERTIES TIMEOUT 15)
 add_test(NAME core_lifecycle COMMAND sentinel_harness --core "$<TARGET_FILE:sentinel_core>")
 add_test(NAME proxy_forwarding_lifecycle COMMAND sentinel_harness --proxy "$<TARGET_FILE:sentinel_bootstrap>")
 add_test(NAME proxy_normal_exit COMMAND sentinel_harness --exit "$<TARGET_FILE:sentinel_bootstrap>")

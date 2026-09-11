@@ -1,5 +1,7 @@
 #include "native_runtime.h"
 #include "native_target.h"
+#include "save_native_hooks.h"
+#include "save_session.h"
 #include "context_observer.h"
 #include "MinHook.h"
 #include <intrin.h>
@@ -281,6 +283,7 @@ void free_detour(uintptr_t root, uintptr_t slot) {
 }
 
 void prepare(const Snapshot& identity) {
+    save::configure_prelaunch();
     AcquireSRWLockExclusive(&lock);
     status = {}; status.size = sizeof(status); status.abi_version = SC_NATIVE_ABI_VERSION;
     bound_generation = 0; bound_map_address = 0; bound_map_name = {};
@@ -370,6 +373,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             for (unsigned i = 0; i < created; ++i) MH_RemoveHook(reinterpret_cast<void*>(targets[i].address));
             if (mh == MH_OK) MH_Uninitialize();
         }
+        if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
         AcquireSRWLockExclusive(&lock);
         status.installed_hooks = initial.installed_hooks; status.retained_module = pinned.load();
         status.reason = why; status.coverage = why ? 0 : 7;
@@ -438,18 +442,19 @@ sc_diagnostic_result result(const sc_diagnostic_request& request, bool cancel, s
     ReleaseSRWLockExclusive(&lock); return out;
 }
 bool stop() {
+    save::session().stop_requests();
     stopping.store(true, std::memory_order_release);
     accepting.store(false, std::memory_order_release);
     AcquireSRWLockExclusive(&startup); // Never called from a native callback.
     accepting.store(false, std::memory_order_release);
     AcquireSRWLockExclusive(&lock);
     diagnostics.cancel_pending(GetTickCount64()); clear_context(SC_NATIVE_STOPPED);
-    status.availability = pinned.load() ? SC_NATIVE_RETAINED : SC_NATIVE_DISABLED;
+    status.availability = retained() ? SC_NATIVE_RETAINED : SC_NATIVE_DISABLED;
     status.reason = SC_NATIVE_STOPPED;
     ReleaseSRWLockExclusive(&lock); ReleaseSRWLockExclusive(&startup);
-    return pinned.load(std::memory_order_acquire);
+    return retained();
 }
-bool retained() { return pinned.load(std::memory_order_acquire); }
+bool retained() { return pinned.load(std::memory_order_acquire) || save::owner_retained(); }
 #ifdef SC_NATIVE_TESTING
 void test_start(const TestAdapter& adapter, const Snapshot& identity, HANDLE stop_event) {
     fixture = adapter; fixture_active = true;

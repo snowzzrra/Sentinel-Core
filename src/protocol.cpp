@@ -53,18 +53,28 @@ void header(Writer& w, uint16_t version, uint16_t op, size_t payload, WireResult
 size_t encode_request(Message& out, uint64_t required, uint16_t version, uint16_t op) {
     Writer w{out}; header(w, version, op, 8, WireResult::ok); w.number(required, 8); return w.pos;
 }
+size_t encode_save_write_request(Message& out, uint64_t operation_id) {
+    Writer w{out}; header(w, wire_version, save_write_operation, 16, WireResult::ok);
+    w.number(save_write_capability, 8); w.number(operation_id, 8); return w.pos;
+}
 WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
-                          sc_diagnostic_request* diagnostic, uint64_t* after_event) {
+                          sc_diagnostic_request* diagnostic, uint64_t* after_event, uint64_t* write_id) {
     if (operation) *operation = inspect_operation;
     if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && op >= engine_operation && op <= diagnostic_detail_cancel_operation) *operation = static_cast<uint16_t>(op);
+    if (operation && op >= engine_operation && op <= save_write_operation) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op < inspect_operation || op > diagnostic_detail_cancel_operation) return WireResult::unsupported_operation;
-    if (op >= native_operation) {
+    if (op < inspect_operation || op > save_write_operation) return WireResult::unsupported_operation;
+    if (op == save_write_operation) {
+        if (length != 16) return WireResult::malformed;
+        if (r.number(8) != save_write_capability) return WireResult::capability_unavailable;
+        const auto id = r.number(8); if (write_id) *write_id = id;
+        return r.valid && r.pos == size ? WireResult::ok : WireResult::malformed;
+    }
+    if (op >= native_operation && op <= diagnostic_detail_cancel_operation) {
         if (length != (op == native_operation ? 16u : 72u)) return WireResult::malformed;
         const auto supported = op == native_operation ? native_capability :
             (op >= diagnostic_detail_submit_operation ? diagnostic_detail_capability : diagnostic_capability);
@@ -89,8 +99,8 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
         return r.valid && r.pos == size ? WireResult::ok : WireResult::malformed;
     }
     if (length != 8) return WireResult::malformed;
-    const auto supported = op == context_operation ? context_capability :
-        (op == engine_operation ? engine_capability : inspect_capability);
+    const auto supported = op == save_admission_operation ? save_admission_capability : (op == save_operation ? save_capability :
+        (op == context_operation ? context_capability : (op == engine_operation ? engine_capability : inspect_capability)));
     return (r.number(8) & ~supported) ? WireResult::capability_unavailable : WireResult::ok;
 }
 size_t encode_response(Message& out, WireResult result, const Snapshot& s) {
@@ -206,6 +216,238 @@ bool decode_engine_response(const Message& in, size_t size, WireResult& result, 
 const char* field_name(size_t field) {
     constexpr const char* names[] = {"root_available", "loading", "in_game", "map_present", "player_present", "cutscene_id"};
     return field < SC_ENGINE_FIELD_COUNT ? names[field] : "invalid_field";
+}
+// Op 11 is additive. Its field records use explicit widths, not C struct layout.
+size_t encode_save_response(Message& out, WireResult result, const Snapshot& s, const sc_save_snapshot& v) {
+    Writer w{out}; header(w, wire_version, save_operation, 0, result);
+    if (result == WireResult::ok) {
+        w.number(save_capability, 8); w.number(s.pid, 4); w.number(s.process_created, 8);
+        for (auto byte : s.instance) w.number(byte, 1);
+        w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id);
+        w.number(v.abi_version, 4); w.number(v.profile, 4); w.number(v.sequence, 8); w.number(v.sampled_at_ms, 8);
+        w.number(v.duration_ms, 4); w.number(v.sample_reason, 4); w.number(v.layout_revision, 4);
+        w.number(v.root_locator_reason, 4); w.number(v.mutation_available, 4); w.number(v.mutation_reason, 4);
+        for (const auto& f : v.fields) {
+            w.number(f.validity, 4); w.number(f.reason, 4); w.number(f.value, 8); w.number(f.win32_error, 4);
+        }
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.pos;
+}
+bool decode_save_response(const Message& in, size_t size, WireResult& result, Snapshot& s, sc_save_snapshot& v) {
+    if (size < header_size || size > max_message) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != save_operation ||
+        r.number(4) != size - header_size) return false;
+    const auto code = r.number(4);
+    if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code);
+    if (result != WireResult::ok) return size == header_size;
+    s = {}; v = {}; s.core.size = sizeof(sc_status); v.size = sizeof(v);
+    auto u32 = [&] { return static_cast<uint32_t>(r.number(4)); };
+    if (r.number(8) != save_capability) return false;
+    v.pid = s.pid = u32(); v.process_created = s.process_created = r.number(8);
+    for (size_t i = 0; i < s.instance.size(); ++i) v.instance[i] = s.instance[i] = static_cast<uint8_t>(r.number(1));
+    s.core.abi_version = u32(); r.text(s.core.version); r.text(s.core.build_id);
+    v.abi_version = u32(); v.profile = u32(); v.sequence = r.number(8); v.sampled_at_ms = r.number(8);
+    v.duration_ms = u32(); v.sample_reason = u32(); v.layout_revision = u32(); v.root_locator_reason = u32();
+    v.mutation_available = u32(); v.mutation_reason = u32();
+    if (s.core.abi_version != SC_ABI_VERSION || v.abi_version != SC_SAVE_ABI_VERSION ||
+        v.profile > SC_PROFILE_STEAM_20260818 || v.sample_reason > SC_REASON_STALE ||
+        v.root_locator_reason > SC_REASON_STALE || v.layout_revision > 1 ||
+        (v.layout_revision && v.profile != SC_PROFILE_STEAM_20260818) ||
+        v.mutation_available || v.mutation_reason != SC_SAVE_NATIVE_NAMESPACE_ROUTE_UNPROVEN) return false;
+    for (size_t i = 0; i < SC_SAVE_FIELD_COUNT; ++i) {
+        auto& f = v.fields[i]; f.validity = u32(); f.reason = u32(); f.value = r.number(8); f.win32_error = u32();
+        if (i >= SC_SAVE_SELECTED_SLOT) {
+            const uint32_t expected = i == SC_SAVE_SELECTED_SLOT ? SC_SAVE_SELECTED_SLOT_UNPROVEN :
+                (i == SC_SAVE_NAMESPACE_ROUTE ? SC_SAVE_NATIVE_NAMESPACE_ROUTE_UNPROVEN : SC_SAVE_COMPLETION_UNPROVEN);
+            if (f.validity != SC_OBSERVATION_UNKNOWN || f.reason != expected || f.value || f.win32_error) return false;
+        } else {
+            if (f.validity > SC_OBSERVATION_OBSERVED || f.reason > SC_REASON_STALE) return false;
+            if (f.validity == SC_OBSERVATION_UNKNOWN) { if (!f.reason || f.value) return false; }
+            else if (f.reason || f.win32_error || !v.layout_revision || v.root_locator_reason ||
+                f.value > (i == SC_SAVE_QUEUED_REQUESTS ? INT32_MAX :
+                    (i == SC_SAVE_PROVIDER ? SC_SAVE_PROVIDER_FOREIGN : 1)) ||
+                (i == SC_SAVE_PROVIDER && f.value == SC_SAVE_PROVIDER_UNKNOWN)) return false;
+        }
+    }
+    return r.valid && r.pos == size;
+}
+size_t encode_save_admission_response(Message& out, WireResult result, const Snapshot& s,
+                                      const sc_save_admission_snapshot& v) {
+    Writer w{out}; header(w, wire_version, save_admission_operation, 0, result);
+    if (result == WireResult::ok) {
+        w.number(save_admission_capability, 8); w.number(s.pid, 4); w.number(s.process_created, 8);
+        for (auto byte : s.instance) w.number(byte, 1);
+        w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id);
+        w.number(v.abi_version, 4); w.number(v.state, 4); w.number(v.fault, 4);
+        w.number(v.prepared_routes, 4); w.number(v.required_routes, 4); w.number(v.flags, 4);
+        for (auto c : v.namespace_id) w.number(static_cast<uint8_t>(c), 1);
+        for (auto c : v.native_root) w.number(static_cast<uint8_t>(c), 1);
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.pos;
+}
+bool decode_save_admission_response(const Message& in, size_t size, WireResult& result,
+                                     Snapshot& s, sc_save_admission_snapshot& v) {
+    if (size < header_size || size > max_message) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != save_admission_operation ||
+        r.number(4) != size - header_size) return false;
+    const auto code = r.number(4);
+    if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code);
+    if (result != WireResult::ok) return size == header_size;
+    s = {}; v = {}; s.core.size = sizeof(sc_status); v.size = sizeof(v);
+    if (r.number(8) != save_admission_capability) return false;
+    s.pid = static_cast<uint32_t>(r.number(4)); s.process_created = r.number(8);
+    for (auto& byte : s.instance) r.byte(byte);
+    r.u32(s.core.abi_version); r.text(s.core.version); r.text(s.core.build_id);
+    r.u32(v.abi_version); r.u32(v.state); r.u32(v.fault);
+    r.u32(v.prepared_routes); r.u32(v.required_routes); r.u32(v.flags);
+    for (auto& c : v.namespace_id) c = static_cast<char>(r.number(1));
+    for (auto& c : v.native_root) c = static_cast<char>(r.number(1));
+    if (!r.valid || r.pos != size || s.core.abi_version != SC_ABI_VERSION ||
+        v.abi_version != SC_SAVE_ADMISSION_ABI_VERSION || v.state > SC_SAVE_SESSION_BINDING ||
+        v.fault > 16 || v.required_routes != 63 || (v.prepared_routes & ~63u) || (v.flags & ~7u)) return false;
+    const bool has_id = v.namespace_id[0] != 0;
+    if (has_id) {
+        for (size_t i = 0; i < 64; ++i)
+            if (!((v.namespace_id[i] >= '0' && v.namespace_id[i] <= '9') ||
+                  (v.namespace_id[i] >= 'a' && v.namespace_id[i] <= 'f'))) return false;
+        if (v.namespace_id[64] || std::memcmp(v.native_root, "ap-", 3) ||
+            std::memcmp(v.native_root + 3, v.namespace_id, 40) || v.native_root[43]) return false;
+    } else {
+        for (auto c : v.namespace_id) if (c) return false;
+        for (auto c : v.native_root) if (c) return false;
+    }
+    const bool routed = (v.flags & SC_SAVE_SESSION_ROUTED) != 0;
+    const bool qualified = (v.flags & SC_SAVE_SESSION_STARTUP_QUALIFIED) != 0;
+    if (v.state == SC_SAVE_SESSION_DISABLED && (has_id || v.flags || v.prepared_routes)) return false;
+    if (v.state != SC_SAVE_SESSION_DISABLED && v.state != SC_SAVE_SESSION_REJECTED && !has_id) return false;
+    if ((v.state == SC_SAVE_SESSION_REJECTED || v.state == SC_SAVE_SESSION_FAULTED) != (v.fault != 0)) return false;
+    if (routed != (v.state == SC_SAVE_SESSION_ADMITTED || v.state == SC_SAVE_SESSION_FAULTED || v.state == SC_SAVE_SESSION_BINDING)) return false;
+    if (routed && (!qualified || v.prepared_routes != v.required_routes)) return false;
+    if ((v.flags & SC_SAVE_SESSION_ACCEPTING) && (!routed || v.state != SC_SAVE_SESSION_ADMITTED)) return false;
+    if (qualified && v.state <= SC_SAVE_SESSION_PREPARED) return false;
+    return true;
+}
+size_t encode_save_write_response(Message& out, WireResult result, const Snapshot& s,
+                                  const sc_save_write_snapshot& v) {
+    Writer w{out}; header(w, wire_version, save_write_operation, 0, result);
+    if (result == WireResult::ok) {
+        w.number(save_write_capability, 8); w.number(s.pid, 4); w.number(s.process_created, 8);
+        for (auto byte : s.instance) w.number(byte, 1);
+        w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id);
+        w.number(v.abi_version, 4); w.number(v.state, 4); w.number(v.flags, 4);
+        w.number(v.operation_id, 8); w.number(v.sdk_sequence, 8);
+        w.number(v.file_count, 4); w.number(v.submitted, 4); w.number(v.completed, 4); w.number(v.pending_handles, 4);
+        w.number(v.preparation_jobs, 4); w.number(v.preflight_jobs, 4); w.number(v.native_value, 4); w.number(v.reserved, 4);
+        w.number(static_cast<uint64_t>(v.native_state), 8); w.number(static_cast<uint64_t>(v.native_outcome), 8);
+        for (auto c : v.directory) w.number(static_cast<uint8_t>(c), 1);
+        for (auto c : v.reserved_bytes) w.number(c, 1);
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.pos;
+}
+bool decode_save_write_response(const Message& in, size_t size, WireResult& result,
+                                 Snapshot& s, sc_save_write_snapshot& v) {
+    if (size < header_size || size > max_message) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != save_write_operation ||
+        r.number(4) != size - header_size) return false;
+    const auto code = r.number(4);
+    if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code);
+    if (result != WireResult::ok) return size == header_size;
+    s = {}; v = {}; s.core.size = sizeof(sc_status); v.size = sizeof(v);
+    if (r.number(8) != save_write_capability) return false;
+    r.u32(s.pid); r.u64(s.process_created); for (auto& byte : s.instance) r.byte(byte);
+    r.u32(s.core.abi_version); r.text(s.core.version); r.text(s.core.build_id);
+    r.u32(v.abi_version); r.u32(v.state); r.u32(v.flags); r.u64(v.operation_id); r.u64(v.sdk_sequence);
+    r.u32(v.file_count); r.u32(v.submitted); r.u32(v.completed); r.u32(v.pending_handles);
+    r.u32(v.preparation_jobs); r.u32(v.preflight_jobs); r.u32(v.native_value); r.u32(v.reserved);
+    const auto state = r.number(8), outcome = r.number(8);
+    std::memcpy(&v.native_state, &state, 8); std::memcpy(&v.native_outcome, &outcome, 8);
+    for (auto& c : v.directory) c = static_cast<char>(r.number(1));
+    for (auto& c : v.reserved_bytes) r.byte(c);
+    if (!r.valid || r.pos != size || s.core.abi_version != SC_ABI_VERSION ||
+        v.abi_version != SC_SAVE_WRITE_ABI_VERSION || v.state > SC_SAVE_WRITE_READBACK_FAILED || (v.flags & ~32767u) ||
+        v.reserved || v.file_count > 1024 || v.submitted > v.file_count || v.completed > v.submitted ||
+        v.pending_handles > v.submitted - v.completed || v.preparation_jobs > 128 ||
+        v.preflight_jobs > 128 - v.preparation_jobs) return false;
+    for (auto c : v.reserved_bytes) if (c) return false;
+    bool ended = false;
+    for (unsigned char c : v.directory) {
+        if (!c) ended = true;
+        else if (ended || c < 32 || c > 126) return false;
+    }
+    if (!ended) return false;
+    if (v.state == SC_SAVE_WRITE_NONE || v.state == SC_SAVE_WRITE_NOT_RETAINED) {
+        return (v.state == SC_SAVE_WRITE_NONE ? !v.operation_id : v.operation_id != 0) &&
+            !(v.flags & ~SC_SAVE_WRITE_TRACKING_LOST) && !v.sdk_sequence && !v.file_count && !v.submitted &&
+            !v.completed && !v.pending_handles && !v.preparation_jobs && !v.preflight_jobs &&
+            !v.native_state && !v.native_outcome && !v.native_value && !v.directory[0];
+    }
+    if (!v.operation_id || !v.directory[0]) return false;
+    constexpr auto readback = SC_SAVE_WRITE_READBACK_ACTIVE | SC_SAVE_WRITE_READBACK_HASHES |
+        SC_SAVE_WRITE_READBACK_TERMINAL | SC_SAVE_WRITE_READBACK_ERROR;
+    if ((v.flags & readback) && !(v.flags & SC_SAVE_WRITE_READBACK_REQUIRED)) return false;
+    if ((v.flags & SC_SAVE_WRITE_READBACK_TERMINAL) &&
+        !(v.flags & (SC_SAVE_WRITE_READBACK_HASHES | SC_SAVE_WRITE_READBACK_ERROR))) return false;
+    constexpr auto proof = SC_SAVE_WRITE_PAYLOADS_PREPARED | SC_SAVE_WRITE_PAYLOADS_CAPTURED |
+        SC_SAVE_WRITE_CALLBACKS_SUCCEEDED | SC_SAVE_WRITE_SDK_SUCCEEDED;
+    if (!v.sdk_sequence && (v.submitted || v.completed || (v.flags & (proof | SC_SAVE_WRITE_UNPROVEN)))) return false;
+    if ((v.flags & proof) && !v.file_count) return false;
+    if ((v.flags & SC_SAVE_WRITE_PAYLOADS_CAPTURED) &&
+        (!(v.flags & SC_SAVE_WRITE_PAYLOADS_PREPARED) || v.submitted != v.file_count)) return false;
+    if ((v.flags & SC_SAVE_WRITE_CALLBACKS_SUCCEEDED) && (v.completed != v.file_count || v.pending_handles)) return false;
+    uint32_t expected = SC_SAVE_WRITE_PENDING;
+    if (!(v.flags & SC_SAVE_WRITE_PROVIDER_TERMINAL)) {
+        if (v.native_state || v.native_outcome || v.native_value) return false;
+        if (!(v.flags & SC_SAVE_WRITE_PROVIDER_ALIVE)) expected = SC_SAVE_WRITE_INDETERMINATE;
+    } else {
+        if (v.native_state == -1 || (v.native_state && (v.native_outcome || v.native_value))) return false;
+        if (v.native_state || v.native_outcome || v.native_value != 1) expected = SC_SAVE_WRITE_NATIVE_FAILED;
+        else expected = (v.flags & proof) == proof && !(v.flags & (SC_SAVE_WRITE_UNPROVEN | SC_SAVE_WRITE_TRACKING_LOST)) ?
+            SC_SAVE_WRITE_SDK_CONFIRMED : SC_SAVE_WRITE_NATIVE_SUCCEEDED;
+        if (expected == SC_SAVE_WRITE_SDK_CONFIRMED && (v.flags & SC_SAVE_WRITE_READBACK_REQUIRED))
+            expected = (v.flags & SC_SAVE_WRITE_READBACK_ERROR) ? SC_SAVE_WRITE_READBACK_FAILED :
+                (v.flags & SC_SAVE_WRITE_READBACK_TERMINAL) ? SC_SAVE_WRITE_READBACK_CONFIRMED : SC_SAVE_WRITE_READBACK_PENDING;
+    }
+    return v.state == expected;
+}
+const char* save_write_state_name(uint32_t state) {
+    constexpr const char* names[] = {"none", "pending", "native_failed", "native_succeeded",
+        "sdk_confirmed", "indeterminate", "not_retained", "readback_pending", "readback_confirmed", "readback_failed"};
+    return state < std::size(names) ? names[state] : "invalid";
+}
+const char* save_session_state_name(uint32_t state) {
+    constexpr const char* names[] = {"disabled", "prepared", "starting", "admitted", "rejected", "faulted", "binding"};
+    return state < std::size(names) ? names[state] : "invalid";
+}
+const char* save_session_fault_name(uint32_t fault) {
+    constexpr const char* names[] = {"none", "descriptor", "installation", "incomplete_routes", "startup_context",
+        "repeated_startup", "missed_startup", "provider_identity", "foreign_collector", "malformed_entry",
+        "native_collection", "native_copy", "unscoped_delete", "delete_indeterminate", "native_write", "native_profile", "native_read"};
+    return fault < std::size(names) ? names[fault] : "invalid";
+}
+const char* save_field_name(size_t field) {
+    constexpr const char* names[] = {"root_present", "profile_manager_present", "provider_kind", "queued_requests",
+        "pending_map_load", "save_job_witness", "request58_witness", "request50_witness", "selected_slot",
+        "namespace_route", "native_operation_id", "native_completion"};
+    return field < SC_SAVE_FIELD_COUNT ? names[field] : "invalid_field";
+}
+const char* save_reason_name(uint32_t reason) {
+    switch (reason) {
+    case SC_SAVE_UNSUPPORTED: return "unsupported";
+    case SC_SAVE_NATIVE_NAMESPACE_ROUTE_UNPROVEN: return "native_namespace_route_unproven";
+    case SC_SAVE_SELECTED_SLOT_UNPROVEN: return "selected_slot_unproven";
+    case SC_SAVE_COMPLETION_UNPROVEN: return "native_completion_unproven";
+    default: return reason_name(reason);
+    }
+}
+const char* save_provider_name(uint64_t provider) {
+    constexpr const char* names[] = {"unknown", "steam", "local_encrypted", "local", "foreign"};
+    return provider <= SC_SAVE_PROVIDER_FOREIGN ? names[provider] : "invalid_provider";
 }
 size_t encode_context_response(Message& out, WireResult result, const Snapshot& s, const sc_context_snapshot& c) {
     Writer w{out}; header(w, wire_version, context_operation, 0, result);

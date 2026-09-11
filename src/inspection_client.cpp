@@ -17,7 +17,8 @@ ProbeResult classify(DWORD error) {
 }
 }
 static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t required, uint16_t operation,
-                                   const sc_diagnostic_request* request = nullptr, uint64_t after_event = 0) {
+                                   const sc_diagnostic_request* request = nullptr, uint64_t after_event = 0,
+                                   uint64_t write_id = 0) {
     Inspection result;
     Handle process;
     auto fail = [&](DWORD error) {
@@ -73,7 +74,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(operation >= native_operation ?
+    const DWORD size = static_cast<DWORD>(operation == save_write_operation ? encode_save_write_request(data, write_id) :
+        operation >= native_operation && operation <= diagnostic_detail_cancel_operation ?
         encode_native_request(data, operation, request ? *request : sc_diagnostic_request{}, after_event) :
         encode_request(data, required, wire_version, operation));
     DWORD count = 0;
@@ -87,10 +89,13 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     WireResult code{};
     result.failure_stage = "decode_response";
     // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
-    bool decoded = operation >= native_operation ? decode_native_response(data, count, code, operation, result.snapshot, result.native, result.diagnostic, &result.detail) :
+    bool decoded = operation == save_write_operation ? decode_save_write_response(data, count, code, result.snapshot, result.write) :
+        operation == save_admission_operation ? decode_save_admission_response(data, count, code, result.snapshot, result.admission) :
+        (operation == save_operation ? decode_save_response(data, count, code, result.snapshot, result.save) :
+        (operation >= native_operation ? decode_native_response(data, count, code, operation, result.snapshot, result.native, result.diagnostic, &result.detail) :
         (operation == context_operation ? decode_context_response(data, count, code, result.snapshot, result.context) :
         (operation == engine_operation ? decode_engine_response(data, count, code, result.snapshot, result.engine) :
-        decode_response(data, count, code, result.snapshot)));
+        decode_response(data, count, code, result.snapshot)))));
     if (!decoded && operation != inspect_operation && count == header_size)
         decoded = decode_response(data, count, code, result.snapshot) && code != WireResult::ok;
     if (!decoded) {
@@ -111,6 +116,9 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         std::memcmp(result.diagnostic.nonce, request->nonce, sizeof(request->nonce)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
+    if (operation == save_write_operation && write_id && result.write.operation_id != write_id) {
+        result.result = ProbeResult::invalid_response; return result;
+    }
     result.result = ProbeResult::ok;
     result.failure_stage = "none"; result.target_state = "live";
     return result;
@@ -123,6 +131,15 @@ Inspection query_engine(uint32_t pid, uint32_t timeout_ms) {
 }
 Inspection query_context(uint32_t pid, uint32_t timeout_ms) {
     return query_operation(pid, timeout_ms, context_capability, context_operation);
+}
+Inspection query_save(uint32_t pid, uint32_t timeout_ms) {
+    return query_operation(pid, timeout_ms, save_capability, save_operation);
+}
+Inspection query_save_admission(uint32_t pid, uint32_t timeout_ms) {
+    return query_operation(pid, timeout_ms, save_admission_capability, save_admission_operation);
+}
+Inspection query_save_write(uint32_t pid, uint32_t timeout_ms, uint64_t operation_id) {
+    return query_operation(pid, timeout_ms, save_write_capability, save_write_operation, nullptr, 0, operation_id);
 }
 Inspection query_native(uint32_t pid, uint32_t timeout_ms, uint64_t after_event) {
     return query_operation(pid, timeout_ms, native_capability, native_operation, nullptr, after_event);

@@ -1,4 +1,5 @@
 #include "sentinel_inspection.h"
+#include "save_probe.h"
 #include "pipe_io.h"
 #include <windows.h>
 #include <cstdio>
@@ -213,7 +214,85 @@ void print_context(const sentinel::Inspection& r, uint32_t pid, bool json) {
     else std::puts("game_state: 0=main menu, 1=loading, 2=in game. state_changed_ms wraps; it is not a load serial.\n"
         "Bounded observation; static RE basis, runtime validation recorded externally. Gameplay authorization unvalidated.");
 }
-int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool engine, bool context) {
+void print_save(const sentinel::Inspection& r, bool json) {
+    const auto& v = r.save; const auto& s = r.snapshot;
+    const auto now = GetTickCount64();
+    const auto age = v.sampled_at_ms && now >= v.sampled_at_ms ? std::to_string(now - v.sampled_at_ms) : "null";
+    if (json) std::printf("{\"result\":\"ok\",\"operation\":\"save_context\",\"wire_version\":1,\"save_abi\":%u,"
+        "\"save_query_capability\":64,\"core_version\":%s,\"build_id\":%s,\"target_pid\":%u,\"server_pid\":%u,"
+        "\"process_created\":\"%llu\",\"instance_id\":\"%s\",\"host_path\":%s,\"sequence\":\"%llu\","
+        "\"sampled_at_ms\":\"%llu\",\"sample_age_ms\":%s,\"sample_duration_ms\":%u,\"sample_reason\":\"%s\","
+        "\"profile\":%u,\"layout_revision\":%u,\"root_locator_reason\":\"%s\",\"mutation_available\":false,"
+        "\"mutation_reason\":\"%s\",\"provider\":\"%s\",\"native_runtime_evidence\":\"pending\",\"fields\":{",
+        v.abi_version, quoted(s.core.version).c_str(), quoted(s.core.build_id).c_str(), s.pid, r.server_pid,
+        s.process_created, sentinel::instance_text(s.instance).c_str(), quoted(utf8(r.host_path)).c_str(),
+        v.sequence, v.sampled_at_ms, age.c_str(), v.duration_ms, sentinel::save_reason_name(v.sample_reason),
+        v.profile, v.layout_revision, sentinel::reason_name(v.root_locator_reason), sentinel::save_reason_name(v.mutation_reason),
+        sentinel::save_provider_name(v.fields[SC_SAVE_PROVIDER].value));
+    else std::printf("Sentinel %s | save ABI=%u wire=1 | PID=%u (OS server verified)\nbuild=%s\n"
+        "process_created=%llu instance_id=%s\nprofile=%u layout_revision=%u root_locator=%s\n"
+        "sample=%llu tick_ms=%llu age_ms=%s duration_ms=%u reason=%s\nmutation_available=no reason=%s\nprovider=%s\n",
+        s.core.version, v.abi_version, r.server_pid, s.core.build_id, s.process_created, sentinel::instance_text(s.instance).c_str(),
+        v.profile, v.layout_revision, sentinel::reason_name(v.root_locator_reason), v.sequence, v.sampled_at_ms,
+        age.c_str(), v.duration_ms, sentinel::save_reason_name(v.sample_reason), sentinel::save_reason_name(v.mutation_reason),
+        sentinel::save_provider_name(v.fields[SC_SAVE_PROVIDER].value));
+    for (size_t i = 0; i < SC_SAVE_FIELD_COUNT; ++i) {
+        const auto& f = v.fields[i];
+        const auto value = f.validity == SC_OBSERVATION_UNKNOWN ? "null" : std::to_string(f.value);
+        if (json) std::printf("%s\"%s\":{\"validity\":\"%s\",\"reason\":\"%s\",\"value\":%s,\"win32_error\":%u}",
+            i ? "," : "", sentinel::save_field_name(i), sentinel::validity_name(f.validity),
+            sentinel::save_reason_name(f.reason), value.c_str(), f.win32_error);
+        else std::printf("  %s=%s validity=%s reason=%s win32=%u\n", sentinel::save_field_name(i), value.c_str(),
+            sentinel::validity_name(f.validity), sentinel::save_reason_name(f.reason), f.win32_error);
+    }
+    if (json) std::puts("}}");
+    else std::puts("Zero queued requests or job witnesses does not prove idle, completion or persistence.\n"
+        "Native selected slot, namespace routing and completion remain unproven; manual runtime evidence is pending.");
+}
+int print_admission(const sentinel::Inspection& r, bool json) {
+    const auto& v = r.admission; const auto& s = r.snapshot;
+    if (json) std::printf("{\"result\":\"ok\",\"operation\":\"save_admission\",\"wire_version\":1,"
+        "\"admission_abi\":%u,\"core_version\":%s,\"build_id\":%s,\"target_pid\":%u,\"server_pid\":%u,"
+        "\"process_created\":\"%llu\",\"instance_id\":\"%s\",\"state\":\"%s\",\"fault\":\"%s\","
+        "\"prepared_routes\":%u,\"required_routes\":%u,\"startup_qualified\":%s,\"route_retained\":%s,"
+        "\"accepting_requests\":%s,\"namespace_id\":\"%s\",\"native_root\":\"%s\"}\n",
+        v.abi_version, quoted(s.core.version).c_str(), quoted(s.core.build_id).c_str(), s.pid, r.server_pid, s.process_created,
+        sentinel::instance_text(s.instance).c_str(), sentinel::save_session_state_name(v.state), sentinel::save_session_fault_name(v.fault),
+        v.prepared_routes, v.required_routes, v.flags & SC_SAVE_SESSION_STARTUP_QUALIFIED ? "true" : "false",
+        v.flags & SC_SAVE_SESSION_ROUTED ? "true" : "false", v.flags & SC_SAVE_SESSION_ACCEPTING ? "true" : "false",
+        v.namespace_id, v.native_root);
+    else std::printf("Sentinel %s | admission ABI=%u | PID=%u (OS server verified)\nbuild=%s\n"
+        "state=%s fault=%s prepared_routes=%u required_routes=%u flags=%u\nnamespace=%s native_root=%s\n",
+        s.core.version, v.abi_version, s.pid, s.core.build_id, sentinel::save_session_state_name(v.state),
+        sentinel::save_session_fault_name(v.fault), v.prepared_routes, v.required_routes, v.flags, v.namespace_id, v.native_root);
+    // A readable status is not a successful preflight. Existing observation CLI exits are unchanged.
+    return v.state == SC_SAVE_SESSION_ADMITTED && (v.flags & SC_SAVE_SESSION_ACCEPTING) ? 0 : 8;
+}
+void print_save_write(const sentinel::Inspection& r, bool json) {
+    const auto& v = r.write; const auto& s = r.snapshot;
+    const auto native_result = v.flags & SC_SAVE_WRITE_PROVIDER_TERMINAL ?
+        std::string("{\"state\":") + std::to_string(v.native_state) + ",\"outcome\":" +
+        std::to_string(v.native_outcome) + ",\"value\":" + std::to_string(v.native_value) + "}" : "null";
+    if (json) std::printf("{\"result\":\"ok\",\"operation\":\"save_write\",\"wire_version\":1,\"write_abi\":%u,"
+        "\"core_version\":%s,\"build_id\":%s,\"target_pid\":%u,\"server_pid\":%u,\"process_created\":\"%llu\","
+        "\"instance_id\":\"%s\",\"operation_id\":\"%llu\",\"sdk_sequence\":\"%llu\",\"state\":\"%s\","
+        "\"directory\":%s,\"flags\":%u,\"file_count\":%u,\"submitted\":%u,\"completed\":%u,"
+        "\"pending_handles\":%u,\"preparation_jobs\":%u,\"preflight_jobs\":%u,\"native_result\":%s,"
+        "\"readback_verified\":%s,\"persistence_verified\":false,\"reopen_verified\":false}\n",
+        v.abi_version, quoted(s.core.version).c_str(), quoted(s.core.build_id).c_str(), s.pid, r.server_pid,
+        s.process_created, sentinel::instance_text(s.instance).c_str(), v.operation_id, v.sdk_sequence,
+        sentinel::save_write_state_name(v.state), quoted(v.directory).c_str(), v.flags, v.file_count, v.submitted,
+        v.completed, v.pending_handles, v.preparation_jobs, v.preflight_jobs, native_result.c_str(),
+        v.state == SC_SAVE_WRITE_READBACK_CONFIRMED ? "true" : "false");
+    else std::printf("Sentinel %s | write ABI=%u | PID=%u (OS server verified)\nbuild=%s\n"
+        "operation=%llu sdk_sequence=%llu state=%s directory=%s flags=%u\n"
+        "files=%u submitted=%u completed=%u pending_handles=%u preparation_jobs=%u preflight_jobs=%u native_result=%s\n"
+        "Readback confirms transport bytes; playable reopen and global idle remain separate.\n",
+        s.core.version, v.abi_version, s.pid, s.core.build_id, v.operation_id, v.sdk_sequence,
+        sentinel::save_write_state_name(v.state), v.directory, v.flags, v.file_count, v.submitted, v.completed,
+        v.pending_handles, v.preparation_jobs, v.preflight_jobs, native_result.c_str());
+}
+int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool engine, bool context, bool save = false) {
     const char* result = sentinel::result_name(r.result);
     if (r.result != sentinel::ProbeResult::ok) {
         if (json) std::printf("{\"result\":\"%s\",\"target_pid\":%u,\"win32_error\":%u,\"failure_stage\":\"%s\","
@@ -224,6 +303,7 @@ int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool en
         return static_cast<int>(r.result);
     }
     const auto& s = r.snapshot;
+    if (save) { print_save(r, json); return 0; }
     if (context) { print_context(r, pid, json); return 0; }
     const auto id = sentinel::instance_text(s.instance);
     if (engine) {
@@ -298,16 +378,23 @@ int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool en
     return 0;
 }
 int wmain(int argc, wchar_t** argv) {
+    const int storage_result = save_storage_command(argc, argv);
+    if (storage_result >= 0) return storage_result;
     uint32_t pid = 0, timeout = 2000, count = 1, interval = 1000;
-    bool json = false, engine = false, context = false, native = false, valid = true;
+    bool json = false, engine = false, context = false, native = false, save = false, admission = false, write = false, valid = true;
+    uint64_t write_id = 0; bool saw_write_id = false;
     uint16_t diagnostic_op = 0;
     sc_diagnostic_request request{}; request.deadline_ms = 1000;
     bool saw_created = false, saw_instance = false, saw_generation = false, saw_nonce = false, saw_id = false, saw_deadline = false;
     bool saw_pid = false, saw_timeout = false, saw_count = false, saw_interval = false;
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--help") == 0 && argc == 2) {
-            std::puts("sentinel_probe --pid PID [--timeout-ms 50..10000] [--json] [--engine | --context | --native]\n"
-                "Capture: --context, --engine or --native --watch-count 1..600 [--interval-ms 100..10000]\n"
+            std::puts("sentinel_probe --pid PID [--timeout-ms 50..10000] [--json] [--engine | --context | --native | --save-context]\n"
+                "Capture: --context, --engine, --native or --save-context --watch-count 1..600 [--interval-ms 100..10000]\n"
+                "Save context: read-only provider/request witnesses; native namespace mutation remains unavailable.\n"
+                "Admission preflight: --save-admission (one query; exit 8 unless admitted and accepting).\n"
+                "Write evidence: --save-write [--write-id N] (latest if omitted); supports capture.\n"
+                "  SDK confirmation is separate from persistence and reopen; observation exit 0 is not save success.\n"
                 "Harmless diagnostic: --diagnostic [--deadline-ms 1..5000] (submit then retrieve; no engine commands).\n"
                 "Retrieve/cancel: --diagnostic-result or --diagnostic-cancel, with --request-id N --nonce HEX32\n"
                 "  --expect-created N --expect-instance HEX32 --expect-generation N (from the prepared request).\n"
@@ -320,6 +407,12 @@ int wmain(int argc, wchar_t** argv) {
         else if (wcscmp(argv[i], L"--engine") == 0 && !engine) engine = true;
         else if (wcscmp(argv[i], L"--context") == 0 && !context) context = true;
         else if (wcscmp(argv[i], L"--native") == 0 && !native) native = true;
+        else if (wcscmp(argv[i], L"--save-context") == 0 && !save) save = true;
+        else if (wcscmp(argv[i], L"--save-admission") == 0 && !admission) admission = true;
+        else if (wcscmp(argv[i], L"--save-write") == 0 && !write) write = true;
+        else if (wcscmp(argv[i], L"--write-id") == 0 && !saw_write_id && i + 1 < argc) {
+            saw_write_id = true; valid = number64(argv[++i], write_id) && write_id && valid;
+        }
         else if (wcscmp(argv[i], L"--diagnostic") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_detail_submit_operation;
         else if (wcscmp(argv[i], L"--diagnostic-result") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_detail_result_operation;
         else if (wcscmp(argv[i], L"--diagnostic-cancel") == 0 && !diagnostic_op) diagnostic_op = sentinel::diagnostic_detail_cancel_operation;
@@ -348,8 +441,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (!valid || !pid || timeout < sentinel::min_timeout_ms || timeout > sentinel::max_timeout_ms ||
         !count || count > 600 || interval < 100 || interval > 10000 || uint64_t(count) * interval > 600000 ||
-        (unsigned(engine) + unsigned(context) + unsigned(native) + unsigned(diagnostic_op != 0) > 1) ||
-        (saw_count && !engine && !context && !native) || (saw_interval && !saw_count) ||
+        (unsigned(engine) + unsigned(context) + unsigned(native) + unsigned(save) + unsigned(admission) + unsigned(write) + unsigned(diagnostic_op != 0) > 1) ||
+        (saw_count && !engine && !context && !native && !save && !write) || (saw_interval && !saw_count) || (saw_write_id && !write) ||
         (saw_deadline && !diagnostic_op) || !request.deadline_ms || request.deadline_ms > SC_DIAGNOSTIC_MAX_DEADLINE_MS ||
         ((saw_created || saw_instance || saw_generation || saw_id || saw_nonce) && diagnostic_op <= sentinel::diagnostic_detail_submit_operation) ||
         (diagnostic_op > sentinel::diagnostic_detail_submit_operation && !(saw_created && saw_instance && saw_generation && saw_id && saw_nonce))) {
@@ -403,16 +496,20 @@ int wmain(int argc, wchar_t** argv) {
     for (uint32_t i = 0; i < count; ++i) {
         if (WaitForSingleObject(stop.value, 0) != WAIT_TIMEOUT) break;
         const auto started = GetTickCount64();
-        auto r = native ? sentinel::query_native(pid, timeout, after_event) : (context ? sentinel::query_context(pid, timeout) :
-            (engine ? sentinel::query_engine(pid, timeout) : sentinel::query(pid, timeout)));
+        auto r = write ? sentinel::query_save_write(pid, timeout, write_id) :
+            admission ? sentinel::query_save_admission(pid, timeout) : (save ? sentinel::query_save(pid, timeout) :
+            (native ? sentinel::query_native(pid, timeout, after_event) :
+            (context ? sentinel::query_context(pid, timeout) : (engine ? sentinel::query_engine(pid, timeout) : sentinel::query(pid, timeout)))));
         if (r.result == sentinel::ProbeResult::ok && i &&
             (r.snapshot.process_created != first.process_created || r.snapshot.instance != first.instance))
             r.result = sentinel::ProbeResult::process_mismatch;
         if (!i) first = r.snapshot;
-        if (native && r.result == sentinel::ProbeResult::ok) {
+        if (write && r.result == sentinel::ProbeResult::ok) print_save_write(r, json);
+        else if (admission && r.result == sentinel::ProbeResult::ok) result = print_admission(r, json);
+        else if (native && r.result == sentinel::ProbeResult::ok) {
             print_native(r, json);
             if (r.native.event_count) after_event = r.native.events[r.native.event_count - 1].sequence;
-        } else result = print_result(r, pid, json, engine, context);
+        } else result = print_result(r, pid, json, engine, context, save);
         std::fflush(stdout);
         if (result || i + 1 == count || GetTickCount64() >= deadline) break;
         const auto next = std::min(deadline, started + interval);

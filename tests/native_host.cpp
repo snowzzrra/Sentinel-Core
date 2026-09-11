@@ -194,6 +194,13 @@ int wmain(int argc, wchar_t** argv) {
         CHECK(memory.copy(addresses[i], adapter.targets[i].bytes.data(), 32).reason == SC_REASON_NONE);
         CHECK(native::validate_target(memory, image, adapter.targets[i], nullptr, GetTickCount64() + 3000) == SC_NATIVE_NONE);
     }
+    auto distinct = adapter.targets[0]; distinct.signature_offset = 1;
+    CHECK(memory.copy(distinct.address + 1, distinct.signature.data(), 32).reason == SC_REASON_NONE);
+    CHECK(native::validate_target(memory, image, distinct, nullptr, GetTickCount64() + 3000) == SC_NATIVE_NONE);
+    distinct.signature[0] ^= 1;
+    CHECK(native::validate_target(memory, image, distinct, nullptr, GetTickCount64() + 3000) == SC_NATIVE_TARGET_BYTES);
+    distinct.signature_offset = UINT32_MAX;
+    CHECK(native::validate_target(memory, image, distinct, nullptr, GetTickCount64() + 3000) == SC_NATIVE_TARGET_BOUNDARY);
     // Foreign entry redirection in task-owned code only; parked callback cannot
     // enter it. Validator rejects it without following/overwriting the jump.
     DWORD protect = 0, ignored = 0;
@@ -293,6 +300,12 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(!native::inspect().context_generation && native::inspect().event_gap_count);
     const auto original_count = originals.load();
     sc_native_snapshot exact{};
+    sc_save_admission_snapshot admission_status{};
+    CHECK(sc_save_admission_inspect(SC_SAVE_ADMISSION_ABI_VERSION, sizeof(admission_status), &admission_status) == SC_OK);
+    CHECK(admission_status.size == 160 && admission_status.state == SC_SAVE_SESSION_DISABLED);
+    CHECK(sc_save_admission_inspect(SC_SAVE_ADMISSION_ABI_VERSION + 1, sizeof(admission_status), &admission_status) == SC_ABI_MISMATCH);
+    CHECK(sc_save_admission_inspect(SC_SAVE_ADMISSION_ABI_VERSION, sizeof(admission_status) - 1, &admission_status) == SC_INVALID_ARGUMENT);
+    CHECK(sc_save_admission_inspect(SC_SAVE_ADMISSION_ABI_VERSION, sizeof(admission_status), nullptr) == SC_INVALID_ARGUMENT);
     CHECK(sc_native_inspect(SC_NATIVE_ABI_VERSION, sizeof(exact), &exact) == SC_OK);
     CHECK(sc_native_inspect(SC_NATIVE_ABI_VERSION + 1, sizeof(exact), &exact) == SC_ABI_MISMATCH);
     CHECK(sc_native_inspect(SC_NATIVE_ABI_VERSION, sizeof(exact) - 1, &exact) == SC_INVALID_ARGUMENT);

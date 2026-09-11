@@ -4,6 +4,7 @@
 #include "sentinel_engine.h"
 #include "sentinel_context.h"
 #include "sentinel_native.h"
+#include "sentinel_save.h"
 #include <array>
 #include <cstddef>
 #include <string>
@@ -24,6 +25,12 @@ constexpr uint64_t native_capability = 8, diagnostic_capability = 16;
 constexpr uint16_t diagnostic_detail_submit_operation = 8,
     diagnostic_detail_result_operation = 9, diagnostic_detail_cancel_operation = 10;
 constexpr uint64_t diagnostic_detail_capability = 32;
+constexpr uint16_t save_operation = 11;
+constexpr uint64_t save_capability = 64; // Read-only save observation; no native mutation.
+constexpr uint16_t save_admission_operation = 12;
+constexpr uint64_t save_admission_capability = 128;
+constexpr uint16_t save_write_operation = 13;
+constexpr uint64_t save_write_capability = 256;
 constexpr size_t max_request = 512, max_message = 1024;
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
 enum class WireResult : uint32_t { ok, incompatible_protocol, capability_unavailable,
@@ -56,14 +63,26 @@ struct Inspection {
     sc_native_snapshot native{};
     sc_diagnostic_result diagnostic{};
     sc_diagnostic_detail detail{};
+    sc_save_snapshot save{};
+    sc_save_admission_snapshot admission{};
+    sc_save_write_snapshot write{};
 };
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required = inspect_capability);
 Inspection query_engine(uint32_t pid, uint32_t timeout_ms);
 Inspection query_context(uint32_t pid, uint32_t timeout_ms);
+Inspection query_save(uint32_t pid, uint32_t timeout_ms);
+Inspection query_save_admission(uint32_t pid, uint32_t timeout_ms);
+Inspection query_save_write(uint32_t pid, uint32_t timeout_ms, uint64_t operation_id = 0);
+const char* save_write_state_name(uint32_t state);
+const char* save_session_state_name(uint32_t state);
+const char* save_session_fault_name(uint32_t fault);
 Inspection query_native(uint32_t pid, uint32_t timeout_ms, uint64_t after_event = 0);
 Inspection query_diagnostic(uint32_t pid, uint32_t timeout_ms, uint16_t operation,
                             const sc_diagnostic_request& request);
 const char* native_reason_name(uint32_t reason);
+const char* save_reason_name(uint32_t reason);
+const char* save_field_name(size_t field);
+const char* save_provider_name(uint64_t provider);
 const char* diagnostic_state_name(uint32_t state);
 const char* diagnostic_stage_name(uint32_t stage);
 const char* context_field_name(size_t field);

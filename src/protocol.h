@@ -7,7 +7,9 @@ constexpr size_t header_size = 16;
 size_t encode_request(Message& out, uint64_t required, uint16_t version = wire_version,
                       uint16_t operation = inspect_operation);
 WireResult decode_request(const Message& in, size_t size, uint16_t* operation = nullptr,
-                          sc_diagnostic_request* diagnostic = nullptr, uint64_t* after_event = nullptr);
+                          sc_diagnostic_request* diagnostic = nullptr, uint64_t* after_event = nullptr,
+                          uint64_t* write_id = nullptr);
+size_t encode_save_write_request(Message&, uint64_t operation_id);
 size_t encode_native_request(Message& out, uint16_t operation,
                               const sc_diagnostic_request& request, uint64_t after_event = 0);
 size_t encode_native_response(Message& out, WireResult result, uint16_t operation,
@@ -27,4 +29,12 @@ size_t encode_context_response(Message& out, WireResult result, const Snapshot& 
                                const sc_context_snapshot& context);
 bool decode_context_response(const Message& in, size_t size, WireResult& result,
                              Snapshot& snapshot, sc_context_snapshot& context);
+size_t encode_save_response(Message& out, WireResult result, const Snapshot& snapshot,
+                            const sc_save_snapshot& save);
+bool decode_save_response(const Message& in, size_t size, WireResult& result,
+                          Snapshot& snapshot, sc_save_snapshot& save);
+size_t encode_save_admission_response(Message&, WireResult, const Snapshot&, const sc_save_admission_snapshot&);
+bool decode_save_admission_response(const Message&, size_t, WireResult&, Snapshot&, sc_save_admission_snapshot&);
+size_t encode_save_write_response(Message&, WireResult, const Snapshot&, const sc_save_write_snapshot&);
+bool decode_save_write_response(const Message&, size_t, WireResult&, Snapshot&, sc_save_write_snapshot&);
 }
