@@ -103,6 +103,28 @@ class ProtectionTests(unittest.TestCase):
             protection.protect(self.args)
         self.assertEqual(self.snapshot(), original)
 
+    def test_unknown_stat_link_count_requires_real_single_link_handle(self):
+        class UnknownLinks:
+            st_nlink = 0
+            def __init__(self, value): self.value = value
+            def __getattr__(self, name): return getattr(self.value, name)
+        info = self.campaign.lstat()
+        expected = self.campaign.read_bytes()
+        with mock.patch.object(Path, 'lstat', return_value=UnknownLinks(info)):
+            self.assertEqual(protection.check_node(self.campaign).st_nlink, 0)
+        with mock.patch.object(protection.os, 'fstat', return_value=UnknownLinks(info)):
+            with protection.pinned(self.campaign) as source:
+                self.assertEqual(source.read(), expected)
+        linked = self.campaign.with_name('second-name')
+        os.link(self.campaign, linked)
+        with self.assertRaises(protection.Refused) as caught:
+            protection.check_node(self.campaign)
+        self.assertEqual(caught.exception.private_metadata['handle_nlink'], 2)
+        self.assertEqual(caught.exception.distinction, 'confirmed_multiple_file_links')
+        with self.assertRaises(protection.Refused) as caught:
+            protection.verify_links(mock.Mock(GetFileInformationByHandleEx=lambda *unused: False), 0, self.campaign, 'fixture_query_failure', 0)
+        self.assertEqual(caught.exception.distinction, 'handle_link_query_failed')
+
     def test_source_share_conflict_refused_before_destination_created(self):
         with self.campaign.open("rb"):
             with self.assertRaisesRegex(protection.Refused, "pin a path exclusively"):

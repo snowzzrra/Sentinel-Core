@@ -11,7 +11,7 @@
 
 namespace sentinel::engine {
 namespace {
-constexpr size_t chunk_size = 256 * 1024;
+constexpr size_t chunk_size = Memory::maximum_copy;
 constexpr uintptr_t highest_address = 0x00007FFFFFFFFFFFULL;
 constexpr uint32_t readable = IMAGE_SCN_MEM_READ, writable = IMAGE_SCN_MEM_WRITE;
 constexpr uint32_t executable = IMAGE_SCN_MEM_EXECUTE;

@@ -15,15 +15,18 @@ bool Session::is_profile_request(uintptr_t data) const {
     return data && data == profile_data_;
 }
 void Session::profile_step(ProfileStage stage, ProfileStatus status, const char* predicate,
-        bool attempted, int64_t state, int64_t outcome, uint32_t value) {
+        bool attempted, int64_t state, int64_t outcome, uint32_t value, ProfileRead read) {
     std::lock_guard<std::mutex> guard(profile_trace_mutex_);
     auto& step = profile_trace_.steps[static_cast<size_t>(stage)];
     if (step.status == status && step.predicate == predicate && step.native_attempted == attempted &&
-        step.native_state == state && step.native_outcome == outcome && step.native_value == value) return;
+        step.native_state == state && step.native_outcome == outcome && step.native_value == value &&
+        step.read.reason == read.reason && step.read.error == read.error && step.read.requested == read.requested &&
+        step.read.offset == read.offset && step.read.size == read.size) return;
     const auto now = GetTickCount64();
     if (!step.first_ms) step.first_ms = now;
     step.changed_ms = now; step.status = status; step.predicate = predicate;
     step.native_attempted = attempted; step.native_state = state; step.native_outcome = outcome; step.native_value = value;
+    step.read = read;
     if (status == ProfileStatus::refused) {
         if (profile_trace_.failed_stage == ProfileStage::count) {
             profile_trace_.failed_stage = stage; profile_trace_.failure = step;

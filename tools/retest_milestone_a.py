@@ -45,6 +45,12 @@ class Refused(Exception):
     pass
 
 
+class CollectionUnavailable(Refused):
+    def __init__(self, operation, result):
+        super().__init__(operation + "_unavailable")
+        self.operation, self.result = operation, result
+
+
 def utc():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
 
@@ -260,10 +266,7 @@ $ErrorActionPreference = 'Stop'
 $items = @(Get-Process -Name 'DOOMEternalx64vk' -ErrorAction SilentlyContinue)
 $records = @($items | ForEach-Object {
     $p = $_
-    $modules = @($p.Modules | Where-Object { $_.ModuleName -in @('sentinel_core.dll','msimg32.dll') } | ForEach-Object {
-        @{basename=$_.ModuleName; path=$_.FileName; sha256=(Get-FileHash -LiteralPath $_.FileName -Algorithm SHA256).Hash.ToLowerInvariant()}
-    })
-    @{pid=$p.Id; path=$p.Path; process_created=$p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(); modules=$modules}
+    @{pid=$p.Id; path=$p.Path; process_created=$p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()}
 })
 ConvertTo-Json -InputObject $records -Depth 5 -Compress
 """
@@ -271,9 +274,11 @@ ConvertTo-Json -InputObject $records -Depth 5 -Compress
 
 def observe_game(config, prefix):
     result = run_command([config["PowerShell7"], "-NoProfile", "-NonInteractive", "-Command", PROCESS_SCRIPT], prefix, 8)
+    if result["cancelled"]: raise KeyboardInterrupt
     if result["exit_code"] != 0 or result["stdout_truncated"]:
-        raise Refused("game_process_inventory_unavailable")
-    items = json.loads(result["stdout"])
+        raise CollectionUnavailable("process_identity", result)
+    try: items = json.loads(result["stdout"])
+    except (ValueError, TypeError): raise CollectionUnavailable("process_identity_JSON", result)
     if not isinstance(items, list) or len(items) != 1:
         raise Refused("no_game_process" if items == [] else "ambiguous_game_processes")
     observed = items[0]
@@ -281,6 +286,67 @@ def observe_game(config, prefix):
     if Path(observed["path"]) != expected:
         raise Refused("game_executable_path_mismatch")
     return observed
+
+
+MODULE_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$operation = 'module_enumeration'
+try {
+    [Console]::Error.WriteLine($operation)
+    $p = Get-Process -Id __PID__
+    if ($p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -ne '__CREATED__') { throw 'process_identity_changed' }
+    $modules = @($p.Modules | Where-Object { $_.ModuleName -in @('sentinel_core.dll','msimg32.dll') } | ForEach-Object {
+        $operation = 'module_disk_hash'; [Console]::Error.WriteLine($operation)
+        @{basename=$_.ModuleName; path=$_.FileName; sha256=(Get-FileHash -LiteralPath $_.FileName -Algorithm SHA256).Hash.ToLowerInvariant()}
+    })
+    $operation = 'system_forwarder_disk_hash'; [Console]::Error.WriteLine($operation)
+    $system = Join-Path ([Environment]::SystemDirectory) 'msimg32.dll'
+    @{modules=$modules; system_path=$system; system_sha256=(Get-FileHash -LiteralPath $system -Algorithm SHA256).Hash.ToLowerInvariant()} | ConvertTo-Json -Depth 5 -Compress
+} catch {
+    [Console]::Error.WriteLine(($operation + ': ' + $_.Exception.ToString()))
+    exit 1
+}
+"""
+
+
+def observe_modules(config, process, prefix):
+    script = MODULE_SCRIPT.replace('__PID__', str(int(process['pid']))).replace('__CREATED__', str(int(process['process_created'])))
+    result = run_command([config['PowerShell7'], '-NoProfile', '-NonInteractive', '-Command', script], prefix, 8)
+    if result['cancelled']: raise KeyboardInterrupt
+    if result['exit_code'] != 0 or result['stdout_truncated']:
+        raise CollectionUnavailable('module_collection', result)
+    try:
+        value = json.loads(result['stdout'])
+        if not isinstance(value, dict) or not isinstance(value.get('modules'), list): raise ValueError()
+        return value
+    except (ValueError, TypeError): raise CollectionUnavailable('module_collection_JSON', result)
+
+
+def module_roles(config, manifest, observation):
+    api = protection.kernel()
+    api.GetSystemDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = api.GetSystemDirectoryW(buffer, len(buffer))
+    if not length or length >= len(buffer): raise Refused('system_directory_identity_unavailable')
+    system = Path(buffer.value) / 'msimg32.dll'
+    hashes = {item['name']: item['sha256'] for item in manifest['files']}
+    expected = {Path(config['GameInstall']) / name: ('game_core' if name == 'sentinel_core.dll' else 'game_proxy', hashes[name])
+                for name in ('sentinel_core.dll', 'msimg32.dll')}
+    if Path(observation.get('system_path', '')) != system or not re.fullmatch('[0-9a-f]{64}', observation.get('system_sha256', '')):
+        raise Refused('system_forwarder_reference_identity_mismatch')
+    expected[system] = ('windows_system_forwarder', observation['system_sha256'])
+    rows = []; seen = set()
+    for module in observation['modules']:
+        name = module.get('basename', '').lower()
+        role, digest = expected.get(Path(module.get('path', '')), ('untrusted_same_name', None))
+        valid = role != 'untrusted_same_name' and module.get('sha256') == digest and name == Path(module['path']).name.lower()
+        verification = 'verified_path_and_disk_hash' if valid else 'path_or_disk_hash_mismatch'
+        if role in seen and role != 'untrusted_same_name': verification = 'duplicate_role'
+        seen.add(role)
+        rows.append({**module, 'role': role, 'verification': verification})
+    mismatch = any(row['verification'] != 'verified_path_and_disk_hash' for row in rows)
+    state = 'verified_mismatch' if mismatch else 'verified' if {'game_core', 'game_proxy'} <= seen else 'not_yet_observable'
+    return state, rows
 
 
 class Handoff:
@@ -462,14 +528,57 @@ class Run:
 
     def fail(self, error, stage):
         failure = safe_failure(error, self.config, stage)
+        key = {k: failure.get(k) for k in ('operation', 'stage', 'reason', 'distinction', 'win32_error')}
+        known = [self.state.get('primary_failure'), *self.state.get('secondary_failures', [])]
+        for item in known:
+            if item and all(item.get(k) == value for k, value in key.items()):
+                item['occurrences'] = item.get('occurrences', 1) + 1
+                self.save()
+                return
         private = {**failure, "original_error": str(error), "metadata": getattr(error, "private_metadata", None)}
-        write_json(self.prefix("failure-" + stage).with_suffix(".private.json"), private, create=True)
+        write_json(self.prefix("failure-" + stage + '-' + uuid.uuid4().hex[:8]).with_suffix(".private.json"), private, create=True)
         if not self.state.get("primary_failure"):
             self.state["primary_failure"] = failure
         else:
             self.state.setdefault("secondary_failures", []).append(failure)
         self.save()
         print(stage + ": " + failure["reason"])
+
+    def collection(self, operation, prefix, call):
+        health = self.state.setdefault('collection_health', {'operations': {}})
+        entry = health['operations'].setdefault(operation, {'attempts': 0, 'failures': 0, 'recoveries': 0, 'state': 'not_observed', 'history': []})
+        for attempt in range(3):
+            entry['attempts'] += 1
+            target = prefix.with_name(prefix.name + '-' + str(attempt + 1))
+            try:
+                value = call(target)
+                if entry['state'] == 'unavailable': entry['recoveries'] += 1
+                if entry['state'] != 'available':
+                    entry['history'].append({'utc': utc(), 'state': 'available', 'attempt': entry['attempts']})
+                entry['state'] = 'available'
+                self.save()
+                return value
+            except CollectionUnavailable as error:
+                raw = error.result
+                detail = {k: raw.get(k) for k in ('exit_code', 'timed_out', 'cancelled', 'launch_error', 'win32_error', 'duration_ms', 'stdout_truncated', 'stderr_truncated')}
+                # Full stderr and exact paths remain in the individual private receipts.
+                detail.pop('launch_error', None)
+                detail['launch_failed'] = bool(raw.get('launch_error'))
+                phases = [line for line in raw.get('stderr', '').splitlines() if line in
+                          ('module_enumeration', 'module_disk_hash', 'system_forwarder_disk_hash')]
+                detail['operation'] = phases[-1] if phases else error.operation
+                detail['private_receipt'] = target.name + '.result.private.json'
+                entry['failures'] += 1
+                entry['last_failure'] = detail
+                if entry['state'] != 'unavailable':
+                    entry['history'].append({'utc': utc(), 'state': 'unavailable', 'attempt': entry['attempts'], **detail})
+                entry['history'] = entry['history'][-64:]
+                entry['state'] = 'unavailable'; self.save()
+                if attempt < 2: time.sleep(attempt + 1)
+        return None  # Unknown collection state never means process exit or replacement.
+
+    def observe_identity(self, prefix):
+        return self.collection('process_identity', prefix, lambda target: observe_game(self.config, target))
 
     def helper(self, label, script, arguments, timeout=180):
         command = [self.config["Python"], "-B", str(Path(self.config["CandidateManifest"]).parent / script), *arguments]
@@ -645,11 +754,12 @@ class Run:
                 item.get("build_id") != self.state["manifest"]["build_id"]):
                 raise Refused("automatic_log_process_or_build_identity_mismatch")
             trace = item.get("profile", {})
-            step_keys = ("first_ms", "changed_ms", "elapsed_ms", "status", "predicate", "native_attempted", "native_state", "native_outcome", "native_value")
+            step_keys = ("first_ms", "changed_ms", "elapsed_ms", "status", "predicate", "native_attempted", "native_state", "native_outcome", "native_value",
+                         "read_reason", "read_error", "read_requested", "read_offset", "read_size")
             profile = {**scalars(trace, ("request_id", "identity_kind", "identity_matched", "deadline_basis", "account_network_state", "downstream_refusals", "first_failed_stage")),
                 "first_failure": scalars(trace.get("first_failure", {}), step_keys),
                 "steps": {key: scalars(trace.get("steps", {}).get(key, {}), step_keys) for key in
-                    ("request", "profile_created", "catalog_created", "first_poll", "prepare", "decode", "transport", "catalog_poll", "catalog", "reader", "framing", "checksum", "parse", "overlay", "application", "root", "admission", "write_after_refusal")}}
+                    ("request", "profile_created", "catalog_created", "first_poll", "prepare", "decode", "transport", "catalog_poll", "catalog", "reader", "framing", "checksum", "parse", "overlay", "application", "root", "admission", "write_after_refusal", "output_validation")}}
             rows.append({**scalars(item, ("schema", "control_sha256", "pid", "process_created", "build_id", "at_ms", "engine_reason")), "profile": profile,
                 "admission": scalars(item.get("admission", {}), ("state", "fault", "flags", "prepared_routes", "required_routes", "namespace_id")),
                 "installation": {**scalars(item.get("installation", {}), ("phase", "sequence", "startup_observation", "last_completed_stage", "validated", "created", "enabled")),
@@ -686,28 +796,33 @@ class Run:
             while True:
                 attempt += 1
                 try:
-                    self.state["process"] = observe_game(self.config, self.directory / "private" / ("discovery-" + str(attempt)))
-                    self.state["process"]["instance_id"] = None
-                    self.save()
-                    break
+                    observed = self.observe_identity(self.directory / "private" / ("discovery-" + str(attempt)))
+                    if observed:
+                        self.state["process"] = {**observed, "instance_id": None}
+                        self.save()
+                        break
                 except Refused as error:
                     if str(error) != "no_game_process": raise
                     if self.discover_recorded_process(): break
                 if time.monotonic() >= deadline: raise Refused("game_discovery_deadline_no_game_observed")
                 time.sleep(1)
             deadline = time.monotonic() + self.config.get("ObservationSeconds", 1800)
-            captures = 0; last_log = None
+            captures = 0; last_log = None; next_capture = 0
             while self.state["process"].get("source") != "automatic_record_only":
                 self.collect_startup_log()
                 signature = json.dumps(self.state.get("automatic_log"), sort_keys=True)
-                if captures == 0 or (signature != last_log and captures < 8):
+                retry_modules = self.state.get('capture_health', {}).get('module_state') != 'verified'
+                if captures < 8 and (captures == 0 or signature != last_log or (retry_modules and time.monotonic() >= next_capture)):
                     try: self.capture()
-                    except (Refused, protection.Refused, OSError, ValueError) as error: self.fail(error, "safe_capture")
+                    except (Refused, protection.Refused, OSError, ValueError) as error:
+                        self.fail(error, "safe_capture")
+                        if 'replaced' in str(error) or 'identity_mismatch' in str(error) or str(error) == 'loaded_module_identity_verified_mismatch': raise
                     captures += 1; last_log = signature
+                    next_capture = time.monotonic() + 30
                 attempt += 1
                 try:
-                    observed = observe_game(self.config, self.directory / "private" / ("observation-" + str(attempt)))
-                    if any(str(observed[k]) != str(self.state["process"][k]) for k in ("pid", "process_created", "path")):
+                    observed = self.observe_identity(self.directory / "private" / ("observation-" + str(attempt)))
+                    if observed and any(str(observed[k]) != str(self.state["process"][k]) for k in ("pid", "process_created", "path")):
                         raise Refused("game_process_replaced")
                 except Refused as error:
                     if str(error) == "no_game_process": break
@@ -741,7 +856,8 @@ class Run:
         namespace_refusal = None
         probe = Path(self.config["CandidateManifest"]).parent / "sentinel_probe.exe"
         for index, query in enumerate(QUERIES):
-            observed = observe_game(self.config, self.directory / "private" / f"capture-{capture_id}-{index}-process")
+            observed = self.observe_identity(self.directory / "private" / f"capture-{capture_id}-{index}-process")
+            if observed is None: return
             previous = self.state["process"]
             if previous and any(str(previous[key]) != str(observed[key]) for key in ("pid", "process_created", "path")):
                 raise Refused("game_process_replaced_remaining_queries_not_performed")
@@ -783,20 +899,21 @@ class Run:
                 record["response"] = safe_response(query, response)
             self.save()
             # Admission exit 8 is evidence, never a reason to skip safe queries.
-        final = observe_game(self.config, self.directory / "private" / f"capture-{capture_id}-final-process")
-        if any(str(final[key]) != str(self.state["process"][key]) for key in ("pid", "process_created", "path")):
+        final = self.observe_identity(self.directory / "private" / f"capture-{capture_id}-final-process")
+        if final and any(str(final[key]) != str(self.state["process"][key]) for key in ("pid", "process_created", "path")):
             raise Refused("game_process_replaced_at_capture_end")
-        hashes = {entry["name"]: entry["sha256"] for entry in manifest["files"]}
-        modules = final.get("modules", [])
-        mismatched = any(Path(module["path"]) != Path(self.config["GameInstall"]) / module["basename"].lower()
-                         or module["sha256"] != hashes.get(module["basename"].lower()) for module in modules)
-        module_state = "verified_mismatch" if mismatched else "verified" if len(modules) == 2 else "not_yet_observable"
+        observation = self.collection('module_collection', self.directory / 'private' / f'capture-{capture_id}-modules',
+            lambda target: observe_modules(self.config, self.state['process'], target)) if final else None
+        after = self.observe_identity(self.directory / 'private' / f'capture-{capture_id}-modules-process') if observation else None
+        if after and any(str(after[key]) != str(self.state['process'][key]) for key in ('pid', 'process_created', 'path')):
+            raise Refused('game_process_replaced_during_module_collection')
+        module_state, modules = module_roles(self.config, manifest, observation) if observation and after else ('collection_unavailable', [])
         health = self.state.setdefault("capture_health", {"module_history": []})
         health["module_state"] = module_state
         health["module_history"].append({"capture": capture_id, "state": module_state, "observed_modules": len(modules)})
-        if module_state == "verified": self.state["process"]["modules"] = modules
+        if modules: self.state["process"]["modules"] = modules
         self.save()
-        if mismatched: raise Refused("loaded_module_identity_verified_mismatch")
+        if module_state == 'verified_mismatch': raise Refused("loaded_module_identity_verified_mismatch")
         if namespace_refusal:
             raise Refused(namespace_refusal)
         for item in self.state["commands"][-len(QUERIES):]:
@@ -815,7 +932,7 @@ class Run:
             return  # Export cannot reattribute later legitimate changes to a completed test.
         self.state["operator"] = {"attribution": "operator_supplied_not_script_verified", "catalog": args.catalog,
                                   "selection": args.selection, "rollback": args.rollback, "note": redact(args.note, self.config)}
-        if self.state.get("process") and self.state.get("capture_health", {}).get("module_state") == "not_yet_observable":
+        if self.state.get("process") and self.state.get("capture_health", {}).get("module_state") in ('not_yet_observable', 'collection_unavailable'):
             self.fail(Refused("loaded_module_identity_not_established"), "capture_health")
         comparison = {"state": "not_performed", "reason": "game_not_observed_and_no_activation"}
         self.state["comparison"] = comparison
@@ -852,8 +969,8 @@ class Run:
         for module in (process or {}).get("modules", []):
             name = module.get("basename", "").lower()
             if name in ("sentinel_core.dll", "msimg32.dll"):
-                matches = (Path(module.get("path", "")) == Path(self.config["GameInstall"]) / name and module.get("sha256") == hashes.get(name))
-                modules.append({"basename": name, "on_disk_sha256": module.get("sha256"), "matches_installed_candidate": matches})
+                modules.append({'basename': name, 'role': module.get('role', 'not_classified'),
+                    'verification': module.get('verification', 'not_verified'), 'on_disk_sha256': module.get('sha256')})
         report = {"schema": "sentinel-milestone-a-retest-shareable-v1", "run_id": self.state["run_id"],
             "started_utc": self.state["started_utc"], "finished_utc": self.state.get("finished_utc"),
             "expected": {"build_id": manifest.get("build_id"), "product_version": manifest.get("product_version"),
@@ -867,6 +984,8 @@ class Run:
             "previous_comparisons": self.state.get("previous_comparisons", []),
             "automatic_startup": self.state.get("automatic_log", {"state": "not_observed"}),
             "capture_health": self.state.get("capture_health", {"module_state": "not_observed", "module_history": []}),
+            "collection_health": self.state.get('collection_health', {'operations': {}}),
+            "module_evidence_limit": "verified mapped paths and current disk hashes do not attest every loaded byte",
             "process": {**scalars(process or {}, ("pid", "process_created", "instance_id")), "modules": modules},
             "stages": self.state["stages"], "commands": self.state["commands"],
             "comparison": self.state.get("comparison", {"state": "pending", "reason": "FINISH_not_run"}),
@@ -905,6 +1024,8 @@ class Run:
         if report["native_failure"]:
             summary.append("Native game failure: " + json.dumps(report["native_failure"], sort_keys=True))
         summary.append("Capture health: " + json.dumps(report["capture_health"], sort_keys=True))
+        for operation, status in report['collection_health']['operations'].items():
+            summary.append(f"Collection {operation}: {status['state']}; failed attempts={status['failures']}; recoveries={status['recoveries']}.")
         if trace:
             summary.append("PROFILE initialization: " + json.dumps(trace, sort_keys=True))
         if report["primary_failure"]: summary.append("First workflow failure (separate from native cause): " + json.dumps(report["primary_failure"], sort_keys=True))

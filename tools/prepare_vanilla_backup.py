@@ -115,8 +115,36 @@ def check_node(path):
     if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
         raise Refused("non-regular source entry")
     if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
-        raise Refused("hard-linked files are not supported")
+        # Windows path stat may report an unavailable link count. Establish it
+        # using file metadata, never infer a hard link from zero/unknown.
+        api = kernel()
+        handle = api.CreateFileW(str(path), 0x80, 7, None, 3, 0x00200000, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise Refused("file link metadata unavailable", distinction="path_link_count_unverified",
+                win32_error=ctypes.get_last_error(), private={"path": str(path), "operation": "path_link_attributes_open", "raw_path_nlink": info.st_nlink})
+        try:
+            verify_links(api, handle, path, "path_link_metadata", info.st_nlink)
+        finally:
+            api.CloseHandle(handle)
     return info
+
+
+def verify_links(api, handle, path, operation, raw_count):
+    class Standard(ctypes.Structure):
+        _fields_ = [("allocation", ctypes.c_int64), ("size", ctypes.c_int64), ("links", wintypes.DWORD),
+                    ("delete_pending", wintypes.BOOLEAN), ("directory", wintypes.BOOLEAN)]
+    value = Standard()
+    private = {"path": str(path), "operation": operation, "raw_stat_nlink": raw_count}
+    if not api.GetFileInformationByHandleEx(handle, 1, ctypes.byref(value), ctypes.sizeof(value)):
+        raise Refused("file link metadata unavailable", distinction="handle_link_query_failed",
+                      win32_error=ctypes.get_last_error(), private=private)
+    private.update(handle_nlink=value.links, delete_pending=bool(value.delete_pending))
+    if value.links > 1:
+        raise Refused("hard-linked files are not supported", distinction="confirmed_multiple_file_links", private=private)
+    if value.links != 1 or value.delete_pending or value.directory:
+        raise Refused("file link metadata is not a stable single file", distinction="handle_link_state_unverified", private=private)
+    if raw_count not in (0, 1):
+        raise Refused("path and handle link metadata disagree", distinction="link_metadata_changed", private=private)
 
 
 @contextlib.contextmanager
@@ -155,8 +183,8 @@ def pinned(path, directory=False):
             fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
             handle = None  # fd owns the Windows handle now.
             with os.fdopen(fd, "rb") as source:
-                if os.fstat(source.fileno()).st_nlink != 1:
-                    raise Refused("hard-linked files are not supported")
+                verify_links(api, msvcrt.get_osfhandle(source.fileno()), path, "exclusive_handle_link_metadata",
+                             os.fstat(source.fileno()).st_nlink)
                 yield source
     finally:
         if handle is not None:

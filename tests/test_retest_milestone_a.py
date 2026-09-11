@@ -92,9 +92,17 @@ class RetestWorkflowTests(unittest.TestCase):
         self.stop_patch = mock.patch.object(retest.protection, "require_stopped")
         self.stopped = self.stop_patch.start()
         self.addCleanup(self.stop_patch.stop)
+        self.actual_observe_game = retest.observe_game
         self.process_patch = mock.patch.object(retest, "observe_game", side_effect=lambda *unused: copy.deepcopy(self.observed))
         self.process_mock = self.process_patch.start()
         self.addCleanup(self.process_patch.stop)
+        self.system_forwarder = str(Path(os.environ['SystemRoot']) / 'System32/msimg32.dll')
+        self.module_observed = {'modules': copy.deepcopy(self.observed['modules']) +
+            [{'basename': 'msimg32.dll', 'path': self.system_forwarder, 'sha256': 'c' * 64}],
+            'system_path': self.system_forwarder, 'system_sha256': 'c' * 64}
+        module_patch = mock.patch.object(retest, 'observe_modules', side_effect=lambda *unused: copy.deepcopy(self.module_observed))
+        self.module_mock = module_patch.start()
+        self.addCleanup(module_patch.stop)
         self.command_patch = mock.patch.object(retest, "run_command", side_effect=self.fixture_command)
         self.command_patch.start()
         self.addCleanup(self.command_patch.stop)
@@ -185,6 +193,24 @@ class RetestWorkflowTests(unittest.TestCase):
         self.assertEqual(len(list(directory.glob("*.zip"))), 1)
         self.assertEqual(code, 1)  # Native refusal remains evidence, never a PASS.
 
+    def test_run_survives_transient_identity_collection_and_exports_after_exit(self):
+        observations = iter([retest.CollectionUnavailable('process_identity', {'exit_code': None, 'timed_out': True})] * 3 +
+                            [copy.deepcopy(self.observed), retest.Refused('no_game_process')])
+        def observe(config, prefix):
+            value = next(observations) if 'observation-' in prefix.name else copy.deepcopy(self.observed)
+            if isinstance(value, Exception): raise value
+            return value
+        self.process_mock.side_effect = observe
+        with mock.patch.object(retest.time, 'sleep'):
+            code, output = self.stage('RUN')
+        state, directory = self.state()
+        self.assertEqual(code, 1)  # Retained native refusal, never a collection/DOOM PASS.
+        self.assertEqual(state['process']['pid'], self.observed['pid'], output)
+        self.assertEqual(state['collection_health']['operations']['process_identity']['failures'], 3)
+        self.assertEqual(state['collection_health']['operations']['process_identity']['recoveries'], 1)
+        self.assertEqual(self.report(directory)['comparison']['response']['result'], 'vanilla_campaign_unchanged')
+        self.assertFalse((self.game / 'sentinel-prelaunch.txt').exists())
+
     def test_successive_runs_refresh_current_metadata_preserve_first_and_compare_current(self):
         self.assertEqual(self.stage("PREPARE")[0], 0)
         first_state, first_run = self.state()
@@ -271,10 +297,10 @@ class RetestWorkflowTests(unittest.TestCase):
         (diagnostic / (str(self.observed["pid"])+"-"+str(self.observed["process_created"])+".jsonl")).write_text(
             (json.dumps(earlier)+"\n") * 96 + json.dumps(record)+"\n")
         with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "log-root")}): run.collect_startup_log()
-        self.process_mock.side_effect = lambda *unused: {**copy.deepcopy(self.observed), "modules": []}
+        self.module_mock.side_effect = lambda *unused: {**copy.deepcopy(self.module_observed), 'modules': []}
         with self.assertRaises(retest.protection.Refused): run.capture()
         self.assertEqual(run.state["capture_health"]["module_state"], "not_yet_observable")
-        self.process_mock.side_effect = lambda *unused: copy.deepcopy(self.observed)
+        self.module_mock.side_effect = lambda *unused: copy.deepcopy(self.module_observed)
         with self.assertRaises(retest.protection.Refused): run.capture()
         run.export()
         report = self.report(run.directory)
@@ -286,6 +312,63 @@ class RetestWorkflowTests(unittest.TestCase):
         summary = (run.directory / "shareable/SUMMARY.md").read_text()
         self.assertIn("Native game failure:", summary)
         self.assertIn("native_authentication_refused", summary)
+
+    def test_module_roles_include_system_forwarder_reject_wrong_paths_and_duplicates(self):
+        state, rows = retest.module_roles(self.config, self.manifest, self.module_observed)
+        self.assertEqual(state, 'verified')
+        self.assertEqual({row['role'] for row in rows}, {'game_core', 'game_proxy', 'windows_system_forwarder'})
+        for defect in ('unknown_path', 'wrong_hash', 'duplicate_proxy', 'duplicate_core', 'duplicate_system'):
+            with self.subTest(defect=defect):
+                observed = copy.deepcopy(self.module_observed)
+                if defect == 'unknown_path': observed['modules'][2]['path'] = str(self.root / 'untrusted/msimg32.dll')
+                elif defect == 'wrong_hash': observed['modules'][1]['sha256'] = 'd' * 64
+                else: observed['modules'].append(copy.deepcopy(observed['modules'][{'duplicate_proxy': 1, 'duplicate_core': 0, 'duplicate_system': 2}[defect]]))
+                self.assertEqual(retest.module_roles(self.config, self.manifest, observed)[0], 'verified_mismatch')
+
+    def test_optional_collection_timeout_recovers_identity_and_deduplicates_warning(self):
+        run = retest.Run(self.config_path, 'RUN'); run.prepare(); run.state['process'] = copy.deepcopy(self.observed)
+        run.state['process']['instance_id'] = 'b' * 32
+        failure = retest.CollectionUnavailable('module_collection', {'timed_out': True, 'exit_code': None,
+            'stderr': 'module_disk_hash\nDO_NOT_EXPORT', 'stdout': '', 'duration_ms': 8016})
+        self.module_mock.side_effect = [failure, failure, failure, copy.deepcopy(self.module_observed)]
+        with mock.patch.object(retest.time, 'sleep'):
+            with self.assertRaises(retest.protection.Refused): run.capture()
+        self.assertEqual(run.state['capture_health']['module_state'], 'collection_unavailable')
+        self.assertEqual(run.state['process']['instance_id'], 'b' * 32)
+        with self.assertRaises(retest.protection.Refused): run.capture()
+        operation = run.state['collection_health']['operations']['module_collection']
+        self.assertEqual((operation['failures'], operation['recoveries']), (3, 1))
+        self.assertEqual(operation['last_failure']['operation'], 'module_disk_hash')
+        self.assertEqual(run.state['capture_health']['module_state'], 'verified')
+        for unused in range(3): run.fail(retest.Refused('same_warning'), 'safe_capture')
+        self.assertEqual(run.state['primary_failure']['occurrences'], 3)
+        self.assertEqual(run.state['secondary_failures'], [])
+        run.export(); report = self.report(run.directory)
+        self.assertNotIn('DO_NOT_EXPORT', json.dumps(report))
+        self.assertNotIn(self.system_forwarder, json.dumps(report))
+        self.assertEqual(report['process']['modules'][2]['role'], 'windows_system_forwarder')
+
+    def test_process_collection_errors_preserve_identity_and_replacement_stops_queries(self):
+        run = retest.Run(self.config_path, 'RUN'); run.prepare(); run.state['process'] = copy.deepcopy(self.observed)
+        run.state['process']['instance_id'] = 'b' * 32
+        original = copy.deepcopy(run.state['process'])
+        for raw in ({'timed_out': True, 'exit_code': None}, {'timed_out': False, 'exit_code': 5, 'stderr': 'access denied'}):
+            self.process_mock.side_effect = retest.CollectionUnavailable('process_identity', raw)
+            with mock.patch.object(retest.time, 'sleep'): run.capture()
+            self.assertEqual(run.state['process'], original)
+            self.assertEqual(self.queries, [])
+        self.process_mock.side_effect = lambda *unused: {**self.observed, 'process_created': '134077788800000001'}
+        with self.assertRaisesRegex(retest.Refused, 'game_process_replaced'): run.capture()
+        self.process_mock.side_effect = lambda *unused: copy.deepcopy(self.observed)
+        self.query_responses['basic'] = lambda response, code: ({**response, 'instance_id': 'd' * 32}, code)
+        with self.assertRaisesRegex(retest.Refused, 'core_instance_replaced'): run.capture()
+        self.assertEqual(self.queries, ['basic'])
+
+    def test_inventory_nonzero_and_cancel_are_distinct_from_process_exit(self):
+        with mock.patch.object(retest, 'run_command', return_value={'exit_code': 5, 'stdout_truncated': False, 'cancelled': False}):
+            with self.assertRaises(retest.CollectionUnavailable): self.actual_observe_game(self.config, self.root / 'observation')
+        with mock.patch.object(retest, 'run_command', return_value={'cancelled': True}):
+            with self.assertRaises(KeyboardInterrupt): self.actual_observe_game(self.config, self.root / 'cancel')
 
     def test_real_metadata_change_during_copy_refuses_full_run(self):
         helper = self.candidate / "prepare_vanilla_backup.py"

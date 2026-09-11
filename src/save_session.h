@@ -32,9 +32,13 @@ struct NativeCampaignCatalog { std::vector<std::string> slots; std::string selec
 // One retained startup PROFILE request. No payloads, user IDs or callback I/O.
 enum class ProfileStage : size_t {
     request, profile_created, catalog_created, first_poll, prepare, decode, transport,
-    catalog_poll, catalog, reader, framing, checksum, parse, overlay, application, root, admission, write_after_refusal, count
+    catalog_poll, catalog, reader, framing, checksum, parse, overlay, application, root, admission, write_after_refusal, output_validation, count
 };
 enum class ProfileStatus : uint32_t { unobserved, entered, pending, succeeded, refused };
+struct ProfileRead {
+    uint32_t reason = 0, error = 0;
+    uint64_t requested = 0, offset = 0, size = 0;
+};
 struct ProfileStep {
     uint64_t first_ms = 0, changed_ms = 0;
     ProfileStatus status = ProfileStatus::unobserved;
@@ -42,6 +46,7 @@ struct ProfileStep {
     bool native_attempted = false;
     int64_t native_state = 0, native_outcome = 0;
     uint32_t native_value = 0;
+    ProfileRead read{};
 };
 struct ProfileTrace {
     uint64_t request = 0;
@@ -116,7 +121,7 @@ public:
     void begin_profile(uintptr_t data);
     bool is_profile_request(uintptr_t data) const;
     void profile_step(ProfileStage, ProfileStatus, const char* predicate,
-        bool attempted = false, int64_t state = 0, int64_t outcome = 0, uint32_t value = 0);
+        bool attempted = false, int64_t state = 0, int64_t outcome = 0, uint32_t value = 0, ProfileRead read = {});
     ProfileTrace profile_trace() const;
 private:
     mutable std::mutex profile_trace_mutex_;

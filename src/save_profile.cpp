@@ -120,23 +120,62 @@ private:
     Fields* fields_ = nullptr;
     size_t cursor_ = 12, nodes_ = 0;
 };
-bool payload(engine::Memory& memory, uintptr_t data, const ProfileCalls& calls, Fields& fields, Session* trace = nullptr) {
+bool payload(engine::Memory& memory, uintptr_t data, const ProfileCalls& calls, Fields& fields, Session& trace, bool output = false) {
+    ProfileRead acquisition{};
     const auto record = [&](ProfileStage stage, bool valid, const char* predicate) {
-        if (trace) trace->profile_step(stage, valid ? ProfileStatus::succeeded : ProfileStatus::refused, predicate);
+        trace.profile_step(output ? ProfileStage::output_validation : stage,
+            valid ? ProfileStatus::succeeded : ProfileStatus::refused, predicate, false, 0, 0, 0, acquisition);
         return valid;
     };
     struct Files { uintptr_t entries; int32_t count, capacity; } files{};
-    uintptr_t file = 0, vtable = 0, buffer = 0;
+    uintptr_t file = 0, vtable = 0, buffer = 0, name_address = 0;
     uint64_t length = 0, capacity = 0;
     if (!named(memory, data, "PROFILE") || !at(memory, data, 0x1c0, files) ||
         files.count != 1 || files.capacity < 1 || !at(memory, files.entries, 0, file) ||
         !at(memory, file, 0, vtable) || vtable != calls.image_base + 0x2a575a8 ||
-        !named(memory, file + 8, "profile.bin") || !at(memory, file, 0x150, length) ||
-        !at(memory, file, 0x158, capacity) || !at(memory, file, 0x168, buffer) ||
-        length < 14 || length > maximum_profile || length > capacity)
+        !engine::add(file, 8, sizeof(NativeString), name_address) || !named(memory, name_address, "profile.bin") ||
+        !at(memory, file, 0x150, length) || !at(memory, file, 0x158, capacity) || !at(memory, file, 0x168, buffer))
         return record(ProfileStage::framing, false, "profile_file_layout_or_size");
+    acquisition.requested = length;
+    if (length < 14 || length > maximum_profile || length > capacity)
+        return record(ProfileStage::framing, false, "profile_file_layout_or_size");
+    uintptr_t checked = 0;
+    if (!engine::add(buffer, 0, static_cast<size_t>(length), checked)) {
+        acquisition.reason = SC_REASON_OUT_OF_RANGE;
+        return record(ProfileStage::framing, false, "profile_buffer_address_range");
+    }
     std::vector<uint8_t> bytes(static_cast<size_t>(length));
-    if (memory.copy(buffer, bytes.data(), bytes.size()).reason) return record(ProfileStage::framing, false, "profile_buffer_unreadable");
+    // The completed read owns SaveData until calls.read consumes its references.
+    // Output validation runs after synchronous encoding, with its retained strong
+    // reference (or the provider caller's reference) still alive. No native call
+    // can resize/release this file during acquisition; refcounts alone are not a
+    // concurrency lock. Check the owned file descriptor again before parsing.
+    for (size_t offset = 0; offset < bytes.size();) {
+        const size_t size = std::min(engine::Memory::maximum_copy, bytes.size() - offset);
+        acquisition.offset = offset; acquisition.size = size;
+        const auto result = memory.copy(buffer + offset, bytes.data() + offset, size);
+        acquisition.reason = result.reason; acquisition.error = result.error;
+        if (result.reason) {
+            const char* predicate = result.reason == SC_REASON_OUT_OF_RANGE ? "profile_copy_policy_rejected" :
+                result.reason == SC_REASON_PARTIAL_READ ? "profile_buffer_partial_read" : "profile_buffer_inaccessible";
+            return record(ProfileStage::framing, false, predicate); // Partial vector is discarded, never parsed.
+        }
+        offset += size; // Whole span was checked; offset <= bounded length.
+    }
+    Files after{}; uintptr_t next_file = 0, next_buffer = 0; uint64_t next_length = 0, next_capacity = 0;
+    const auto stable_field = [&](uintptr_t base, size_t offset, auto& value) {
+        uintptr_t address = 0;
+        const auto result = engine::add(base, offset, sizeof(value), address) ? memory.copy(address, &value, sizeof(value)) :
+            engine::ReadResult{SC_REASON_OUT_OF_RANGE, 0};
+        acquisition.reason = result.reason; acquisition.error = result.error;
+        return result.reason == SC_REASON_NONE;
+    };
+    if (!stable_field(data, 0x1c0, after) || !stable_field(files.entries, 0, next_file) ||
+        !stable_field(file, 0x150, next_length) || !stable_field(file, 0x158, next_capacity) || !stable_field(file, 0x168, next_buffer))
+        return record(ProfileStage::framing, false, "profile_source_metadata_unreadable");
+    if (after.entries != files.entries || after.count != files.count || after.capacity != files.capacity ||
+        next_file != file || next_length != length || next_capacity != capacity || next_buffer != buffer)
+        return record(ProfileStage::framing, false, "profile_source_changed");
     constexpr uint8_t header[]{0xa9, 0x0d, 0x8d, 0xaa, 0, 0, 0, 2};
     if (!record(ProfileStage::framing, !std::memcmp(bytes.data(), header, sizeof(header)), "supported_binary_v2_header")) return false;
     const uint32_t checksum = uint32_t(bytes[8]) << 24 | uint32_t(bytes[9]) << 16 | uint32_t(bytes[10]) << 8 | bytes[11];
@@ -220,7 +259,7 @@ uint64_t read_profile(Session& owner, engine::Memory& memory, SaveReference* ref
                 at(memory, context.shell, 16, context.manager), "profile_shell_layout") &&
             require(callbacks(memory, context.profile, context.shell, calls), "profile_callback_identity") &&
             require(at(memory, data->control, 8, payload_object), "profile_data_reference") &&
-            require(payload(memory, payload_object, calls, fields, &owner), "profile_payload_rejected") &&
+            require(payload(memory, payload_object, calls, fields, owner), "profile_payload_rejected") &&
             require(owner.capture_profile_baseline(context.profile, context.manager, std::move(fields.name), fields.index),
                 "vanilla_selection_baseline_mismatch");
     } catch (const std::bad_alloc&) {}
@@ -294,7 +333,7 @@ uint32_t serialize_profile(Session& owner, engine::Memory& memory, uintptr_t man
 bool profile_payload_valid(Session& owner, engine::Memory& memory, uintptr_t data, const ProfileCalls& calls) {
     try {
         const char* baseline = nullptr; int32_t index = -1; Fields fields;
-        if (owner.profile_baseline(0, 0, baseline, index) && payload(memory, data, calls, fields) &&
+        if (owner.profile_baseline(0, 0, baseline, index) && payload(memory, data, calls, fields, owner, true) &&
             fields.name == baseline && fields.index == index) return true;
     } catch (const std::bad_alloc&) {}
     owner.fail_profile(); return false;

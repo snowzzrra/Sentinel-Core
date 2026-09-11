@@ -59,6 +59,8 @@ int main() {
         session.fail_profile();
         session.profile_step(sentinel::save::ProfileStage::reader, sentinel::save::ProfileStatus::refused,
             "session_already_faulted");
+        session.profile_step(sentinel::save::ProfileStage::output_validation, sentinel::save::ProfileStatus::refused,
+            "profile_buffer_partial_read", false, 0, 0, 0, {SC_REASON_PARTIAL_READ, ERROR_PARTIAL_COPY, 560873, 262144, 262144});
         for (int i=0;i<300;++i) sentinel::startup_log::record(core);
         const auto log = root / "SentinelCore/diagnostics" / (std::to_string(core.pid)+"-"+std::to_string(created)+".jsonl");
         std::ifstream input(log); std::string line; unsigned lines=0;
@@ -70,6 +72,9 @@ int main() {
                 check(line.find("\"first_failed_stage\":\"decode\"")!=std::string::npos,"first PROFILE failure survives downstream refusal");
                 check(line.find("native_authentication_refused")!=std::string::npos,"native result and predicate retained");
                 check(line.find("\"native_value\":4")!=std::string::npos,"original native error retained");
+                check(line.find("\"read_requested\":560873,\"read_offset\":262144,\"read_size\":262144")!=std::string::npos,
+                    "bounded acquisition diagnostics retained without pointers");
+                check(line.find("\"read_error\":299")!=std::string::npos,"original partial read error retained");
             }
         }
         check(lines==3,"bounded transition-only automatic log");

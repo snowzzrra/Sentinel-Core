@@ -8,6 +8,7 @@ namespace sentinel::engine {
 struct ReadResult { uint32_t reason = SC_REASON_NONE, error = 0; };
 /* Internal fixed-field adapter only; never accepts protocol-supplied addresses. */
 struct Memory {
+    static constexpr size_t maximum_copy = 256 * 1024;
     virtual ~Memory() = default;
     virtual ReadResult copy(uintptr_t address, void* out, size_t size) = 0;
 };

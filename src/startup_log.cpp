@@ -16,11 +16,14 @@ std::string profile_step(const save::ProfileStep& s) {
         ",\"elapsed_ms\":" + std::to_string(s.changed_ms - s.first_ms) + ",\"status\":" + std::to_string(static_cast<uint32_t>(s.status)) +
         ",\"predicate\":\"" + s.predicate + "\",\"native_attempted\":" + (s.native_attempted ? "true" : "false") +
         ",\"native_state\":" + std::to_string(s.native_state) + ",\"native_outcome\":" + std::to_string(s.native_outcome) +
-        ",\"native_value\":" + std::to_string(s.native_value) + "}";
+        ",\"native_value\":" + std::to_string(s.native_value) +
+        ",\"read_reason\":" + std::to_string(s.read.reason) + ",\"read_error\":" + std::to_string(s.read.error) +
+        ",\"read_requested\":" + std::to_string(s.read.requested) + ",\"read_offset\":" + std::to_string(s.read.offset) +
+        ",\"read_size\":" + std::to_string(s.read.size) + "}";
 }
 std::string profile(const save::ProfileTrace& trace) {
     constexpr const char* names[]{"request", "profile_created", "catalog_created", "first_poll", "prepare", "decode", "transport",
-        "catalog_poll", "catalog", "reader", "framing", "checksum", "parse", "overlay", "application", "root", "admission", "write_after_refusal"};
+        "catalog_poll", "catalog", "reader", "framing", "checksum", "parse", "overlay", "application", "root", "admission", "write_after_refusal", "output_validation"};
     static_assert(std::size(names) == static_cast<size_t>(save::ProfileStage::count));
     auto out = "{\"request_id\":" + std::to_string(trace.request) + ",\"identity_kind\":\"native_steam_identity\",\"identity_matched\":" +
         (trace.identity_matched ? "true" : "false") + ",\"deadline_basis\":\"native_lifetime\",\"account_network_state\":\"not_observed\",\"downstream_refusals\":" +
