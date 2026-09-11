@@ -58,16 +58,39 @@ size_t encode_save_write_request(Message& out, uint64_t operation_id) {
     w.number(save_write_capability, 8); w.number(operation_id, 8); return w.pos;
 }
 WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
-                          sc_diagnostic_request* diagnostic, uint64_t* after_event, uint64_t* write_id) {
+                          sc_diagnostic_request* diagnostic, uint64_t* after_event, uint64_t* write_id, sc_save_backup_request* backup) {
     if (operation) *operation = inspect_operation;
     if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && op >= engine_operation && op <= save_write_operation) *operation = static_cast<uint16_t>(op);
+    if (operation && op >= engine_operation && op <= save_backup_cancel_operation) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op < inspect_operation || op > save_write_operation) return WireResult::unsupported_operation;
+    if (op < inspect_operation || op > save_backup_cancel_operation) return WireResult::unsupported_operation;
+    if (op >= save_backup_submit_operation) {
+        // Reuse the exact existing request identity decoder, then consume only
+        // this operation's fixed namespace/campaign/slot/deadline extension.
+        if (length != 149) return WireResult::malformed;
+        if (r.number(8) != save_backup_capability) return WireResult::capability_unavailable;
+        Message identity = in;
+        Writer fixed{identity, 6}; fixed.number(diagnostic_submit_operation, 2); fixed.number(72, 4);
+        Writer capability{identity, header_size}; capability.number(diagnostic_capability, 8);
+        sc_save_backup_request value{};
+        const auto decoded = decode_request(identity, 88, nullptr, &value.execution);
+        if (decoded != WireResult::ok) return decoded;
+        r.pos = 88;
+        for (auto& c : value.namespace_id) c = static_cast<char>(r.number(1));
+        r.u32(value.campaign); r.u32(value.slot); r.u32(value.work_deadline_ms);
+        if (value.namespace_id[64] || value.campaign > 2 || value.slot > 11 || !value.work_deadline_ms ||
+            value.work_deadline_ms > SC_SAVE_BACKUP_MAX_WORK_MS) return WireResult::malformed;
+        for (size_t i = 0; i < 64; ++i) {
+            const auto c = value.namespace_id[i];
+            if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return WireResult::malformed;
+        }
+        if (backup) *backup = value;
+        return r.valid && r.pos == size ? WireResult::ok : WireResult::malformed;
+    }
     if (op == save_write_operation) {
         if (length != 16) return WireResult::malformed;
         if (r.number(8) != save_write_capability) return WireResult::capability_unavailable;
@@ -567,7 +590,7 @@ template<class C> bool native_values(C& c, sc_native_snapshot& n) {
     }
     return true;
 }
-template<class C> bool diagnostic_values(C& c, sc_diagnostic_result& d) {
+template<class C> bool diagnostic_values(C& c, sc_diagnostic_result& d, bool backup = false) {
     c.u32(d.state); c.u32(d.reason); c.u32(d.cancel_requested); c.u32(d.retrieved); scope_values(c, d.scope);
     c.u64(d.request_id); for (auto& b : d.nonce) c.byte(b);
     c.u64(d.admitted_at_ms); c.u64(d.deadline_at_ms); c.u64(d.claimed_at_ms); c.u64(d.observed_at_ms); c.u64(d.executed_at_ms);
@@ -576,6 +599,15 @@ template<class C> bool diagnostic_values(C& c, sc_diagnostic_result& d) {
     if (!map_values(c, d.current_map) || d.state > SC_DIAGNOSTIC_CANCELLED || d.reason > SC_NATIVE_EXCEPTION ||
         d.cancel_requested > 1 || d.retrieved > 1 || d.site_revision > 1 || d.phase > 1 ||
         d.lifecycle > SC_LIFETIME_INVALID || d.game_state > SC_GAME_IN_GAME) return false;
+    if (backup) {
+        if (!d.executed_at_ms) return !d.observed_at_ms && !d.current_map.length && d.state != SC_DIAGNOSTIC_EXECUTED;
+        return d.observed_at_ms && d.claimed_at_ms && d.admitted_at_ms && d.thread_id &&
+            d.scope.lifecycle_generation && d.phase == 1 && d.site_revision == 1 && d.lifecycle == SC_LIFETIME_ACTIVE &&
+            d.current_map.validity == SC_OBSERVATION_OBSERVED && d.game_state == SC_GAME_IN_GAME &&
+            d.observed_at_ms >= d.claimed_at_ms && d.executed_at_ms >= d.observed_at_ms &&
+            d.claimed_at_ms >= d.admitted_at_ms && d.executed_at_ms < d.deadline_at_ms &&
+            (d.state == SC_DIAGNOSTIC_CLAIMED ? !d.completed_at_ms : d.completed_at_ms >= d.executed_at_ms);
+    }
     if (d.state == SC_DIAGNOSTIC_EXECUTED) {
         if (d.reason || !d.observed_at_ms || !d.executed_at_ms || !d.claimed_at_ms || !d.admitted_at_ms || !d.thread_id ||
             !d.scope.lifecycle_generation || d.phase != 1 || d.site_revision != 1 || d.lifecycle != SC_LIFETIME_ACTIVE ||
@@ -616,6 +648,97 @@ template<class C> bool detail_values(C& c, sc_diagnostic_detail& d, const sc_dia
     if (result.state == SC_DIAGNOSTIC_EXECUTED && (!d.observation_accepted || d.stage != SC_STAGE_EXECUTED)) return false;
     return true;
 }
+}
+namespace {
+template<class C> bool backup_values(C& c, sc_save_backup_snapshot& v) {
+    c.u32(v.abi_version); c.u32(v.state); c.u32(v.failure);
+    if (!diagnostic_values(c, v.execution, true)) return false;
+    c.u64(v.operation_id); c.u32(v.flags); c.u32(v.native_exception);
+    c.u32(v.storage_outcome); c.u32(v.storage_error); c.u32(v.files); c.u64(v.bytes);
+    for (auto& b : v.basename) { auto n = static_cast<uint8_t>(b); c.byte(n); b = static_cast<char>(n); }
+    for (auto& b : v.namespace_id) { auto n = static_cast<uint8_t>(b); c.byte(n); b = static_cast<char>(n); }
+    c.u32(v.campaign); c.u32(v.slot);
+    if (v.abi_version != SC_SAVE_BACKUP_ABI_VERSION || v.state > SC_BACKUP_EXPIRED ||
+        v.failure > SC_BACKUP_FAILURE_STORAGE || (v.flags & ~255u) || v.files > 16 || v.bytes > (1ull << 30) ||
+        v.storage_outcome > 17 || v.campaign > 2 || v.slot > 11 || v.namespace_id[64]) return false;
+    for (size_t i = 0; i < 64; ++i) {
+        const auto b = v.namespace_id[i];
+        if (!(b >= '0' && b <= '9') && !(b >= 'a' && b <= 'f')) return false;
+    }
+    if (v.basename[0]) {
+        constexpr char prefix[] = "transport-backup-";
+        constexpr size_t count = sizeof(prefix) - 1;
+        if (std::memcmp(v.basename, prefix, count) || std::memcmp(v.basename + count, v.namespace_id, 16) ||
+            v.basename[count + 16] != '-') return false;
+        for (size_t i = count + 17; i < count + 49; ++i) {
+            const auto b = v.basename[i];
+            if (!(b >= '0' && b <= '9') && !(b >= 'a' && b <= 'f')) return false;
+        }
+        for (size_t i = count + 49; i < sizeof(v.basename); ++i) if (v.basename[i]) return false;
+    } else for (auto b : v.basename) if (b) return false;
+    const bool matched = (v.flags & SC_BACKUP_SOURCE_MATCHED) != 0;
+    const bool stored = (v.flags & SC_BACKUP_STORAGE_COMPLETE) != 0;
+    if (matched && (!(v.flags & SC_BACKUP_NATIVE_ENTERED) || !(v.flags & SC_BACKUP_TASK_RETURNED) ||
+        !v.operation_id || v.native_exception)) return false;
+    if ((v.flags & SC_BACKUP_READ_SUCCESS) && (!(v.flags & SC_BACKUP_READ_TERMINAL) || !v.operation_id)) return false;
+    if (stored && (!(v.flags & SC_BACKUP_STORAGE_ATTEMPTED) || !v.basename[0] || !v.files ||
+        v.bytes < v.files || v.storage_outcome != 16 || v.storage_error)) return false;
+    if (!(v.flags & SC_BACKUP_STORAGE_ATTEMPTED) && (v.files || v.bytes || v.basename[0] || v.storage_outcome || v.storage_error)) return false;
+    const auto state = v.execution.state;
+    switch (v.state) {
+    case SC_BACKUP_UNKNOWN: return state == SC_DIAGNOSTIC_UNKNOWN && !v.operation_id && !v.flags;
+    case SC_BACKUP_QUEUED: return state == SC_DIAGNOSTIC_QUEUED && !v.operation_id && !v.flags;
+    case SC_BACKUP_CLAIMED: return state == SC_DIAGNOSTIC_CLAIMED && !v.operation_id && !(v.flags & ~SC_BACKUP_CANCEL_REQUESTED);
+    case SC_BACKUP_WAITING_NATIVE: return state == SC_DIAGNOSTIC_CLAIMED && v.execution.executed_at_ms;
+    case SC_BACKUP_COPYING: return state == SC_DIAGNOSTIC_CLAIMED && v.operation_id && !stored;
+    case SC_BACKUP_COPIED: return state == SC_DIAGNOSTIC_CLAIMED && stored;
+    case SC_BACKUP_COMPLETE: return state == SC_DIAGNOSTIC_EXECUTED && !v.execution.reason && !v.failure &&
+        (v.flags & 247u) == 247u && v.operation_id && !v.native_exception;
+    case SC_BACKUP_FAILED: return state == SC_DIAGNOSTIC_EXECUTED && v.failure != SC_BACKUP_FAILURE_NONE;
+    case SC_BACKUP_REJECTED: return state == SC_DIAGNOSTIC_REJECTED;
+    case SC_BACKUP_CANCELLED: return state == SC_DIAGNOSTIC_CANCELLED && !v.operation_id;
+    case SC_BACKUP_EXPIRED: return state == SC_DIAGNOSTIC_EXPIRED && !v.operation_id;
+    default: return false;
+    }
+}
+}
+size_t encode_backup_request(Message& out, uint16_t op, const sc_save_backup_request& request) {
+    if (op < save_backup_submit_operation || op > save_backup_cancel_operation) return 0;
+    const auto end = encode_native_request(out, diagnostic_submit_operation, request.execution);
+    Writer h{out}; header(h, wire_version, op, 149, WireResult::ok); h.number(save_backup_capability, 8);
+    Writer w{out, end};
+    for (auto b : request.namespace_id) w.number(static_cast<uint8_t>(b), 1);
+    w.number(request.campaign, 4); w.number(request.slot, 4); w.number(request.work_deadline_ms, 4);
+    return w.valid ? w.pos : 0;
+}
+size_t encode_backup_response(Message& out, WireResult result, uint16_t op, const Snapshot& s, const sc_save_backup_snapshot& value) {
+    Writer w{out}; header(w, wire_version, op, 0, result);
+    if (result == WireResult::ok) {
+        w.number(save_backup_capability, 8); w.number(s.pid, 4); w.number(s.process_created, 8);
+        for (auto b : s.instance) w.number(b, 1);
+        w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id);
+        auto v = value; if (!backup_values(w, v)) return 0;
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.valid ? w.pos : 0;
+}
+bool decode_backup_response(const Message& in, size_t size, WireResult& result, uint16_t op, Snapshot& s, sc_save_backup_snapshot& v) {
+    if (size < header_size || size > max_message || op < save_backup_submit_operation || op > save_backup_cancel_operation) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != op || r.number(4) != size - header_size) return false;
+    const auto code = r.number(4); if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code); if (result != WireResult::ok) return size == header_size;
+    if (r.number(8) != save_backup_capability) return false;
+    s = {}; v = {}; s.core.size = sizeof(s.core); v.size = sizeof(v);
+    r.u32(s.pid); r.u64(s.process_created); for (auto& b : s.instance) r.byte(b);
+    r.u32(s.core.abi_version); r.text(s.core.version); r.text(s.core.build_id);
+    return s.core.abi_version == SC_ABI_VERSION && backup_values(r, v) && r.valid && r.pos == size &&
+        v.execution.scope.pid == s.pid && v.execution.scope.process_created == s.process_created &&
+        !std::memcmp(v.execution.scope.instance_id, s.instance.data(), 16);
+}
+const char* backup_state_name(uint32_t state) {
+    constexpr const char* names[] = {"unknown", "queued", "claimed", "waiting_native", "copying", "copied",
+        "complete", "failed", "rejected", "cancelled", "expired"};
+    return state <= SC_BACKUP_EXPIRED ? names[state] : "invalid";
 }
 size_t encode_native_request(Message& out, uint16_t op, const sc_diagnostic_request& request, uint64_t after) {
     Writer w{out}; header(w, wire_version, op, 0, WireResult::ok);

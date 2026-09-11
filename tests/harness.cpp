@@ -11,6 +11,9 @@
 extern "C" int sentinel_c_status_size(void);
 extern "C" int sentinel_c_engine_size(void);
 extern "C" int sentinel_c_save_write_size(void);
+#include "sentinel_save_request.h"
+extern "C" int sentinel_c_backup_request_size(void);
+extern "C" int sentinel_c_backup_snapshot_size(void);
 #define CHECK(condition) do { if (!(condition)) { \
     std::fprintf(stderr, "FAIL line %d: %s (win32=%lu)\n", __LINE__, #condition, GetLastError()); \
     std::exit(1); } } while (0)
@@ -26,6 +29,8 @@ template<class T> T symbol(HMODULE module, const char* name) {
 
 void core_test(HMODULE module) {
     CHECK(sentinel_c_save_write_size() == sizeof(sc_save_write_snapshot));
+    CHECK(sentinel_c_backup_request_size() == sizeof(sc_save_backup_request));
+    CHECK(sentinel_c_backup_snapshot_size() == sizeof(sc_save_backup_snapshot));
     const auto inspect = symbol<decltype(&sc_inspect)>(module, "sc_inspect");
     const auto initialize = symbol<decltype(&sc_initialize)>(module, "sc_initialize");
     const auto shutdown = symbol<decltype(&sc_shutdown)>(module, "sc_shutdown");

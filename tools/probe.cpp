@@ -380,6 +380,8 @@ int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool en
 int wmain(int argc, wchar_t** argv) {
     const int storage_result = save_storage_command(argc, argv);
     if (storage_result >= 0) return storage_result;
+    const int backup_result = native_backup_command(argc, argv);
+    if (backup_result >= 0) return backup_result;
     uint32_t pid = 0, timeout = 2000, count = 1, interval = 1000;
     bool json = false, engine = false, context = false, native = false, save = false, admission = false, write = false, valid = true;
     uint64_t write_id = 0; bool saw_write_id = false;
@@ -391,16 +393,17 @@ int wmain(int argc, wchar_t** argv) {
         if (wcscmp(argv[i], L"--help") == 0 && argc == 2) {
             std::puts("sentinel_probe --pid PID [--timeout-ms 50..10000] [--json] [--engine | --context | --native | --save-context]\n"
                 "Capture: --context, --engine, --native or --save-context --watch-count 1..600 [--interval-ms 100..10000]\n"
-                "Save context: read-only provider/request witnesses; native namespace mutation remains unavailable.\n"
+                "Save context: read-only provider/request witnesses.\n"
                 "Admission preflight: --save-admission (one query; exit 8 unless admitted and accepting).\n"
                 "Write evidence: --save-write [--write-id N] (latest if omitted); supports capture.\n"
+                "Native backup: --native-backup --help (explicit owned campaign save, readback and local archive).\n"
                 "  SDK confirmation is separate from persistence and reopen; observation exit 0 is not save success.\n"
                 "Harmless diagnostic: --diagnostic [--deadline-ms 1..5000] (submit then retrieve; no engine commands).\n"
                 "Retrieve/cancel: --diagnostic-result or --diagnostic-cancel, with --request-id N --nonce HEX32\n"
                 "  --expect-created N --expect-instance HEX32 --expect-generation N (from the prepared request).\n"
                 "Defaults: timeout 2000 ms, interval 1000 ms. Capture scheduling window <= 10 minutes.\n"
                 "One fresh query per record; stop on first error, target exit/restart, or Ctrl+C.\n"
-                "Read-only query of an already loaded Core; --json capture emits JSON Lines.");
+                "Uses an already loaded Core; --json capture emits JSON Lines. Native backup requires admitted AP ownership.");
             return 0;
         }
         if (wcscmp(argv[i], L"--json") == 0 && !json) json = true;

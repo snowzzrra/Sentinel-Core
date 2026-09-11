@@ -211,7 +211,7 @@ void publish(Frame& f, bool expected, bool cancel = false) {
 }
 }
 void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make) {
-    for (unsigned test = 0; test < 30; ++test) {
+    for (unsigned test = 0; test < 32; ++test) {
         auto owner = make(); Frame f(*owner); active = &f;
         f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
         REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {"AUTOSAVE3", "AUTOSAVE10"}, "AUTOSAVE10", 1, false, 0));
@@ -242,6 +242,20 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         REQUIRE(f.strings_freed == 1 && f.comments_freed == 1);
         const char* baseline = nullptr; int32_t baseline_index = -1;
         REQUIRE(owner->profile_baseline(0, 0, baseline, baseline_index) && std::strcmp(baseline, "AUTOSAVE7") == 0 && baseline_index == 2);
+        if (test >= 30) {
+            // A delayed PROFILE callback still owns valid inputs after an
+            // unrelated route failed. No native import may run at that point.
+            f.refresh_refs();
+            const auto fault = test == 30 ? SessionFault::native_write : SessionFault::native_collection;
+            owner->fail(fault);
+            REQUIRE(read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls) == 0x10);
+            REQUIRE(f.readers == 1 && f.serializers == 1 && f.bytes == original_bytes);
+            REQUIRE(f.releases == 4 && !f.profile_ref.control && !f.data_ref.control);
+            REQUIRE(f.profile_control.strong == 1 && f.profile_control.weak == 1 &&
+                f.data_control.strong == 1 && f.data_control.weak == 1);
+            REQUIRE(owner->state() == SessionState::faulted && owner->fault() == fault && !owner->accepts_requests());
+            continue;
+        }
         if (test == 21) {
             f.refresh_refs(); frame(f, "AUTOSAVE4", 3);
             REQUIRE(read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls) == 0x10 && f.readers == 1);
@@ -281,7 +295,7 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         REQUIRE(f.strings_freed == (test == 28 ? 3u : 2u) && f.comments_freed == (test == 28 ? 3u : 2u));
     }
     active = nullptr;
-    std::puts("PASS production PROFILE reader/serializer/payload policies with native-modeled ownership and caller outcomes (30 cases)");
+    std::puts("PASS production PROFILE reader/serializer/payload policies with native-modeled ownership and caller outcomes (32 cases)");
 }
 void exercise_profile_caller(Session& owner, const std::function<bool(SaveReference&)>& provider, bool malformed) {
     Frame f(owner); active = &f;

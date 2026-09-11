@@ -23,7 +23,7 @@ Target save_target(uintptr_t base, unsigned index) {
         0x1bd74f0, 0x1bde680, 0x1bdeea0, 0x14911a0, 0x1bdf290, 0x148dd10,
         0x26ec090, 0x1a4fe20, 0x14902f0, 0x1bd6870, 0x14978e0, 0x1a50a80, 0x1a50080, 0x1bd7a60,
         0x1bd5b10, 0x11c4f30, 0x1ac8d10, 0x6765c0, 0x1bdd0a0, 0x1bde610, 0x1bd8350, 0x1bd6e80,
-        0x37d7a0, 0x1bd4b40, 0x1bdc300, 0x6744e0, 0x1495a80};
+        0x37d7a0, 0x1bd4b40, 0x1bdc300, 0x6744e0, 0x1495a80, 0x1bda4b0};
     constexpr const char* bytes[] = {
         "48895c241048896c2418488974242057415641574881ece0000000488b059636",
         "40555356488dac2400fcffff4881ec00050000488b052e875d024833c4488985",
@@ -65,11 +65,22 @@ Target save_target(uintptr_t base, unsigned index) {
         "405341574881ecb8000000488b05869e5d024833c44889842488000000488339",
         "405557415541564157488dac24a0fdffff4881ec60030000488b05b9265d0248",
         "4055535657415441564157488d6c24e14881ec00010000488b05daa4b3034833",
-        "48895c241856574156b890380000e80d633d01482be0488b053b8fd1024833c4"};
+        "48895c241856574156b890380000e80d633d01482be0488b053b8fd1024833c4",
+        "4053415441564883ec40410fb640094d8be0488bda4c8bf184c0741448c70201"};
+    static_assert(std::size(rvas) == std::size(bytes));
     Target out{}; out.address = base + rvas[index];
     const auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
     for (size_t n = 0; n < out.bytes.size(); ++n)
         out.bytes[n] = static_cast<uint8_t>(digit(bytes[index][n * 2]) * 16 + digit(bytes[index][n * 2 + 1]));
+    if (index == 4 || index == 41) {
+        // DeleteAll and directory-delete polls have identical entry prefixes,
+        // but own different native context layouts (0x30 versus 0x70).
+        const char* unique = index == 4 ? "00488b7f084885ff0f849d020000488b0543d22a0148896c246048c7c5ffffff" :
+            "00488b7f084885ff0f849d020000488b05ab5d2b0148896c246048c7c5ffffff";
+        out.signature_offset = 64;
+        for (size_t n = 0; n < out.signature.size(); ++n)
+            out.signature[n] = static_cast<uint8_t>(digit(unique[n * 2]) * 16 + digit(unique[n * 2 + 1]));
+    }
     if (index == 13 || index == 15 || index == 16) {
         const char* unique = index == 13 ? "8bdf48895d6f488d557f498bc8e83e3e9ffe48897dcf48c7c6ffffffff488975" :
             index == 15 ? "8bdf48895d6f488d557f498bc8e8ae539ffe48897dcf48c7c6ffffffff488975" :

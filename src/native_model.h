@@ -1,5 +1,8 @@
 #pragma once
 #include "sentinel_native.h"
+#include "sentinel_save_request.h"
+#include "save_backup.h"
+#include "save_submission.h"
 #include <array>
 #include <atomic>
 
@@ -7,8 +10,8 @@ namespace sentinel::native {
 bool same_scope(const sc_native_scope& a, const sc_native_scope& b);
 
 // Caller serializes lifecycle/admission/history; no lock survives an original
-// engine call. A claimed slot belongs exclusively to its callback until the
-// terminal release-store, so readers cannot observe a partly written result.
+// engine call. A claimed slot belongs to its callback until terminal publication
+// or explicit backup handoff. Readers never observe partly written results.
 struct Lifecycle {
     uint64_t generation = 0, sequence = 0, overwritten = 0;
     uint32_t state = SC_LIFETIME_UNOBSERVED, depth = 0;
@@ -29,18 +32,29 @@ public:
         sc_diagnostic_result result{};
         sc_diagnostic_detail detail{};
         uint64_t admitted_lock_misses = 0;
+        bool is_backup = false;
+        sc_save_backup_request backup_request{};
+        std::shared_ptr<save::BackupJob> backup;
+        save::SubmissionResult submission;
+        // The callback publishes its final submission facts here, then stops
+        // accessing the slot. Queue housekeeping owns it after this handoff.
+        std::atomic<bool> awaiting_backup{false};
     };
     // admission/retrieval/claim/housekeeping run under the caller's short lock.
     sc_diagnostic_result submit(const sc_diagnostic_request& request,
-                                uint32_t reject, uint64_t now, sc_diagnostic_detail* detail = nullptr);
+                                uint32_t reject, uint64_t now, sc_diagnostic_detail* detail = nullptr,
+                                const sc_save_backup_request* backup = nullptr);
     sc_diagnostic_result retrieve(const sc_diagnostic_request& request, bool cancel, uint64_t now,
-                                  sc_diagnostic_detail* detail = nullptr);
+                                  sc_diagnostic_detail* detail = nullptr,
+                                  const sc_save_backup_request* backup = nullptr);
+    sc_save_backup_snapshot backup_result(const sc_save_backup_request&, bool cancel, uint64_t now);
+    static void await_backup(Slot&, sc_diagnostic_result, sc_diagnostic_detail, save::SubmissionResult);
     void note_claim_contention() { claim_lock_misses_.fetch_add(1, std::memory_order_relaxed); }
     Slot* claim(uint64_t now);
     void cancel_pending(uint64_t now);
     void counts(sc_native_snapshot& out, uint64_t now);
-    // Only the native callback calls finish. Timeout/cancel of CLAIMED requests
-    // requests cancellation, never asserts that the callback did not execute.
+    // The native callback finishes diagnostics; housekeeping finishes a handed-off
+    // backup. Timeout/cancel never asserts that claimed work did not execute.
     static void finish(Slot& slot, sc_diagnostic_result result, sc_diagnostic_detail detail = {});
 private:
     std::atomic<uint64_t> claim_lock_misses_{0};

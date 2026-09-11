@@ -14,6 +14,8 @@ SaveFuture* create_write_readback(Session&, uint64_t operation, uintptr_t provid
 struct ReadWorkerResult { int64_t outcome; uint32_t value, padding; };
 using PrepareRead = ReadWorkerResult* (*)(uintptr_t, ReadWorkerResult*, SaveReference*);
 using DecodeRead = ReadWorkerResult* (*)(uintptr_t, ReadWorkerResult*);
+// Ordinary reads validate the final worker's remote/directory before FileSize;
+// private readbacks retain their operation-owned manifest and draining rules.
 ReadWorkerResult* prepare_readback(Session&, engine::Memory&, uintptr_t context,
     ReadWorkerResult*, SaveReference* weak_waiter, PrepareRead);
 ReadWorkerResult* verify_readback(Session&, engine::Memory&, uintptr_t context,

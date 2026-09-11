@@ -88,6 +88,21 @@ int32_t file_size(uintptr_t self, const char* name) {
 }
 const std::array<void*, 16> size_table{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
     nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, reinterpret_cast<void*>(file_size)};
+bool ordinary_directory(Session& owner, engine::Memory& memory, uintptr_t data) {
+    NativeString name{}; std::array<char, 64> text{};
+    if (!at(memory, data, 0, name) || !name.data || name.length <= 0 || name.length >= 64 ||
+        memory.copy(reinterpret_cast<uintptr_t>(name.data), text.data(), static_cast<size_t>(name.length) + 1).reason ||
+        text[static_cast<size_t>(name.length)] || std::memchr(text.data(), 0, static_cast<size_t>(name.length))) return false;
+    std::string_view directory(text.data(), static_cast<size_t>(name.length));
+    if (directory == "PROFILE") return true;
+    const auto& root = owner.native_root();
+    if (directory.size() <= root.size() || directory.substr(0, root.size()) != root || directory[root.size()] != '/') return false;
+    directory.remove_prefix(root.size() + 1);
+    if (directory.size() < 14 || native_campaign_index(directory.substr(0, 5)) < 0 ||
+        !steam_name_equal(directory.substr(5, 8), "AUTOSAVE")) return false;
+    const auto slot = directory.substr(13);
+    return (slot.size() == 1 && slot[0] >= '0' && slot[0] <= '9') || slot == "10" || slot == "11";
+}
 ReadWorkerResult* invoke_prepare(PrepareRead original, uintptr_t context, ReadWorkerResult* out,
         SaveReference* waiter, uintptr_t proxy, uintptr_t remote) {
     auto* field = reinterpret_cast<uintptr_t*>(context); remote = *field; *field = proxy;
@@ -120,9 +135,22 @@ SaveFuture* create_write_readback(Session& owner, uint64_t id, uintptr_t provide
 ReadWorkerResult* prepare_readback(Session& owner, engine::Memory& memory, uintptr_t context,
         ReadWorkerResult* out, SaveReference* waiter, PrepareRead original) {
     uintptr_t control = 0, data = 0;
-    if (!at(memory, context, 8, control) || !at(memory, control, 8, data)) return original(context, out, waiter);
-    const auto id = owner.native_writes.readback_operation(data);
-    if (!id) return original(context, out, waiter);
+    const bool source = at(memory, context, 8, control) && at(memory, control, 8, data);
+    const auto id = source ? owner.native_writes.readback_operation(data) : 0;
+    if (!id) {
+        if (!owner.routed()) return original(context, out, waiter);
+        uintptr_t remote = 0;
+        if (source && owner.native_io() && at(memory, context, 0, remote) &&
+            owner.collecting(remote, owner.native_root()) && ordinary_directory(owner, memory, data))
+            return original(context, out, waiter);
+        owner.fail(SessionFault::native_read);
+        // The native null-remote branch touches no files/streams and consumes
+        // its weak waiter. Preserve that cleanup, then suppress fallback 0x40.
+        auto* result = invoke_prepare(original, context, out, waiter, 0, remote);
+        result->value = 1; return result;
+    }
+    // Correlated private jobs retain their own manifest and may drain after a
+    // later Session fault; the ordinary-read admission check does not own them.
     SdkWriteObservation manifest; uintptr_t remote = 0, table = 0; FileSize size = nullptr; bool valid = false;
     try {
         valid = owner.native_writes.readback_manifest(id, manifest) && at(memory, context, 0, remote) &&

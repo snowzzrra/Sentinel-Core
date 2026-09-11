@@ -1,8 +1,11 @@
 #include "native_model.h"
 #include <algorithm>
 #include <cstring>
+#include <new>
 
 namespace sentinel::native {
+static_assert(sizeof(sc_save_backup_request) == 152);
+static_assert(sizeof(sc_save_backup_snapshot) == 648);
 bool same_scope(const sc_native_scope& a, const sc_native_scope& b) {
     return a.pid == b.pid && a.process_created == b.process_created &&
         a.lifecycle_generation == b.lifecycle_generation &&
@@ -47,6 +50,21 @@ sc_diagnostic_result initial(const sc_diagnostic_request& r) {
     sc_diagnostic_result out{}; out.scope = r.expected; out.request_id = r.request_id;
     std::memcpy(out.nonce, r.nonce, sizeof(out.nonce)); return out;
 }
+bool same_backup(const Diagnostics::Slot& s, const sc_save_backup_request* b) {
+    return s.is_backup == (b != nullptr) && (!b ||
+        (s.backup_request.campaign == b->campaign && s.backup_request.slot == b->slot &&
+         s.backup_request.work_deadline_ms == b->work_deadline_ms &&
+         std::memcmp(s.backup_request.namespace_id, b->namespace_id, sizeof(b->namespace_id)) == 0));
+}
+bool backup_options(const sc_save_backup_request& b) {
+    if (b.campaign > 2 || b.slot > 11 || !b.work_deadline_ms ||
+        b.work_deadline_ms > SC_SAVE_BACKUP_MAX_WORK_MS || b.namespace_id[64]) return false;
+    for (size_t i = 0; i < 64; ++i) {
+        const auto c = b.namespace_id[i];
+        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
+    }
+    return true;
+}
 }
 void Diagnostics::queue_detail(Slot& s) {
     s.detail.revision = SC_DIAGNOSTIC_DETAIL_REVISION;
@@ -56,29 +74,53 @@ void Diagnostics::queue_detail(Slot& s) {
 void Diagnostics::collect(uint64_t now) {
     for (auto& s : slots_) {
         auto state = s.state.load(std::memory_order_acquire);
-        if (state == SC_DIAGNOSTIC_QUEUED && now >= s.result.deadline_at_ms) {
+        if (state == SC_DIAGNOSTIC_CLAIMED && s.awaiting_backup.load(std::memory_order_acquire)) {
+            sc_save_backup_snapshot progress{}; s.backup->inspect(progress);
+            // A failed copy can precede the outer native read completion. Keep
+            // the slot while either that read or the actual copy still runs.
+            if ((progress.flags & SC_BACKUP_READ_TERMINAL) && progress.state != SC_BACKUP_COPYING) {
+                auto done = s.result; done.completed_at_ms = now;
+                done.state = s.submission.entered ? SC_DIAGNOSTIC_EXECUTED : SC_DIAGNOSTIC_REJECTED;
+                done.reason = s.submission.exception ? SC_NATIVE_EXCEPTION :
+                    (s.submission.matched ? SC_NATIVE_NONE : SC_NATIVE_BINDING_FAILED);
+                finish(s, done, s.detail);
+            }
+        } else if (state == SC_DIAGNOSTIC_QUEUED && now >= s.result.deadline_at_ms) {
             queue_detail(s);
+            if (s.backup) s.backup->readback_finished(false);
             s.result.state = SC_DIAGNOSTIC_EXPIRED; s.result.reason = SC_NATIVE_DEADLINE;
             s.result.completed_at_ms = now; s.state.store(SC_DIAGNOSTIC_EXPIRED, std::memory_order_release);
         } else if (state >= SC_DIAGNOSTIC_EXECUTED && now >= s.result.completed_at_ms &&
                    now - s.result.completed_at_ms >= SC_DIAGNOSTIC_RETENTION_MS) {
+            s.backup.reset();
             s.state.store(SC_DIAGNOSTIC_UNKNOWN, std::memory_order_release);
         }
     }
 }
-sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_t reject, uint64_t now, sc_diagnostic_detail* detail) {
+sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_t reject, uint64_t now,
+        sc_diagnostic_detail* detail, const sc_save_backup_request* backup) {
     if (detail) { *detail = {}; detail->revision = SC_DIAGNOSTIC_DETAIL_REVISION; detail->stage = SC_STAGE_ADMISSION; }
     collect(now);
     auto out = initial(r);
     for (auto& s : slots_) if (s.state.load(std::memory_order_acquire) != SC_DIAGNOSTIC_UNKNOWN && key(s.request, r)) {
-        if (!same_scope(s.request.expected, r.expected) || s.request.deadline_ms != r.deadline_ms) {
+        if (!same_scope(s.request.expected, r.expected) || s.request.deadline_ms != r.deadline_ms || !same_backup(s, backup)) {
             out.state = SC_DIAGNOSTIC_REJECTED; out.reason = SC_NATIVE_DUPLICATE_MISMATCH; return out;
         }
-        return retrieve(r, false, now, detail);
+        return retrieve(r, false, now, detail, backup);
     }
+    if (!reject && backup && !backup_options(*backup)) reject = SC_NATIVE_SCOPE_MISMATCH;
     if (!reject && (r.deadline_ms == 0 || r.deadline_ms > SC_DIAGNOSTIC_MAX_DEADLINE_MS)) reject = SC_NATIVE_DEADLINE;
     if (reject) { out.state = SC_DIAGNOSTIC_REJECTED; out.reason = reject; return out; }
     for (auto& s : slots_) if (s.state.load(std::memory_order_acquire) == SC_DIAGNOSTIC_UNKNOWN) {
+        std::shared_ptr<save::BackupJob> job;
+        if (backup) try {
+            job = std::make_shared<save::BackupJob>(r.expected.pid, r.expected.process_created, now + backup->work_deadline_ms);
+        } catch (const std::bad_alloc&) {
+            out.state = SC_DIAGNOSTIC_REJECTED; out.reason = SC_NATIVE_BINDING_FAILED; return out;
+        }
+        s.is_backup = backup != nullptr; s.backup_request = backup ? *backup : sc_save_backup_request{};
+        s.backup = std::move(job); s.submission = {};
+        s.awaiting_backup.store(false, std::memory_order_relaxed);
         s.request = r; s.cancel.store(false, std::memory_order_relaxed);
         s.detail = {}; s.detail.revision = SC_DIAGNOSTIC_DETAIL_REVISION;
         s.admitted_lock_misses = claim_lock_misses_.load(std::memory_order_relaxed);
@@ -88,18 +130,22 @@ sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_
     }
     out.state = SC_DIAGNOSTIC_REJECTED; out.reason = SC_NATIVE_QUEUE_FULL; return out;
 }
-sc_diagnostic_result Diagnostics::retrieve(const sc_diagnostic_request& r, bool cancel, uint64_t now, sc_diagnostic_detail* detail) {
+sc_diagnostic_result Diagnostics::retrieve(const sc_diagnostic_request& r, bool cancel, uint64_t now,
+        sc_diagnostic_detail* detail, const sc_save_backup_request* backup) {
     if (detail) { *detail = {}; detail->revision = SC_DIAGNOSTIC_DETAIL_REVISION; }
     collect(now);
     for (auto& s : slots_) {
         auto state = s.state.load(std::memory_order_acquire);
-        if (state == SC_DIAGNOSTIC_UNKNOWN || !key(s.request, r) || !same_scope(s.request.expected, r.expected)) continue;
+        if (state == SC_DIAGNOSTIC_UNKNOWN || !key(s.request, r) || !same_scope(s.request.expected, r.expected) ||
+            !same_backup(s, backup) || (backup && s.request.deadline_ms != r.deadline_ms)) continue;
         if (cancel && (state == SC_DIAGNOSTIC_QUEUED || state == SC_DIAGNOSTIC_CLAIMED)) {
             s.cancel.store(true, std::memory_order_release);
+            if (s.backup) s.backup->cancel();
             if (state == SC_DIAGNOSTIC_QUEUED) {
                 queue_detail(s);
                 s.result.state = SC_DIAGNOSTIC_CANCELLED; s.result.reason = SC_NATIVE_CANCELLED;
                 s.result.completed_at_ms = now; state = SC_DIAGNOSTIC_CANCELLED;
+                if (s.backup) s.backup->readback_finished(false);
                 s.state.store(state, std::memory_order_release);
             }
         }
@@ -122,15 +168,62 @@ Diagnostics::Slot* Diagnostics::claim(uint64_t now) {
     return nullptr;
 }
 void Diagnostics::finish(Slot& s, sc_diagnostic_result result, sc_diagnostic_detail detail) {
+    if (s.backup && !s.awaiting_backup.load(std::memory_order_acquire)) s.backup->readback_finished(false);
     result.cancel_requested = s.cancel.load(std::memory_order_acquire);
     detail.revision = SC_DIAGNOSTIC_DETAIL_REVISION;
     s.detail = detail; s.result = result; s.state.store(result.state, std::memory_order_release);
 }
+void Diagnostics::await_backup(Slot& s, sc_diagnostic_result result, sc_diagnostic_detail detail,
+        save::SubmissionResult submission) {
+    result.state = SC_DIAGNOSTIC_CLAIMED; result.completed_at_ms = 0;
+    s.submission = submission; s.result = result; s.detail = detail;
+    s.awaiting_backup.store(true, std::memory_order_release);
+    // No caller access to s is permitted after publication: retrieval may now
+    // observe completion and eventually reuse the slot. Workers own only the job.
+}
+sc_save_backup_snapshot Diagnostics::backup_result(const sc_save_backup_request& r, bool cancel, uint64_t now) {
+    sc_save_backup_snapshot out{}; out.size = sizeof(out); out.abi_version = SC_SAVE_BACKUP_ABI_VERSION;
+    out.execution = retrieve(r.execution, cancel, now, nullptr, &r);
+    if (out.execution.cancel_requested) out.flags = SC_BACKUP_CANCEL_REQUESTED;
+    std::memcpy(out.namespace_id, r.namespace_id, sizeof(out.namespace_id)); out.campaign = r.campaign; out.slot = r.slot;
+    switch (out.execution.state) {
+    case SC_DIAGNOSTIC_UNKNOWN: return out;
+    case SC_DIAGNOSTIC_QUEUED: out.state = SC_BACKUP_QUEUED; break;
+    case SC_DIAGNOSTIC_CLAIMED: out.state = SC_BACKUP_CLAIMED; break;
+    case SC_DIAGNOSTIC_REJECTED: out.state = SC_BACKUP_REJECTED; break;
+    case SC_DIAGNOSTIC_EXPIRED: out.state = SC_BACKUP_EXPIRED; break;
+    case SC_DIAGNOSTIC_CANCELLED: out.state = SC_BACKUP_CANCELLED; break;
+    default: out.state = SC_BACKUP_FAILED; break;
+    }
+    for (const auto& s : slots_) {
+        if (s.state.load(std::memory_order_acquire) == SC_DIAGNOSTIC_UNKNOWN || !same_backup(s, &r) ||
+            !key(s.request, r.execution) || !same_scope(s.request.expected, r.execution.expected)) continue;
+        // Callback-owned submission/result fields are invisible until handoff.
+        if (!s.awaiting_backup.load(std::memory_order_acquire)) return out;
+        out.execution = s.result; out.execution.cancel_requested = s.cancel.load(std::memory_order_acquire);
+        out.execution.retrieved = 1; out.execution.retrieved_at_ms = now;
+        out.native_exception = s.submission.exception;
+        out.flags = (s.submission.entered ? SC_BACKUP_NATIVE_ENTERED : 0u) |
+            (s.submission.task_returned ? SC_BACKUP_TASK_RETURNED : 0u) |
+            (s.submission.matched ? SC_BACKUP_SOURCE_MATCHED : 0u);
+        s.backup->inspect(out);
+        if (out.execution.state == SC_DIAGNOSTIC_CLAIMED) {
+            if (out.state != SC_BACKUP_COPYING && out.state != SC_BACKUP_COPIED) out.state = SC_BACKUP_WAITING_NATIVE;
+        } else if (out.execution.state == SC_DIAGNOSTIC_EXECUTED) {
+            out.state = s.submission.matched && out.state == SC_BACKUP_COMPLETE ? SC_BACKUP_COMPLETE : SC_BACKUP_FAILED;
+            if (!s.submission.matched) out.failure = SC_BACKUP_FAILURE_NATIVE;
+        } else if (out.execution.state == SC_DIAGNOSTIC_REJECTED) out.state = SC_BACKUP_REJECTED;
+        return out;
+    }
+    return out;
+}
 void Diagnostics::cancel_pending(uint64_t now) {
     for (auto& s : slots_) {
         const auto state = s.state.load(std::memory_order_acquire);
+        if (s.backup && (state == SC_DIAGNOSTIC_CLAIMED || state == SC_DIAGNOSTIC_QUEUED)) s.backup->cancel();
         if (state == SC_DIAGNOSTIC_CLAIMED) s.cancel.store(true, std::memory_order_release);
         if (state == SC_DIAGNOSTIC_QUEUED) {
+            if (s.backup) s.backup->readback_finished(false);
             queue_detail(s);
             s.result.state = SC_DIAGNOSTIC_CANCELLED; s.result.reason = SC_NATIVE_STOPPED;
             s.result.completed_at_ms = now; s.state.store(SC_DIAGNOSTIC_CANCELLED, std::memory_order_release);

@@ -2,6 +2,7 @@
 #pragma once
 #include "save_storage.h"
 #include "save_sdk_write.h"
+#include "sentinel_save_request.h"
 #include <atomic>
 #include <mutex>
 
@@ -29,6 +30,8 @@ public:
     void cancel() { cancel_.store(true, std::memory_order_release); }
     void readback_finished(bool success);
     BackupProgress progress() const;
+    // Allocation-free facts for queue housekeeping and IPC.
+    void inspect(sc_save_backup_snapshot&) const;
     void copy(Session&, engine::Memory&, const SdkWriteObservation&, const std::vector<uintptr_t>& buffers);
 private:
     BackupFailure stopped() const;

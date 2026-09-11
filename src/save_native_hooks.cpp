@@ -25,6 +25,7 @@ using RootInit = void (*)(uintptr_t);
 RootInit original_root = nullptr;
 CollectorCalls calls{};
 DeleteCalls delete_calls{};
+DeleteCalls scoped_delete_calls{};
 WriteCalls write_calls{};
 WriteCalls read_calls{};
 WriteCalls erase_calls{}, auxiliary_calls{};
@@ -121,6 +122,10 @@ CollectorResult* collector_detour(const CollectorContext* context, CollectorResu
 DeleteResult* delete_detour(DeleteFuture* future, DeleteResult* out, void* executor) {
     engine::LocalMemory memory;
     return refuse_unscoped_delete(session(), memory, future, out, executor, delete_calls);
+}
+DeleteResult* scoped_delete_detour(DeleteFuture* future, DeleteResult* out, void* executor) {
+    engine::LocalMemory memory;
+    return poll_scoped_delete(session(), memory, future, out, executor, scoped_delete_calls);
 }
 SaveFuture** write_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
     engine::LocalMemory memory;
@@ -221,7 +226,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         session().reject(SessionFault::installation); return;
     }
     engine::LocalMemory memory;
-    std::array<native::Target, 41> targets;
+    std::array<native::Target, 42> targets;
     for (unsigned i = 0; i < targets.size(); ++i) {
         targets[i] = native::save_target(binding.image.base, i);
         if (native::validate_target(memory, binding.image, targets[i], stop, GetTickCount64() + 3000)) {
@@ -238,7 +243,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     if (memory.copy(binding.image.base + 0x2a1cc60, &context_init, sizeof(context_init)).reason || !context_init) {
         session().reject(SessionFault::installation); return;
     }
-    constexpr unsigned hooks[] = {0, 1, 4, 6, 8, 9, 13, 14, 15, 16, 17, 18, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34, 35, 37, 38, 40};
+    constexpr unsigned hooks[] = {0, 1, 4, 6, 8, 9, 13, 14, 15, 16, 17, 18, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34, 35, 37, 38, 40, 41};
     void* originals[std::size(hooks)]{};
     void* detours[] = {reinterpret_cast<void*>(root_detour), reinterpret_cast<void*>(collector_detour),
         reinterpret_cast<void*>(delete_detour), reinterpret_cast<void*>(write_detour),
@@ -253,7 +258,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         reinterpret_cast<void*>(prepare_job_detour), reinterpret_cast<void*>(destroy_preparation_detour),
         reinterpret_cast<void*>(write_context_detour), reinterpret_cast<void*>(destroy_preflight_detour),
         reinterpret_cast<void*>(read_preparation_detour), reinterpret_cast<void*>(read_decode_detour),
-        reinterpret_cast<void*>(save_factory_detour)};
+        reinterpret_cast<void*>(save_factory_detour), reinterpret_cast<void*>(scoped_delete_detour)};
     static_assert(std::size(detours) == std::size(hooks));
     unsigned created = 0;
     for (; created < std::size(hooks); ++created) {
@@ -286,6 +291,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     calls = {reinterpret_cast<Collect>(originals[1]),
         reinterpret_cast<AssignString>(targets[2].address), reinterpret_cast<ReleaseVector>(targets[3].address)};
     delete_calls = {reinterpret_cast<PollDelete>(originals[2]), reinterpret_cast<ReleaseDelete>(targets[5].address)};
+    scoped_delete_calls = {reinterpret_cast<PollDelete>(originals[27]), delete_calls.release};
     write_calls = {reinterpret_cast<CreateWrite>(originals[3]), reinterpret_cast<SetSaveName>(targets[7].address),
         reinterpret_cast<ReleaseSaveReference>(targets[5].address), profile_payload, binding.image.base};
     submission_calls = {reinterpret_cast<NativeSave>(targets[39].address), write_calls.release,
@@ -312,7 +318,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     session().install(binding.root, binding.image.base + 0x4323fc, startup_route | collector_route);
     // All immutable pointers and policy are ready BEFORE the one-time startup
     // hook is reachable. The existing observer accepting flag is independent.
-    for (unsigned index : {1u, 4u, 6u, 8u, 9u, 13u, 14u, 15u, 16u, 17u, 18u, 23u, 24u, 25u, 26u, 27u, 28u, 29u, 30u, 32u, 33u, 34u, 35u, 37u, 38u, 40u, 0u}) {
+    for (unsigned index : {1u, 4u, 6u, 8u, 9u, 13u, 14u, 15u, 16u, 17u, 18u, 23u, 24u, 25u, 26u, 27u, 28u, 29u, 30u, 32u, 33u, 34u, 35u, 37u, 38u, 40u, 41u, 0u}) {
         std::array<uint8_t, 32> current{};
         if (memory.copy(targets[index].address, current.data(), current.size()).reason ||
             std::memcmp(current.data(), targets[index].bytes.data(), current.size()) ||

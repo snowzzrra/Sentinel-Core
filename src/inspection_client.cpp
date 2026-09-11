@@ -18,7 +18,7 @@ ProbeResult classify(DWORD error) {
 }
 static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t required, uint16_t operation,
                                    const sc_diagnostic_request* request = nullptr, uint64_t after_event = 0,
-                                   uint64_t write_id = 0) {
+                                   uint64_t write_id = 0, const sc_save_backup_request* backup = nullptr) {
     Inspection result;
     Handle process;
     auto fail = [&](DWORD error) {
@@ -74,7 +74,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(operation == save_write_operation ? encode_save_write_request(data, write_id) :
+    const DWORD size = static_cast<DWORD>(backup ? encode_backup_request(data, operation, *backup) :
+        operation == save_write_operation ? encode_save_write_request(data, write_id) :
         operation >= native_operation && operation <= diagnostic_detail_cancel_operation ?
         encode_native_request(data, operation, request ? *request : sc_diagnostic_request{}, after_event) :
         encode_request(data, required, wire_version, operation));
@@ -89,7 +90,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     WireResult code{};
     result.failure_stage = "decode_response";
     // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
-    bool decoded = operation == save_write_operation ? decode_save_write_response(data, count, code, result.snapshot, result.write) :
+    bool decoded = backup ? decode_backup_response(data, count, code, operation, result.snapshot, result.backup) :
+        operation == save_write_operation ? decode_save_write_response(data, count, code, result.snapshot, result.write) :
         operation == save_admission_operation ? decode_save_admission_response(data, count, code, result.snapshot, result.admission) :
         (operation == save_operation ? decode_save_response(data, count, code, result.snapshot, result.save) :
         (operation >= native_operation ? decode_native_response(data, count, code, operation, result.snapshot, result.native, result.diagnostic, &result.detail) :
@@ -112,8 +114,14 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         WaitForSingleObject(process.value, 0) != WAIT_TIMEOUT) {
         result.result = ProbeResult::process_mismatch; return result;
     }
-    if (request && (result.diagnostic.request_id != request->request_id ||
-        std::memcmp(result.diagnostic.nonce, request->nonce, sizeof(request->nonce)))) {
+    const auto& execution = backup ? result.backup.execution : result.diagnostic;
+    if (request && (execution.request_id != request->request_id ||
+        std::memcmp(execution.nonce, request->nonce, sizeof(request->nonce)))) {
+        result.result = ProbeResult::invalid_response; return result;
+    }
+    if (backup && (execution.scope.lifecycle_generation != backup->execution.expected.lifecycle_generation ||
+        result.backup.campaign != backup->campaign || result.backup.slot != backup->slot ||
+        std::memcmp(result.backup.namespace_id, backup->namespace_id, sizeof(backup->namespace_id)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
     if (operation == save_write_operation && write_id && result.write.operation_id != write_id) {
@@ -140,6 +148,12 @@ Inspection query_save_admission(uint32_t pid, uint32_t timeout_ms) {
 }
 Inspection query_save_write(uint32_t pid, uint32_t timeout_ms, uint64_t operation_id) {
     return query_operation(pid, timeout_ms, save_write_capability, save_write_operation, nullptr, 0, operation_id);
+}
+Inspection query_save_backup(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_save_backup_request& request) {
+    if (operation < save_backup_submit_operation || operation > save_backup_cancel_operation) {
+        Inspection out; out.result = ProbeResult::usage; return out;
+    }
+    return query_operation(pid, timeout_ms, save_backup_capability, operation, &request.execution, 0, 0, &request);
 }
 Inspection query_native(uint32_t pid, uint32_t timeout_ms, uint64_t after_event) {
     return query_operation(pid, timeout_ms, native_capability, native_operation, nullptr, after_event);

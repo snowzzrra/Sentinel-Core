@@ -6,6 +6,7 @@
 #include "MinHook.h"
 #include <intrin.h>
 #include <cstring>
+#include <cstdio>
 #ifdef SC_NATIVE_TESTING
 #include "native_test_adapter.h"
 #endif
@@ -97,6 +98,11 @@ uint32_t prerequisite(uint64_t now) {
     if (now < status.context_sampled_at_ms || now - status.context_sampled_at_ms > 1000) return SC_NATIVE_STALE;
     return SC_NATIVE_NONE;
 }
+uint32_t backup_prerequisite(const sc_save_backup_request& request) {
+    const auto& owner = save::session();
+    if (owner.state() != save::SessionState::admitted || !owner.accepts_requests()) return SC_NATIVE_BINDING_FAILED;
+    return std::memcmp(owner.namespace_id().data(), request.namespace_id, 64) ? SC_NATIVE_SCOPE_MISMATCH : SC_NATIVE_NONE;
+}
 bool begin_event(uintptr_t root, bool change, uintptr_t descriptor) {
     if (!accepting.load(std::memory_order_acquire)) return false;
     // Root binding and same native execution role are necessary independently
@@ -168,6 +174,7 @@ void post_frame() {
     auto detail = slot->detail;
     detail.stage = why ? SC_STAGE_CLAIM_CONTEXT : SC_STAGE_NONE;
     result.scope = scope; result.thread_id = GetCurrentThreadId();
+    if (slot->is_backup) result.scope = slot->request.expected;
     result.site_revision = 1; result.phase = 1; result.lifecycle = life;
     auto reject = [&](uint32_t reason, uint32_t stage) { why = reason; detail.stage = stage; };
     if (!same_scope(slot->request.expected, scope)) reject(SC_NATIVE_SCOPE_MISMATCH, SC_STAGE_SCOPE);
@@ -225,6 +232,16 @@ void post_frame() {
     }
     if (!why && owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); reject(SC_NATIVE_WRONG_THREAD, SC_STAGE_NATIVE_FAULT); }
     if (!why && !accepting.load(std::memory_order_acquire)) reject(SC_NATIVE_STOPPED, SC_STAGE_NATIVE_FAULT);
+    char backup_directory[64]{};
+    if (!why && slot->is_backup) {
+        const auto reason = backup_prerequisite(slot->backup_request);
+        if (reason) reject(reason, SC_STAGE_NATIVE_FAULT);
+        else {
+            constexpr const char* campaigns[] = {"GAME-", "DLC1-", "DLC2-"};
+            sprintf_s(backup_directory, "%s/%sAUTOSAVE%u", save::session().native_root().c_str(),
+                campaigns[slot->backup_request.campaign], slot->backup_request.slot);
+        }
+    }
     if (!why && slot->cancel.load(std::memory_order_acquire)) reject(SC_NATIVE_CANCELLED, SC_STAGE_CANCELLATION);
     const auto execution_at = GetTickCount64();
     if (!why && execution_at >= result.deadline_at_ms) reject(SC_NATIVE_DEADLINE, SC_STAGE_DEADLINE);
@@ -237,6 +254,13 @@ void post_frame() {
         result.current_map = facts.current_map;
         result.game_state = static_cast<uint32_t>(facts.fields[SC_CONTEXT_GAME_STATE].value);
         result.state = SC_DIAGNOSTIC_EXECUTED;
+        if (slot->is_backup) {
+            // The observation budget ends above. Native serialization has its
+            // own ordinary engine scheduling; it is not a two-millisecond job.
+            const auto submitted = save::submit_native_backup(slot->backup, backup_directory);
+            Diagnostics::await_backup(*slot, result, detail, submitted);
+            return;
+        }
     } else {
         result.state = why == SC_NATIVE_CANCELLED ? SC_DIAGNOSTIC_CANCELLED :
             (why == SC_NATIVE_DEADLINE ? SC_DIAGNOSTIC_EXPIRED : SC_DIAGNOSTIC_REJECTED);
@@ -439,6 +463,27 @@ sc_diagnostic_result submit(const sc_diagnostic_request& request, sc_diagnostic_
 sc_diagnostic_result result(const sc_diagnostic_request& request, bool cancel, sc_diagnostic_detail* detail) {
     AcquireSRWLockExclusive(&lock);
     auto out = diagnostics.retrieve(request, cancel, GetTickCount64(), detail);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_save_backup_snapshot submit_backup(const sc_save_backup_request& request) {
+    AcquireSRWLockExclusive(&lock);
+    const auto now = GetTickCount64(); auto why = prerequisite(now);
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
+    if (!why) why = backup_prerequisite(request);
+    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, &request);
+    sc_save_backup_snapshot out{};
+    if (admitted.state == SC_DIAGNOSTIC_REJECTED) {
+        out.size = sizeof(out); out.abi_version = SC_SAVE_BACKUP_ABI_VERSION;
+        out.state = SC_BACKUP_REJECTED; out.execution = admitted;
+        std::memcpy(out.namespace_id, request.namespace_id, sizeof(out.namespace_id));
+        out.campaign = request.campaign; out.slot = request.slot;
+    } else out = diagnostics.backup_result(request, false, now);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_save_backup_snapshot backup_result(const sc_save_backup_request& request, bool cancel) {
+    AcquireSRWLockExclusive(&lock);
+    auto out = diagnostics.backup_result(request, cancel, GetTickCount64());
     ReleaseSRWLockExclusive(&lock); return out;
 }
 bool stop() {

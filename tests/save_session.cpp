@@ -112,28 +112,153 @@ struct DeleteFixture {
         int64_t result = -1;
         uint64_t payload = 0, job = 0;
     } context;
+    struct DirectoryContext {
+        uintptr_t storage = 0x1234;
+        NativeString directory{};
+        uintptr_t task = 0;
+        int64_t result = -1;
+        uint64_t payload = 0, job = 0;
+    } directory_context;
+    static_assert(offsetof(DirectoryContext, result) == 0x40 && offsetof(DirectoryContext, job) == 0x50);
     struct Control { uint32_t strong = 1, weak = 1; uintptr_t object = 0, destructor = 0; } control;
     DeleteFuture future{};
     std::vector<std::string> files{"GAME-AUTOSAVE0/game.details", "PROFILE/profile.bin", "ap-fixture/GAME-AUTOSAVE0/game.details"};
-    unsigned polls = 0, launches = 0, released = 0;
-    bool finish = false;
+    std::string directory_text;
+    unsigned polls = 0, launches = 0, released = 0, destroyed = 0;
+    bool finish = false, scoped = false;
+    DeleteResult completed{0, 0, 1, 0};
     DeleteFixture() {
         control.object = reinterpret_cast<uintptr_t>(&context);
         future.control = reinterpret_cast<uintptr_t>(&control);
     }
+    explicit DeleteFixture(const std::string& directory) : DeleteFixture() {
+        scoped = true; directory_text = directory;
+        directory_context.directory.data = directory_text.data();
+        directory_context.directory.length = static_cast<int32_t>(directory_text.size());
+        directory_context.directory.capacity_flags = static_cast<uint32_t>(directory_text.size() + 1);
+        control.object = reinterpret_cast<uintptr_t>(&directory_context);
+    }
 };
 DeleteFixture* active_delete = nullptr;
 void release_delete(DeleteFuture* future) {
-    CHECK(future == &active_delete->future && future->control);
-    ++active_delete->released; future->control = 0;
+    auto& fixture = *active_delete;
+    CHECK(future == &fixture.future && future->control && fixture.control.strong && fixture.control.weak);
+    if (--fixture.control.strong == 0) { fixture.control.object = 0; ++fixture.destroyed; }
+    --fixture.control.weak; ++fixture.released; future->control = 0;
 }
-DeleteResult* poll_delete(DeleteFuture* future, DeleteResult* out, void*) {
+DeleteResult* poll_delete(DeleteFuture* future, DeleteResult* out, void* executor) {
     auto& fixture = *active_delete;
     CHECK(future == &fixture.future && future->control); ++fixture.polls;
-    if (!fixture.context.job) { ++fixture.launches; fixture.files.clear(); fixture.context.job = 123; }
-    if (fixture.finish) { release_delete(future); *out = {0, 0, 1, 0}; }
+    if (executor && static_cast<uint8_t*>(executor)[9]) { *out = {1, 0, 0, 0}; return out; }
+    auto& job = fixture.scoped ? fixture.directory_context.job : fixture.context.job;
+    if (!job) {
+        ++fixture.launches; job = 123;
+        if (fixture.scoped) {
+            const auto prefix = fixture.directory_text + "/";
+            fixture.files.erase(std::remove_if(fixture.files.begin(), fixture.files.end(), [&](const auto& key) {
+                return key.size() >= prefix.size() && steam_name_equal(std::string_view(key).substr(0, prefix.size()), prefix);
+            }), fixture.files.end());
+        } else fixture.files.clear();
+    }
+    if (fixture.finish) { job = 0; release_delete(future); *out = fixture.completed; }
     else *out = {-1, 0, 0, 0};
     return out;
+}
+void scoped_delete_contracts(Fixture& fixtures, engine::Memory& memory) {
+    const DeleteCalls calls{poll_delete, release_delete};
+    for (unsigned mode = 0; mode < 19; ++mode) {
+        Session owner; fixtures.admit(owner);
+        std::string directory = owner.native_root() + "/GAME-AUTOSAVE0";
+        if (mode == 1) directory = owner.native_root() + "/DLC1-AUTOSAVE11";
+        if (mode == 2) directory = owner.native_root() + "/dlc2-autosave5";
+        if (mode == 3 || mode == 18) directory = "PROFILE";
+        if (mode == 4) directory = "GAME-AUTOSAVE0";
+        if (mode == 5) directory = owner.native_root();
+        if (mode == 6) directory = owner.native_root() + "x/GAME-AUTOSAVE0";
+        if (mode == 7) directory = "foreign/GAME-AUTOSAVE0";
+        if (mode == 8) directory = owner.native_root() + "/GAME-AUTOSAVE12";
+        if (mode == 9) directory = owner.native_root() + "/GAME-AUTOSAVE01";
+        if (mode == 10) directory += "/child";
+        if (mode == 11) directory = owner.native_root() + "/PROFILE";
+        if (mode == 17) directory[owner.native_root().size() + 3] = '\0';
+        DeleteFixture fixture(directory); active_delete = &fixture; DeleteResult result{};
+        // These changes happen after the native factory captured its context.
+        if (mode == 12) fixture.directory_context.storage = 0x5678;
+        if (mode == 13) owner.fail(SessionFault::native_write);
+        if (mode == 14) fixture.directory_context.storage = 0;
+        if (mode == 15) fixture.directory_context.directory.length = 64;
+        if (mode == 16) fixture.directory_context.directory.data = reinterpret_cast<char*>(1);
+        if (mode == 18) fixture.control.strong = fixture.control.weak = 2;
+        fixture.files.push_back(directory + "0/game.details");
+        fixture.files.push_back(owner.native_root() + "/sentinel-owner.bin");
+        const auto protected_files = fixture.files;
+        fixture.files.push_back(directory + "/game.details");
+        fixture.files.push_back(directory + "/nested/stream.bin");
+        const auto before = fixture.files;
+        poll_scoped_delete(owner, memory, &fixture.future, &result, nullptr, calls);
+        if (mode < 3) {
+            CHECK(result.state == -1 && fixture.polls == 1 && fixture.launches == 1 && !fixture.released);
+            CHECK(fixture.files == protected_files && fixture.control.strong == 1 && fixture.control.object);
+            fixture.finish = true;
+            poll_scoped_delete(owner, memory, &fixture.future, &result, nullptr, calls);
+            CHECK(!result.state && !result.outcome && result.error == 1 && fixture.polls == 2 && fixture.launches == 1);
+            CHECK(fixture.released == 1 && fixture.destroyed == 1 && !fixture.future.control && !fixture.control.strong && !fixture.control.weak);
+            CHECK(owner.native_io() && owner.fault() == SessionFault::none);
+        } else {
+            CHECK(!result.state && result.outcome == 1 && result.error == 1);
+            CHECK(!fixture.polls && !fixture.launches && fixture.released == 1 && !fixture.future.control && fixture.files == before);
+            CHECK(fixture.control.strong == (mode == 18 ? 1u : 0u) && fixture.control.weak == (mode == 18 ? 1u : 0u));
+            CHECK(fixture.destroyed == (mode == 18 ? 0u : 1u));
+            CHECK(owner.state() == SessionState::faulted && owner.routed() &&
+                owner.fault() == (mode == 13 ? SessionFault::native_write : SessionFault::unscoped_delete));
+            poll_scoped_delete(owner, memory, &fixture.future, &result, nullptr, calls);
+            CHECK(result.state == 1 && !fixture.polls && !fixture.launches && fixture.released == 1);
+        }
+    }
+    for (bool failed : {false, true}) {
+        Session owner; fixtures.admit(owner); DeleteFixture fixture(owner.native_root() + "/GAME-AUTOSAVE0");
+        active_delete = &fixture; DeleteResult result{}; std::array<uint8_t, 16> executor{};
+        fixture.files = {fixture.directory_text + "/game.details", "PROFILE/profile.bin"};
+        poll_scoped_delete(owner, memory, &fixture.future, &result, executor.data(), calls);
+        CHECK(fixture.files == std::vector<std::string>{"PROFILE/profile.bin"}); // Deletion already occurred in this model.
+        owner.fail(SessionFault::native_write); executor[9] = 1;
+        poll_scoped_delete(owner, memory, &fixture.future, &result, executor.data(), calls);
+        CHECK(result.state == 1 && fixture.directory_context.job && fixture.future.control && !fixture.released && fixture.launches == 1);
+        executor[9] = 0;
+        poll_scoped_delete(owner, memory, &fixture.future, &result, executor.data(), calls);
+        CHECK(result.state == -1 && fixture.control.strong == 1 && !fixture.destroyed && fixture.launches == 1);
+        fixture.finish = true; if (failed) fixture.completed = {0, 1, 4, 0};
+        poll_scoped_delete(owner, memory, &fixture.future, &result, executor.data(), calls);
+        CHECK(!result.state && result.outcome == (failed ? 1 : 0) && result.error == (failed ? 4u : 1u));
+        CHECK(fixture.released == 1 && fixture.destroyed == 1 && !fixture.future.control && fixture.launches == 1);
+        CHECK(owner.state() == SessionState::faulted && owner.fault() == SessionFault::native_write);
+    }
+    {
+        Session owner; fixtures.admit(owner); DeleteFixture fixture("foreign/GAME-AUTOSAVE0");
+        active_delete = &fixture; DeleteResult result{}; fixture.directory_context.job = 999;
+        poll_scoped_delete(owner, memory, &fixture.future, &result, nullptr, calls);
+        CHECK(result.state == -1 && fixture.polls == 1 && !fixture.launches && !fixture.released);
+        CHECK(owner.fault() == SessionFault::delete_indeterminate);
+        fixture.finish = true;
+        poll_scoped_delete(owner, memory, &fixture.future, &result, nullptr, calls);
+        CHECK(!result.state && !result.outcome && fixture.released == 1 && !fixture.launches);
+        CHECK(owner.state() == SessionState::faulted && !fixture.future.control);
+    }
+    for (bool invalid_control : {false, true}) {
+        Session owner; fixtures.admit(owner); DeleteFixture fixture(owner.native_root() + "/GAME-AUTOSAVE0");
+        active_delete = &fixture; DeleteResult result{};
+        if (invalid_control) fixture.future.control = 1; else fixture.directory_context.result = 0;
+        poll_scoped_delete(owner, memory, &fixture.future, &result, nullptr, calls);
+        CHECK(result.state == 1 && !fixture.polls && !fixture.launches && !fixture.released && fixture.control.strong == 1);
+        CHECK(owner.fault() == SessionFault::delete_indeterminate && owner.routed());
+    }
+    {
+        Session disabled; DeleteFixture fixture("PROFILE"); active_delete = &fixture; DeleteResult result{};
+        fixture.finish = true;
+        poll_scoped_delete(disabled, memory, &fixture.future, &result, nullptr, calls);
+        CHECK(!result.state && !result.outcome && fixture.polls == 1 && fixture.launches == 1 && fixture.released == 1);
+        CHECK(disabled.state() == SessionState::disabled && disabled.fault() == SessionFault::none);
+    }
 }
 void delete_contracts(Fixture& fixtures, engine::Memory& memory) {
     const DeleteCalls calls{poll_delete, release_delete};
@@ -172,7 +297,7 @@ void delete_contracts(Fixture& fixtures, engine::Memory& memory) {
         CHECK(result.state == 1 && !fixture.polls && !fixture.released && !fixture.launches);
         CHECK(owner.fault() == SessionFault::delete_indeterminate && owner.routed());
     }
-    active_delete = nullptr;
+    scoped_delete_contracts(fixtures, memory); active_delete = nullptr;
 }
 }
 namespace {

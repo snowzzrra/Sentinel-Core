@@ -203,7 +203,9 @@ uint64_t read_profile(Session& owner, engine::Memory& memory, SaveReference* ref
     bool valid = false;
     try {
         Fields fields;
-        valid = !active_read && owner.profile_choice(context.choice) &&
+        // A completed provider read can reach this callback after another route
+        // faulted. Refuse before native import, even with a valid cached baseline.
+        valid = owner.native_io() && !active_read && owner.profile_choice(context.choice) &&
             at(memory, reference->control, 8, context.shell) &&
             at(memory, context.shell, 8, context.profile) && at(memory, context.shell, 16, context.manager) &&
             callbacks(memory, context.profile, context.shell, calls) &&

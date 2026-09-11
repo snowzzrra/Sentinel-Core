@@ -16,6 +16,7 @@ sc_diagnostic_request request(uint64_t id, uint32_t deadline = 100) {
     r.expected.instance_id[0] = 1; r.expected.lifecycle_generation = 1;
     r.request_id = id; r.nonce[0] = 42; r.deadline_ms = deadline; return r;
 }
+void run_backup_request_contracts();
 int main() {
     Lifecycle life;
     CHECK(life.generation == 0 && life.state == SC_LIFETIME_UNOBSERVED);
@@ -136,5 +137,6 @@ int main() {
     size = encode_native_response(wire, WireResult::ok, diagnostic_detail_result_operation, host, {}, d, detail);
     CHECK(size && decode_native_response(wire, size, code, diagnostic_detail_result_operation, s, roundtrip, d, &restored));
     CHECK(restored.pending_before_reason == SC_REASON_PARTIAL_READ && restored.pending_before_error == ERROR_PARTIAL_COPY);
+    run_backup_request_contracts();
     std::puts("PASS native lifecycle, nested/free/failure/menu, same-name generation, history gaps, queue bounds/deadlines/retention, claimed cancellation race, strict bounded wire; HARNESS ONLY");
 }

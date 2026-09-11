@@ -388,6 +388,31 @@ int wmain(int argc, wchar_t** argv) {
         CHECK(repeated.result == ProbeResult::ok && repeated.snapshot.instance == initial.snapshot.instance);
     }
     const auto args = L"--pid " + std::to_wstring(first.child.pid) + L" --timeout-ms 2000";
+    sc_save_backup_request backup{};
+    backup.execution.expected.pid = first.child.pid; backup.execution.expected.process_created = created;
+    std::memcpy(backup.execution.expected.instance_id, initial.snapshot.instance.data(), 16);
+    backup.execution.expected.lifecycle_generation = 1; backup.execution.request_id = UINT64_MAX;
+    backup.execution.nonce[0] = 42; backup.execution.deadline_ms = 1000; backup.work_deadline_ms = 10000;
+    std::memset(backup.namespace_id, 'a', 64);
+    const auto rejected_backup = query_save_backup(first.child.pid, 2000, save_backup_submit_operation, backup);
+    CHECK(rejected_backup.result == ProbeResult::ok && rejected_backup.backup.state == SC_BACKUP_REJECTED &&
+        !(rejected_backup.backup.flags & SC_BACKUP_NATIVE_ENTERED));
+    CHECK(query_save_backup(first.child.pid, 2000, save_backup_result_operation, backup).backup.state == SC_BACKUP_UNKNOWN);
+    CHECK(query_save_backup(first.child.pid, 2000, save_backup_cancel_operation, backup).backup.state == SC_BACKUP_UNKNOWN);
+    auto wrong_backup = backup; ++wrong_backup.execution.expected.process_created;
+    CHECK(query_save_backup(first.child.pid, 2000, save_backup_submit_operation, wrong_backup).result == ProbeResult::process_mismatch);
+    const auto backup_args = args + L" --namespace " + std::wstring(64, L'a') + L" --campaign game --slot 0 --json";
+    const auto unavailable_backup = probe(probe_path, backup_args + L" --native-backup", 8);
+    CHECK(unavailable_backup.find("\"native_entered\":false") != std::string::npos);
+    probe(probe_path, backup_args + L" --native-backup --slot 1", 2);
+    probe(probe_path, backup_args + L" --native-backup-result", 2);
+    const auto backup_instance = instance_text(initial.snapshot.instance);
+    const std::wstring backup_scope = L" --request-id 18446744073709551615 --nonce " + std::wstring(L"2a") + std::wstring(30, L'0') +
+        L" --expect-created " + std::to_wstring(created) + L" --expect-instance " +
+        std::wstring(backup_instance.begin(), backup_instance.end()) +
+        L" --expect-generation 1";
+    const auto unknown_backup = probe(probe_path, backup_args + backup_scope + L" --native-backup-result", 8);
+    CHECK(unknown_backup.find("\"state\":\"unknown\"") != std::string::npos);
     const auto readable = probe(probe_path, args, 0);
     CHECK(readable.find("OS server verified, non_game_host") != std::string::npos);
     const auto json = probe(probe_path, args + L" --json", 0);
