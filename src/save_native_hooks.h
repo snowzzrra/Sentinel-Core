@@ -10,6 +10,8 @@ inline constexpr uint32_t steam_20260818_routes = startup_route | collector_rout
 // Worker/bootstrap preparation, never DllMain or an IPC dispatch operation.
 void configure_prelaunch();
 bool owner_retained();
+// Production read-only helper/import validation, shared with the controlled host.
+bool validate_native_helpers(Installation&, engine::Memory&, const engine::Image&, uintptr_t& initializer);
 // Called by the existing hook owner after MinHook initialization/module pinning.
 // Save detours never take that owner's installer lock or use its accepting flag.
 void install_native_hooks(const engine::Binding&, HANDLE stop);

@@ -1,4 +1,5 @@
 #include "native_target.h"
+#include "save_installation.h"
 #include "hde/hde64.h"
 #include <algorithm>
 #include <cstring>
@@ -71,6 +72,10 @@ Target save_target(uintptr_t base, unsigned index) {
         "48895c240848896c24104889742418574883ec20488b3933ed488929488bd98d",
         "48895c241848896c242056574154415641574883ec20488b0d6be2dd024c8bf2"};
     static_assert(std::size(rvas) == std::size(bytes));
+    static_assert([&] { for (auto text : bytes) {
+        size_t length = 0; while (text[length]) ++length;
+        if (length != 64) return false;
+    } return true; }(), "Every entry signature must contain exactly 32 bytes");
     Target out{}; out.address = base + rvas[index];
     const auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
     for (size_t n = 0; n < out.bytes.size(); ++n)
@@ -99,17 +104,80 @@ Target save_target(uintptr_t base, unsigned index) {
         for (size_t n = 0; n < out.signature.size(); ++n)
             out.signature[n] = static_cast<uint8_t>(digit(unique[n * 2]) * 16 + digit(unique[n * 2 + 1]));
     }
+    if (index == 3 || index == 5 || index == 9) {
+        // Template prologues are shared by other functions in this exact image.
+        const char* unique = index == 3 ? "33f60f1f400066660f1f840000000000488b1f4803de488d4b30e8217e95fe48" :
+            index == 5 ? "4b08ff5310f00fc17b04ffcf83ff01488b7c24307d0dba18000000488bcbe841" :
+            "e1498be8488d0dc59a6601488bfae81dc9b7fe488b47204533f64885c0740848";
+        out.signature_offset = index == 5 ? 48 : 32;
+        for (size_t n = 0; n < out.signature.size(); ++n)
+            out.signature[n] = static_cast<uint8_t>(digit(unique[n * 2]) * 16 + digit(unique[n * 2 + 1]));
+    }
     return out;
 }
+namespace {
+// Windows x64 may split a function into chained RUNTIME_FUNCTION fragments.
+// A secondary window must belong to the exact entry's unwind owner throughout;
+// adjacent executable bytes alone never establish ownership.
+bool same_unwind_owner(engine::Memory& memory, const engine::Image& image,
+                       RUNTIME_FUNCTION part, const RUNTIME_FUNCTION& entry,
+                       ValidationDetail* detail) {
+    for (unsigned depth = 0; depth < 8; ++depth) {
+        if (part.BeginAddress == entry.BeginAddress && part.EndAddress == entry.EndAddress &&
+            part.UnwindData == entry.UnwindData) return true;
+        if (part.EndAddress <= part.BeginAddress ||
+            !image.contains(part.BeginAddress, part.EndAddress - part.BeginAddress,
+                IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE) ||
+            !image.contains(part.UnwindData, 4, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE)) return false;
+        uint8_t header[4]{};
+        auto read = memory.copy(image.base + part.UnwindData, header, sizeof(header));
+        if (detail) { detail->read_attempted = 1; detail->read = read; }
+        if (read.reason || (header[0] & 7) != 1 || (header[0] >> 3) != UNW_FLAG_CHAININFO) return false;
+        const uint64_t chained = uint64_t{part.UnwindData} + 4 + ((header[2] + 1u) & ~1u) * 2;
+        if (chained + sizeof(part) > image.size || !image.contains(static_cast<uint32_t>(chained), sizeof(part),
+                IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE)) return false;
+        read = memory.copy(image.base + static_cast<uintptr_t>(chained), &part, sizeof(part));
+        if (detail) { detail->read_attempted = 1; detail->read = read; }
+        if (read.reason) return false;
+    }
+    return false;
+}
+bool owned_window(engine::Memory& memory, const engine::Image& image, uintptr_t address,
+                  size_t length, const RUNTIME_FUNCTION& entry, ValidationDetail* detail) {
+    const uintptr_t end = address + length;
+    while (address < end) {
+        DWORD64 base = 0;
+        const auto part = RtlLookupFunctionEntry(address, &base, nullptr);
+        if (!part || base != image.base || part->EndAddress <= address - base ||
+            !same_unwind_owner(memory, image, *part, entry, detail)) return false;
+        address = std::min(end, static_cast<uintptr_t>(base + part->EndAddress));
+    }
+    return true;
+}
+}
+bool function_window(engine::Memory& memory, const engine::Image& image, uintptr_t entry_address,
+                     uintptr_t address, size_t length, ValidationDetail* detail) {
+    if (address < image.base || address - image.base > UINT32_MAX ||
+        !image.contains(static_cast<uint32_t>(address - image.base), length,
+            IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE)) return false;
+    DWORD64 base = 0;
+    const auto entry = RtlLookupFunctionEntry(entry_address, &base, nullptr);
+    return entry && base == image.base && base + entry->BeginAddress == entry_address &&
+        owned_window(memory, image, address, length, *entry, detail);
+}
 uint32_t validate_target(engine::Memory& memory, const engine::Image& image,
-                         const Target& target, HANDLE stop, uint64_t deadline) {
+                         const Target& target, HANDLE stop, uint64_t deadline, ValidationDetail* detail) {
+    if (detail) *detail = {};
     constexpr size_t signature_size = 32;
     if (target.address < image.base || target.address - image.base > UINT32_MAX ||
         !image.contains(static_cast<uint32_t>(target.address - image.base), 32,
                         IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE))
         return SC_NATIVE_TARGET_BOUNDARY;
     std::array<uint8_t, 32> actual{};
-    if (memory.copy(target.address, actual.data(), actual.size()).reason != SC_REASON_NONE ||
+    auto read = memory.copy(target.address, actual.data(), actual.size());
+    if (detail) { detail->read_attempted = 1; detail->read = read; detail->byte_count = 32;
+        detail->expected = target.bytes; detail->actual = actual; }
+    if (read.reason != SC_REASON_NONE ||
         std::memcmp(actual.data(), target.bytes.data(), signature_size)) return SC_NATIVE_TARGET_BYTES;
     DWORD64 base = 0;
     const auto unwind = RtlLookupFunctionEntry(target.address, &base, nullptr);
@@ -117,11 +185,17 @@ uint32_t validate_target(engine::Memory& memory, const engine::Image& image,
         return SC_NATIVE_TARGET_BOUNDARY;
     const auto& signature = target.signature_offset ? target.signature : target.bytes;
     if (target.signature_offset) {
-        if (static_cast<uint64_t>(target.signature_offset) + signature_size >
-            static_cast<uint64_t>(unwind->EndAddress) - unwind->BeginAddress)
+        const auto rva = static_cast<uint32_t>(target.address - image.base);
+        if (uint64_t{rva} + target.signature_offset > UINT32_MAX ||
+            !image.contains(rva + target.signature_offset, signature_size,
+                IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE) ||
+            !owned_window(memory, image, target.address + target.signature_offset, signature_size, *unwind, detail))
             return SC_NATIVE_TARGET_BOUNDARY;
         std::array<uint8_t, 32> actual_signature{};
-        if (memory.copy(target.address + target.signature_offset, actual_signature.data(), actual_signature.size()).reason ||
+        read = memory.copy(target.address + target.signature_offset, actual_signature.data(), actual_signature.size());
+        if (detail) { detail->window_offset = target.signature_offset; detail->read_attempted = 1; detail->read = read;
+            detail->expected = signature; detail->actual = actual_signature; }
+        if (read.reason ||
             actual_signature != signature) return SC_NATIVE_TARGET_BYTES;
     }
     size_t length = 0;
@@ -139,11 +213,16 @@ uint32_t validate_target(engine::Memory& memory, const engine::Image& image,
             if (GetTickCount64() >= deadline || (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT))
                 return SC_NATIVE_BUDGET;
             const auto count = std::min(chunk.size(), static_cast<size_t>(section.size) - offset);
-            if (memory.copy(image.base + section.rva + offset, chunk.data(), count).reason != SC_REASON_NONE)
+            read = memory.copy(image.base + section.rva + offset, chunk.data(), count);
+            if (detail) { detail->read_attempted = 1; detail->read = read; }
+            if (read.reason != SC_REASON_NONE)
                 return SC_NATIVE_READ_FAILED;
             auto cursor = chunk.begin(); const auto end = chunk.begin() + count;
             while ((cursor = std::search(cursor, end, signature.begin(), signature.end())) != end) {
-                if (++matches > 1) return SC_NATIVE_TARGET_NOT_UNIQUE;
+                if (++matches > 1) {
+                    if (detail) detail->collision_rva = section.rva + static_cast<uint32_t>(offset + (cursor - chunk.begin()));
+                    return SC_NATIVE_TARGET_NOT_UNIQUE;
+                }
                 ++cursor;
             }
             if (count <= signature_size) break;
@@ -151,5 +230,18 @@ uint32_t validate_target(engine::Memory& memory, const engine::Image& image,
         }
     }
     return matches == 1 ? SC_NATIVE_NONE : SC_NATIVE_TARGET_NOT_UNIQUE;
+}
+uint32_t validate_recorded(save::Installation& record, engine::Memory& memory, const engine::Image& image,
+                            const Target& target, HANDLE stop, uint64_t deadline, uint32_t group, uint32_t index) {
+    auto event = record.begin(group == 1 ? SC_INSTALL_NATIVE_TARGET : SC_INSTALL_SAVE_TARGET,
+        group, index, static_cast<uint32_t>(target.address - image.base), target.signature_offset);
+    ValidationDetail detail;
+    const auto reason = validate_target(memory, image, target, stop, deadline, &detail);
+    if (detail.read_attempted) save::attach_read(event, detail.read);
+    event.byte_count = detail.byte_count; event.collision_rva = detail.collision_rva; event.byte_window_offset = detail.window_offset;
+    std::memcpy(event.expected_bytes, detail.expected.data(), 32);
+    std::memcpy(event.actual_bytes, detail.actual.data(), 32);
+    record.finish(event, reason);
+    return reason;
 }
 }

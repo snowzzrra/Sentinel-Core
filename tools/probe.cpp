@@ -1,4 +1,5 @@
 #include "sentinel_inspection.h"
+#include "installation_probe.h"
 #include "save_probe.h"
 #include "pipe_io.h"
 #include <windows.h>
@@ -266,7 +267,9 @@ int print_admission(const sentinel::Inspection& r, bool json) {
         s.core.version, v.abi_version, s.pid, s.core.build_id, sentinel::save_session_state_name(v.state),
         sentinel::save_session_fault_name(v.fault), v.prepared_routes, v.required_routes, v.flags, v.namespace_id, v.native_root);
     // A readable status is not a successful preflight. Existing observation CLI exits are unchanged.
-    return v.state == SC_SAVE_SESSION_ADMITTED && (v.flags & SC_SAVE_SESSION_ACCEPTING) ? 0 : 8;
+    const bool admitted = v.state == SC_SAVE_SESSION_ADMITTED && (v.flags & SC_SAVE_SESSION_ACCEPTING);
+    if (!admitted) std::fputs("AP admission failed or is not ready; vanilla slots may remain visible. Do not create or load a campaign. Continue safe installation/context queries.\n", stderr);
+    return admitted ? 0 : 8;
 }
 void print_save_write(const sentinel::Inspection& r, bool json) {
     const auto& v = r.write; const auto& s = r.snapshot;
@@ -384,6 +387,7 @@ int wmain(int argc, wchar_t** argv) {
     if (backup_result >= 0) return backup_result;
     uint32_t pid = 0, timeout = 2000, count = 1, interval = 1000;
     bool json = false, engine = false, context = false, native = false, save = false, admission = false, write = false, valid = true;
+    bool installation = false;
     uint64_t write_id = 0; bool saw_write_id = false;
     uint16_t diagnostic_op = 0;
     sc_diagnostic_request request{}; request.deadline_ms = 1000;
@@ -395,6 +399,7 @@ int wmain(int argc, wchar_t** argv) {
                 "Capture: --context, --engine, --native or --save-context --watch-count 1..600 [--interval-ms 100..10000]\n"
                 "Save context: read-only provider/request witnesses.\n"
                 "Admission preflight: --save-admission (one query; exit 8 unless admitted and accepting).\n"
+                "Installation evidence: --save-installation (read-only, retained after refusal).\n"
                 "Write evidence: --save-write [--write-id N] (latest if omitted); supports capture.\n"
                 "Native backup: --native-backup --help (explicit owned campaign save, readback and local archive).\n"
                 "  SDK confirmation is separate from persistence and reopen; observation exit 0 is not save success.\n"
@@ -412,6 +417,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (wcscmp(argv[i], L"--native") == 0 && !native) native = true;
         else if (wcscmp(argv[i], L"--save-context") == 0 && !save) save = true;
         else if (wcscmp(argv[i], L"--save-admission") == 0 && !admission) admission = true;
+        else if (wcscmp(argv[i], L"--save-installation") == 0 && !installation) installation = true;
         else if (wcscmp(argv[i], L"--save-write") == 0 && !write) write = true;
         else if (wcscmp(argv[i], L"--write-id") == 0 && !saw_write_id && i + 1 < argc) {
             saw_write_id = true; valid = number64(argv[++i], write_id) && write_id && valid;
@@ -444,7 +450,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (!valid || !pid || timeout < sentinel::min_timeout_ms || timeout > sentinel::max_timeout_ms ||
         !count || count > 600 || interval < 100 || interval > 10000 || uint64_t(count) * interval > 600000 ||
-        (unsigned(engine) + unsigned(context) + unsigned(native) + unsigned(save) + unsigned(admission) + unsigned(write) + unsigned(diagnostic_op != 0) > 1) ||
+        (unsigned(engine) + unsigned(context) + unsigned(native) + unsigned(save) + unsigned(admission) + unsigned(write) + unsigned(installation) + unsigned(diagnostic_op != 0) > 1) ||
         (saw_count && !engine && !context && !native && !save && !write) || (saw_interval && !saw_count) || (saw_write_id && !write) ||
         (saw_deadline && !diagnostic_op) || !request.deadline_ms || request.deadline_ms > SC_DIAGNOSTIC_MAX_DEADLINE_MS ||
         ((saw_created || saw_instance || saw_generation || saw_id || saw_nonce) && diagnostic_op <= sentinel::diagnostic_detail_submit_operation) ||
@@ -499,7 +505,7 @@ int wmain(int argc, wchar_t** argv) {
     for (uint32_t i = 0; i < count; ++i) {
         if (WaitForSingleObject(stop.value, 0) != WAIT_TIMEOUT) break;
         const auto started = GetTickCount64();
-        auto r = write ? sentinel::query_save_write(pid, timeout, write_id) :
+        auto r = installation ? sentinel::query_save_installation(pid, timeout) : write ? sentinel::query_save_write(pid, timeout, write_id) :
             admission ? sentinel::query_save_admission(pid, timeout) : (save ? sentinel::query_save(pid, timeout) :
             (native ? sentinel::query_native(pid, timeout, after_event) :
             (context ? sentinel::query_context(pid, timeout) : (engine ? sentinel::query_engine(pid, timeout) : sentinel::query(pid, timeout)))));
@@ -507,7 +513,8 @@ int wmain(int argc, wchar_t** argv) {
             (r.snapshot.process_created != first.process_created || r.snapshot.instance != first.instance))
             r.result = sentinel::ProbeResult::process_mismatch;
         if (!i) first = r.snapshot;
-        if (write && r.result == sentinel::ProbeResult::ok) print_save_write(r, json);
+        if (installation && r.result == sentinel::ProbeResult::ok) print_installation(r, json);
+        else if (write && r.result == sentinel::ProbeResult::ok) print_save_write(r, json);
         else if (admission && r.result == sentinel::ProbeResult::ok) result = print_admission(r, json);
         else if (native && r.result == sentinel::ProbeResult::ok) {
             print_native(r, json);

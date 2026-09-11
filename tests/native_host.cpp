@@ -329,6 +329,18 @@ int wmain(int argc, wchar_t** argv) {
     sc_save_admission_snapshot admission_status{};
     CHECK(sc_save_admission_inspect(SC_SAVE_ADMISSION_ABI_VERSION, sizeof(admission_status), &admission_status) == SC_OK);
     CHECK(admission_status.size == 160 && admission_status.state == SC_SAVE_SESSION_DISABLED);
+    const auto installation_query = query_save_installation(GetCurrentProcessId(), 1000);
+    CHECK(installation_query.result == ProbeResult::ok && installation_query.installation.attempt == 1);
+    Child installation_probe(probe, L"--save-installation");
+    const auto installation_json = installation_probe.complete(0);
+    CHECK(installation_json.find("\"operation\":\"save_installation\"") != std::string::npos &&
+          installation_json.find("\"primary_failure\":{") != std::string::npos && installation_json.find("GetTickCount64") != std::string::npos);
+    CHECK(installation_query.installation.primary_failure.sequence); // Initial unknown-build refusal remains queryable.
+    sc_save_installation_snapshot installation_status{};
+    CHECK(sc_save_installation_inspect(1, sizeof(installation_status), &installation_status) == SC_OK);
+    CHECK(installation_status.primary_failure.sequence == installation_query.installation.primary_failure.sequence);
+    CHECK(sc_save_installation_inspect(2, sizeof(installation_status), &installation_status) == SC_ABI_MISMATCH);
+    CHECK(sc_save_installation_inspect(1, sizeof(installation_status)-1, &installation_status) == SC_INVALID_ARGUMENT);
     CHECK(sc_save_admission_inspect(SC_SAVE_ADMISSION_ABI_VERSION + 1, sizeof(admission_status), &admission_status) == SC_ABI_MISMATCH);
     CHECK(sc_save_admission_inspect(SC_SAVE_ADMISSION_ABI_VERSION, sizeof(admission_status) - 1, &admission_status) == SC_INVALID_ARGUMENT);
     CHECK(sc_save_admission_inspect(SC_SAVE_ADMISSION_ABI_VERSION, sizeof(admission_status), nullptr) == SC_INVALID_ARGUMENT);

@@ -70,7 +70,7 @@ DWORD serve(void*) {
             sc_save_backup_request backup{};
             const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup);
             sc_save_backup_snapshot backup_result{};
-            if (result == WireResult::ok && operation >= save_backup_submit_operation) {
+            if (result == WireResult::ok && operation >= save_backup_submit_operation && operation <= save_backup_cancel_operation) {
                 backup_result = operation == save_backup_submit_operation ? native::submit_backup(backup) :
                     native::backup_result(backup, operation == save_backup_cancel_operation);
             }
@@ -81,7 +81,8 @@ DWORD serve(void*) {
                     native::submit(diagnostic, &detail) : native::result(diagnostic,
                         operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
-            const DWORD size = static_cast<DWORD>(operation >= save_backup_submit_operation ?
+            const DWORD size = static_cast<DWORD>(operation == save_installation_operation ?
+                encode_installation_response(data, result, current_snapshot(), save::session().installation.inspect()) : operation >= save_backup_submit_operation ?
                 encode_backup_response(data, result, operation, current_snapshot(), backup_result) : operation == save_write_operation ?
                 encode_save_write_response(data, result, current_snapshot(), save::session().native_writes.snapshot(write_id)) :
                 operation == save_admission_operation ?

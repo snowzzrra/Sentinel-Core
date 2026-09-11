@@ -4,6 +4,7 @@
 #include "context_observer.h"
 #include "save_observer.h"
 #include "save_session.h"
+#include "sentinel_save_installation.h"
 #include "native_runtime.h"
 #include <cstring>
 #include <bcrypt.h>
@@ -92,6 +93,11 @@ sc_result sc_save_inspect(uint32_t abi, uint32_t size, sc_save_snapshot* snapsho
     return SC_OK;
 }
 
+sc_result sc_save_installation_inspect(uint32_t abi, uint32_t size, sc_save_installation_snapshot* snapshot) {
+    if (abi != SC_SAVE_INSTALLATION_ABI_VERSION) return SC_ABI_MISMATCH;
+    if (!snapshot || size != sizeof(*snapshot)) return SC_INVALID_ARGUMENT;
+    *snapshot = sentinel::save::session().installation.inspect(); return SC_OK;
+}
 sc_result sc_save_admission_inspect(uint32_t abi, uint32_t size, sc_save_admission_snapshot* snapshot) {
     if (abi != SC_SAVE_ADMISSION_ABI_VERSION) return SC_ABI_MISMATCH;
     if (!snapshot || size != sizeof(sc_save_admission_snapshot)) return SC_INVALID_ARGUMENT;

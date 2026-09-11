@@ -788,6 +788,7 @@ int main(int argc, char** argv) {
             CHECK(late.state() == SessionState::starting && !late.accepts_requests());
         }
         late.unrouted_import();
+        CHECK(late.installation.inspect().primary_failure.stage == SC_INSTALL_STARTUP && late.installation.inspect().startup_observation == 2);
         CHECK(!late.bind_provider(late.native_root(), 0x1234, late.ownership_record()));
         CHECK(late.fault() == SessionFault::missed_startup && !late.routed());
     }

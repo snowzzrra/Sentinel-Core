@@ -6,6 +6,7 @@
 #include "sentinel_native.h"
 #include "sentinel_save.h"
 #include "sentinel_save_request.h"
+#include "sentinel_save_installation.h"
 #include <array>
 #include <cstddef>
 #include <string>
@@ -35,6 +36,8 @@ constexpr uint64_t save_write_capability = 256;
 constexpr uint16_t save_backup_submit_operation = 14, save_backup_result_operation = 15,
     save_backup_cancel_operation = 16;
 constexpr uint64_t save_backup_capability = 512;
+constexpr uint16_t save_installation_operation = 17;
+constexpr uint64_t save_installation_capability = 1024;
 constexpr size_t max_request = 512, max_message = 1024;
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
 enum class WireResult : uint32_t { ok, incompatible_protocol, capability_unavailable,
@@ -69,6 +72,7 @@ struct Inspection {
     sc_diagnostic_detail detail{};
     sc_save_snapshot save{};
     sc_save_admission_snapshot admission{};
+    sc_save_installation_snapshot installation{};
     sc_save_write_snapshot write{};
     sc_save_backup_snapshot backup{};
 };
@@ -77,6 +81,7 @@ Inspection query_engine(uint32_t pid, uint32_t timeout_ms);
 Inspection query_context(uint32_t pid, uint32_t timeout_ms);
 Inspection query_save(uint32_t pid, uint32_t timeout_ms);
 Inspection query_save_admission(uint32_t pid, uint32_t timeout_ms);
+Inspection query_save_installation(uint32_t pid, uint32_t timeout_ms);
 Inspection query_save_write(uint32_t pid, uint32_t timeout_ms, uint64_t operation_id = 0);
 Inspection query_save_backup(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_save_backup_request&);
 const char* backup_state_name(uint32_t);

@@ -91,6 +91,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     result.failure_stage = "decode_response";
     // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
     bool decoded = backup ? decode_backup_response(data, count, code, operation, result.snapshot, result.backup) :
+        operation == save_installation_operation ? decode_installation_response(data, count, code, result.snapshot, result.installation) :
         operation == save_write_operation ? decode_save_write_response(data, count, code, result.snapshot, result.write) :
         operation == save_admission_operation ? decode_save_admission_response(data, count, code, result.snapshot, result.admission) :
         (operation == save_operation ? decode_save_response(data, count, code, result.snapshot, result.save) :
@@ -145,6 +146,9 @@ Inspection query_save(uint32_t pid, uint32_t timeout_ms) {
 }
 Inspection query_save_admission(uint32_t pid, uint32_t timeout_ms) {
     return query_operation(pid, timeout_ms, save_admission_capability, save_admission_operation);
+}
+Inspection query_save_installation(uint32_t pid, uint32_t timeout_ms) {
+    return query_operation(pid, timeout_ms, save_installation_capability, save_installation_operation);
 }
 Inspection query_save_write(uint32_t pid, uint32_t timeout_ms, uint64_t operation_id) {
     return query_operation(pid, timeout_ms, save_write_capability, save_write_operation, nullptr, 0, operation_id);

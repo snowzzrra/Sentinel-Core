@@ -1,5 +1,6 @@
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #pragma once
+#include "save_installation.h"
 #include "save_storage.h"
 #include "save_sdk_write.h"
 #include "sentinel_save.h"
@@ -39,6 +40,7 @@ bool steam_name_equal(std::string_view, std::string_view);
 class Session final {
     friend class BackupJob;
 public:
+    Installation installation;
     NativeWrites native_writes;
     ~Session();
     storage::Result configure(const storage::Descriptor&, std::unique_ptr<storage::Namespace>);

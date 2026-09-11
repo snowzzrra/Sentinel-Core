@@ -318,6 +318,7 @@ void prepare(const Snapshot& identity) {
     ReleaseSRWLockExclusive(&lock);
 }
 void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_event) {
+    auto& installation = save::session().installation;
     (void)context::observation_clock(); // Cache QPC frequency before any hook is reachable.
     AcquireSRWLockExclusive(&startup);
     if (pinned.load(std::memory_order_acquire) || stopping.load(std::memory_order_acquire)) {
@@ -340,13 +341,14 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
 #ifdef SC_NATIVE_TESTING
         if (fixture_active) targets[i] = fixture.targets[i];
 #endif
-        initial.validator_reasons[i] = validate_target(memory, binding.image, targets[i], stop_event, deadline);
+        initial.validator_reasons[i] = validate_recorded(installation, memory, binding.image, targets[i], stop_event, deadline, 1, i);
     }
     bool profile = binding.metadata.profile == SC_PROFILE_STEAM_20260818;
 #ifdef SC_NATIVE_TESTING
     if (fixture_active) { profile = true; initial.site_rva = static_cast<uint32_t>(targets[0].address - binding.image.base); }
 #endif
     uintptr_t common = 0, vtable = 0, frame = 0;
+    auto binding_event = installation.begin(SC_INSTALL_NATIVE_BINDING);
     if (profile) {
         initial.reason = SC_NATIVE_NONE;
         for (const auto why : initial.validator_reasons) if (why && !initial.reason) initial.reason = why;
@@ -354,30 +356,43 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
 #ifdef SC_NATIVE_TESTING
         check_binding = !fixture_active;
 #endif
+        auto observed_read = [&](uintptr_t address, uintptr_t& value) {
+            const auto result = memory.copy(address, &value, sizeof(value));
+            save::attach_read(binding_event, result); return !result.reason;
+        };
         if (!initial.reason && check_binding && (binding.root != binding.image.base + 0x45ea6f0 ||
-            !read(binding.image.base + 0x2a6b040, common) || common != binding.image.base + 0x440fc10 ||
-            !read(common, vtable) || vtable != binding.image.base + 0x2a6b9c0 ||
-            !read(vtable + 0x20, frame) || frame != targets[0].address)) initial.reason = SC_NATIVE_BINDING_FAILED;
+            !observed_read(binding.image.base + 0x2a6b040, common) || common != binding.image.base + 0x440fc10 ||
+            !observed_read(common, vtable) || vtable != binding.image.base + 0x2a6b9c0 ||
+            !observed_read(vtable + 0x20, frame) || frame != targets[0].address)) initial.reason = SC_NATIVE_BINDING_FAILED;
     }
+    installation.finish(binding_event, initial.reason);
     // Publish immutable binding/status before any detour can become reachable.
     AcquireSRWLockExclusive(&lock);
     lifetime = {}; status = initial; fault.store(SC_NATIVE_NONE); gaps.store(0); epoch.fetch_add(1);
     ReleaseSRWLockExclusive(&lock);
     if (!initial.reason && !stopping.load() && WaitForSingleObject(stop_event, 0) == WAIT_TIMEOUT) {
         uint32_t why = SC_NATIVE_NONE;
-        const auto mh = MH_Initialize();
+        const auto mh = installation.hook(SC_INSTALL_MH_INITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Initialize(); });
         if (mh != MH_OK) why = SC_NATIVE_HOOK_FAILED;
         void* trampolines[3]{};
         void* detours[] = {reinterpret_cast<void*>(frame_detour), reinterpret_cast<void*>(change_detour), reinterpret_cast<void*>(free_detour)};
         unsigned created = 0;
         while (!why && created < targets.size()) {
-            if (MH_CreateHook(reinterpret_cast<void*>(targets[created].address), detours[created], &trampolines[created]) != MH_OK)
+            if (installation.hook(SC_INSTALL_NATIVE_CREATE, 1, created,
+                static_cast<uint32_t>(targets[created].address - binding.image.base), [&] {
+                    return MH_CreateHook(reinterpret_cast<void*>(targets[created].address), detours[created], &trampolines[created]); }) != MH_OK)
                 why = SC_NATIVE_HOOK_FAILED;
             else ++created;
         }
         HMODULE module = nullptr;
-        if (!why && !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                reinterpret_cast<LPCWSTR>(frame_detour), &module)) why = SC_NATIVE_PIN_FAILED;
+        if (!why) {
+            auto event = installation.begin(SC_INSTALL_PIN);
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                    reinterpret_cast<LPCWSTR>(frame_detour), &module)) {
+                const auto error = GetLastError(); why = SC_NATIVE_PIN_FAILED;
+                installation.finish(event, why, SC_INSTALL_UNKNOWN, error);
+            } else installation.finish(event);
+        }
         if (!why) {
             pinned.store(true, std::memory_order_release);
             original_frame = reinterpret_cast<Frame>(trampolines[0]);
@@ -386,16 +401,26 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             // Per-target operations only. Never MH_ALL_HOOKS or a foreign target.
             for (unsigned i = 0; i < targets.size() && !why; ++i) {
                 std::array<uint8_t, 32> current{};
-                if (memory.copy(targets[i].address, current.data(), current.size()).reason != SC_REASON_NONE ||
-                    std::memcmp(current.data(), targets[i].bytes.data(), current.size())) why = SC_NATIVE_TARGET_BYTES;
-                else if (MH_EnableHook(reinterpret_cast<void*>(targets[i].address)) != MH_OK) why = SC_NATIVE_HOOK_FAILED;
-                else initial.installed_hooks |= 1u << i;
+                auto event = installation.begin(SC_INSTALL_NATIVE_ENABLE, 1, i,
+                    static_cast<uint32_t>(targets[i].address - binding.image.base));
+                const auto read_result = memory.copy(targets[i].address, current.data(), current.size());
+                save::attach_read(event, read_result); event.byte_count = 32;
+                std::memcpy(event.expected_bytes, targets[i].bytes.data(), 32); std::memcpy(event.actual_bytes, current.data(), 32);
+                uint32_t enabled = SC_INSTALL_UNKNOWN;
+                if (read_result.reason || std::memcmp(current.data(), targets[i].bytes.data(), current.size())) why = SC_NATIVE_TARGET_BYTES;
+                else {
+                    enabled = static_cast<uint32_t>(MH_EnableHook(reinterpret_cast<void*>(targets[i].address)));
+                    if (enabled) why = SC_NATIVE_HOOK_FAILED; else initial.installed_hooks |= 1u << i;
+                }
+                installation.finish(event, why, enabled);
             }
         } else {
             // These trampolines have NEVER been reachable. Removing them cannot
             // race a detour entry. Once pinned/enabled, removal is unsupported.
-            for (unsigned i = 0; i < created; ++i) MH_RemoveHook(reinterpret_cast<void*>(targets[i].address));
-            if (mh == MH_OK) MH_Uninitialize();
+            for (unsigned i = 0; i < created; ++i) installation.hook(SC_INSTALL_REMOVE, 1, i,
+                static_cast<uint32_t>(targets[i].address - binding.image.base), [&] {
+                    return MH_RemoveHook(reinterpret_cast<void*>(targets[i].address)); });
+            if (mh == MH_OK) installation.hook(SC_INSTALL_UNINITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Uninitialize(); });
         }
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
         AcquireSRWLockExclusive(&lock);

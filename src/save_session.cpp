@@ -55,6 +55,7 @@ void Session::install(uintptr_t root, uintptr_t startup_return, uint32_t routes)
     root_ = root; caller_ = startup_return; routes_ = routes;
 }
 bool Session::startup_enter(uintptr_t root, uintptr_t caller, uint32_t thread) {
+    installation.startup(1);
     std::lock_guard<std::mutex> guard(mutex_);
     if (state_ == SessionState::disabled) return false;
     SessionFault why = SessionFault::none;
@@ -93,6 +94,7 @@ void Session::startup_leave(bool abnormal) {
 void Session::unrouted_import() {
     std::lock_guard<std::mutex> guard(mutex_);
     if (state_ == SessionState::prepared || state_ == SessionState::starting) {
+        installation.startup(2);
         if (fault_ == SessionFault::none) fault_ = SessionFault::missed_startup;
         state_ = SessionState::rejected; requests_ = false;
     }
@@ -180,6 +182,7 @@ void Session::provider_reset(uintptr_t manager) {
     if (affected) fail(SessionFault::provider_identity);
 }
 void Session::stop_requests() {
+    installation.startup(3);
     std::lock_guard<std::mutex> guard(mutex_);
     requests_stopped_ = true; requests_ = false;
     if (state_ == SessionState::prepared || state_ == SessionState::starting) {

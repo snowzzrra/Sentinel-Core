@@ -65,10 +65,14 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && op >= engine_operation && op <= save_backup_cancel_operation) *operation = static_cast<uint16_t>(op);
+    if (operation && op >= engine_operation && op <= save_installation_operation) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op < inspect_operation || op > save_backup_cancel_operation) return WireResult::unsupported_operation;
-    if (op >= save_backup_submit_operation) {
+    if (op < inspect_operation || op > save_installation_operation) return WireResult::unsupported_operation;
+    if (op == save_installation_operation) {
+        if (length != 8) return WireResult::malformed;
+        return r.number(8) == save_installation_capability ? WireResult::ok : WireResult::capability_unavailable;
+    }
+    if (op >= save_backup_submit_operation && op <= save_backup_cancel_operation) {
         // Reuse the exact existing request identity decoder, then consume only
         // this operation's fixed namespace/campaign/slot/deadline extension.
         if (length != 149) return WireResult::malformed;
@@ -352,6 +356,49 @@ bool decode_save_admission_response(const Message& in, size_t size, WireResult& 
     if (routed && (!qualified || v.prepared_routes != v.required_routes)) return false;
     if ((v.flags & SC_SAVE_SESSION_ACCEPTING) && (!routed || v.state != SC_SAVE_SESSION_ADMITTED)) return false;
     if (qualified && v.state <= SC_SAVE_SESSION_PREPARED) return false;
+    return true;
+}
+namespace {
+template<class Codec> void installation_fields(Codec& c, sc_save_installation_snapshot& v) {
+    c.u32(v.abi_version); c.u32(v.attempt); c.u32(v.phase); c.u32(v.last_completed_stage); c.u32(v.startup_observation);
+    c.u32(v.validated); c.u32(v.created); c.u32(v.enabled); c.u32(v.cleanup_failures); c.u32(v.gaps); c.u64(v.sequence);
+    for (auto e : {&v.active, &v.primary_failure, &v.cleanup_failure}) {
+        c.u64(e->sequence); c.u64(e->at_ms); c.u64(e->duration_ms);
+        c.u32(e->stage); c.u32(e->target_group); c.u32(e->target_index); c.u32(e->rva); c.u32(e->signature_offset);
+        c.u32(e->result); c.u32(e->reason); c.u32(e->read_reason); c.u32(e->win32_error); c.u32(e->minhook_status);
+        c.u32(e->byte_count); c.u32(e->collision_rva); c.u32(e->byte_window_offset);
+        for (auto& b : e->expected_bytes) c.byte(b);
+        for (auto& b : e->actual_bytes) c.byte(b);
+    }
+}
+}
+size_t encode_installation_response(Message& out, WireResult result, const Snapshot& s, const sc_save_installation_snapshot& value) {
+    Writer w{out}; header(w, wire_version, save_installation_operation, 0, result);
+    if (result == WireResult::ok) {
+        w.number(save_installation_capability, 8); w.number(s.pid, 4); w.number(s.process_created, 8);
+        for (auto b : s.instance) w.number(b, 1);
+        w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id);
+        auto copy = value; installation_fields(w, copy);
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.valid ? w.pos : 0;
+}
+bool decode_installation_response(const Message& in, size_t size, WireResult& result, Snapshot& s, sc_save_installation_snapshot& v) {
+    if (size < header_size || size > max_message) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != save_installation_operation || r.number(4) != size - header_size) return false;
+    const auto code = r.number(4);
+    if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code);
+    if (result != WireResult::ok) return size == header_size;
+    s = {}; v = {}; s.core.size = sizeof(s.core); v.size = sizeof(v);
+    if (r.number(8) != save_installation_capability) return false;
+    r.u32(s.pid); r.u64(s.process_created); for (auto& b : s.instance) r.byte(b);
+    r.u32(s.core.abi_version); r.text(s.core.version); r.text(s.core.build_id);
+    installation_fields(r, v);
+    if (!r.valid || r.pos != size || s.core.abi_version != SC_ABI_VERSION || v.abi_version != 1 ||
+        v.attempt > 1 || v.phase > 3 || v.startup_observation > 3 || v.last_completed_stage > SC_INSTALL_UPSTREAM) return false;
+    for (const auto e : {&v.active, &v.primary_failure, &v.cleanup_failure})
+        if (e->sequence > v.sequence || e->stage > SC_INSTALL_UPSTREAM || e->target_group > 3 || e->byte_count > 32 || e->result > 2) return false;
     return true;
 }
 size_t encode_save_write_response(Message& out, WireResult result, const Snapshot& s,

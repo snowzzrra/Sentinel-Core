@@ -51,7 +51,9 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   src/save_sdk_write.h src/save_sdk_write.cpp
   include/sentinel_save_request.h src/save_readback.h src/save_readback.cpp
   src/save_backup.h src/save_backup.cpp src/save_submission.h src/save_submission.cpp
-  tools/backup_probe.cpp
+  tools/backup_probe.cpp tools/installation_probe.h tools/installation_probe.cpp
+  include/sentinel_save_installation.h src/save_installation.h src/save_installation.cpp
+  tools/retest_milestone_a.py tools/Retest-MilestoneA.ps1
   tools/prepare_vanilla_backup.py tools/compare_vanilla_campaign.py
   src/save_profile.h src/save_profile.cpp
   src/save_provider.h src/save_provider.cpp
@@ -82,7 +84,7 @@ target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
 add_library(sentinel_save_storage STATIC src/save_storage.cpp)
 target_include_directories(sentinel_save_storage PUBLIC src)
 target_link_libraries(sentinel_save_storage PUBLIC bcrypt)
-add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp tools/backup_probe.cpp)
+add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp)
 target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client sentinel_save_storage bcrypt)
 add_library(sentinel_observer STATIC src/engine_observer.cpp src/context_observer.cpp src/save_observer.cpp)
 target_include_directories(sentinel_observer PUBLIC include src)
@@ -96,7 +98,7 @@ target_include_directories(sentinel_minhook PUBLIC third_party/minhook/include t
 target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
 add_library(sentinel_native_model STATIC src/native_model.cpp)
 target_include_directories(sentinel_native_model PUBLIC include src)
-add_library(sentinel_save_session STATIC src/save_session.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp)
+add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp)
 target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
 target_link_libraries(sentinel_native_model PUBLIC sentinel_save_session)
 add_library(sentinel_native STATIC src/native_target.cpp src/native_runtime.cpp src/save_native_hooks.cpp)
@@ -118,6 +120,9 @@ add_executable(sentinel_import_host tests/import_host.cpp)
 target_include_directories(sentinel_import_host PRIVATE include)
 target_link_libraries(sentinel_import_host PRIVATE sentinel_bootstrap gdi32)
 enable_testing()
+add_executable(sentinel_installation_tests tests/installation.cpp)
+target_link_libraries(sentinel_installation_tests PRIVATE sentinel_protocol sentinel_native)
+add_test(NAME retained_installation_contract COMMAND sentinel_installation_tests)
 add_executable(sentinel_save_session_tests tests/save_session.cpp tests/save_profile.cpp tests/save_provider.cpp tests/save_sdk_write.cpp tests/save_readback.cpp tests/save_submission.cpp)
 target_link_libraries(sentinel_save_session_tests PRIVATE sentinel_save_session sentinel_native_model sentinel_protocol)
 add_test(NAME native_save_session_collector_contract COMMAND sentinel_save_session_tests)

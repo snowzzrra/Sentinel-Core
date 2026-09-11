@@ -190,7 +190,21 @@ uint32_t profile_serialize_detour(uintptr_t manager, uintptr_t profile, ProfileH
 bool profile_payload(Session& owner, engine::Memory& memory, uintptr_t data) {
     return profile_payload_valid(owner, memory, data, profile_calls);
 }
-bool reference_copy_entry(engine::Memory& memory, const engine::Image& image) {
+bool checked_bytes(engine::Memory& memory, uintptr_t address, const uint8_t* expected, size_t count, sc_install_event& event) {
+    std::array<uint8_t, 88> actual{};
+    const auto read = memory.copy(address, actual.data(), count);
+    attach_read(event, read);
+    size_t mismatch = 0;
+    if (!read.reason) while (mismatch < count && actual[mismatch] == expected[mismatch]) ++mismatch;
+    const size_t window = mismatch < count ? (mismatch / 32) * 32 : 0;
+    event.byte_window_offset = static_cast<uint32_t>(window);
+    event.byte_count = static_cast<uint32_t>(std::min(count - window, size_t{32}));
+    std::memcpy(event.expected_bytes, expected + window, event.byte_count);
+    std::memcpy(event.actual_bytes, actual.data() + window, event.byte_count);
+    return !read.reason && !std::memcmp(actual.data(), expected, count);
+}
+bool reference_copy_entry(engine::Memory& memory, const engine::Image& image, sc_install_event& event) {
+    event.reason = SC_NATIVE_TARGET_BOUNDARY;
     // This leaf has no .pdata entry. A CALL in the separately validated native
     // enum finalizer establishes its entry; all 88 body bytes are fixed as well.
     constexpr char hex[] = "48c701000000004c8bc1488b124885d274428b420485c074360f1f80000000008d4801f00fb14a0474108b420485c075ef33d2498bc0498910c38b0285c0740f8d4801f00fb10a74088b0285c075f133d2498910498bc0c3";
@@ -201,72 +215,106 @@ bool reference_copy_entry(engine::Memory& memory, const engine::Image& image) {
             !(section.flags & IMAGE_SCN_MEM_WRITE)) executable = true;
     }
     if (!executable) return false;
-    DWORD64 module = 0;
-    const auto caller = RtlLookupFunctionEntry(image.base + 0x148de8c, &module, nullptr);
-    if (!caller || module != image.base || caller->BeginAddress != 0x148dd10 || caller->EndAddress < 0x148de91) return false;
+    native::ValidationDetail detail;
+    if (!native::function_window(memory, image, image.base + 0x148dd10, image.base + 0x148de8c, 5, &detail)) {
+        if (detail.read_attempted) attach_read(event, detail.read);
+        return false;
+    }
     constexpr std::array<uint8_t, 5> expected_call{0xe8, 0x7f, 0x96, 0xed, 0xfe};
-    std::array<uint8_t, 5> call{}; std::array<uint8_t, 88> body{};
-    if (memory.copy(image.base + 0x148de8c, call.data(), call.size()).reason || call != expected_call ||
-        memory.copy(image.base + 0x367510, body.data(), body.size()).reason) return false;
+    event.reason = SC_NATIVE_TARGET_BYTES;
+    event.rva = 0x148de8c;
+    if (!checked_bytes(memory, image.base + event.rva, expected_call.data(), expected_call.size(), event)) return false;
+    std::array<uint8_t, 88> body{};
     const auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
     for (size_t i = 0; i < body.size(); ++i)
-        if (body[i] != static_cast<uint8_t>(digit(hex[2 * i]) * 16 + digit(hex[2 * i + 1]))) return false;
-    return true;
+        body[i] = static_cast<uint8_t>(digit(hex[2 * i]) * 16 + digit(hex[2 * i + 1]));
+    event.rva = 0x367510;
+    return checked_bytes(memory, image.base + event.rva, body.data(), body.size(), event);
 }
 }
 void configure_prelaunch() {
     if (session().configured()) return;
+    auto& record = session().installation;
+    record.initialize();
+    auto event = record.begin(SC_INSTALL_PRELAUNCH);
     constexpr wchar_t variable[] = L"SENTINEL_AP_TEST_SESSION";
     SetLastError(ERROR_SUCCESS);
     const DWORD needed = GetEnvironmentVariableW(variable, nullptr, 0);
-    if (!needed && GetLastError() == ERROR_ENVVAR_NOT_FOUND) return;
-    if (!needed || needed > 32761) { session().reject(SessionFault::descriptor); return; }
+    const auto environment_error = needed ? ERROR_SUCCESS : GetLastError();
+    if (!needed && environment_error == ERROR_ENVVAR_NOT_FOUND) { record.finish(event); return; }
+    if (!needed || needed > 32761) { record.finish(event, SC_NATIVE_BINDING_FAILED, SC_INSTALL_UNKNOWN, environment_error); session().reject(SessionFault::descriptor); return; }
     std::wstring path(needed, L'\0');
     const DWORD written = GetEnvironmentVariableW(variable, path.data(), needed);
-    if (!written || written >= needed) { session().reject(SessionFault::descriptor); return; }
+    const auto read_error = written ? ERROR_SUCCESS : GetLastError();
+    if (!written || written >= needed) { record.finish(event, SC_NATIVE_BINDING_FAILED, SC_INSTALL_UNKNOWN, read_error); session().reject(SessionFault::descriptor); return; }
     path.resize(written);
     storage::Descriptor descriptor;
     auto result = storage::read_descriptor_file(path.c_str(), descriptor);
     std::unique_ptr<storage::Namespace> lease;
     if (result.ok()) result = storage::reopen(descriptor, lease);
+    record.finish(event, result.ok() ? SC_NATIVE_NONE : SC_NATIVE_BINDING_FAILED);
     if (result.ok()) {
         // The one-use descriptor/lease owner must survive even when startup is
         // missed or binding fails before any native hook becomes reachable.
         HMODULE module = nullptr;
+        event = record.begin(SC_INSTALL_PIN);
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                 reinterpret_cast<LPCWSTR>(&configure_prelaunch), &module)) {
+            const auto error = GetLastError();
+            record.finish(event, SC_NATIVE_PIN_FAILED, SC_INSTALL_UNKNOWN, error);
             session().reject(SessionFault::installation); return;
         }
+        record.finish(event);
         owner_pinned.store(true, std::memory_order_release);
     }
     if (result.ok()) result = session().configure(descriptor, std::move(lease));
     if (!result.ok()) session().reject(SessionFault::descriptor);
 }
 bool owner_retained() { return owner_pinned.load(std::memory_order_acquire); }
+bool validate_native_helpers(Installation& record, engine::Memory& memory, const engine::Image& image, uintptr_t& initializer) {
+    auto event = record.begin(SC_INSTALL_REFERENCE_COPY, 3, SC_INSTALL_UNKNOWN, 0x367510);
+    const bool reference_ok = reference_copy_entry(memory, image, event);
+    record.finish(event, reference_ok ? SC_NATIVE_NONE : event.reason);
+    if (!reference_ok) { return false; }
+    constexpr std::array<uint8_t, 5> expected_factory_call{0xe8, 0x3c, 0x13, 0xe2, 0x00};
+    event = record.begin(SC_INSTALL_FACTORY_CALL, 3, SC_INSTALL_UNKNOWN, 0x67473f);
+    const bool factory_scope = image.contains(event.rva, 5, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE);
+    const bool factory_ok = factory_scope &&
+        checked_bytes(memory, image.base + event.rva, expected_factory_call.data(), expected_factory_call.size(), event);
+    record.finish(event, factory_ok ? SC_NATIVE_NONE : (factory_scope ? SC_NATIVE_TARGET_BYTES : SC_NATIVE_TARGET_BOUNDARY));
+    if (!factory_ok) { return false; }
+    InitializeSteamContext context_init = nullptr;
+    event = record.begin(SC_INSTALL_STEAM_IMPORT, 3, SC_INSTALL_UNKNOWN, 0x2a1cc60);
+    const auto import_read = memory.copy(image.base + event.rva, &context_init, sizeof(context_init));
+    attach_read(event, import_read);
+    record.finish(event, import_read.reason ? SC_NATIVE_READ_FAILED : (!context_init ? SC_NATIVE_BINDING_FAILED : SC_NATIVE_NONE));
+    if (import_read.reason || !context_init) {
+        return false;
+    }
+    initializer = reinterpret_cast<uintptr_t>(context_init);
+    return true;
+}
 void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     if (session().state() != SessionState::prepared) return;
+    auto& record = session().installation;
+    auto event = record.begin(SC_INSTALL_SAVE_BINDING);
     if (binding.metadata.profile != SC_PROFILE_STEAM_20260818 ||
         binding.root != binding.image.base + 0x45ea6f0) {
+        record.finish(event, SC_NATIVE_BINDING_FAILED);
         session().reject(SessionFault::installation); return;
     }
+    record.finish(event);
     engine::LocalMemory memory;
     std::array<native::Target, 45> targets;
     for (unsigned i = 0; i < targets.size(); ++i) {
         targets[i] = native::save_target(binding.image.base, i);
-        if (native::validate_target(memory, binding.image, targets[i], stop, GetTickCount64() + 3000)) {
+        if (native::validate_recorded(record, memory, binding.image, targets[i], stop, GetTickCount64() + 3000, 2, i)) {
             session().reject(SessionFault::installation); return;
         }
     }
-    if (!reference_copy_entry(memory, binding.image)) { session().reject(SessionFault::installation); return; }
-    constexpr std::array<uint8_t, 5> expected_factory_call{0xe8, 0x3c, 0x13, 0xe2, 0x00};
-    std::array<uint8_t, 5> factory_call{};
-    if (!binding.image.contains(0x67473f, 5, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE) ||
-        memory.copy(binding.image.base + 0x67473f, factory_call.data(), factory_call.size()).reason ||
-        factory_call != expected_factory_call) { session().reject(SessionFault::installation); return; }
-    InitializeSteamContext context_init = nullptr;
-    if (memory.copy(binding.image.base + 0x2a1cc60, &context_init, sizeof(context_init)).reason || !context_init) {
-        session().reject(SessionFault::installation); return;
-    }
+    uintptr_t initializer = 0;
+    if (!validate_native_helpers(record, memory, binding.image, initializer)) { session().reject(SessionFault::installation); return; }
+    const auto context_init = reinterpret_cast<InitializeSteamContext>(initializer);
     constexpr unsigned hooks[] = {0, 1, 4, 6, 8, 9, 13, 14, 15, 16, 17, 18, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34, 35, 37, 38, 40, 41, 42, 43, 44};
     void* originals[std::size(hooks)]{};
     void* detours[] = {reinterpret_cast<void*>(root_detour), reinterpret_cast<void*>(collector_detour),
@@ -288,11 +336,14 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     static_assert(std::size(detours) == std::size(hooks));
     unsigned created = 0;
     for (; created < std::size(hooks); ++created) {
-        if (MH_CreateHook(reinterpret_cast<void*>(targets[hooks[created]].address),
-                detours[created], &originals[created]) != MH_OK) break;
+        const auto index = hooks[created];
+        if (record.hook(SC_INSTALL_SAVE_CREATE, 2, index, static_cast<uint32_t>(targets[index].address - binding.image.base), [&] {
+                return MH_CreateHook(reinterpret_cast<void*>(targets[index].address), detours[created], &originals[created]); }) != MH_OK) break;
     }
     if (created != std::size(hooks)) {
-        for (unsigned i = 0; i < created; ++i) MH_RemoveHook(reinterpret_cast<void*>(targets[hooks[i]].address));
+        for (unsigned i = 0; i < created; ++i) record.hook(SC_INSTALL_REMOVE, 2, hooks[i],
+            static_cast<uint32_t>(targets[hooks[i]].address - binding.image.base), [&] {
+                return MH_RemoveHook(reinterpret_cast<void*>(targets[hooks[i]].address)); });
         session().reject(SessionFault::installation); return;
     }
     original_root = reinterpret_cast<RootInit>(originals[0]);
@@ -344,18 +395,27 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         reinterpret_cast<ProfileChecksum>(targets[12].address), reinterpret_cast<ReleaseSaveReference>(targets[5].address), binding.image.base};
     // The installed production modules determine the gate, never configuration or
     // IPC. Unsupported provider/reset transitions retain AP ownership and fail.
+    event = record.begin(SC_INSTALL_POLICY);
     session().install(binding.root, binding.image.base + 0x4323fc, steam_20260818_routes);
+    const bool published = session().inspect().prepared_routes == steam_20260818_routes;
+    record.finish(event, published ? SC_NATIVE_NONE : SC_NATIVE_CANCELLED);
+    if (!published) { session().reject(SessionFault::installation); return; }
     // All immutable pointers and policy are ready BEFORE the one-time startup
     // hook is reachable. The existing observer accepting flag is independent.
     for (unsigned index : {1u, 4u, 6u, 8u, 9u, 13u, 14u, 15u, 16u, 17u, 18u, 23u, 24u, 25u, 26u, 27u, 28u, 29u, 30u, 32u, 33u, 34u, 35u, 37u, 38u, 40u, 41u, 42u, 43u, 44u, 0u}) {
-        std::array<uint8_t, 32> current{};
-        if (memory.copy(targets[index].address, current.data(), current.size()).reason ||
-            std::memcmp(current.data(), targets[index].bytes.data(), current.size()) ||
-            MH_EnableHook(reinterpret_cast<void*>(targets[index].address)) != MH_OK) {
+        event = record.begin(SC_INSTALL_SAVE_ENABLE, 2, index, static_cast<uint32_t>(targets[index].address - binding.image.base));
+        if (!checked_bytes(memory, targets[index].address, targets[index].bytes.data(), 32, event)) {
+            record.finish(event, SC_NATIVE_TARGET_BYTES);
+            session().reject(SessionFault::installation); return;
+        }
+        const auto enabled = MH_EnableHook(reinterpret_cast<void*>(targets[index].address));
+        record.finish(event, enabled == MH_OK ? SC_NATIVE_NONE : SC_NATIVE_HOOK_FAILED, static_cast<uint32_t>(enabled));
+        if (enabled != MH_OK) {
             // Reachable trampolines stay pinned. No partial install can admit.
             session().reject(SessionFault::installation); return;
         }
     }
+    record.finish(record.begin(SC_INSTALL_READY));
 }
 SubmissionResult submit_native_backup(const std::shared_ptr<BackupJob>& job, std::string_view directory) {
     return submit_native_save(session().native_writes, job, directory, submission_calls);
