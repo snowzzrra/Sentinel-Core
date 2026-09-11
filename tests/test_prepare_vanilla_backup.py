@@ -63,16 +63,30 @@ class ProtectionTests(unittest.TestCase):
         self.args.action = "verify"
         self.assertEqual(protection.protect(self.args)["result"], "protective_backup_verified")
 
-    def test_later_original_progress_refused_without_overwriting_first(self):
+    def test_later_original_progress_gets_new_reference_without_overwriting_first(self):
         protection.protect(self.args)
         first = (self.backup / "steam_app" / "remote" / "GAME-AUTOSAVE0" / "game.details").read_bytes()
         self.campaign.write_bytes(b"later legitimate vanilla progress")
-        with self.assertRaisesRegex(protection.Refused, "originals differ"):
-            protection.protect(self.args)
+        refreshed = protection.protect(self.args)
+        self.assertNotEqual(refreshed["reference_directory"], str(self.backup))
+        self.assertEqual(refreshed["historical_comparison"]["campaign_counts"]["content_changed"], 1)
         self.assertEqual(self.campaign.read_bytes(), b"later legitimate vanilla progress")
         self.assertEqual((self.backup / "steam_app" / "remote" / "GAME-AUTOSAVE0" / "game.details").read_bytes(), first)
         self.args.action = "verify"
         self.assertEqual(protection.protect(self.args)["result"], "protective_backup_verified")
+
+    def test_executable_path_mode_and_precise_timestamp_remain_stable_under_lock(self):
+        executable = self.local / "fixture.exe"
+        executable.write_bytes(b"fixture; never executed")
+        stamp = 1700000000123456700
+        os.utime(executable, ns=(stamp, stamp))
+        before = protection.inventory({"fixture": self.local})
+        with protection.pinned(executable) as source:
+            by_handle = protection.handle_metadata(source)
+            self.assertEqual(before, protection.inventory({"fixture": self.local}))
+            self.assertEqual(before[("fixture", "fixture.exe")][2] & ~0o111, by_handle[2])
+            self.assertEqual(by_handle[4], stamp)
+        self.assertEqual(protection.protect(self.args)["result"], "protective_backup_ready")
 
     def test_interrupted_copy_retained_and_never_resumed(self):
         original = self.snapshot()
@@ -81,7 +95,7 @@ class ProtectionTests(unittest.TestCase):
             real_copy(source, destination)
             raise OSError("fixture interrupted write")
         with mock.patch.object(protection, "copy_file", side_effect=interrupted):
-            with self.assertRaises(OSError):
+            with self.assertRaisesRegex(protection.Refused, "OSError"):
                 protection.protect(self.args)
         self.assertTrue(self.backup.is_dir())
         self.assertFalse((self.backup / protection.MANIFEST).exists())
@@ -94,6 +108,98 @@ class ProtectionTests(unittest.TestCase):
             with self.assertRaisesRegex(protection.Refused, "pin a path exclusively"):
                 protection.protect(self.args)
         self.assertFalse(self.backup.exists())
+
+    def test_exact_metadata_change_before_exclusive_acquisition_is_retained(self):
+        real_pin = protection.pinned
+        old = self.campaign.stat().st_mtime_ns
+        @contextlib.contextmanager
+        def changing(path, directory=False):
+            if path == self.campaign:
+                os.utime(path, ns=(old, old + 1000000000))
+            with real_pin(path, directory) as stream:
+                yield stream
+        with mock.patch.object(protection, "pinned", changing):
+            with self.assertRaises(protection.Refused) as caught:
+                protection.protect(self.args)
+        failure = caught.exception
+        self.assertEqual(failure.stage, "inventory_acquisition")
+        row = next(row for row in failure.private_metadata["differences"] if row["entry"].endswith("game.details"))
+        self.assertEqual(row["path_before"]["mtime_ns"], old)
+        self.assertEqual(row["path_after"]["mtime_ns"], old + 1000000000)
+        self.assertEqual(row["handle_acquired"], row["handle_after"])
+        self.assertEqual(failure.summary["handle_path_mismatches"], 1)
+        self.assertFalse(self.backup.exists())
+
+    def test_metadata_writer_while_data_handles_are_exclusive_is_detected(self):
+        import ctypes
+        from ctypes import wintypes
+        real_pin = protection.pinned
+        changed = False
+        @contextlib.contextmanager
+        def changing(path, directory=False):
+            nonlocal changed
+            with real_pin(path, directory) as stream:
+                if path == self.local / "settings.cfg" and not changed:
+                    api = protection.kernel()
+                    handle = api.CreateFileW(str(self.campaign), 0x100, 7, None, 3, 0, None)  # WRITE_ATTRIBUTES, share all.
+                    self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+                    try:
+                        ticks = self.campaign.stat().st_mtime_ns // 100 + 116444736000000000 + 10000000
+                        value = ctypes.c_uint64(ticks)
+                        api.SetFileTime.argtypes = (wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+                        self.assertTrue(api.SetFileTime(handle, None, None, ctypes.byref(value)))
+                        changed = True
+                    finally:
+                        api.CloseHandle(handle)
+                yield stream
+        with mock.patch.object(protection, "pinned", changing):
+            with self.assertRaises(protection.Refused) as caught:
+                protection.protect(self.args)
+        self.assertTrue(changed)
+        self.assertEqual(caught.exception.summary["handle_changed_entries"], 1)
+        self.assertIn("mtime_ns", caught.exception.summary["changed_fields"])
+        self.assertFalse(self.backup.exists())
+
+    def test_path_disagreement_is_not_accepted_merely_because_handle_is_stable(self):
+        original_inventory = protection.inventory
+        calls = 0
+        def path_disagreement(sources):
+            nonlocal calls
+            calls += 1
+            values = original_inventory(sources)
+            if calls == 2:
+                key = ("steam_app", "remote/GAME-AUTOSAVE0/game.details")
+                old = values[key]
+                values[key] = old[:3] + (old[3] + 1,) + old[4:]
+            return values
+        with mock.patch.object(protection, "inventory", side_effect=path_disagreement):
+            with self.assertRaises(protection.Refused) as caught:
+                protection.protect(self.args)
+        self.assertEqual(caught.exception.summary["changed_fields"], {"size": 1})
+        self.assertEqual(caught.exception.summary["handle_changed_entries"], 0)
+        self.assertFalse(self.backup.exists())
+
+    def test_private_metadata_diagnostic_is_create_only_and_not_in_sources(self):
+        diagnostic = self.root / "metadata.private.json"
+        argv = ["prepare"]
+        for key, value in vars(self.args).items():
+            if key != "action":
+                for entry in value if isinstance(value, list) else [value]:
+                    argv.extend(["--" + key.replace("_", "-"), entry])
+        failure = protection.Refused("source changed while establishing exclusive protection")
+        failure.stage = "inventory_acquisition"
+        failure.private_metadata = {"entry": "private-source-name"}
+        failure.summary = {"changed_entries": 1, "changed_fields": {"mtime_ns": 1}}
+        output = io.StringIO()
+        with mock.patch.object(protection, "protect", side_effect=failure), contextlib.redirect_stderr(output):
+            self.assertEqual(protection.main(argv + ["--diagnostic-file", str(diagnostic)]), 1)
+        self.assertNotIn("private-source-name", output.getvalue())
+        self.assertIn("private-source-name", diagnostic.read_text())
+        old = diagnostic.read_bytes()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(protection.main(argv + ["--diagnostic-file", str(diagnostic)]), 1)
+            self.assertEqual(protection.main(argv + ["--diagnostic-file", str(self.campaign)]), 1)
+        self.assertEqual(old, diagnostic.read_bytes())
 
     def test_source_file_set_change_during_copy_refused(self):
         real_copy = protection.copy_file

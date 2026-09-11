@@ -1,0 +1,97 @@
+#include "startup_log.h"
+#include "save_session.h"
+#include "prelaunch.h"
+#include <windows.h>
+#include <string>
+#include <cstdio>
+namespace sentinel::startup_log {
+namespace {
+SRWLOCK guard = SRWLOCK_INIT;
+HANDLE file = INVALID_HANDLE_VALUE;
+bool opened = false;
+unsigned count = 0;
+std::string last;
+std::string profile_step(const save::ProfileStep& s) {
+    return "{\"first_ms\":" + std::to_string(s.first_ms) + ",\"changed_ms\":" + std::to_string(s.changed_ms) +
+        ",\"elapsed_ms\":" + std::to_string(s.changed_ms - s.first_ms) + ",\"status\":" + std::to_string(static_cast<uint32_t>(s.status)) +
+        ",\"predicate\":\"" + s.predicate + "\",\"native_attempted\":" + (s.native_attempted ? "true" : "false") +
+        ",\"native_state\":" + std::to_string(s.native_state) + ",\"native_outcome\":" + std::to_string(s.native_outcome) +
+        ",\"native_value\":" + std::to_string(s.native_value) + "}";
+}
+std::string profile(const save::ProfileTrace& trace) {
+    constexpr const char* names[]{"request", "profile_created", "catalog_created", "first_poll", "prepare", "decode", "transport",
+        "catalog_poll", "catalog", "reader", "framing", "checksum", "parse", "overlay", "application", "root", "admission", "write_after_refusal"};
+    static_assert(std::size(names) == static_cast<size_t>(save::ProfileStage::count));
+    auto out = "{\"request_id\":" + std::to_string(trace.request) + ",\"identity_kind\":\"native_steam_identity\",\"identity_matched\":" +
+        (trace.identity_matched ? "true" : "false") + ",\"deadline_basis\":\"native_lifetime\",\"account_network_state\":\"not_observed\",\"downstream_refusals\":" +
+        std::to_string(trace.downstream_refusals) + ",\"first_failed_stage\":\"" +
+        (trace.failed_stage == save::ProfileStage::count ? "none" : names[static_cast<size_t>(trace.failed_stage)]) +
+        "\",\"first_failure\":" + profile_step(trace.failure) + ",\"steps\":{";
+    for (size_t i = 0; i < std::size(names); ++i) {
+        if (i) out += ',';
+        out += "\"" + std::string(names[i]) + "\":" + profile_step(trace.steps[i]);
+    }
+    return out + "}}";
+}
+std::string event(const sc_install_event& e) {
+    if (!e.sequence) return "null";
+    char expected[65]{}, actual[65]{};
+    for (unsigned i=0; i<e.byte_count && i<32; ++i) {
+        std::snprintf(expected+i*2,3,"%02x",e.expected_bytes[i]);
+        std::snprintf(actual+i*2,3,"%02x",e.actual_bytes[i]);
+    }
+    return "{\"sequence\":" + std::to_string(e.sequence) + ",\"stage\":" + std::to_string(e.stage) +
+        ",\"reason\":" + std::to_string(e.reason) + ",\"at_ms\":" + std::to_string(e.at_ms) +
+        ",\"duration_ms\":" + std::to_string(e.duration_ms) + ",\"target_group\":" + std::to_string(e.target_group) +
+        ",\"target_index\":" + std::to_string(e.target_index) + ",\"rva\":" + std::to_string(e.rva) +
+        ",\"result\":" + std::to_string(e.result) + ",\"win32_error\":" + std::to_string(e.win32_error) +
+        ",\"minhook_status\":" + std::to_string(e.minhook_status) + ",\"read_reason\":" + std::to_string(e.read_reason) +
+        ",\"expected_bytes\":\"" + expected + "\",\"actual_bytes\":\"" + actual + "\"}";
+}
+void open(const Snapshot& core) {
+    opened = true;
+    wchar_t root[32761]{};
+    const DWORD size = GetEnvironmentVariableW(L"LOCALAPPDATA",root,32761);
+    if (!size || size >= 32761) return;
+    std::wstring directory(root);
+    directory += L"\\SentinelCore";
+    if (!CreateDirectoryW(directory.c_str(),nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return;
+    directory += L"\\diagnostics";
+    if (!CreateDirectoryW(directory.c_str(),nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return;
+    const auto path = directory + L"\\" + std::to_wstring(core.pid) + L"-" + std::to_wstring(core.process_created) + L".jsonl";
+    file = CreateFileW(path.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+}
+}
+void record(const Snapshot& core, uint32_t engine_reason) noexcept {
+    AcquireSRWLockExclusive(&guard);
+    try {
+        if (!opened) open(core);
+        if (file != INVALID_HANDLE_VALUE && count < 128) {
+            const auto install = save::session().installation.inspect();
+            const auto session = save::session().inspect();
+            const auto facts = "\"engine_reason\":" + std::to_string(engine_reason) + ",\"installation\":{\"phase\":" + std::to_string(install.phase) +
+                ",\"sequence\":" + std::to_string(install.sequence) + ",\"startup_observation\":" + std::to_string(install.startup_observation) +
+                ",\"last_completed_stage\":" + std::to_string(install.last_completed_stage) + ",\"validated\":" + std::to_string(install.validated) +
+                ",\"created\":" + std::to_string(install.created) + ",\"enabled\":" + std::to_string(install.enabled) +
+                ",\"primary_failure\":" + event(install.primary_failure) + ",\"cleanup_failure\":" + event(install.cleanup_failure) +
+                ",\"active\":" + event(install.active) + "},\"admission\":{\"state\":" + std::to_string(session.state) +
+                ",\"fault\":" + std::to_string(session.fault) + ",\"flags\":" + std::to_string(session.flags) +
+                ",\"prepared_routes\":" + std::to_string(session.prepared_routes) + ",\"required_routes\":" + std::to_string(session.required_routes) +
+                ",\"namespace_id\":\"" + session.namespace_id + "\"},\"profile\":" + profile(save::session().profile_trace());
+            if (facts != last) {
+                const auto& wide_key = prelaunch::diagnostic_key();
+                std::string control;
+                if (wide_key.size() >= 64) for (auto digit : wide_key.substr(wide_key.size()-64)) control.push_back(static_cast<char>(digit));
+                const auto line = "{\"schema\":\"sentinel-startup-v1\",\"control_sha256\":\"" + control + "\",\"pid\":" + std::to_string(core.pid) +
+                    ",\"process_created\":\"" + std::to_string(core.process_created) + "\",\"build_id\":\"" + core.core.build_id +
+                    "\",\"at_ms\":" + std::to_string(GetTickCount64()) + "," + facts + "}\n";
+                DWORD written = 0;
+                if (!WriteFile(file,line.data(),static_cast<DWORD>(line.size()),&written,nullptr) || written != line.size()) {
+                    CloseHandle(file); file = INVALID_HANDLE_VALUE;
+                } else { FlushFileBuffers(file); last = facts; ++count; }
+            }
+        }
+    } catch (...) { /* Diagnostics never change admission or inspection availability. */ }
+    ReleaseSRWLockExclusive(&guard);
+}
+}

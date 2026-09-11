@@ -4,6 +4,35 @@
 #include <cstring>
 
 namespace sentinel::save {
+void Session::begin_profile(uintptr_t data) {
+    std::lock_guard<std::mutex> guard(profile_trace_mutex_);
+    if (profile_trace_.request) return; // Retain the first startup request through later refusals.
+    profile_trace_.request = 1; profile_data_ = data;
+    profile_trace_.identity_matched = native_io(); // Native hook's provider_operation failure closes native_io.
+}
+bool Session::is_profile_request(uintptr_t data) const {
+    std::lock_guard<std::mutex> guard(profile_trace_mutex_);
+    return data && data == profile_data_;
+}
+void Session::profile_step(ProfileStage stage, ProfileStatus status, const char* predicate,
+        bool attempted, int64_t state, int64_t outcome, uint32_t value) {
+    std::lock_guard<std::mutex> guard(profile_trace_mutex_);
+    auto& step = profile_trace_.steps[static_cast<size_t>(stage)];
+    if (step.status == status && step.predicate == predicate && step.native_attempted == attempted &&
+        step.native_state == state && step.native_outcome == outcome && step.native_value == value) return;
+    const auto now = GetTickCount64();
+    if (!step.first_ms) step.first_ms = now;
+    step.changed_ms = now; step.status = status; step.predicate = predicate;
+    step.native_attempted = attempted; step.native_state = state; step.native_outcome = outcome; step.native_value = value;
+    if (status == ProfileStatus::refused) {
+        if (profile_trace_.failed_stage == ProfileStage::count) {
+            profile_trace_.failed_stage = stage; profile_trace_.failure = step;
+        } else if (profile_trace_.downstream_refusals != UINT32_MAX) ++profile_trace_.downstream_refusals;
+    }
+}
+ProfileTrace Session::profile_trace() const {
+    std::lock_guard<std::mutex> guard(profile_trace_mutex_); return profile_trace_;
+}
 Session::~Session() {
     // Production's pinned process owner is never destructed. Controlled owners
     // leave scope on their startup thread; inspection shutdown releases neither lease.
@@ -76,6 +105,8 @@ bool Session::startup_enter(uintptr_t root, uintptr_t caller, uint32_t thread) {
     return true;
 }
 void Session::startup_leave(bool abnormal) {
+    profile_step(ProfileStage::root, abnormal ? ProfileStatus::refused : ProfileStatus::succeeded,
+        abnormal ? "abnormal_root_return" : "qualified_root_return");
     std::lock_guard<std::mutex> guard(mutex_);
     if (abnormal) {
         if (fault_ == SessionFault::none) fault_ = SessionFault::provider_identity;
@@ -88,6 +119,7 @@ void Session::startup_leave(bool abnormal) {
         root_finished_ = qualified_;
         if (state_ == SessionState::binding && profile_finished_) {
             state_ = SessionState::admitted; requests_ = !requests_stopped_;
+            profile_step(ProfileStage::admission, ProfileStatus::succeeded, "profile_and_root_completed");
         }
     }
 }
@@ -103,7 +135,10 @@ bool Session::profile_read_completed() {
     std::lock_guard<std::mutex> guard(mutex_);
     if (!native_io() || !baseline_ready_ || !choice_ready_ || profile_failed_) return false;
     profile_finished_ = true;
-    if (root_finished_) { state_ = SessionState::admitted; requests_ = !requests_stopped_; }
+    if (root_finished_) {
+        state_ = SessionState::admitted; requests_ = !requests_stopped_;
+        profile_step(ProfileStage::admission, ProfileStatus::succeeded, "profile_and_root_completed");
+    } else profile_step(ProfileStage::admission, ProfileStatus::pending, "awaiting_root_return");
     return true;
 }
 bool Session::bind_provider(std::string_view root, uintptr_t provider, std::string_view ownership) {
@@ -255,6 +290,7 @@ bool Session::take_profile_write(uintptr_t data, ProfileWrite& out) {
 }
 void Session::forget_save_data(uintptr_t data) {
     { std::lock_guard<std::mutex> guard(mutex_); profile_writes_.erase(data); }
+    { std::lock_guard<std::mutex> guard(profile_trace_mutex_); if (data == profile_data_) profile_data_ = 0; }
     native_writes.invalidate_source(data);
 }
 bool Session::capture_profile_baseline(uintptr_t profile, uintptr_t manager, std::string name, int32_t index) {

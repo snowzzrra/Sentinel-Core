@@ -1,8 +1,4 @@
-"""Private START/CAPTURE/FINISH driver for one explicitly selected A retest.
-
-Only START, explicitly invoked by the maintainer, launches Steam. No stage
-launches DOOM, installs DLLs, submits saves or restores original data.
-"""
+"""Persisted Milestone A RUN/PREPARE/EXPORT orchestration. Never launches the game."""
 import argparse
 import datetime
 import hashlib
@@ -16,6 +12,9 @@ import threading
 import time
 import uuid
 import zipfile
+import contextlib
+import ctypes
+from ctypes import wintypes
 
 import prepare_vanilla_backup as protection
 
@@ -24,6 +23,7 @@ REQUIRED = ("sentinel_core.dll", "msimg32.dll", "sentinel_probe.exe", "prepare_v
             "compare_vanilla_campaign.py", "Prepare-MilestoneA.ps1", "Retest-MilestoneA.ps1", "retest_milestone_a.py")
 QUERIES = ("basic", "engine", "native", "save_admission", "save_installation", "save_context", "save_write")
 MAX_OUTPUT = 256 * 1024
+MAX_STARTUP_LOG = 1024 * 1024  # 128 bounded native transition records, including PROFILE stages.
 COMMON = "result operation wire_version core_abi core_version build_id target_pid server_pid process_created instance_id failure_stage win32_error target_state target_wait_error verified_process_created".split()
 ALLOWED = {
     "basic": "host_kind core_state ipc_state ipc_error core_capabilities inspection_capabilities initialization_count last_result engine_integration gameplay_safety game_build",
@@ -61,7 +61,7 @@ def write_json(path, data, create=False):
             json.dump(data, stream, indent=2)
             stream.write("\n")
         return
-    pending = path.with_name(path.name + ".pending")
+    pending = path.with_name(path.name + "." + uuid.uuid4().hex + ".pending")
     with pending.open("x", encoding="utf-8") as stream:
         json.dump(data, stream, indent=2)
         stream.write("\n")
@@ -130,8 +130,9 @@ def run_command(command, prefix, timeout, started=None):
         environment.pop("SENTINEL_AP_TEST_SESSION", None)
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-    except OSError:
-        result["launch_error"] = "command_launch_failed"
+    except OSError as error:
+        result.update(launch_error="command_launch_failed", win32_error=getattr(error, "winerror", None), errno=error.errno)
+        write_json(str(prefix) + ".launch-error.private.json", {"original_error": str(error)}, create=True)
     else:
         def read(channel):
             pipe = getattr(process, channel)
@@ -282,18 +283,69 @@ def observe_game(config, prefix):
     return observed
 
 
-def launch_steam(config, descriptor):
-    environment = os.environ.copy()
-    environment["SENTINEL_AP_TEST_SESSION"] = descriptor
-    if config.get("DebugView", {}).get("Requested"):
-        environment["SENTINEL_INSTALL_DEBUG"] = "1"
-    # The environment is inherited only by this explicit Steam child.
-    startup = subprocess.STARTUPINFO()
-    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startup.wShowWindow = 0
-    process = subprocess.Popen([config["SteamExe"]], env=environment, startupinfo=startup,
-                               cwd=str(Path(config["SteamExe"]).parent))
-    return process.pid
+class Handoff:
+    """One-use live owner lease. The local descriptor alone cannot activate AP."""
+    def __init__(self, run):
+        self.path = Path(run.config["GameInstall"]) / "sentinel-prelaunch.txt"
+        self.api = protection.kernel()
+        self.api.CreateSemaphoreW.argtypes = [ctypes.c_void_p, wintypes.LONG, wintypes.LONG, wintypes.LPCWSTR]
+        self.api.CreateSemaphoreW.restype = wintypes.HANDLE
+        self.handle = None
+        self.published = False
+        run_id = run.state["run_id"].removeprefix("retest-")
+        reference = run.state["protection"]["reference_manifest_sha256"]
+        created = process_created()
+        self.text = (f"sentinel-run-v1\nrun={run_id}\nprotection={reference}\nowner={os.getpid()}\ncreated={created}\n" +
+                     Path(run.state["descriptor"]).read_text(encoding="utf-8"))
+        if os.environ.get("SENTINEL_AP_TEST_SESSION"):
+            raise Refused("prelaunch_conflicting_environment_descriptor")
+        lease_key = hashlib.sha256(self.text.encode("utf-8")).hexdigest()
+        run.state["control_sha256"] = lease_key
+        self.handle = self.api.CreateSemaphoreW(None, 1, 1, "Local\\SentinelA-" + lease_key)
+        if not self.handle or ctypes.get_last_error() == 183:
+            self.close()
+            raise Refused("prelaunch_live_lease_creation_failed")
+        try:
+            write_json(run.directory / "private/handoff.private.json", {"text": self.text, "owner": os.getpid(), "created": created}, create=True)
+            with self.path.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(self.text)
+            self.published = True
+            run.state["handoff_armed"] = True
+            run.save()
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        if self.handle:
+            self.api.CloseHandle(self.handle)
+            self.handle = None
+
+    def retire(self):
+        self.close()
+        # Only this run's ephemeral publication; its exact bytes remain private.
+        if self.published and self.path.exists():
+            if self.path.read_text(encoding="utf-8") != self.text:
+                raise Refused("prelaunch_publication_changed_cleanup_refused")
+            self.path.unlink()
+
+
+def process_created():
+    api = protection.kernel()
+    api.GetCurrentProcess.restype = wintypes.HANDLE
+    values = [wintypes.FILETIME() for _ in range(4)]
+    api.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    if not api.GetProcessTimes(api.GetCurrentProcess(), *(ctypes.byref(v) for v in values)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return (values[0].dwHighDateTime << 32) | values[0].dwLowDateTime
+
+
+def safe_failure(error, config, stage):
+    value = protection.failure_record(error, stage)
+    value["operation"] = stage
+    if isinstance(error, Refused):
+        value.update(reason=redact(str(error), config), distinction=redact(str(error), config), stage=stage)
+    return value
 
 
 def redact(text, config):
@@ -351,15 +403,15 @@ class Run:
         self.config_path = Path(config_path)
         current = load_config(self.config_path)
         self.reference = Path(current["ActiveRun"])
-        if stage == "START":
+        if stage in ("START", "RUN", "PREPARE"):
             completed_reference = False
+            prior = list(current.get("PriorRuns", []))
             if self.reference.exists():
                 previous = read_json(self.reference)
                 previous_directory = Path(previous["run_directory"])
-                if (previous_directory.parent != Path(current["EvidenceRoot"]) or previous_directory.name != previous["run_id"]
-                    or not read_json(previous_directory / "private/state.json").get("finished")
-                    or not (previous_directory / (previous["run_id"] + "-shareable.zip")).is_file()):
-                    raise Refused("active_run_already_exists_use_CAPTURE_or_FINISH")
+                if previous_directory.parent != Path(current["EvidenceRoot"]) or previous_directory.name != previous["run_id"]:
+                    raise Refused("previous_exact_run_reference_mismatch")
+                prior.append(str(previous_directory))
                 completed_reference = True
             self.config = current
             self.directory = Path(current["EvidenceRoot"]) / ("retest-" + uuid.uuid4().hex)
@@ -368,6 +420,8 @@ class Run:
             self.state = {"schema": "sentinel-a-retest-private-v1", "run_id": self.directory.name,
                           "started_utc": utc(), "finished": False, "stages": [], "commands": [],
                           "captures": 0, "process": None, "descriptor": None,
+                          "prior_runs": list(dict.fromkeys(prior)), "preparation": {"state": "not_performed"},
+                          "primary_failure": None, "secondary_failures": [],
                           "debug_capture": {"state": "unavailable", "reason": "optional_process_filtered_capture_not_configured"}}
             write_json(self.directory / "private/config.json", current, create=True)
             self.reference.parent.mkdir(parents=True, exist_ok=True)
@@ -380,7 +434,7 @@ class Run:
                 raise Refused("active_run_reference_mismatch")
             self.config = read_json(self.directory / "private/config.json")
             self.state = read_json(self.directory / "private/state.json")
-            if self.state["run_id"] != reference["run_id"] or self.state["finished"]:
+            if self.state["run_id"] != reference["run_id"] or (self.state["finished"] and stage != "EXPORT"):
                 raise Refused("run_mismatched_or_already_finished")
             if stage == "CAPTURE" and current != self.config:
                 raise Refused("configuration_changed_since_START")
@@ -406,58 +460,275 @@ class Run:
             raise KeyboardInterrupt
         return record, raw, response
 
-    def start(self):
-        config = self.config
-        print("Resolved private configuration (kept local):\n" + json.dumps(config, indent=2))
-        for name in ("Python", "PowerShell7", "SteamExe"):
-            if not Path(config[name]).is_file():
-                raise Refused("configured_tool_missing_" + name)
-        manifest = validate_candidate(config, installed=True)
-        self.state["manifest"] = manifest
-        self.state["manifest_sha256"] = sha(config["CandidateManifest"])
+    def fail(self, error, stage):
+        failure = safe_failure(error, self.config, stage)
+        private = {**failure, "original_error": str(error), "metadata": getattr(error, "private_metadata", None)}
+        write_json(self.prefix("failure-" + stage).with_suffix(".private.json"), private, create=True)
+        if not self.state.get("primary_failure"):
+            self.state["primary_failure"] = failure
+        else:
+            self.state.setdefault("secondary_failures", []).append(failure)
         self.save()
-        protection.require_stopped()
-        params = {"Python": config["Python"], "SteamAccount": str(config["SteamAccount32"]),
-                  "SteamAppRoot": config["SteamAppRoot"], "LocalProviderRoot": config["LocalProviderRoot"],
-                  "BackupDirectory": config["OriginalBackupDirectory"], "APRoot": config["APRoot"],
-                  "UninstallRoot": config["UninstallRoots"]}
-        params_path = self.directory / "private/preparation-parameters.json"
-        write_json(params_path, params, create=True)
-        wrapper = Path(config["CandidateManifest"]).parent / "Prepare-MilestoneA.ps1"
-        # JSON carries a real string[]; no user-supplied PowerShell expressions.
-        def literal(value):
-            return "'" + str(value).replace("'", "''") + "'"
-        script = "$ErrorActionPreference='Stop'; $p=Get-Content -LiteralPath " + literal(params_path) + " -Raw | ConvertFrom-Json -AsHashtable; & " + literal(wrapper) + " @p"
-        record, raw, _ = self.execute("protect_and_prepare", [config["PowerShell7"], "-NoProfile", "-NonInteractive", "-Command", script], 180)
+        print(stage + ": " + failure["reason"])
+
+    def helper(self, label, script, arguments, timeout=180):
+        command = [self.config["Python"], "-B", str(Path(self.config["CandidateManifest"]).parent / script), *arguments]
+        record, raw, response = self.execute(label, command, timeout)
+        if record.get("launch_error"):
+            raise protection.Refused(label + " command launch failed", stage=label, distinction="helper_runtime_unavailable_see_private_OS_error",
+                                     win32_error=record.get("win32_error"))
         if record["exit_code"] != 0 or record["stdout_truncated"]:
-            raise Refused("original_protection_or_preparation_refused")
-        # The existing wrapper emits the protection JSON, then its own receipt.
-        decoder = json.JSONDecoder()
-        text = raw["stdout"].strip()
-        receipts = []
-        while text:
-            value, end = decoder.raw_decode(text)
-            receipts.append(value)
-            text = text[end:].lstrip()
-        receipt = receipts[-1] if receipts else {}
-        if receipt.get("result") != "guarded_prelaunch_prepared" or receipt.get("build_id") != manifest["build_id"]:
-            raise Refused("invalid_preparation_receipt")
-        descriptor = Path(receipt["descriptor"])
-        if descriptor.parent != Path(config["APRoot"]) or not descriptor.is_file():
-            raise Refused("prepared_descriptor_path_mismatch")
-        self.state["descriptor"] = str(descriptor)
-        self.state["namespace_id"] = receipt["namespace_id"]
-        record["json_state"] = "verified_preparation_receipt"
-        record["response"] = {"result": receipt["result"], "build_id": receipt["build_id"], "namespace_id": receipt["namespace_id"]}
+            failure = None
+            for line in (raw["stderr"] + "\n" + raw["stdout"]).splitlines():
+                try:
+                    value = json.loads(line)
+                    if isinstance(value, dict) and value.get("reason"): failure = value; break
+                except ValueError:
+                    pass
+            if failure:
+                record["subprocess_failure"] = {k: failure.get(k) for k in
+                    ("operation", "stage", "reason", "distinction", "win32_error", "errno", "comparison", "metadata_summary")}
+                self.save()
+                error = protection.Refused(failure["reason"], stage=failure.get("stage", label),
+                    distinction=failure.get("distinction"), comparison=failure.get("comparison"), win32_error=failure.get("win32_error"))
+                if failure.get("metadata_summary"): error.summary = failure["metadata_summary"]
+                raise error
+            if response and response.get("result") == "vanilla_campaign_changed":
+                record["response"] = response
+                return response
+            raise Refused(label + ("_timeout" if record["timed_out"] else "_subprocess_exit_" + str(record["exit_code"])) + "_see_private_output")
+        if not isinstance(response, dict): raise Refused(label + "_invalid_JSON_receipt")
+        return response
+
+    def source_arguments(self, reference):
+        return ["--steam-account", str(self.config["SteamAccount32"]), "--steam-app-root", self.config["SteamAppRoot"],
+                "--local-provider-root", self.config["LocalProviderRoot"], "--backup-directory", str(reference)]
+
+    def compare_reference(self, reference, label):
+        return self.helper(label, "compare_vanilla_campaign.py", self.source_arguments(reference) +
+                           ["--diagnostic-file", str(self.directory / "private" / (label + ".private.json"))])
+
+    def recover_previous(self):
+        queue = list(self.state.get("prior_runs", [])); seen = set(); outcomes = []
+        records = []; recovered = {}
+        while queue:
+            directory = Path(queue.pop(0))
+            if str(directory) in seen: continue
+            seen.add(str(directory))
+            if directory.parent != Path(self.config["EvidenceRoot"]) or not re.fullmatch(r"retest-[0-9a-f]{32}", directory.name):
+                raise Refused("prior_run_reference_outside_evidence_root")
+            previous = read_json(directory / "private/state.json")
+            config = read_json(directory / "private/config.json")
+            if any(config[k] != self.config[k] for k in ("SteamAccount32", "SteamAppRoot", "LocalProviderRoot", "OriginalBackupDirectory")):
+                raise Refused("prior_run_account_or_source_identity_conflict")
+            queue.extend(previous.get("prior_runs", []))
+            records.append((directory, previous, config))
+            for item in previous.get("previous_comparisons", []):
+                if item.get("recovered_comparison"):
+                    recovered[item["run_id"]] = (item["state_sha256"], item["recovered_comparison"])
+        for directory, previous, config in records:
+            reference = previous.get("protection", {}).get("reference_directory") or config["OriginalBackupDirectory"]
+            if previous.get("protection") and sha(Path(reference) / protection.MANIFEST) != previous["protection"]["reference_manifest_sha256"]:
+                raise Refused("previous_protection_reference_manifest_changed")
+            comparison = previous.get("comparison") or {}
+            if comparison.get("state") != "completed" and directory.name in recovered:
+                expected_hash, result = recovered[directory.name]
+                if expected_hash != sha(directory / "private/state.json"):
+                    raise Refused("previous_recovery_evidence_identity_mismatch")
+                comparison = {"state": "completed", "response": result, "reason": "retained_recovered_comparison"}
+            outcome = {"run_id": directory.name, "retained_comparison": comparison, "state_sha256": sha(directory / "private/state.json")}
+            may_have_run = bool(previous.get("descriptor") or previous.get("process") or previous.get("handoff_armed"))
+            prior_result = comparison.get("response", {}).get("result")
+            if prior_result == "vanilla_campaign_changed":
+                outcome["distinction"] = "unresolved_previous_campaign_regression"
+            elif prior_result == "vanilla_campaign_unchanged":
+                outcome["distinction"] = "previous_post_test_comparison_retained"
+            elif may_have_run:
+                result = self.compare_reference(reference, "recover-" + directory.name)
+                outcome.update(recovered_comparison=result, distinction="delayed_previous_test_comparison")
+                if result["result"] == "vanilla_campaign_changed":
+                    outcome["distinction"] = "unresolved_previous_campaign_regression"
+            else:
+                outcome["distinction"] = "preflight_only_native_not_tested"
+            outcomes.append(outcome)
+            self.state["previous_comparisons"] = outcomes
+            self.save()
+            if outcome["distinction"] == "unresolved_previous_campaign_regression":
+                raise protection.Refused("previous protected campaign regression remains unresolved", stage="previous_comparison",
+                    distinction="potential_previous_test_effect_preserve_both_states_before_new_reference",
+                    comparison=outcome.get("recovered_comparison") or comparison.get("response"))
+            # A previous published descriptor is retired only with exact retained bytes
+            # and stopped game/Steam; a stale file alone never grants a new lease.
+            publication = Path(self.config["GameInstall"]) / "sentinel-prelaunch.txt"
+            private_handoff = directory / "private/handoff.private.json"
+            if publication.exists() and private_handoff.exists():
+                retained = read_json(private_handoff)["text"]
+                if publication.read_text(encoding="utf-8") == retained:
+                    publication.unlink()
+            if not self.state.get("reuse_reference") and previous.get("protection"):
+                self.state["reuse_reference"] = reference
+        write_json(self.directory / "private/previous-comparisons.private.json", outcomes, create=True)
+
+    def prepare(self, activate=True):
+        print("DOOM e Steam precisam estar fechados para capturar e verificar os arquivos sem escritores concorrentes.")
+        self.state["manifest"] = validate_candidate(self.config)
+        self.state["manifest_sha256"] = sha(self.config["CandidateManifest"])
         self.save()
         protection.require_stopped()
-        try:
-            self.state["debug_capture"] = arm_debug(config, self.directory / "private")
-        except (OSError, Refused, ValueError):
-            self.state["debug_capture"] = {"state": "unavailable", "reason": "optional_capture_prerequisite_unavailable"}
+        self.recover_previous()
+        params = self.source_arguments(self.config["OriginalBackupDirectory"])
+        params += ["--ap-root", self.config["APRoot"], "--diagnostic-file", str(self.directory / "private/protection.private.json")]
+        for root in self.config["UninstallRoots"]: params.extend(["--uninstall-root", root])
+        if self.state.get("reuse_reference"): params.extend(["--reference-directory", self.state["reuse_reference"]])
+        receipt = self.helper("run_protection", "prepare_vanilla_backup.py", ["prepare", *params])
+        self.state["protection"] = receipt
+        self.state["preparation"] = {"state": "protected", "historical_comparison": receipt.get("historical_comparison"),
+                                     "reference_manifest_sha256": receipt["reference_manifest_sha256"], "reused": receipt["reused"]}
         self.save()
-        self.state["steam_launch_pid"] = launch_steam(config, str(descriptor))
-        print("Steam started with this run's AP descriptor. Open DOOM manually and remain in the main menu; do not enter a campaign.")
+        if not activate: return
+        # Installing diagnostic DLLs and ordinary read-only IPC do not require protection.
+        # AP handoff does require it, plus this exact installed pair and game identity.
+        validate_candidate(self.config, installed=True)
+        if os.environ.get("SENTINEL_AP_TEST_SESSION"):
+            raise Refused("prelaunch_conflicting_environment_descriptor")
+        root = protection.explicit_path(self.config["APRoot"])
+        root.mkdir(exist_ok=True)
+        seed = "sentinel-a-" + self.state["run_id"]
+        descriptor = root / (seed + ".txt")
+        text = "sentinel-test-session-v1\nseed_hex=" + seed.encode().hex() + "\nteam=0\nslot=1\ngeneration_fingerprint=" + uuid.uuid4().hex + uuid.uuid4().hex + "\nprovenance=synthetic-fixture\nroot=" + str(root) + "\n"
+        with descriptor.open("x", encoding="utf-8", newline="\n") as stream: stream.write(text)
+        probe = Path(self.config["CandidateManifest"]).parent / "sentinel_probe.exe"
+        record, raw, response = self.execute("namespace_prepare", [str(probe), "--save-session-prepare", str(descriptor)], 20)
+        if record["exit_code"] != 0 or not isinstance(response, dict) or not re.fullmatch("[0-9a-f]{64}", response.get("namespace_id", "")):
+            if isinstance(response, dict): record["response"] = scalars(response, ("result", "outcome", "win32_error"))
+            self.save()
+            raise Refused("namespace_prepare_refused_" + json.dumps(record.get("response", {}), sort_keys=True))
+        self.state.update(descriptor=str(descriptor), namespace_id=response["namespace_id"])
+        self.state["preparation"]["state"] = "prepared"
+        self.save()
+
+    def discover_recorded_process(self):
+        """Recover a short-lived attempt by exact control hash, never newest file/PID."""
+        root = Path(os.environ.get("LOCALAPPDATA", "")) / "SentinelCore/diagnostics"
+        if not root.is_dir(): return False
+        earliest = int(datetime.datetime.fromisoformat(self.state["started_utc"]).timestamp() * 10000000) + 116444736000000000
+        matches = {}
+        for index, path in enumerate(root.iterdir()):
+            if index >= 4096: raise Refused("automatic_record_scan_limit_exact_identity_not_resolved")
+            match = re.fullmatch(r"([0-9]+)-([0-9]+)\.jsonl", path.name)
+            if not match or int(match[2]) < earliest: continue
+            with path.open("rb") as stream: data = stream.read(MAX_STARTUP_LOG)
+            for line in data.splitlines():
+                try: value = json.loads(line)
+                except (ValueError, UnicodeError): continue
+                if (isinstance(value, dict) and value.get("control_sha256") == self.state.get("control_sha256") and
+                    value.get("build_id") == self.state["manifest"]["build_id"] and str(value.get("pid")) == match[1] and str(value.get("process_created")) == match[2]):
+                    matches[path.name] = {"pid": int(match[1]), "process_created": match[2], "path": None, "modules": [], "source": "automatic_record_only"}
+        if len(matches) > 1: raise Refused("multiple_process_records_for_this_run_no_identity_guess")
+        if not matches: return False
+        self.state["process"] = next(iter(matches.values())); self.save()
+        return True
+
+    def collect_startup_log(self):
+        process = self.state.get("process")
+        if not process: return
+        path = Path(os.environ["LOCALAPPDATA"]) / "SentinelCore/diagnostics" / (str(process["pid"]) + "-" + str(process["process_created"]) + ".jsonl")
+        if not path.exists():
+            self.state["automatic_log"] = {"state": "unavailable", "reason": "exact_process_log_not_present"}
+            return
+        with path.open("rb") as stream: raw = stream.read(MAX_STARTUP_LOG + 1)
+        rows = []
+        for line in raw[:MAX_STARTUP_LOG].splitlines():
+            try: item = json.loads(line)
+            except ValueError: continue
+            if (str(item.get("pid")) != str(process["pid"]) or str(item.get("process_created")) != str(process["process_created"]) or
+                item.get("build_id") != self.state["manifest"]["build_id"]):
+                raise Refused("automatic_log_process_or_build_identity_mismatch")
+            trace = item.get("profile", {})
+            step_keys = ("first_ms", "changed_ms", "elapsed_ms", "status", "predicate", "native_attempted", "native_state", "native_outcome", "native_value")
+            profile = {**scalars(trace, ("request_id", "identity_kind", "identity_matched", "deadline_basis", "account_network_state", "downstream_refusals", "first_failed_stage")),
+                "first_failure": scalars(trace.get("first_failure", {}), step_keys),
+                "steps": {key: scalars(trace.get("steps", {}).get(key, {}), step_keys) for key in
+                    ("request", "profile_created", "catalog_created", "first_poll", "prepare", "decode", "transport", "catalog_poll", "catalog", "reader", "framing", "checksum", "parse", "overlay", "application", "root", "admission", "write_after_refusal")}}
+            rows.append({**scalars(item, ("schema", "control_sha256", "pid", "process_created", "build_id", "at_ms", "engine_reason")), "profile": profile,
+                "admission": scalars(item.get("admission", {}), ("state", "fault", "flags", "prepared_routes", "required_routes", "namespace_id")),
+                "installation": {**scalars(item.get("installation", {}), ("phase", "sequence", "startup_observation", "last_completed_stage", "validated", "created", "enabled")),
+                    **{key: scalars(item.get("installation", {}).get(key) or {},
+                      ("sequence", "stage", "reason", "at_ms", "duration_ms", "target_group", "target_index", "rva", "result", "win32_error", "minhook_status", "read_reason", "expected_bytes", "actual_bytes"))
+                       for key in ("primary_failure", "cleanup_failure", "active")}}})
+        self.state["automatic_log"] = {"state": "captured", "truncated": len(raw) > MAX_STARTUP_LOG, "records": rows[:128]}
+        profile_failure = next((row["profile"] for row in rows
+            if row["profile"].get("first_failed_stage") not in (None, "none") and row["profile"].get("request_id")), None)
+        if profile_failure and not self.state.get("profile_failure_reported"):
+            self.state["profile_failure_reported"] = True
+            stage = profile_failure["first_failed_stage"]
+            predicate = profile_failure["first_failure"].get("predicate", "predicate_unavailable")
+            self.fail(protection.Refused("native PROFILE initialization: " + stage + ": " + predicate,
+                stage="profile_" + stage, distinction=predicate), "native_profile")
+        target = self.directory / "private/automatic-startup.private.json"
+        write_json(target, self.state["automatic_log"], create=not target.exists())
+        self.save()
+        if not self.state.get("primary_failure"):
+            failure = next((row["installation"]["primary_failure"] for row in rows if row["installation"]["primary_failure"]), None)
+            if failure:
+                self.fail(protection.Refused("retained native installation failure in automatic startup record", stage="native_installation",
+                    distinction="original_stage_and_reason_in_automatic_installation_record", win32_error=failure.get("win32_error")), "automatic_startup")
+
+    def run(self):
+        handoff = None
+        try:
+            self.prepare()
+            protection.require_stopped()
+            handoff = Handoff(self)
+            print("Protecao pronta. Abra Steam e DOOM normalmente, fique no menu e depois feche DOOM e Steam. A coleta e automatica; Ctrl+C exporta o que estiver disponivel.")
+            deadline = time.monotonic() + self.config.get("DiscoverySeconds", 180)
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    self.state["process"] = observe_game(self.config, self.directory / "private" / ("discovery-" + str(attempt)))
+                    self.state["process"]["instance_id"] = None
+                    self.save()
+                    break
+                except Refused as error:
+                    if str(error) != "no_game_process": raise
+                    if self.discover_recorded_process(): break
+                if time.monotonic() >= deadline: raise Refused("game_discovery_deadline_no_game_observed")
+                time.sleep(1)
+            deadline = time.monotonic() + self.config.get("ObservationSeconds", 1800)
+            captures = 0; last_log = None
+            while self.state["process"].get("source") != "automatic_record_only":
+                self.collect_startup_log()
+                signature = json.dumps(self.state.get("automatic_log"), sort_keys=True)
+                if captures == 0 or (signature != last_log and captures < 8):
+                    try: self.capture()
+                    except (Refused, protection.Refused, OSError, ValueError) as error: self.fail(error, "safe_capture")
+                    captures += 1; last_log = signature
+                attempt += 1
+                try:
+                    observed = observe_game(self.config, self.directory / "private" / ("observation-" + str(attempt)))
+                    if any(str(observed[k]) != str(self.state["process"][k]) for k in ("pid", "process_created", "path")):
+                        raise Refused("game_process_replaced")
+                except Refused as error:
+                    if str(error) == "no_game_process": break
+                    raise
+                if time.monotonic() >= deadline: raise Refused("game_close_deadline_process_not_stopped")
+                time.sleep(1)
+            self.collect_startup_log()
+            print("DOOM fechado. Aguardando Steam encerrar para comparar a referencia deste run.")
+            deadline = time.monotonic() + self.config.get("CloseSeconds", 180)
+            while True:
+                try: protection.require_stopped(); break
+                except protection.Refused:
+                    if time.monotonic() >= deadline: raise Refused("post_test_comparison_waiting_for_Steam_to_exit")
+                    time.sleep(1)
+        except (Refused, protection.Refused, OSError, ValueError, KeyboardInterrupt) as error:
+            self.fail(Refused("operator_interrupted_partial_evidence") if isinstance(error, KeyboardInterrupt) else error, "RUN")
+            raise
+        finally:
+            if handoff:
+                try: handoff.retire()
+                except (OSError, Refused) as error: self.fail(error, "handoff_cleanup")
 
     def capture(self):
         if not self.state["descriptor"]:
@@ -517,45 +788,56 @@ class Run:
             raise Refused("game_process_replaced_at_capture_end")
         hashes = {entry["name"]: entry["sha256"] for entry in manifest["files"]}
         modules = final.get("modules", [])
-        if len(modules) != 2 or any(Path(module["path"]) != Path(self.config["GameInstall"]) / module["basename"].lower()
-                                   or module["sha256"] != hashes.get(module["basename"].lower()) for module in modules):
-            raise Refused("loaded_module_identity_mismatch_or_unavailable")
+        mismatched = any(Path(module["path"]) != Path(self.config["GameInstall"]) / module["basename"].lower()
+                         or module["sha256"] != hashes.get(module["basename"].lower()) for module in modules)
+        module_state = "verified_mismatch" if mismatched else "verified" if len(modules) == 2 else "not_yet_observable"
+        health = self.state.setdefault("capture_health", {"module_history": []})
+        health["module_state"] = module_state
+        health["module_history"].append({"capture": capture_id, "state": module_state, "observed_modules": len(modules)})
+        if module_state == "verified": self.state["process"]["modules"] = modules
+        self.save()
+        if mismatched: raise Refused("loaded_module_identity_verified_mismatch")
         if namespace_refusal:
             raise Refused(namespace_refusal)
-        print("Read-only capture complete. Stay out of campaigns. Close DOOM and Steam normally before FINISH.")
+        for item in self.state["commands"][-len(QUERIES):]:
+            failure = item.get("response", {}).get("installation", {}).get("primary_failure")
+            if failure:
+                raise protection.Refused("native installation refused: " + str(failure.get("reason")), stage="native_installation",
+                    distinction="retained_first_installation_failure_all_safe_queries_collected", win32_error=failure.get("win32_error"))
+        for item in self.state["commands"][-len(QUERIES):]:
+            if item["query"] == "save_admission" and item.get("response", {}).get("state") in ("rejected", "faulted"):
+                raise protection.Refused("AP admission refused: " + str(item["response"].get("fault")), stage="native_admission",
+                    distinction="native_session_refusal_all_safe_queries_collected")
+        print("Consultas seguras coletadas; feche DOOM e Steam normalmente quando concluir a observacao do menu.")
 
     def finish(self, args):
-        print("FINISH requires DOOM and Steam to have exited normally. Nothing will be force-stopped; unavailable comparison stays pending while evidence is exported.")
+        if args.stage == "EXPORT" and (self.state.get("comparison") or {}).get("state") == "completed":
+            return  # Export cannot reattribute later legitimate changes to a completed test.
         self.state["operator"] = {"attribution": "operator_supplied_not_script_verified", "catalog": args.catalog,
-                                  "selection": args.selection, "rollback": args.rollback,
-                                  "note": redact(args.note, self.config)}
-        comparison = {"state": "pending", "reason": "not_performed"}
+                                  "selection": args.selection, "rollback": args.rollback, "note": redact(args.note, self.config)}
+        if self.state.get("process") and self.state.get("capture_health", {}).get("module_state") == "not_yet_observable":
+            self.fail(Refused("loaded_module_identity_not_established"), "capture_health")
+        comparison = {"state": "not_performed", "reason": "game_not_observed_and_no_activation"}
         self.state["comparison"] = comparison
-        if args.comparison_cancelled:
-            comparison.update(state="cancelled", reason="operator_cancelled")
-        else:
+        if self.state.get("protection") and (self.state.get("process") or self.state.get("handoff_armed")):
             try:
                 protection.require_stopped()
-                validate_candidate(self.config)
-                if self.state.get("manifest_sha256") != sha(self.config["CandidateManifest"]):
-                    raise Refused("candidate_changed_since_START")
-                command = [self.config["Python"], "-B", str(Path(self.config["CandidateManifest"]).parent / "compare_vanilla_campaign.py")]
-                for flag, key in (("steam-account", "SteamAccount32"), ("steam-app-root", "SteamAppRoot"),
-                                  ("local-provider-root", "LocalProviderRoot"), ("backup-directory", "OriginalBackupDirectory")):
-                    command.extend(["--" + flag, str(self.config[key])])
-                record, _, response = self.execute("campaign_comparison", command, 180)
-                comparison.update(state="completed" if record["exit_code"] == 0 else "failed", reason="comparator_result")
-                if isinstance(response, dict):
-                    comparison["response"] = scalars(response, "result baseline_campaign_files current_campaign_files added removed modified selection_verification".split())
-            except KeyboardInterrupt:
-                comparison.update(state="cancelled", reason="operator_cancelled_during_comparison")
-            except (protection.Refused, Refused, OSError, ValueError):
-                comparison.update(state="pending", reason="stopped_check_or_comparison_prerequisite_unavailable")
+                reference = self.state["protection"]
+                if sha(Path(reference["reference_directory"]) / protection.MANIFEST) != reference["reference_manifest_sha256"]:
+                    raise Refused("run_reference_manifest_changed")
+                response = self.compare_reference(reference["reference_directory"], "campaign_comparison")
+                comparison.update(state="completed", reason="compared_exact_pre_test_reference", response=response)
+                if response["result"] == "vanilla_campaign_changed":
+                    self.fail(protection.Refused("protected campaign changed since this run preparation", stage="campaign_comparison",
+                        distinction="unexplained_campaign_regression_no_automatic_baseline_refresh", comparison=response), "campaign_comparison")
+            except (Refused, protection.Refused, OSError, ValueError, KeyboardInterrupt) as error:
+                comparison.update(state="not_performed", reason=safe_failure(error, self.config, "campaign_comparison"))
+                self.fail(error, "campaign_comparison")
         self.state["finished"] = True
         self.state["finished_utc"] = utc()
-        print("Rollback, only after DOOM/Steam are stopped: restore the retained matched DLL pair, or remove only the test sentinel_core.dll/msimg32.dll according to the candidate's manual rollback instructions. Never restore saves automatically.")
+        self.save()
 
-    def export(self):
+    def export(self, checkpoint=None):
         self.state["debug_capture"].update(capture_finished=False, exit_code=None)
         debug_finished = self.directory / "private/debug-finished.private.json"
         if debug_finished.exists():
@@ -580,6 +862,11 @@ class Run:
             "candidate": {"manifest_sha256": self.state.get("manifest_sha256"),
                           "files": [{"basename": name, "sha256": hashes[name]} for name in REQUIRED if name in hashes]},
             "prepared_namespace_id": self.state.get("namespace_id"),
+            "preparation": self.state.get("preparation", {"state": "not_performed"}),
+            "primary_failure": self.state.get("primary_failure"), "secondary_failures": self.state.get("secondary_failures", []),
+            "previous_comparisons": self.state.get("previous_comparisons", []),
+            "automatic_startup": self.state.get("automatic_log", {"state": "not_observed"}),
+            "capture_health": self.state.get("capture_health", {"module_state": "not_observed", "module_history": []}),
             "process": {**scalars(process or {}, ("pid", "process_created", "instance_id")), "modules": modules},
             "stages": self.state["stages"], "commands": self.state["commands"],
             "comparison": self.state.get("comparison", {"state": "pending", "reason": "FINISH_not_run"}),
@@ -593,13 +880,45 @@ class Run:
         admitted = bool(admissions and admissions[-1]["exit_code"] == 0 and admissions[-1].get("identity_state") == "verified"
                         and admissions[-1].get("namespace_state") == "verified"
                         and admissions[-1].get("response", {}).get("state") == "admitted")
-        report["admission_observation"] = "admitted_in_read_only_snapshot" if admitted else "rejected_or_unavailable_no_gameplay"
-        summary = ["Milestone A targeted retest", "", "Admission: " + report["admission_observation"],
+        report["admission_observation"] = ("admitted_in_read_only_snapshot" if admitted else
+            "native_refusal_observed" if any(i.get("response", {}).get("state") in ("rejected", "faulted") for i in admissions) else
+            "NOT_TESTED" if not process else "not_established")
+        logged = report["automatic_startup"].get("records", [])
+        trace = next((r["profile"] for r in reversed(logged) if r.get("profile", {}).get("request_id")), {})
+        report["profile_initialization"] = trace or {"state": "not_observed"}
+        native_failure = next((i.get("response", {}) for i in admissions if i.get("response", {}).get("state") in ("rejected", "faulted")), {})
+        if not native_failure:
+            native_failure = next((r["admission"] for r in logged if r.get("admission", {}).get("state") in (4, 5)), {})
+        report["native_failure"] = {**scalars(native_failure, ("state", "fault")),
+            "first_failed_stage": trace.get("first_failed_stage", "not_observed"), "first_failure": trace.get("first_failure", {})} if native_failure else None
+        if process and logged and report["admission_observation"] == "not_established":
+            if logged[-1].get("admission", {}).get("state") in (4, 5): report["admission_observation"] = "native_refusal_in_automatic_record"
+        installations = [i.get("response", {}).get("installation", {}) for i in report["commands"] if i["query"] == "save_installation"]
+        report["game_observation"] = "observed" if process else "NOT_OBSERVED"
+        if process and process.get("source") == "automatic_record_only": report["game_observation"] = "observed_in_automatic_record_only"
+        report["hook_installation"] = installations[-1].get("phase", "not_established") if installations else "NOT_TESTED" if not process else "not_established"
+        if not installations and any(r.get("installation", {}).get("primary_failure") for r in logged):
+            report["hook_installation"] = "native_failure_in_automatic_record"
+        summary = ["Milestone A RUN", "", "Preparation: " + report["preparation"]["state"],
+                   "Game: " + report["game_observation"], "Hook installation: " + report["hook_installation"], "AP admission: " + report["admission_observation"],
                    "Expected routes: " + str(report["expected"]["required_routes"]), "Runtime PASS: not claimed.", ""]
+        if report["native_failure"]:
+            summary.append("Native game failure: " + json.dumps(report["native_failure"], sort_keys=True))
+        summary.append("Capture health: " + json.dumps(report["capture_health"], sort_keys=True))
+        if trace:
+            summary.append("PROFILE initialization: " + json.dumps(trace, sort_keys=True))
+        if report["primary_failure"]: summary.append("First workflow failure (separate from native cause): " + json.dumps(report["primary_failure"], sort_keys=True))
+        if report["preparation"].get("historical_comparison"):
+            summary.append("Historical backup comparison: " + json.dumps(report["preparation"]["historical_comparison"], sort_keys=True))
+        for stage in report["stages"]:
+            if stage.get("failure"):
+                summary.append(stage["stage"] + " " + stage["state"] + ": " + stage["failure"])
         for item in admissions:
             response = item.get("response", {})
             summary.append(f"Admission exit={item['exit_code']}; state={response.get('state', 'unavailable')}; fault={response.get('fault', 'unavailable')}; routes={response.get('prepared_routes', 'unknown')}; namespace={item.get('namespace_state', 'unavailable')}.")
         for item in report["commands"]:
+            if item.get("subprocess_failure"):
+                summary.append("Preflight failure: " + json.dumps(item["subprocess_failure"], sort_keys=True))
             failure = item.get("response", {}).get("installation", {}).get("primary_failure")
             if failure:
                 summary.append("Installation primary failure: " + json.dumps(failure, sort_keys=True))
@@ -609,11 +928,12 @@ class Run:
                     "Raw output/configuration remain private. Only SUMMARY.md and report.json are in this ZIP."]
         encoded = json.dumps(report, indent=2) + "\n"
         summary_text = "\n".join(summary) + "\n"
-        share = self.directory / "shareable"
+        suffix = "-" + checkpoint if checkpoint else ""
+        share = self.directory / ("shareable" + suffix)
         share.mkdir()
         write_json(share / "report.json", report, create=True)
         (share / "SUMMARY.md").write_text(summary_text, encoding="utf-8")
-        zip_path = self.directory / (self.state["run_id"] + "-shareable.zip")
+        zip_path = self.directory / (self.state["run_id"] + suffix + "-shareable.zip")
         with zipfile.ZipFile(zip_path, "x", compression=zipfile.ZIP_DEFLATED) as bundle:
             bundle.writestr("SUMMARY.md", summary_text)
             bundle.writestr("report.json", encoded)
@@ -623,10 +943,10 @@ class Run:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("stage", choices=("START", "CAPTURE", "FINISH"))
-    parser.add_argument("--catalog", choices=("not_observed", "unchanged", "changed"), default="not_observed")
-    parser.add_argument("--selection", choices=("not_observed", "unchanged", "changed"), default="not_observed")
-    parser.add_argument("--rollback", choices=("not_performed", "restored_pair", "removed_test_pair"), default="not_performed")
+    parser.add_argument("stage", choices=("RUN", "PREPARE", "EXPORT"))
+    parser.add_argument("--catalog", default="not_observed")
+    parser.add_argument("--selection", default="not_observed")
+    parser.add_argument("--rollback", default="not_performed")
     parser.add_argument("--note", default="")
     parser.add_argument("--comparison-cancelled", action="store_true")
     args = parser.parse_args(argv)
@@ -635,34 +955,43 @@ def main(argv=None):
         config = load_config(args.config)
         lock_path = Path(config["ActiveRun"] + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("x"):
-            pass
         try:
+            with lock_path.open("xb"): pass
+        except FileExistsError: pass
+        # An OS-held exclusive handle survives shell boundaries but never a crash.
+        with protection.pinned(lock_path):
             run = Run(args.config, args.stage)
             stage = {"stage": args.stage, "started_utc": utc(), "state": "running", "failure": None}
             run.state["stages"].append(stage)
             try:
-                getattr(run, args.stage.lower())(args) if args.stage == "FINISH" else getattr(run, args.stage.lower())()
+                if args.stage == "PREPARE": run.prepare(activate=False)
+                elif args.stage not in ("EXPORT", "FINISH"): getattr(run, args.stage.lower())()
                 stage["state"] = "completed"
             except (Refused, protection.Refused, OSError, ValueError, KeyError, TypeError, KeyboardInterrupt) as error:
                 stage["state"] = "cancelled" if isinstance(error, KeyboardInterrupt) else "failed"
-                stage["failure"] = redact(str(error), run.config) if isinstance(error, (Refused, protection.Refused)) else "prerequisite_or_command_unavailable"
-                print("Stage stopped: " + stage["failure"])
+                if isinstance(error, KeyboardInterrupt): error = Refused("operator_interrupted_partial_evidence")
+                stage["failure"] = safe_failure(error, run.config, args.stage)["reason"]
+                if not run.state.get("primary_failure"): run.fail(error, args.stage)
+                if run.state["preparation"]["state"] == "not_performed": run.state["preparation"]["state"] = "failed"
+            if args.stage in ("RUN", "FINISH", "EXPORT", "PREPARE"):
+                run.finish(args)
             stage["finished_utc"] = utc()
             run.save()
-            if args.stage == "FINISH":
-                run.export()
+            if args.stage in ("RUN", "FINISH", "PREPARE") or (args.stage == "START" and stage["state"] != "completed"):
+                run.export("start-failure" if args.stage == "START" else None)
+            elif args.stage == "EXPORT": run.export("recovered-" + uuid.uuid4().hex[:8])
             print("Evidence directory: " + str(run.directory))
-            return 0 if stage["state"] == "completed" else 1
-        finally:
-            lock_path.unlink()
-    except (Refused, OSError, ValueError, KeyError, TypeError):
-        print("Retest refused: configuration, exact run reference or stage lock is unavailable; no run was replaced.", file=sys.stderr)
+            return 0 if stage["state"] == "completed" and not run.state.get("primary_failure") else 1
+    except (Refused, protection.Refused, OSError, ValueError, KeyError, TypeError) as error:
+        if run:
+            run.fail(error, "cleanup_or_export")
+            # A failed export never replaces the first preparation/capture failure.
+            try: run.export("partial-" + uuid.uuid4().hex[:8])
+            except (OSError, ValueError) as secondary: print("Secondary export error: " + type(secondary).__name__)
+        else:
+            print("Run unavailable: " + (str(error) if isinstance(error, (Refused, protection.Refused)) else type(error).__name__), file=sys.stderr)
         return 1
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 4 and sys.argv[1] == "--debug-worker":
-        debug_worker(sys.argv[2], sys.argv[3])
-    else:
-        sys.exit(main())
+    sys.exit(main())

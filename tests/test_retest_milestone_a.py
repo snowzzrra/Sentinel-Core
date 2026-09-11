@@ -1,8 +1,8 @@
 """Retest workflow fixtures: no actual game, Steam, saves or installed DLL access.
 
-Only fixture copies substitute stopped-process checks. Process identity and the
-Steam launch boundary are injected in tests; real protection, preparation probe,
-PowerShell arrays, bounded subprocess capture and ZIP export still run.
+Only fixture copies substitute stopped-process checks. Process discovery and IPC
+are injected; real protection, preparation probe, one-use lease, PowerShell,
+bounded subprocess capture and ZIP export still run. Nothing launches Steam.
 """
 import contextlib
 import copy
@@ -95,9 +95,6 @@ class RetestWorkflowTests(unittest.TestCase):
         self.process_patch = mock.patch.object(retest, "observe_game", side_effect=lambda *unused: copy.deepcopy(self.observed))
         self.process_mock = self.process_patch.start()
         self.addCleanup(self.process_patch.stop)
-        self.launch_patch = mock.patch.object(retest, "launch_steam", side_effect=self.fake_launch)
-        self.launch_patch.start()
-        self.addCleanup(self.launch_patch.stop)
         self.command_patch = mock.patch.object(retest, "run_command", side_effect=self.fixture_command)
         self.command_patch.start()
         self.addCleanup(self.command_patch.stop)
@@ -152,230 +149,274 @@ class RetestWorkflowTests(unittest.TestCase):
         directory = Path(reference["run_directory"])
         return retest.read_json(directory / "private/state.json"), directory
 
-    def test_start_capture_finish_array_paths_safe_queries_and_allowlisted_zip(self):
-        self.assertEqual(self.stage("START")[0], 0)
-        self.assertEqual(len(self.launches), 1)
-        state, directory = self.state()
-        params = retest.read_json(directory / "private/preparation-parameters.json")
-        self.assertEqual(params["UninstallRoot"], self.config["UninstallRoots"])
-        self.assertIsInstance(params["UninstallRoot"], list)
-        self.assertEqual(self.stage("CAPTURE")[0], 0)
-        self.assertEqual(self.queries, list(retest.QUERIES))
-        result, output = self.stage("FINISH", "--catalog", "unchanged", "--selection", "not_observed", "--note", self.config["SteamAppRoot"] + " password=private")
-        self.assertEqual(result, 0, output)
-        bundle = next(directory.glob("*-shareable.zip"))
-        with zipfile.ZipFile(bundle) as archive:
+    def closed_after_capture(self, config, prefix):
+        if "observation-" in str(prefix):
+            raise retest.Refused("no_game_process")
+        return copy.deepcopy(self.observed)
+
+    def report(self, directory):
+        with zipfile.ZipFile(directory / (directory.name + "-shareable.zip")) as archive:
             self.assertEqual(set(archive.namelist()), {"SUMMARY.md", "report.json"})
             text = archive.read("report.json").decode()
-            report = json.loads(text)
             self.assertNotIn("DO_NOT_EXPORT", text)
-            self.assertNotIn(self.config["SteamAppRoot"], text)
-            self.assertNotIn("password=private", text)
-            self.assertNotIn("host_path", text)
-            self.assertEqual(report["comparison"]["response"]["result"], "vanilla_campaign_unchanged")
-            self.assertEqual(report["admission_observation"], "rejected_or_unavailable_no_gameplay")
-            admission = next(c for c in report["commands"] if c["query"] == "save_admission")
-            self.assertEqual(admission["exit_code"], 8)
-            detail = next(c for c in report["commands"] if c["query"] == "save_installation")
-            self.assertEqual(detail["response"]["installation"]["primary_failure"]["reason"], "signature_mismatch")
-        before = bundle.read_bytes()
-        share_before = {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in (directory / "shareable").iterdir()}
-        self.assertEqual(self.stage("FINISH")[0], 1)
-        self.assertEqual(before, bundle.read_bytes())
-        self.assertEqual(share_before, {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in (directory / "shareable").iterdir()})
+            self.assertNotIn(str(self.local), text)
+            self.assertNotIn(str(self.steam), text)
+            return json.loads(text)
 
-    def test_wrong_admission_namespace_or_root_keeps_safe_queries_but_refuses_eligibility(self):
-        self.assertEqual(self.stage("START")[0], 0)
+    def update_member(self, name):
+        for entry in self.manifest["files"]:
+            if entry["name"] == name: entry["sha256"] = retest.sha(self.candidate / name)
+        retest.write_json(self.candidate / "manifest.json", self.manifest)
+
+    def test_run_protection_native_refusal_all_queries_and_one_report(self):
+        self.process_mock.side_effect = self.closed_after_capture
+        self.query_responses["save_admission"] = lambda response, code: ({**response, "state": "rejected"}, 8)
+        code, output = self.stage("RUN")
         state, directory = self.state()
-        namespace = state["namespace_id"]
-        for wrong_field in ("namespace_id", "native_root"):
-            with self.subTest(wrong_field=wrong_field):
-                def wrong_namespace(response, code):
-                    response.update(state="admitted", accepting_requests=True, prepared_routes=63,
-                                    namespace_id=namespace, native_root="ap-" + namespace[:40])
-                    response[wrong_field] = "c" * 64 if wrong_field == "namespace_id" else "ap-" + "c" * 40
-                    return response, 0
-                self.query_responses["save_admission"] = wrong_namespace
-                result, output = self.stage("CAPTURE")
-                self.assertEqual(result, 1)
-                self.assertIn("AP_namespace_mismatch_remaining_safe_queries_captured", output)
-                self.assertEqual(self.queries[-len(retest.QUERIES):], list(retest.QUERIES))
-                current, _ = self.state()
-                self.assertEqual(next(item for item in reversed(current["commands"]) if item["query"] == "save_admission")["namespace_state"], "mismatch")
-        self.assertFalse((directory / "shareable").exists())
-        self.assertFalse(list(directory.glob("*-shareable.zip")))
-        self.assertEqual(self.stage("FINISH", "--comparison-cancelled")[0], 0)
-        report = retest.read_json(directory / "shareable/report.json")
-        self.assertEqual(report["admission_observation"], "rejected_or_unavailable_no_gameplay")
-
-    def test_matching_admission_namespace_is_explicitly_verified(self):
-        self.assertEqual(self.stage("START")[0], 0)
-        state, directory = self.state()
-        namespace = state["namespace_id"]
-        def matching_namespace(response, code):
-            response.update(state="admitted", accepting_requests=True, prepared_routes=63,
-                            namespace_id=namespace, native_root="ap-" + namespace[:40])
-            return response, 0
-        self.query_responses["save_admission"] = matching_namespace
-        self.assertEqual(self.stage("CAPTURE")[0], 0)
-        self.assertEqual(self.stage("FINISH", "--comparison-cancelled")[0], 0)
-        report = retest.read_json(directory / "shareable/report.json")
-        self.assertEqual(report["admission_observation"], "admitted_in_read_only_snapshot")
-        self.assertEqual(next(item for item in report["commands"] if item["query"] == "save_admission")["namespace_state"], "verified")
-
-    def test_candidate_mismatch_precedes_protection_and_launch(self):
-        (self.game / "sentinel_core.dll").write_bytes(b"unmatched fixture DLL")
-        result, output = self.stage("START")
-        self.assertEqual(result, 1)
-        self.assertIn("installed_candidate_mismatch", output)
-        self.assertFalse(self.launches)
-        self.assertFalse(Path(self.config["APRoot"]).exists())
-        self.assertFalse(Path(self.config["OriginalBackupDirectory"]).exists())
-        self.assertEqual(self.stage("FINISH", "--comparison-cancelled")[0], 0)
-
-    def test_failed_protection_does_not_prepare_or_launch_and_still_exports(self):
-        with self.campaign.open("rb"):
-            self.assertEqual(self.stage("START")[0], 1)
-        self.assertFalse(self.launches)
-        self.assertFalse(Path(self.config["APRoot"]).exists())
-        self.assertFalse(Path(self.config["OriginalBackupDirectory"]).exists())
-        self.stopped.side_effect = retest.protection.Refused("exit DOOM and Steam")
-        self.assertEqual(self.stage("FINISH")[0], 0)
-        _, directory = self.state()
-        report = retest.read_json(directory / "shareable/report.json")
-        self.assertEqual(report["comparison"]["state"], "pending")
-
-    def test_process_replacement_stops_without_merging_second_instance(self):
-        self.assertEqual(self.stage("START")[0], 0)
-        def replacing(*unused):
-            observed = copy.deepcopy(self.observed)
-            if self.queries:
-                observed["process_created"] = "134077788800000001"
-            return observed
-        self.process_mock.side_effect = replacing
-        result, output = self.stage("CAPTURE")
-        self.assertEqual(result, 1)
-        self.assertIn("game_process_replaced", output)
-        self.assertEqual(self.queries, ["basic"])
-        state, _ = self.state()
-        self.assertEqual(state["process"]["process_created"], self.observed["process_created"])
-
-    def test_partial_query_is_preserved_and_remaining_queries_continue(self):
-        self.assertEqual(self.stage("START")[0], 0)
-        self.query_responses["native"] = lambda response, code: ('{"result":', 3)
-        self.assertEqual(self.stage("CAPTURE")[0], 0)
+        self.assertTrue(state.get("protection"), output)
         self.assertEqual(self.queries, list(retest.QUERIES))
-        self.assertEqual(self.stage("FINISH", "--comparison-cancelled")[0], 0)
-        _, directory = self.state()
-        report = retest.read_json(directory / "shareable/report.json")
-        native = next(c for c in report["commands"] if c["query"] == "native")
-        self.assertEqual(native["exit_code"], 3)
-        self.assertEqual(native["json_state"], "missing_or_partial")
-        self.assertEqual(report["comparison"]["state"], "cancelled")
+        self.assertEqual(self.launches, [])
+        self.assertFalse((self.game / "sentinel-prelaunch.txt").exists())
+        report = self.report(directory)
+        self.assertEqual(report["preparation"]["state"], "prepared")
+        self.assertEqual(report["admission_observation"], "native_refusal_observed")
+        self.assertEqual(report["hook_installation"], "failed")
+        self.assertEqual(report["comparison"]["response"]["result"], "vanilla_campaign_unchanged")
+        self.assertEqual(len(list(directory.glob("*.zip"))), 1)
+        self.assertEqual(code, 1)  # Native refusal remains evidence, never a PASS.
 
-    def test_cancelled_capture_is_not_success_and_FINISH_still_exports(self):
-        self.assertEqual(self.stage("START")[0], 0)
-        real_fixture = self.fixture_command
-        def cancelling(command, prefix, timeout, **kwargs):
-            result = real_fixture(command, prefix, timeout)
-            if "--engine" in command:
-                result.update(cancelled=True, exit_code=None)
-            return result
-        with mock.patch.object(retest, "run_command", side_effect=cancelling):
-            self.assertEqual(self.stage("CAPTURE")[0], 1)
-        self.assertEqual(self.queries, ["basic", "engine"])
-        self.assertEqual(self.stage("FINISH", "--comparison-cancelled")[0], 0)
-        _, directory = self.state()
-        report = retest.read_json(directory / "shareable/report.json")
-        capture = next(stage for stage in report["stages"] if stage["stage"] == "CAPTURE")
-        self.assertEqual(capture["state"], "cancelled")
-        self.assertIn("read-only query: save_installation", report["not_performed"])
-
-    def test_command_timeout_truncation_and_launch_error_remain_distinct(self):
-        result = self.real_runner([str(PYTHON), "-B", "-c", "import time; print('partial',flush=True); time.sleep(3)"], self.root / "timeout", 0.1)
-        self.assertTrue(result["timed_out"])
-        self.assertIsNone(result["exit_code"])
-        large = self.real_runner([str(PYTHON), "-B", "-c", "print('x'*300000)"], self.root / "truncated", 5)
-        self.assertTrue(large["stdout_truncated"])
-        self.assertEqual(large["exit_code"], 0)
-        self.assertEqual(large["stdout_bytes_retained"], retest.MAX_OUTPUT)
-        missing = self.real_runner([str(self.root / "absent.exe")], self.root / "absent", 5)
-        self.assertEqual(missing["launch_error"], "command_launch_failed")
-        self.assertFalse(missing["timed_out"])
-        self.assertIsNone(missing["exit_code"])
-
-    def test_optional_debug_worker_is_bounded_private_and_does_not_accept_EULA(self):
-        private = self.root / "debug private fixture"
-        private.mkdir()
-        config = {**self.config, "DebugView": {"Requested": True, "Path": str(self.root / "fixture capture executable.exe"), "Sha256": "c" * 64}}
-        path = private / "config.json"
-        retest.write_json(path, config, create=True)
-        commands = []
-        def capture_command(command, prefix, timeout, started=None):
-            commands.append(command)
-            self.assertEqual(timeout, 190)
-            process = mock.Mock(pid=11111)
-            process.poll.return_value = None
-            started(process)
-            return {"exit_code": 0, "timed_out": False, "cancelled": False, "stdout": "private DO_NOT_EXPORT", "stderr": ""}
-        with mock.patch.object(retest, "debug_prerequisite", return_value=None), \
-             mock.patch.object(retest, "debug_owner_present", return_value=True), \
-             mock.patch.object(retest, "run_command", side_effect=capture_command):
-            retest.debug_worker(path, private)
-        self.assertEqual(len(commands), 1)
-        command = commands[0]
-        self.assertNotIn("--accepteula", command)
-        self.assertEqual(command[command.index("--duration") + 1], "180")
-        self.assertEqual(command[command.index("--max-lines") + 1], "32")
-        self.assertEqual(command[command.index("--process-filter") + 1], "DOOMEternalx64vk.exe")
-        self.assertTrue(all(flag in command for flag in ("--win32", "--no-kernel", "--no-global")))
-        self.assertEqual(retest.read_json(private / "debug-ready.private.json")["state"], "armed")
-        self.assertNotIn("stdout", retest.read_json(private / "debug-finished.private.json"))
-        with mock.patch.object(retest, "debug_prerequisite", return_value="optional_capture_EULA_not_already_accepted"), \
-             mock.patch.object(retest.subprocess, "Popen") as process:
-            self.assertEqual(retest.arm_debug(config, private)["state"], "unavailable")
-            process.assert_not_called()
-
-    def test_installation_actual_schema_preserves_active_null_and_negative_API_status(self):
-        event = {"sequence": "4", "at_ms": "1234", "duration_ms": "2", "stage": "save_create", "target_group": 2,
-                 "target_index": 0, "target_name": "save_target_0", "rva": 123, "signature_offset": 0,
-                 "result": "failed", "reason": "hook_create_failed", "read_reason": None, "win32_error": 0,
-                 "minhook_status": -1, "byte_count": 2, "byte_window_offset": 64, "collision_rva": 321, "expected_bytes": "aabb", "actual_bytes": "ccdd"}
-        detail = {"abi": 1, "clock": "GetTickCount64", "units": "milliseconds", "attempt": 1, "sequence": "4",
-                  "phase": "failed", "last_completed_stage": "save_binding", "startup_observation": "not_observed",
-                  "validated": 48, "created": 3, "enabled": 3, "cleanup_failures": 0, "gaps": 0,
-                  "active": event, "primary_failure": event, "cleanup_failure": None}
-        self.assertEqual(retest.safe_response("save_installation", {"installation": detail})["installation"], detail)
-
-    def test_completed_run_is_retained_when_explicit_START_creates_next_run(self):
-        self.assertEqual(self.stage("START")[0], 0)
-        self.assertEqual(self.stage("FINISH", "--comparison-cancelled")[0], 0)
-        first, first_directory = self.state()
-        bundle = next(first_directory.glob("*-shareable.zip"))
-        original = bundle.read_bytes()
-        self.assertEqual(self.stage("START")[0], 0)
-        second, second_directory = self.state()
-        self.assertNotEqual(first["run_id"], second["run_id"])
-        self.assertNotEqual(first_directory, second_directory)
-        self.assertEqual(original, bundle.read_bytes())
-        self.assertEqual(self.stage("START")[0], 1)
-
-    def test_real_powershell_entry_from_unrelated_directory_uses_disk_config(self):
-        self.assertEqual(self.stage("START")[0], 0)
+    def test_successive_runs_refresh_current_metadata_preserve_first_and_compare_current(self):
+        self.assertEqual(self.stage("PREPARE")[0], 0)
+        first_state, first_run = self.state()
+        first = Path(self.config["OriginalBackupDirectory"])
+        hashes = {str(p.relative_to(first)): retest.sha(p) for p in first.rglob("*") if p.is_file()}
+        (self.local / "settings.cfg").write_bytes(b"legitimate changed configuration")
+        stamp = self.campaign.stat().st_mtime_ns
+        os.utime(self.campaign, ns=(stamp, stamp+1000000000))
+        self.process_mock.side_effect = self.closed_after_capture
+        self.stage("RUN")
         state, directory = self.state()
-        # A real independent shell only exports a cancelled comparison; it never
-        # invokes START, accesses original payloads, discovers games or launches Steam.
-        entry = self.root / "Retest-MilestoneA.ps1"
-        shutil.copy2(ROOT / "SentinelDocs/Retest-MilestoneA.ps1", entry)
-        shutil.copy2(self.config_path, self.root / "milestone-a-retest.private.json")
-        completed = subprocess.run([str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File",
-            str(entry), "-Stage", "FINISH",
-            "-ComparisonCancelled", "-Catalog", "unchanged", "-Note", "fixture operator observation"],
-            cwd=self.root, capture_output=True, text=True, timeout=15)
-        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-        report = retest.read_json(directory / "shareable/report.json")
-        self.assertEqual(report["operator"]["catalog"], "unchanged")
-        self.assertEqual(report["comparison"]["state"], "cancelled")
+        self.assertNotEqual(state["protection"]["reference_directory"], str(first))
+        self.assertEqual(hashes, {str(p.relative_to(first)): retest.sha(p) for p in first.rglob("*") if p.is_file()})
+        self.assertTrue((first_run / (first_run.name+"-shareable.zip")).is_file())
+        report = self.report(directory)
+        counts = report["preparation"]["historical_comparison"]["counts"]
+        self.assertEqual(counts["content_changed"], 1)
+        self.assertEqual(counts["metadata_only"], 1)
+        self.assertEqual(report["comparison"]["response"]["modified"], 0)
+
+    def test_previous_campaign_regression_cannot_be_normalized_by_next_reference(self):
+        def observe(config, prefix):
+            if "observation-" in str(prefix):
+                self.campaign.write_bytes(b"unexpected campaign regression")
+            return self.closed_after_capture(config, prefix)
+        self.process_mock.side_effect = observe
+        self.stage("RUN")
+        previous, directory = self.state()
+        self.assertEqual(previous["comparison"]["response"]["modified"], 1)
+        old_report = (directory / (directory.name+"-shareable.zip")).read_bytes()
+        code, output = self.stage("PREPARE")
+        state, refused = self.state()
+        self.assertEqual(code, 1, output)
+        self.assertNotIn("protection", state)
+        self.assertIn("previous protected campaign regression", output)
+        self.assertEqual(old_report, (directory / (directory.name+"-shareable.zip")).read_bytes())
+        self.assertEqual(self.report(refused)["admission_observation"], "NOT_TESTED")
+
+    def test_pending_previous_comparison_is_recovered_before_new_protection(self):
+        self.process_mock.side_effect = self.closed_after_capture
+        self.stage("RUN")
+        previous, directory = self.state()
+        previous["comparison"] = {"state": "not_performed", "reason": "fixture_interruption"}
+        retest.write_json(directory / "private/state.json", previous)
+        self.campaign.write_bytes(b"unexplained delayed campaign change")
+        code, output = self.stage("PREPARE")
+        state, refused = self.state()
+        self.assertEqual(code, 1, output)
+        outcome = state["previous_comparisons"][0]
+        self.assertEqual(outcome["recovered_comparison"]["modified"], 1)
+        self.assertNotIn("protection", state)
+        self.report(refused)
+
+    def test_failed_preparation_is_not_native_rejection_and_retains_os_error(self):
+        with self.campaign.open("rb"):
+            code, output = self.stage("RUN")
+        state, directory = self.state()
+        report = self.report(directory)
+        self.assertEqual(code, 1, output)
+        self.assertEqual(report["admission_observation"], "NOT_TESTED")
+        self.assertEqual(report["hook_installation"], "NOT_TESTED")
+        self.assertEqual(report["game_observation"], "NOT_OBSERVED")
+        self.assertEqual(report["primary_failure"]["stage"], "exclusive_acquisition")
+        self.assertEqual(report["primary_failure"]["win32_error"], 32)
+        self.assertFalse(self.queries)
+
+    def test_profile_failure_survives_module_visibility_recovery(self):
+        run = retest.Run(self.config_path, "RUN")
+        run.prepare()
+        run.state["process"] = copy.deepcopy(self.observed)
+        run.state["process"]["instance_id"] = None
+        self.query_responses["save_installation"] = lambda r, c: ({**r, "installation": {"phase": "installation_ready", "primary_failure": None}}, 0)
+        self.query_responses["save_admission"] = lambda r, c: ({**r, "state": "faulted", "fault": "native_profile", "prepared_routes": 63}, 8)
+        # Exact per-process log; foreign keys/payloads must never reach the ZIP.
+        diagnostic = self.root / "log-root/SentinelCore/diagnostics"
+        diagnostic.mkdir(parents=True)
+        record = {"schema": "sentinel-startup-v1", "pid": self.observed["pid"], "process_created": self.observed["process_created"],
+                  "build_id": self.manifest["build_id"], "admission": {"state": 5, "fault": 15}, "profile": {
+                      "request_id": 1, "first_failed_stage": "decode", "private_identity": "DO_NOT_EXPORT",
+                      "first_failure": {"status": 4, "predicate": "native_authentication_refused", "native_attempted": True,
+                                        "native_outcome": 1, "native_value": 4, "payload": "DO_NOT_EXPORT"},
+                      "steps": {"decode": {"status": 4, "predicate": "native_authentication_refused"}}}}
+        earlier = {**record, "profile": {}, "unknown_padding": "x" * 4096}
+        (diagnostic / (str(self.observed["pid"])+"-"+str(self.observed["process_created"])+".jsonl")).write_text(
+            (json.dumps(earlier)+"\n") * 96 + json.dumps(record)+"\n")
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "log-root")}): run.collect_startup_log()
+        self.process_mock.side_effect = lambda *unused: {**copy.deepcopy(self.observed), "modules": []}
+        with self.assertRaises(retest.protection.Refused): run.capture()
+        self.assertEqual(run.state["capture_health"]["module_state"], "not_yet_observable")
+        self.process_mock.side_effect = lambda *unused: copy.deepcopy(self.observed)
+        with self.assertRaises(retest.protection.Refused): run.capture()
+        run.export()
+        report = self.report(run.directory)
+        self.assertEqual(report["capture_health"]["module_state"], "verified")
+        self.assertEqual([x["state"] for x in report["capture_health"]["module_history"]], ["not_yet_observable", "verified"])
+        self.assertEqual(report["native_failure"]["fault"], "native_profile")
+        self.assertEqual(report["native_failure"]["first_failed_stage"], "decode")
+        self.assertEqual(report["native_failure"]["first_failure"]["native_value"], 4)
+        summary = (run.directory / "shareable/SUMMARY.md").read_text()
+        self.assertIn("Native game failure:", summary)
+        self.assertIn("native_authentication_refused", summary)
+
+    def test_real_metadata_change_during_copy_refuses_full_run(self):
+        helper = self.candidate / "prepare_vanilla_backup.py"
+        text = helper.read_text()
+        marker = '\nif __name__ == "__main__":'
+        injection = "\nreal_copy = copy_file\ndef copy_file(source, destination):\n    result = real_copy(source, destination)\n    api = kernel()\n    handle = api.CreateFileW(" + repr(str(self.campaign)) + ", 0x100, 7, None, 3, 0, None)\n    if handle == ctypes.c_void_p(-1).value: raise RuntimeError('fixture metadata handle')\n    try:\n        ticks = ctypes.c_uint64(134077788800000000)\n        api.SetFileTime.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]\n        if not api.SetFileTime(handle, None, None, ctypes.byref(ticks)): raise RuntimeError('fixture SetFileTime')\n    finally: api.CloseHandle(handle)\n    return result\n"
+        helper.write_text(text.replace(marker, injection + marker))
+        self.update_member("prepare_vanilla_backup.py")
+        code, output = self.stage("RUN")
+        state, directory = self.state()
+        self.assertEqual(code, 1, output)
+        self.assertIn("source changed", output)
+        self.assertIsNone(state["descriptor"])
+        self.assertFalse(self.queries)
+        self.assertEqual(self.report(directory)["admission_observation"], "NOT_TESTED")
+
+    def test_operator_interruption_exports_and_next_shell_reuses_exact_reference(self):
+        self.process_mock.side_effect = KeyboardInterrupt
+        code, output = self.stage("RUN")
+        state, directory = self.state()
+        self.assertEqual(code, 1, output)
+        self.assertIn("operator_interrupted", output)
+        self.assertFalse((self.game / "sentinel-prelaunch.txt").exists())
+        self.assertEqual(self.report(directory)["game_observation"], "NOT_OBSERVED")
+        import subprocess
+        command = [str(POWERSHELL), "-NoProfile", "-File", str(self.candidate / "Retest-MilestoneA.ps1"), "-Config", str(self.config_path), "-Stage", "PREPARE"]
+        completed = subprocess.run(command, capture_output=True, text=True, cwd=self.root)
+        self.assertEqual(completed.returncode, 0, completed.stdout+completed.stderr)
+        newer, new_directory = self.state()
+        self.assertNotEqual(directory, new_directory)
+        self.assertEqual(newer["protection"]["reference_directory"], state["protection"]["reference_directory"])
+        self.report(new_directory)
+
+    def test_corrupt_reference_and_wrong_source_identity_refuse_before_activation(self):
+        self.assertEqual(self.stage("PREPARE")[0], 0)
+        backup = Path(self.config["OriginalBackupDirectory"])
+        (backup / "local_provider/settings.cfg").write_bytes(b"corrupt fixture backup")
+        code, output = self.stage("RUN")
+        state, directory = self.state()
+        self.assertEqual(code, 1, output)
+        self.assertIn("backup", output)
+        self.assertFalse(self.queries)
+        self.assertEqual(self.report(directory)["admission_observation"], "NOT_TESTED")
+
+    def test_export_recovers_exact_run_without_overwriting_first_report(self):
+        self.assertEqual(self.stage("PREPARE")[0], 0)
+        state, directory = self.state()
+        original = (directory / (directory.name+"-shareable.zip")).read_bytes()
+        code, output = self.stage("EXPORT")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(original, (directory / (directory.name+"-shareable.zip")).read_bytes())
+        self.assertEqual(len(list(directory.glob("*.zip"))), 2)
+
+    def test_wrong_account_in_previous_state_cannot_choose_new_baseline(self):
+        self.assertEqual(self.stage("PREPARE")[0], 0)
+        self.config["SteamAccount32"] = "67890"
+        retest.write_json(self.config_path, self.config)
+        code, output = self.stage("PREPARE")
+        self.assertEqual(code, 1, output)
+        self.assertIn("prior_run_account_or_source_identity_conflict", output)
+        state, directory = self.state()
+        self.assertNotIn("protection", state)
+        self.report(directory)
+
+    def test_added_removed_and_automatic_record_privacy(self):
+        self.assertEqual(self.stage("PREPARE")[0], 0)
+        (self.local / "settings.cfg").unlink()
+        (self.local / "replacement.cfg").write_bytes(b"fixture replacement")
+        self.process_mock.side_effect = self.closed_after_capture
+        diagnostic = self.root / "log-root/SentinelCore/diagnostics"
+        diagnostic.mkdir(parents=True)
+        record = {"schema": "sentinel-startup-v1", "pid": self.observed["pid"], "process_created": str(self.observed["process_created"]),
+                  "build_id": self.manifest["build_id"], "admission": {"state": 4, "fault": 2},
+                  "installation": {"phase": 3}, "private_payload": "DO_NOT_EXPORT"}
+        (diagnostic / (str(self.observed["pid"])+"-"+str(self.observed["process_created"])+".jsonl")).write_text(json.dumps(record)+"\n")
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "log-root")}): self.stage("RUN")
+        state, directory = self.state()
+        report = self.report(directory)
+        self.assertEqual(report["preparation"]["historical_comparison"]["counts"]["added"], 1)
+        self.assertEqual(report["preparation"]["historical_comparison"]["counts"]["removed"], 1)
+        self.assertEqual(report["automatic_startup"]["state"], "captured")
+        self.assertNotIn("private_payload", report["automatic_startup"]["records"][0])
+
+    def test_short_lived_attempt_recovered_by_exact_control_hash_without_PID_guess(self):
+        import time
+        diagnostic = self.root / "log-root/SentinelCore/diagnostics"
+        diagnostic.mkdir(parents=True)
+        def already_closed(config, prefix):
+            state, directory = self.state()
+            created = int(time.time()*10000000)+116444736000000000
+            record = {"schema": "sentinel-startup-v1", "pid": 45678, "process_created": str(created),
+                "build_id": self.manifest["build_id"], "control_sha256": state["control_sha256"],
+                "admission": {"state": 4, "fault": 2},
+                "installation": {"phase": 3, "primary_failure": {"sequence": 1, "stage": 1, "reason": 2, "win32_error": 52}}}
+            (diagnostic / ("45678-"+str(created)+".jsonl")).write_text(json.dumps(record)+"\n")
+            raise retest.Refused("no_game_process")
+        self.process_mock.side_effect = already_closed
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "log-root")}): code, output = self.stage("RUN")
+        state, directory = self.state()
+        self.assertEqual(code, 1, output)
+        self.assertFalse(self.queries)
+        report = self.report(directory)
+        self.assertEqual(report["game_observation"], "observed_in_automatic_record_only")
+        self.assertEqual(report["hook_installation"], "native_failure_in_automatic_record")
+        self.assertEqual(report["primary_failure"]["win32_error"], 52)
+        self.assertEqual(report["comparison"]["response"]["result"], "vanilla_campaign_unchanged")
+
+    def test_completed_export_preserves_outcome_after_later_legitimate_change(self):
+        self.process_mock.side_effect = self.closed_after_capture
+        self.stage("RUN")
+        previous, directory = self.state()
+        self.campaign.write_bytes(b"legitimate later fixture progress")
+        self.stage("EXPORT")
+        current, same_directory = self.state()
+        self.assertEqual(current["comparison"], previous["comparison"])
+        self.assertEqual(directory, same_directory)
+
+    def test_recovered_previous_outcome_survives_multiple_later_runs(self):
+        self.process_mock.side_effect = self.closed_after_capture
+        self.stage("RUN")
+        previous, directory = self.state()
+        previous["comparison"] = {"state": "not_performed", "reason": "fixture_interruption"}
+        retest.write_json(directory / "private/state.json", previous)
+        self.assertEqual(self.stage("PREPARE")[0], 0)
+        self.campaign.write_bytes(b"legitimate progress after completed recovery")
+        code, output = self.stage("PREPARE")
+        state, newest = self.state()
+        self.assertEqual(code, 0, output)
+        self.assertTrue(state.get("protection"))
+        recovered = next(row for row in state["previous_comparisons"] if row["run_id"] == directory.name)
+        self.assertEqual(recovered["retained_comparison"]["response"]["modified"], 0)
 
 
 if __name__ == "__main__":

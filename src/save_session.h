@@ -29,6 +29,28 @@ constexpr uint32_t required_routes = startup_route | collector_route | campaign_
 struct ProfileChoice { std::array<char, 16> name{}; int32_t index = -1; };
 struct ProfileWrite { ProfileChoice choice; unsigned campaign = 0; uint64_t sequence = 0; };
 struct NativeCampaignCatalog { std::vector<std::string> slots; std::string selected; };
+// One retained startup PROFILE request. No payloads, user IDs or callback I/O.
+enum class ProfileStage : size_t {
+    request, profile_created, catalog_created, first_poll, prepare, decode, transport,
+    catalog_poll, catalog, reader, framing, checksum, parse, overlay, application, root, admission, write_after_refusal, count
+};
+enum class ProfileStatus : uint32_t { unobserved, entered, pending, succeeded, refused };
+struct ProfileStep {
+    uint64_t first_ms = 0, changed_ms = 0;
+    ProfileStatus status = ProfileStatus::unobserved;
+    const char* predicate = "not_attempted";
+    bool native_attempted = false;
+    int64_t native_state = 0, native_outcome = 0;
+    uint32_t native_value = 0;
+};
+struct ProfileTrace {
+    uint64_t request = 0;
+    std::array<ProfileStep, static_cast<size_t>(ProfileStage::count)> steps{};
+    ProfileStage failed_stage = ProfileStage::count;
+    ProfileStep failure{};
+    uint32_t downstream_refusals = 0;
+    bool identity_matched = false;
+};
 int native_campaign_index(std::string_view);
 const char* native_campaign_prefix(unsigned);
 // ISteamRemoteStorage014 folds file names to lowercase. Keep borrowed/native
@@ -91,7 +113,15 @@ public:
     bool capture_profile_baseline(uintptr_t profile, uintptr_t manager, std::string name, int32_t index);
     bool profile_baseline(uintptr_t profile, uintptr_t manager, const char*& name, int32_t& index) const;
     void fail_profile();
+    void begin_profile(uintptr_t data);
+    bool is_profile_request(uintptr_t data) const;
+    void profile_step(ProfileStage, ProfileStatus, const char* predicate,
+        bool attempted = false, int64_t state = 0, int64_t outcome = 0, uint32_t value = 0);
+    ProfileTrace profile_trace() const;
 private:
+    mutable std::mutex profile_trace_mutex_;
+    ProfileTrace profile_trace_{};
+    uintptr_t profile_data_ = 0;
     mutable std::mutex mutex_;
     std::atomic<SessionState> state_{SessionState::disabled};
     std::atomic<SessionFault> fault_{SessionFault::none};

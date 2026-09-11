@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory=$true)][ValidateSet('START','CAPTURE','FINISH')][string]$Stage,
+    [Parameter(Mandatory=$true)][ValidateSet('RUN','PREPARE','EXPORT')][string]$Stage,
     [Parameter(Mandatory=$true)][string]$Config,
     [ValidateSet('not_observed','unchanged','changed')][string]$Catalog = 'not_observed',
     [ValidateSet('not_observed','unchanged','changed')][string]$Selection = 'not_observed',

@@ -38,6 +38,8 @@ struct Json {
         members["lastUsedGameSlot"] = {static_cast<uint64_t>(index), 1, 0, {}, 0};
         members["magicNumber"] = {magic, 1, 0, {}, 0};
         members["musicVolume"] = {27, 1, 0, {}, 0};
+        members["s_volume"] = {reinterpret_cast<uintptr_t>("0.02"), 4, 0, {}, 0};
+        members["s_musicvolume"] = {reinterpret_cast<uintptr_t>("1.0"), 4, 0, {}, 0};
     }
     ~Json() { for (auto& entry : members) destroy_value(&entry.second); }
     std::string name() const { return reinterpret_cast<const char*>(members.at("lastSaveGameName").payload); }
@@ -141,6 +143,9 @@ uint32_t native_serialize(uintptr_t context, uintptr_t profile, ProfileHolder* h
         auto name = lookup(holder->root, "lastSaveGameName"); auto index = lookup(holder->root, "lastUsedGameSlot");
         f.selected = reinterpret_cast<const char*>(name->payload); f.selected_index = static_cast<int>(index->payload);
         REQUIRE(lookup(holder->root, "musicVolume")->payload == 27);
+        REQUIRE(lookup(holder->root, "s_volume")->type == 4 &&
+            std::strcmp(reinterpret_cast<const char*>(lookup(holder->root, "s_volume")->payload), "0.02") == 0);
+        REQUIRE(std::strcmp(reinterpret_cast<const char*>(lookup(holder->root, "s_musicvolume")->payload), "1.0") == 0);
     }
     return f.serialize_result;
 }
@@ -236,7 +241,15 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         // Model the governing native load callback: only zero imports cache;
         // error 4 would reset and 0x100 would re-save. Neither can escape here.
         REQUIRE(result != 4 && result != 0x100);
-        if (refused) { REQUIRE(!owner->accepts_requests() && owner->routed()); REQUIRE(f.readers == (test == 12 ? 1u : 0u)); continue; }
+        if (refused) {
+            REQUIRE(!owner->accepts_requests() && owner->routed()); REQUIRE(f.readers == (test == 12 ? 1u : 0u));
+            const auto trace = owner->profile_trace();
+            REQUIRE(trace.failed_stage != ProfileStage::count);
+            if (test == 7 || test == 23) REQUIRE(trace.failed_stage == ProfileStage::framing);
+            if (test == 8) REQUIRE(trace.failed_stage == ProfileStage::checksum);
+            if (test == 12) REQUIRE(trace.failed_stage == ProfileStage::reader && trace.failure.native_attempted && trace.failure.native_outcome == 4);
+            continue;
+        }
         REQUIRE(owner->state() == SessionState::admitted && owner->accepts_requests());
         REQUIRE(f.selected == "AUTOSAVE10" && f.selected_index == 1 && f.serializers == 1);
         REQUIRE(f.strings_freed == 1 && f.comments_freed == 1);
@@ -294,8 +307,29 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         publish(f, !failure && test != 17 && test != 27 && test != 28, test == 25);
         REQUIRE(f.strings_freed == (test == 28 ? 3u : 2u) && f.comments_freed == (test == 28 ? 3u : 2u));
     }
+    {
+        auto owner = make(); Frame f(*owner); active = &f;
+        f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
+        REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {}, "AUTOSAVE0", 0, true, 0));
+        f.vanilla = "AUTOSAVE2"; f.vanilla_index = 2;
+        // Body comes from independently authenticated/parsed native evidence,
+        // with only allowlisted selection fields and synthetic unrelated types.
+        const uint8_t body[]{
+#include "profile_evidence_body.inc"
+        };
+        f.bytes = {0xa9,0x0d,0x8d,0xaa,0,0,0,2};
+        const auto hash = static_cast<uint32_t>(checksum(body, sizeof(body)));
+        for (int shift : {24,16,8,0}) f.bytes.push_back(static_cast<uint8_t>(hash >> shift));
+        f.bytes.insert(f.bytes.end(), std::begin(body), std::end(body));
+        put(f.file, 0x150, uint64_t(f.bytes.size())); put(f.file, 0x158, uint64_t(f.bytes.size()));
+        put(f.file, 0x168, reinterpret_cast<uintptr_t>(f.bytes.data()));
+        const auto before = f.bytes;
+        REQUIRE(read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls) == 0);
+        REQUIRE(f.selected == "AUTOSAVE0" && f.selected_index == 0 && before == f.bytes);
+        REQUIRE(owner->accepts_requests() && owner->profile_trace().failed_stage == ProfileStage::count);
+    }
     active = nullptr;
-    std::puts("PASS production PROFILE reader/serializer/payload policies with native-modeled ownership and caller outcomes (32 cases)");
+    std::puts("PASS production PROFILE reader/serializer, minimized native format and non-default settings (33 cases)");
 }
 void exercise_profile_caller(Session& owner, const std::function<bool(SaveReference&)>& provider, bool malformed) {
     Frame f(owner); active = &f;

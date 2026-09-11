@@ -29,7 +29,7 @@ bool prefix_at(engine::Memory& memory, const char* address, std::string& out) {
 struct CatalogFuture : SaveFuture {
     Session& owner; engine::LocalMemory memory; CatalogCalls calls;
     SaveReference data{}; SaveFuture* native = nullptr;
-    std::string prefix; ULONGLONG deadline = GetTickCount64() + 10000;
+    std::string prefix;
     bool terminal = false;
     CatalogFuture(Session& s, const CatalogCalls& c) : owner(s), calls(c) {}
     ~CatalogFuture() { if (native) native->vtable->destroy(native, 1); calls.release(&data); }
@@ -84,15 +84,21 @@ SaveResult* poll(SaveFuture* base, SaveResult* out, void* executor) {
     if (future.terminal) { *out = {1, 0, 0, 0}; return out; }
     SaveResult result{};
     future.native->vtable->poll(future.native, &result, executor);
-    if (result.state == -1 && GetTickCount64() <= future.deadline && future.owner.native_io()) {
+    if (result.state == -1 && future.owner.native_io()) {
+        future.owner.profile_step(ProfileStage::catalog, ProfileStatus::pending, "native_catalog_pending",
+            true, result.state, result.outcome, result.value);
         *out = result; return out;
     }
     bool valid = false;
     try {
         valid = result.state == 0 && result.outcome == 0 && result.value == 1 &&
-            GetTickCount64() <= future.deadline && future.reconcile();
+            future.owner.native_io() && future.reconcile();
     } catch (const std::bad_alloc&) {}
     future.terminal = true;
+    future.owner.profile_step(ProfileStage::catalog, valid ? ProfileStatus::succeeded : ProfileStatus::refused,
+        valid ? "native_order_and_owned_selection_reconciled" :
+        (result.state || result.outcome || result.value != 1) ? "native_catalog_result" : "catalog_reconciliation",
+        true, result.state, result.outcome, result.value);
     if (!valid) { future.owner.fail(SessionFault::native_collection); result = {0, 1, 1, 0}; }
     *out = result; return out;
 }

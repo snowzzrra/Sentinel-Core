@@ -793,4 +793,7 @@ Result read_descriptor_file(const wchar_t* filename, Descriptor& descriptor) {
     auto result = read_descriptor_text(filename, text);
     return result.ok() ? parse_descriptor(text, descriptor) : result;
 }
+Result read_control_text(const wchar_t* filename, std::string& text) {
+    return read_descriptor_text(filename, text);
+}
 } // namespace sentinel::storage

@@ -1,3 +1,4 @@
+#include "prelaunch.h"
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #include "save_native_hooks.h"
 #include "save_collector.h"
@@ -237,22 +238,13 @@ void configure_prelaunch() {
     auto& record = session().installation;
     record.initialize();
     auto event = record.begin(SC_INSTALL_PRELAUNCH);
-    constexpr wchar_t variable[] = L"SENTINEL_AP_TEST_SESSION";
-    SetLastError(ERROR_SUCCESS);
-    const DWORD needed = GetEnvironmentVariableW(variable, nullptr, 0);
-    const auto environment_error = needed ? ERROR_SUCCESS : GetLastError();
-    if (!needed && environment_error == ERROR_ENVVAR_NOT_FOUND) { record.finish(event); return; }
-    if (!needed || needed > 32761) { record.finish(event, SC_NATIVE_BINDING_FAILED, SC_INSTALL_UNKNOWN, environment_error); session().reject(SessionFault::descriptor); return; }
-    std::wstring path(needed, L'\0');
-    const DWORD written = GetEnvironmentVariableW(variable, path.data(), needed);
-    const auto read_error = written ? ERROR_SUCCESS : GetLastError();
-    if (!written || written >= needed) { record.finish(event, SC_NATIVE_BINDING_FAILED, SC_INSTALL_UNKNOWN, read_error); session().reject(SessionFault::descriptor); return; }
-    path.resize(written);
     storage::Descriptor descriptor;
-    auto result = storage::read_descriptor_file(path.c_str(), descriptor);
+    bool requested = false;
+    auto result = prelaunch::resolve(descriptor, requested);
+    if (!requested && result.ok()) { record.finish(event); return; }
     std::unique_ptr<storage::Namespace> lease;
     if (result.ok()) result = storage::reopen(descriptor, lease);
-    record.finish(event, result.ok() ? SC_NATIVE_NONE : SC_NATIVE_BINDING_FAILED);
+    record.finish(event, result.ok() ? SC_NATIVE_NONE : SC_NATIVE_BINDING_FAILED, SC_INSTALL_UNKNOWN, result.win32_error);
     if (result.ok()) {
         // The one-use descriptor/lease owner must survive even when startup is
         // missed or binding fails before any native hook becomes reachable.

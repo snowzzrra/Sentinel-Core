@@ -1,3 +1,4 @@
+#include "startup_log.h"
 #include "inspection_server.h"
 #include "pipe_io.h"
 #include "engine_observer.h"
@@ -166,7 +167,9 @@ sc_result sc_initialize(uint32_t abi, uint64_t required) {
             else if (BCryptGenRandom(nullptr, current.instance.data(), static_cast<ULONG>(current.instance.size()),
                                     BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) error = ERROR_GEN_FAILURE;
             if (error == ERROR_SUCCESS) {
+                sentinel::startup_log::record(current);
                 sentinel::native::prepare(current);
+                sentinel::startup_log::record(current);
                 error = sentinel::start_inspection();
             }
             current.service_error = error;

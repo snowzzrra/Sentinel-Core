@@ -77,6 +77,7 @@ private:
 Result parse_descriptor(std::string_view text, Descriptor& descriptor);
 // Shares the probe's bounded, pinned, local-file reader with prelaunch admission.
 Result read_descriptor_file(const wchar_t* filename, Descriptor& descriptor);
+Result read_control_text(const wchar_t* filename, std::string& text);
 Result namespace_id(const Identity& identity, std::string& id);
 
 class Namespace final {

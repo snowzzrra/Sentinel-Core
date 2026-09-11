@@ -45,7 +45,7 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   include/sentinel_native.h src/native_model.h src/native_model.cpp
   src/native_target.h src/native_target.cpp src/native_runtime.h src/native_runtime.cpp
   include/sentinel_save.h src/save_observer.h src/save_observer.cpp
-  src/save_storage.h src/save_storage.cpp tools/save_probe.h tools/save_probe.cpp
+  src/save_storage.h src/save_storage.cpp src/prelaunch.h src/prelaunch.cpp src/startup_log.h src/startup_log.cpp tools/save_probe.h tools/save_probe.cpp
   src/save_session.h src/save_session.cpp src/save_collector.h src/save_collector.cpp
   src/save_delete.h src/save_delete.cpp src/save_write.h src/save_write.cpp
   src/save_sdk_write.h src/save_sdk_write.cpp
@@ -81,7 +81,7 @@ add_library(sentinel_protocol STATIC src/protocol.cpp)
 target_include_directories(sentinel_protocol PUBLIC include src)
 add_library(sentinel_inspection_client STATIC src/inspection_client.cpp)
 target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
-add_library(sentinel_save_storage STATIC src/save_storage.cpp)
+add_library(sentinel_save_storage STATIC src/save_storage.cpp src/prelaunch.cpp)
 target_include_directories(sentinel_save_storage PUBLIC src)
 target_link_libraries(sentinel_save_storage PUBLIC bcrypt)
 add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp)
@@ -103,9 +103,13 @@ target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentine
 target_link_libraries(sentinel_native_model PUBLIC sentinel_save_session)
 add_library(sentinel_native STATIC src/native_target.cpp src/native_runtime.cpp src/save_native_hooks.cpp)
 target_link_libraries(sentinel_native PUBLIC sentinel_native_model sentinel_observer sentinel_minhook sentinel_save_session)
-add_library(sentinel_core SHARED src/core.cpp src/inspection_server.cpp)
+add_library(sentinel_core SHARED src/core.cpp src/inspection_server.cpp src/startup_log.cpp)
 target_link_libraries(sentinel_core PRIVATE sentinel_protocol sentinel_native advapi32 bcrypt)
 target_include_directories(sentinel_core PUBLIC include)
+add_executable(sentinel_workflow_tests tests/workflow.cpp src/startup_log.cpp)
+target_link_libraries(sentinel_workflow_tests PRIVATE sentinel_save_session sentinel_protocol)
+add_test(NAME workflow_handoff_logging_contract COMMAND sentinel_workflow_tests)
+set_tests_properties(workflow_handoff_logging_contract PROPERTIES TIMEOUT 15)
 target_compile_definitions(sentinel_core PRIVATE SC_BUILDING_CORE
   SC_VERSION="${PROJECT_VERSION}" SC_BUILD_ID="${SC_BUILD_ID}")
 add_library(sentinel_bootstrap SHARED bootstrap/proxy.cpp "${CMAKE_BINARY_DIR}/forwarders.cpp" "${CMAKE_BINARY_DIR}/msimg32.def")
@@ -138,7 +142,8 @@ set_tests_properties(native_profile_selection_contract PROPERTIES TIMEOUT 15)
   add_test(NAME native_catalog_selection_contract COMMAND sentinel_save_session_tests --catalog)
   set_tests_properties(native_catalog_selection_contract PROPERTIES TIMEOUT 15)
   add_test(NAME native_profile_prerequisite_contract COMMAND sentinel_save_session_tests --prerequisite)
-  set_tests_properties(native_profile_prerequisite_contract PROPERTIES TIMEOUT 15)
+  # Includes two real delays beyond the removed ten-second Core deadline.
+  set_tests_properties(native_profile_prerequisite_contract PROPERTIES TIMEOUT 45)
 add_executable(sentinel_save_observer_tests tests/save_observer.cpp)
 target_link_libraries(sentinel_save_observer_tests PRIVATE sentinel_observer sentinel_protocol sentinel_core)
 add_test(NAME native_save_observation_contract COMMAND sentinel_save_observer_tests)
@@ -153,7 +158,7 @@ add_test(NAME native_lifecycle_dispatch_model COMMAND sentinel_native_model_test
 set_tests_properties(native_lifecycle_dispatch_model PROPERTIES TIMEOUT 10)
 # Separate test executable with explicit fixture adapters. The production Core
 # never compiles SC_NATIVE_TESTING or accepts an address/callback through IPC.
-add_executable(sentinel_native_host tests/native_host.cpp src/core.cpp src/inspection_server.cpp
+add_executable(sentinel_native_host tests/native_host.cpp src/core.cpp src/inspection_server.cpp src/startup_log.cpp
   src/native_runtime.cpp src/native_target.cpp src/save_native_hooks.cpp)
 target_include_directories(sentinel_native_host PRIVATE tests)
 target_link_libraries(sentinel_native_host PRIVATE sentinel_native_model sentinel_observer sentinel_minhook

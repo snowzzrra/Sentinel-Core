@@ -1,3 +1,4 @@
+#include "startup_log.h"
 #include "inspection_server.h"
 #include "pipe_io.h"
 #include "protocol.h"
@@ -21,6 +22,7 @@ DWORD observe(void*) {
         if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return 0;
         binding = engine::bind_host(memory, stop);
         native::start(binding, current_snapshot(), stop);
+        startup_log::record(current_snapshot(), binding.metadata.sample_reason);
         do {
             publish_engine(engine::sample(memory, binding, ++sequence));
             const auto before = native::observation_stamp();
@@ -28,6 +30,7 @@ DWORD observe(void*) {
             native::publish_context(observed, before);
             publish_context(observed);
             publish_save(save::sample(memory, binding, sequence, stop));
+            startup_log::record(current_snapshot(), binding.metadata.sample_reason);
         } while (WaitForSingleObject(stop, 100) == WAIT_TIMEOUT);
     } catch (...) {
         binding.metadata = engine::unavailable(SC_REASON_INTERNAL_ERROR);

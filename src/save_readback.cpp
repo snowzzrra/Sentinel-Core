@@ -141,8 +141,17 @@ ReadWorkerResult* prepare_readback(Session& owner, engine::Memory& memory, uintp
         if (!owner.routed()) return original(context, out, waiter);
         uintptr_t remote = 0;
         if (source && owner.native_io() && at(memory, context, 0, remote) &&
-            owner.collecting(remote, owner.native_root()) && ordinary_directory(owner, memory, data))
-            return original(context, out, waiter);
+            owner.collecting(remote, owner.native_root()) && ordinary_directory(owner, memory, data)) {
+            const bool profile = owner.is_profile_request(data);
+            if (profile) owner.profile_step(ProfileStage::prepare, ProfileStatus::entered, "native_profile_prepare");
+            auto* result = original(context, out, waiter);
+            if (profile) owner.profile_step(ProfileStage::prepare,
+                result->outcome == 0 ? ProfileStatus::succeeded : ProfileStatus::refused,
+                "native_profile_prepare_result", true, 0, result->outcome, result->value);
+            return result;
+        }
+        if (owner.is_profile_request(data)) owner.profile_step(ProfileStage::prepare, ProfileStatus::refused,
+            "profile_remote_or_directory_gate");
         owner.fail(SessionFault::native_read);
         // The native null-remote branch touches no files/streams and consumes
         // its weak waiter. Preserve that cleanup, then suppress fallback 0x40.
@@ -167,7 +176,16 @@ ReadWorkerResult* verify_readback(Session& owner, engine::Memory& memory, uintpt
     uintptr_t control = 0, data = 0;
     if (!at(memory, context, 0, control) || !at(memory, control, 8, data)) return original(context, out);
     const auto id = owner.native_writes.readback_operation(data);
-    if (!id) return original(context, out);
+    if (!id) {
+        const bool profile = owner.is_profile_request(data);
+        if (profile) owner.profile_step(ProfileStage::decode, ProfileStatus::entered, "native_decode_entered");
+        auto* result = original(context, out);
+        if (profile) owner.profile_step(ProfileStage::decode,
+            result->outcome == 0 ? ProfileStatus::succeeded : ProfileStatus::refused,
+            result->outcome == 0 ? "native_decode_completed" : result->value == 4 ? "native_authentication_refused" : "native_decode_result",
+            true, 0, result->outcome, result->value);
+        return result;
+    }
     bool valid = false; SdkWriteObservation manifest; std::vector<uintptr_t> buffers;
     try {
         uintptr_t files = 0; int32_t count = 0; uint8_t cancelled = 0;

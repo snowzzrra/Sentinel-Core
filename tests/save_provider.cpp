@@ -588,7 +588,7 @@ SaveFuture* destroy_profile_read(SaveFuture* value, uint32_t) {
 }
 SaveResult* poll_profile_read(SaveFuture*, SaveResult* out, void*) {
     auto& model = *prerequisite_model; ProfileChoice choice{};
-    REQUIRE(!model.owner->routed() || model.owner->profile_choice(choice)); // Never before catalog completion.
+    REQUIRE(!model.owner->routed() || !model.owner->profile_choice(choice)); // Transport progresses before AP selection/import.
     *out = model.profile_polled++ ? model.result : SaveResult{-1, 0, 0, 0}; return out;
 }
 const SaveFutureVtable profile_read_vtable{destroy_profile_read, poll_profile_read};
@@ -613,7 +613,7 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
         reinterpret_cast<uintptr_t>(&current_campaign) - 0x397f4a8};
     const ProfilePrerequisiteCalls calls{allocate_private, construct_private, destroy_private, catalog, create_profile_read};
     active_prerequisite_calls = &calls;
-    for (unsigned test = 0; test < 19; ++test) {
+    for (unsigned test = 0; test < 20; ++test) {
         auto owner = test == 14 ? std::make_unique<Session>() : make();
         Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
         const auto root = owner->native_root();
@@ -655,14 +655,16 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
             if (test == 7) current_campaign = "DLC2-";
             if (test == 9) owner->stop_requests();
             SaveResult result{};
+            if (test == 19) Sleep(10020); // Would expire the old construction-time deadline before any work.
             future->vtable->poll(future, &result, nullptr);
             if (test == 4) {
-                REQUIRE(result.state == -1 && prerequisite.profile_polled == 0);
+                REQUIRE(result.state == -1 && prerequisite.profile_polled == 1);
                 future->vtable->destroy(future, 1); return false;
             }
+            if (test == 19) Sleep(10020); // Native pending retains its waiter beyond a guessed Core budget.
             if (result.state == -1) future->vtable->poll(future, &result, nullptr);
             if (test == 5) {
-                REQUIRE(result.state == -1 && prerequisite.profile_polled == 1);
+                REQUIRE(result.state == -1 && prerequisite.profile_polled == 2);
                 future->vtable->destroy(future, 1); return false;
             }
             if (test == 13) current_campaign = "DLC1-";
@@ -675,7 +677,15 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
             REQUIRE(owner->state() == SessionState::binding && !owner->accepts_requests());
             owner->startup_leave(test == 17);
         }
-        REQUIRE(owner->accepts_requests() == (test == 0 || test == 11 || test == 15 || test == 16));
+        REQUIRE(owner->accepts_requests() == (test == 0 || test == 11 || test == 15 || test == 16 || test == 19));
+        const auto trace = owner->profile_trace();
+        if (test == 3) REQUIRE(trace.failed_stage == ProfileStage::catalog && trace.failure.native_attempted && trace.failure.native_value == 0x40);
+        if (test == 6) REQUIRE(trace.failed_stage == ProfileStage::transport && trace.failure.native_attempted && trace.failure.native_value == 0x40);
+        if (test == 19) {
+            REQUIRE(trace.failed_stage == ProfileStage::count);
+            REQUIRE(trace.steps[static_cast<size_t>(ProfileStage::first_poll)].first_ms - trace.steps[0].first_ms >= 10000);
+            REQUIRE(trace.steps[static_cast<size_t>(ProfileStage::transport)].changed_ms - trace.steps[static_cast<size_t>(ProfileStage::transport)].first_ms >= 10000);
+        }
         if (test == 0) {
             REQUIRE(provider_initialized(*owner, memory, memory.manager, provider_calls));
             REQUIRE(owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x5678));
@@ -695,9 +705,9 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
         REQUIRE(prerequisite.data_freed == prerequisite.constructed &&
             prerequisite.allocated == prerequisite.data_freed + private_controls_freed);
         if (test == 1 || test == 2 || test == 12 || test == 14 || test == 18) REQUIRE(!model.creates);
-        if (test == 1 || test == 2 || test == 3 || test == 4 || test == 7 || test == 8 || test == 12)
+        if (test == 1 || test == 2 || test == 7 || test == 12)
             REQUIRE(prerequisite.profile_polled == 0);
     }
     active_prerequisite_calls = nullptr; prerequisite_model = nullptr; catalog_model = nullptr;
-    std::puts("PASS production PROFILE prerequisite, admission lifecycle, reader, serializer and publication (19 cases)");
+    std::puts("PASS production PROFILE prerequisite, delayed scheduling, native pending, admission and cleanup (20 cases)");
 }
