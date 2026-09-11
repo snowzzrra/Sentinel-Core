@@ -92,4 +92,42 @@ DeleteResult* poll_scoped_delete(Session& owner, engine::Memory& memory,
     // fresh ownership. Do not release it or restart the native worker.
     *output = {1, 0, 0, 0}; return output;
 }
+DeleteOperationResult* delete_auxiliary_scoped(Session& owner, engine::Memory& memory, uintptr_t object,
+        DeleteOperationResult* out, DeleteOperation original) {
+    if (!owner.routed()) { owner.unrouted_import(); return original(object, out); }
+    // 141bd71a0 -> 141bd9b40 -> 141bd3ed0 -> 141bd4d40. The native job
+    // retains this context across dispatch; do not release its references.
+    struct Context {
+        uintptr_t remote;
+        NativeString directory, prefix, suffix;
+        uintptr_t names; uint64_t count, capacity;
+    } context{};
+    static_assert(sizeof(Context) == 0xb0 && offsetof(Context, names) == 0x98);
+    bool allowed = owner.native_io() && object &&
+        !memory.copy(object, &context, sizeof(context)).reason &&
+        owner.collecting(context.remote, owner.native_root()) &&
+        campaign_directory(owner, memory, context.directory) &&
+        context.count <= context.capacity && context.count <= 4096 &&
+        (!context.count || (context.names && context.names <= UINTPTR_MAX - context.count * sizeof(NativeString)));
+    // Names are appended to directory + '/'. Reject path syntax before any
+    // FileDelete. The pattern branch itself requires the exact directory plus
+    // separator, so filters cannot broaden its root.
+    for (uint64_t i = 0; allowed && i < context.count; ++i) {
+        NativeString name{}; std::array<char, 260> text{};
+        allowed = !memory.copy(context.names + i * sizeof(name), &name, sizeof(name)).reason &&
+            name.length > 0 && name.length < static_cast<int32_t>(text.size()) && name.data &&
+            !memory.copy(reinterpret_cast<uintptr_t>(name.data), text.data(), static_cast<size_t>(name.length) + 1).reason &&
+            text[static_cast<size_t>(name.length)] == 0;
+        for (int32_t n = 0; allowed && n < name.length; ++n) {
+            const auto c = static_cast<unsigned char>(text[static_cast<size_t>(n)]);
+            allowed = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        }
+        if (allowed) allowed = std::strcmp(text.data(), ".") && std::strcmp(text.data(), "..");
+    }
+    // Native true is worker completion, not proof that each FileDelete worked.
+    if (allowed) return original(object, out);
+    owner.fail(SessionFault::unscoped_delete);
+    *out = {1, 1}; return out; // Native error alternative, before any deletion.
+}
 } // namespace sentinel::save

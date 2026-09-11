@@ -49,6 +49,10 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   src/save_session.h src/save_session.cpp src/save_collector.h src/save_collector.cpp
   src/save_delete.h src/save_delete.cpp src/save_write.h src/save_write.cpp
   src/save_sdk_write.h src/save_sdk_write.cpp
+  include/sentinel_save_request.h src/save_readback.h src/save_readback.cpp
+  src/save_backup.h src/save_backup.cpp src/save_submission.h src/save_submission.cpp
+  tools/backup_probe.cpp
+  tools/prepare_vanilla_backup.py tools/compare_vanilla_campaign.py
   src/save_profile.h src/save_profile.cpp
   src/save_provider.h src/save_provider.cpp
   src/save_catalog.h src/save_catalog.cpp

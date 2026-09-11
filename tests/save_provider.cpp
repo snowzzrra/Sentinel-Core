@@ -105,6 +105,39 @@ void run_provider_contracts(const std::function<std::unique_ptr<Session>()>& mak
     table[15] = reinterpret_cast<uintptr_t>(size); table[18] = reinterpret_cast<uintptr_t>(count);
     table[19] = reinterpret_cast<uintptr_t>(name);
     const ProviderCalls calls{image, context};
+    for (unsigned test = 0; test < 9; ++test) {
+        auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+        uintptr_t provider = image + 0x2e90658;
+        std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+        uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
+        Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
+        REQUIRE(provider_initialized(*owner, memory, memory.manager, calls));
+        REQUIRE(owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x123456));
+        owner->startup_leave(false);
+        REQUIRE(provider_initialized(*owner, memory, memory.manager, calls)); // Ordinary lazy getter after startup.
+        REQUIRE(owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x123456));
+        const auto files = remote.files;
+        if (test == 1) remote_pointer = 0x9999;
+        if (test == 2) provider = image + 0x2e90a60; // Native fallback stub, never an AP migration.
+        if (test == 3) control[1] = 0;
+        if (test == 4) owner->provider_reset(memory.manager);
+        if (test == 5) REQUIRE(!owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x654321));
+        if (test == 6) REQUIRE(!owner->provider_operation(0xdead, 0x123456));
+        if (test == 7) owner->provider_reset(0xbeef); // Unrelated manager.
+        if (test == 8) {
+            std::thread worker([&] { REQUIRE(provider_initialized(*owner, memory, memory.manager, calls)); });
+            worker.join(); // Continuity does not require replaying qualified startup.
+        }
+        const bool valid = test == 0 || test >= 7;
+        REQUIRE(provider_initialized(*owner, memory, memory.manager, calls) == valid);
+        REQUIRE(owner->routed() && owner->native_io() == valid && remote.files == files);
+        if (!valid) {
+            uintptr_t unavailable = 0;
+            REQUIRE(owner->fault() == SessionFault::provider_identity && !owner->native_provider(unavailable));
+            provider = image + 0x2e90658; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+            REQUIRE(!provider_initialized(*owner, memory, memory.manager, calls)); // No resurrection/unrouting.
+        }
+    }
     for (unsigned test = 0; test < 35; ++test) {
         auto owner = make();
         Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
@@ -584,6 +617,10 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
         auto owner = test == 14 ? std::make_unique<Session>() : make();
         Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
         const auto root = owner->native_root();
+        uintptr_t provider = image + 0x2e90658;
+        std::array<uintptr_t, 3> provider_control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+        uintptr_t manager = reinterpret_cast<uintptr_t>(provider_control.data());
+        Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
         if (test != 14) {
             remote.files = {{root + "/sentinel-owner-" + owner->namespace_id() + ".txt", owner->ownership_record()}};
             if (test != 11) {
@@ -592,10 +629,6 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
                 remote.files.emplace_back(root + "/sentinel-selection-GAME.txt", "sentinel-native-selection-v1\nnamespace_id=" +
                     owner->namespace_id() + "\ncampaign=GAME-\nname=AUTOSAVE10\n");
             }
-            uintptr_t provider = image + 0x2e90658;
-            std::array<uintptr_t, 3> provider_control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
-            uintptr_t manager = reinterpret_cast<uintptr_t>(provider_control.data());
-            Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
             if (test == 16 || test == 18) owner->startup_leave(false);
             if (test != 18) REQUIRE(provider_initialized(*owner, memory, memory.manager, provider_calls));
             if (test != 15 && test != 16 && test != 17 && test != 18) owner->startup_leave(false);
@@ -614,7 +647,9 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
             SaveFuture* future = nullptr;
             {
                 engine::LocalMemory temporary;
-                REQUIRE(read_scoped(*owner, temporary, 0x1234, &future, 0x5678, &input, read_calls) == &future);
+                const auto native_provider = reinterpret_cast<uintptr_t>(&provider);
+                if (owner->routed()) REQUIRE(owner->provider_operation(native_provider, 0x5678));
+                REQUIRE(read_scoped(*owner, temporary, native_provider, &future, 0x5678, &input, read_calls) == &future);
             }
             REQUIRE(!input.control && prerequisite.profile_polled == 0);
             if (test == 7) current_campaign = "DLC2-";
@@ -641,6 +676,15 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
             owner->startup_leave(test == 17);
         }
         REQUIRE(owner->accepts_requests() == (test == 0 || test == 11 || test == 15 || test == 16));
+        if (test == 0) {
+            REQUIRE(provider_initialized(*owner, memory, memory.manager, provider_calls));
+            REQUIRE(owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x5678));
+            REQUIRE(owner->state() == SessionState::admitted && owner->inspect().prepared_routes == required_routes);
+            const auto before = remote.files;
+            owner->provider_reset(memory.manager); // Reset/account removal after full PROFILE/catalog admission.
+            REQUIRE(owner->routed() && !owner->accepts_requests() && !owner->native_io());
+            REQUIRE(!provider_initialized(*owner, memory, memory.manager, provider_calls) && remote.files == before);
+        }
         if (test == 9) REQUIRE(owner->state() == SessionState::admitted); // Shutdown stays nonaccepting after admission finishes.
         if (test == 17) REQUIRE(owner->state() == SessionState::faulted && owner->routed());
         if (test == 18) {

@@ -20,7 +20,7 @@ std::atomic<uint64_t> originals{0}, changes{0}, frees{0}, last_return{0};
 std::atomic<bool> pause_frames{false}, finish_thread{false}, pending{false}, recurse{false};
 std::atomic<unsigned> gate_stage{0};
 std::atomic<unsigned> observation_case{0};
-HANDLE parked = nullptr, wake = nullptr, gate_entered = nullptr, gate_release = nullptr;
+HANDLE parked = nullptr, wake = nullptr, gate_entered = nullptr, gate_release = nullptr, changed = nullptr;
 int root_object = 0, common_object = 0, slot_object = 0;
 struct Descriptor { uint8_t checkpoint; bool success; uint32_t destination; };
 constexpr uint64_t change_return = UINT64_C(0x1234567800000001);
@@ -105,13 +105,37 @@ void gate(bool executed) {
     CHECK(WaitForSingleObject(gate_release, 5000) == WAIT_OBJECT_0);
     gate_stage.store(0);
 }
-template<class Predicate> void until(Predicate predicate, uint32_t ms = 4000) {
+template<class Predicate> void until_at(int line, const char* stage, Predicate predicate, uint32_t ms = 4000) {
     const auto deadline = GetTickCount64() + ms;
-    while (!predicate()) { CHECK(GetTickCount64() < deadline); Sleep(1); }
+    while (!predicate()) {
+        if (GetTickCount64() >= deadline) {
+            const auto n = native::inspect();
+            std::fprintf(stderr, "TIMEOUT native host line %d: %s; availability=%u reason=%u hooks=%u "
+                "lifecycle=%u generation=%llu context=%llu context_reason=%u gaps=%llu callbacks=%llu "
+                "originals=%llu command=%u paused=%u owner=%u callback_thread=%u\n",
+                line, stage, n.availability, n.reason, n.installed_hooks, n.lifecycle,
+                n.scope.lifecycle_generation, n.context_generation, n.context_reason,
+                n.event_gap_count, n.callback_sequence, originals.load(), command.load(),
+                pause_frames.load() ? 1u : 0u, owner.load(), n.callback_thread_id);
+            std::exit(1);
+        }
+        Sleep(1);
+    }
 }
+#define until(...) until_at(__LINE__, #__VA_ARGS__, __VA_ARGS__)
 void park() { pause_frames.store(true); CHECK(WaitForSingleObject(parked, 4000) == WAIT_OBJECT_0); }
 void resume() { pause_frames.store(false); SetEvent(wake); }
-void ready() { until([] { const auto n = native::inspect(); return n.context_generation && !n.context_reason; }); }
+void transition(uint32_t action) {
+    ResetEvent(changed); command.store(action); resume();
+    // inspect() owns the native history lock. Polling it while this fixture
+    // drives a lifecycle callback can intentionally produce EVENT_GAP, before
+    // the readiness assertion gets a chance to observe the completed event.
+    CHECK(WaitForSingleObject(changed, 4000) == WAIT_OBJECT_0);
+}
+void ready_at(int line) { until_at(line, "ready: published lifecycle context", [] {
+    const auto n = native::inspect(); return n.context_generation && !n.context_reason;
+}); }
+#define ready() ready_at(__LINE__)
 struct Child {
     Handle process, output;
     Child(const wchar_t* probe, const std::wstring& args) {
@@ -154,7 +178,8 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(argc == 3); const wchar_t* probe = argv[1];
     parked = CreateEventW(nullptr, TRUE, FALSE, nullptr); wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     gate_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr); gate_release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    CHECK(parked && wake && gate_entered && gate_release);
+    changed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    CHECK(parked && wake && gate_entered && gate_release && changed);
     Handle stop(CreateEventW(nullptr, TRUE, FALSE, nullptr)); CHECK(stop);
     CHECK(sc_initialize(SC_ABI_VERSION, SC_CAP_INSPECTION | SC_CAP_LIFECYCLE) == SC_OK);
     until([] { return native::inspect().availability == SC_NATIVE_DISABLED; });
@@ -172,6 +197,7 @@ int wmain(int argc, wchar_t** argv) {
                 Descriptor descriptor{static_cast<uint8_t>(action == 1 ? 2 : 0), action != 2,
                                       static_cast<uint32_t>(action == 3 ? SC_GAME_MAIN_MENU : SC_GAME_IN_GAME)};
                 last_return.store(fixture_change(reinterpret_cast<uintptr_t>(&root_object), reinterpret_cast<uintptr_t>(&descriptor), 0));
+                SetEvent(changed);
             }
             call_frame(); Sleep(2); // Only this task-owned host synthesizes frames.
         }
@@ -216,7 +242,7 @@ int wmain(int argc, wchar_t** argv) {
     native::test_start(adapter, current_snapshot(), stop.value);
     CHECK(native::inspect().availability == SC_NATIVE_ENABLED && native::inspect().installed_hooks == 7);
     CHECK(native::inspect().lifecycle == SC_LIFETIME_UNOBSERVED && !native::inspect().context_generation);
-    command.store(1); resume(); ready();
+    transition(1); ready();
     CHECK(last_return.load() == change_return && changes.load() == 1 && frees.load() == 1);
     CHECK(native::inspect().scope.lifecycle_generation == 1 && native::inspect().checkpoint_flag);
     Child normal(probe, L"--diagnostic --deadline-ms 1500");
@@ -226,7 +252,7 @@ int wmain(int argc, wchar_t** argv) {
     if (std::wcscmp(argv[2], L"basic") == 0) {
         park(); Child stale(probe, L"--diagnostic --deadline-ms 1500");
         until([] { return native::inspect().queued == 1; });
-        command.store(1); resume();
+        transition(1);
         CHECK(stale.complete(8).find("scope_mismatch") != std::string::npos); ready();
         CHECK(native::inspect().scope.lifecycle_generation == 2);
         Child fresh(probe, L"--diagnostic --deadline-ms 1500");
@@ -257,11 +283,11 @@ int wmain(int argc, wchar_t** argv) {
         auto r = request(200); CHECK(query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_submit_operation, r).diagnostic.state == SC_DIAGNOSTIC_QUEUED);
         resume(); until([&] { return native::result(r, false).state >= SC_DIAGNOSTIC_EXECUTED; });
         CHECK(native::result(r, false).reason == SC_NATIVE_TRANSITION); pending.store(false);
-        park(); command.store(2); resume(); until([] { return native::inspect().lifecycle == SC_LIFETIME_FAILED; });
+        park(); transition(2); until([] { return native::inspect().lifecycle == SC_LIFETIME_FAILED; });
         CHECK(!native::inspect().context_generation && last_return.load() == 0);
-        park(); command.store(3); resume(); until([] { return native::inspect().lifecycle == SC_LIFETIME_MENU; });
+        park(); transition(3); until([] { return native::inspect().lifecycle == SC_LIFETIME_MENU; });
         CHECK(!native::inspect().context_generation);
-        park(); command.store(1); resume(); ready();
+        park(); transition(1); ready();
         recurse.store(true); until([] { return native::inspect().reason == SC_NATIVE_REENTRANT; });
     } else if (std::wcscmp(argv[2], L"wrong-thread") == 0) {
         for (const unsigned mode : {1u, 3u, 4u, 5u, 6u, 8u}) {
@@ -319,6 +345,6 @@ int wmain(int argc, wchar_t** argv) {
     call_frame(); CHECK(originals.load() > original_count); // Still valid pass-through trampolines after shutdown.
     CHECK(query(GetCurrentProcessId(), 500).result == ProbeResult::endpoint_absent);
     finish_thread.store(true); resume(); callback.join();
-    CloseHandle(parked); CloseHandle(wake); CloseHandle(gate_entered); CloseHandle(gate_release);
+    CloseHandle(parked); CloseHandle(wake); CloseHandle(gate_entered); CloseHandle(gate_release); CloseHandle(changed);
     std::puts("PASS actual MinHook attach/original/trampoline, task-owned callback thread, separate probe/IPC, stale scope and cancellation states, retained shutdown; HARNESS ONLY, NOT DOOM SEMANTICS");
 }

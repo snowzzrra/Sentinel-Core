@@ -237,7 +237,7 @@ bool bind_root_provider(Session& owner, engine::Memory& memory, const ProviderCa
 }
 bool provider_initialized(Session& owner, engine::Memory& memory, uintptr_t manager, const ProviderCalls& calls) {
     uintptr_t root = 0;
-    if (!owner.startup_provider_root(root)) return false;
+    if (!owner.provider_root(root)) return false;
     try {
         uintptr_t selected_manager = 0, control = 0, provider = 0, table = 0;
         if (!at(memory, root, 0x9b38, selected_manager)) { owner.fail(SessionFault::provider_identity); return false; }
@@ -246,6 +246,13 @@ bool provider_initialized(Session& owner, engine::Memory& memory, uintptr_t mana
             table == calls.image_base + 0x2e90658 && calls.context) {
             const auto context = calls.context(calls.image_base + 0x397fb88);
             uintptr_t remote = 0; NativeCatalogSource catalog;
+            if (!owner.observe_provider_objects(manager, control, provider)) {
+                owner.fail(SessionFault::provider_identity); return false;
+            }
+            if (owner.routed()) {
+                if (at(memory, context, 0, remote) && owner.collecting(remote, owner.native_root())) return true;
+                owner.fail(SessionFault::provider_identity); return false;
+            }
             if (at(memory, context, 0, remote) && owner.acquire_native_root_lock() &&
                 inspect_remote(owner, memory, remote, catalog, true) &&
                 owner.bind_provider(owner.native_root(), remote, owner.ownership_record())) return true;

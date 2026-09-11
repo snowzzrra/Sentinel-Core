@@ -26,6 +26,11 @@ RootInit original_root = nullptr;
 CollectorCalls calls{};
 DeleteCalls delete_calls{};
 DeleteCalls scoped_delete_calls{};
+DeleteOperation original_auxiliary_operation = nullptr;
+DeleteOperationResult* auxiliary_operation_detour(uintptr_t context, DeleteOperationResult* out) {
+    engine::LocalMemory memory;
+    return delete_auxiliary_scoped(session(), memory, context, out, original_auxiliary_operation);
+}
 WriteCalls write_calls{};
 WriteCalls read_calls{};
 WriteCalls erase_calls{}, auxiliary_calls{};
@@ -48,6 +53,20 @@ ReadWorkerResult* read_decode_detour(uintptr_t context, ReadWorkerResult* out) {
 }
 using InitializeProvider = void (*)(uintptr_t);
 InitializeProvider original_provider = nullptr;
+InitializeProvider original_provider_reset = nullptr;
+using AccountRemoved = void (*)(uintptr_t, uintptr_t, uintptr_t);
+AccountRemoved original_account_removed = nullptr;
+void account_removed_detour(uintptr_t callback, uintptr_t manager, uintptr_t user) {
+    // A removed native account may later reuse an identity address. Refuse the
+    // transition before the manager releases its cached references, even if the
+    // process-wide Steam RemoteStorage singleton has not changed address.
+    session().provider_reset(manager);
+    original_account_removed(callback, manager, user);
+}
+void provider_reset_detour(uintptr_t manager) {
+    session().provider_reset(manager); // Fault before native invalidation; retain routed jobs.
+    original_provider_reset(manager);
+}
 WritePreflight original_preflight = nullptr;
 SdkWriteCalls sdk_calls{};
 SdkWriteCallback original_sdk_callback = nullptr;
@@ -128,14 +147,17 @@ DeleteResult* scoped_delete_detour(DeleteFuture* future, DeleteResult* out, void
     return poll_scoped_delete(session(), memory, future, out, executor, scoped_delete_calls);
 }
 SaveFuture** write_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return write_scoped(session(), memory, provider, out, identity, data, write_calls);
 }
 SaveFuture** read_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return read_scoped(session(), memory, provider, out, identity, data, read_calls);
 }
 SaveFuture** catalog_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data, const char* prefix) {
+    if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return enumerate_provider(session(), memory, provider, out, identity, data, prefix, catalog_calls);
 }
@@ -144,10 +166,12 @@ SaveFuture** prerequisite_detour(uintptr_t provider, SaveFuture** out, uintptr_t
     return profile_read_prerequisite(session(), memory, provider, out, identity, data, prerequisite_calls);
 }
 SaveFuture** erase_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return delete_scoped(session(), memory, provider, out, identity, data, erase_calls, false);
 }
 SaveFuture** auxiliary_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return delete_scoped(session(), memory, provider, out, identity, data, auxiliary_calls, true);
 }
@@ -226,7 +250,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         session().reject(SessionFault::installation); return;
     }
     engine::LocalMemory memory;
-    std::array<native::Target, 42> targets;
+    std::array<native::Target, 45> targets;
     for (unsigned i = 0; i < targets.size(); ++i) {
         targets[i] = native::save_target(binding.image.base, i);
         if (native::validate_target(memory, binding.image, targets[i], stop, GetTickCount64() + 3000)) {
@@ -243,7 +267,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     if (memory.copy(binding.image.base + 0x2a1cc60, &context_init, sizeof(context_init)).reason || !context_init) {
         session().reject(SessionFault::installation); return;
     }
-    constexpr unsigned hooks[] = {0, 1, 4, 6, 8, 9, 13, 14, 15, 16, 17, 18, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34, 35, 37, 38, 40, 41};
+    constexpr unsigned hooks[] = {0, 1, 4, 6, 8, 9, 13, 14, 15, 16, 17, 18, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34, 35, 37, 38, 40, 41, 42, 43, 44};
     void* originals[std::size(hooks)]{};
     void* detours[] = {reinterpret_cast<void*>(root_detour), reinterpret_cast<void*>(collector_detour),
         reinterpret_cast<void*>(delete_detour), reinterpret_cast<void*>(write_detour),
@@ -258,7 +282,9 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         reinterpret_cast<void*>(prepare_job_detour), reinterpret_cast<void*>(destroy_preparation_detour),
         reinterpret_cast<void*>(write_context_detour), reinterpret_cast<void*>(destroy_preflight_detour),
         reinterpret_cast<void*>(read_preparation_detour), reinterpret_cast<void*>(read_decode_detour),
-        reinterpret_cast<void*>(save_factory_detour), reinterpret_cast<void*>(scoped_delete_detour)};
+        reinterpret_cast<void*>(save_factory_detour), reinterpret_cast<void*>(scoped_delete_detour),
+        reinterpret_cast<void*>(auxiliary_operation_detour), reinterpret_cast<void*>(provider_reset_detour),
+        reinterpret_cast<void*>(account_removed_detour)};
     static_assert(std::size(detours) == std::size(hooks));
     unsigned created = 0;
     for (; created < std::size(hooks); ++created) {
@@ -292,6 +318,9 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         reinterpret_cast<AssignString>(targets[2].address), reinterpret_cast<ReleaseVector>(targets[3].address)};
     delete_calls = {reinterpret_cast<PollDelete>(originals[2]), reinterpret_cast<ReleaseDelete>(targets[5].address)};
     scoped_delete_calls = {reinterpret_cast<PollDelete>(originals[27]), delete_calls.release};
+    original_auxiliary_operation = reinterpret_cast<DeleteOperation>(originals[28]);
+    original_provider_reset = reinterpret_cast<InitializeProvider>(originals[29]);
+    original_account_removed = reinterpret_cast<AccountRemoved>(originals[30]);
     write_calls = {reinterpret_cast<CreateWrite>(originals[3]), reinterpret_cast<SetSaveName>(targets[7].address),
         reinterpret_cast<ReleaseSaveReference>(targets[5].address), profile_payload, binding.image.base};
     submission_calls = {reinterpret_cast<NativeSave>(targets[39].address), write_calls.release,
@@ -314,11 +343,11 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         reinterpret_cast<LookupProfileValue>(targets[10].address), reinterpret_cast<DestroyProfileValue>(targets[11].address),
         reinterpret_cast<ProfileChecksum>(targets[12].address), reinterpret_cast<ReleaseSaveReference>(targets[5].address), binding.image.base};
     // The installed production modules determine the gate, never configuration or
-    // IPC. Missing campaign/PROFILE/identity/metadata adapters cannot be bypassed.
-    session().install(binding.root, binding.image.base + 0x4323fc, startup_route | collector_route);
+    // IPC. Unsupported provider/reset transitions retain AP ownership and fail.
+    session().install(binding.root, binding.image.base + 0x4323fc, steam_20260818_routes);
     // All immutable pointers and policy are ready BEFORE the one-time startup
     // hook is reachable. The existing observer accepting flag is independent.
-    for (unsigned index : {1u, 4u, 6u, 8u, 9u, 13u, 14u, 15u, 16u, 17u, 18u, 23u, 24u, 25u, 26u, 27u, 28u, 29u, 30u, 32u, 33u, 34u, 35u, 37u, 38u, 40u, 41u, 0u}) {
+    for (unsigned index : {1u, 4u, 6u, 8u, 9u, 13u, 14u, 15u, 16u, 17u, 18u, 23u, 24u, 25u, 26u, 27u, 28u, 29u, 30u, 32u, 33u, 34u, 35u, 37u, 38u, 40u, 41u, 42u, 43u, 44u, 0u}) {
         std::array<uint8_t, 32> current{};
         if (memory.copy(targets[index].address, current.data(), current.size()).reason ||
             std::memcmp(current.data(), targets[index].bytes.data(), current.size()) ||

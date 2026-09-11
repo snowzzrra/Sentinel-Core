@@ -13,4 +13,9 @@ DeleteResult* refuse_unscoped_delete(Session&, engine::Memory&, DeleteFuture*, D
 // Gate the directory worker before its first enqueue. Existing jobs retain the
 // native polling/release contract; a later fault cannot establish nonexecution.
 DeleteResult* poll_scoped_delete(Session&, engine::Memory&, DeleteFuture*, DeleteResult*, void*, const DeleteCalls&);
+// Operation result inside the unchanged native job's ownership and cleanup.
+struct DeleteOperationResult { int64_t outcome; uint64_t value; };
+using DeleteOperation = DeleteOperationResult* (*)(uintptr_t, DeleteOperationResult*);
+DeleteOperationResult* delete_auxiliary_scoped(Session&, engine::Memory&, uintptr_t,
+    DeleteOperationResult*, DeleteOperation);
 } // namespace sentinel::save

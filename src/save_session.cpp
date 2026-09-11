@@ -150,6 +150,35 @@ bool Session::acquire_native_root_lock() {
     if (result != WAIT_OBJECT_0 && result != WAIT_ABANDONED) { CloseHandle(lock); return false; }
     native_root_lock_ = lock; return true;
 }
+bool Session::provider_root(uintptr_t& root) const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!routed() && (state_ != SessionState::starting || GetCurrentThreadId() != startup_thread_)) return false;
+    root = root_; return true;
+}
+bool Session::observe_provider_objects(uintptr_t manager, uintptr_t control, uintptr_t object) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!manager || !control || !object) return false;
+    if (state_ == SessionState::starting && GetCurrentThreadId() == startup_thread_ && !native_manager_) {
+        native_manager_ = manager; provider_control_ = control; provider_object_ = object; return true;
+    }
+    return native_io() && manager == native_manager_ && control == provider_control_ && object == provider_object_;
+}
+bool Session::provider_operation(uintptr_t object, uintptr_t identity) {
+    bool valid = false;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        valid = native_io() && object && object == provider_object_ && identity &&
+            (!platform_identity_ || identity == platform_identity_);
+        if (valid) platform_identity_ = identity;
+    }
+    if (!valid) fail(SessionFault::provider_identity);
+    return valid;
+}
+void Session::provider_reset(uintptr_t manager) {
+    bool affected = false;
+    { std::lock_guard<std::mutex> guard(mutex_); affected = routed() && manager == native_manager_; }
+    if (affected) fail(SessionFault::provider_identity);
+}
 void Session::stop_requests() {
     std::lock_guard<std::mutex> guard(mutex_);
     requests_stopped_ = true; requests_ = false;

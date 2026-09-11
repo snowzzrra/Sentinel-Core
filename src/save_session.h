@@ -53,6 +53,10 @@ public:
     bool bind_provider(std::string_view root, uintptr_t provider, std::string_view ownership);
     bool native_provider(uintptr_t& provider) const;
     bool startup_provider_root(uintptr_t& root) const;
+    bool provider_root(uintptr_t& root) const;
+    bool observe_provider_objects(uintptr_t manager, uintptr_t control, uintptr_t object);
+    bool provider_operation(uintptr_t object, uintptr_t identity);
+    void provider_reset(uintptr_t manager);
     bool acquire_native_root_lock();
     void stop_requests();
     void fail(SessionFault);
@@ -93,6 +97,7 @@ private:
     bool attempted_ = false, entered_ = false, qualified_ = false;
     bool root_finished_ = false, profile_finished_ = false, requests_stopped_ = false;
     uintptr_t root_ = 0, caller_ = 0, provider_ = 0;
+    uintptr_t native_manager_ = 0, provider_control_ = 0, provider_object_ = 0, platform_identity_ = 0;
     uint32_t routes_ = 0, startup_thread_ = 0;
     std::string namespace_id_, native_root_, ownership_;
     std::unique_ptr<storage::Namespace> lease_;

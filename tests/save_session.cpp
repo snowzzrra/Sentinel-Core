@@ -2,6 +2,7 @@
 // Controlled native-layout/provider fixtures; never a DOOM persistence claim.
 #include "save_collector.h"
 #include "save_delete.h"
+#include "save_native_hooks.h"
 #include "save_write.h"
 #include <algorithm>
 #include <functional>
@@ -97,7 +98,7 @@ struct Fixture {
     }
     void admit(Session& owner) {
         prepare(owner);
-        owner.install(0x1000, 0x2000, required_routes);
+        owner.install(0x1000, 0x2000, steam_20260818_routes);
         CHECK(owner.startup_enter(0x1000, 0x2000, GetCurrentThreadId()));
         CHECK(owner.bind_provider(owner.native_root(), 0x1234, owner.ownership_record()));
         owner.startup_leave(false);
@@ -258,6 +259,58 @@ void scoped_delete_contracts(Fixture& fixtures, engine::Memory& memory) {
         poll_scoped_delete(disabled, memory, &fixture.future, &result, nullptr, calls);
         CHECK(!result.state && !result.outcome && fixture.polls == 1 && fixture.launches == 1 && fixture.released == 1);
         CHECK(disabled.state() == SessionState::disabled && disabled.fault() == SessionFault::none);
+    }
+}
+struct AuxiliaryContext {
+    uintptr_t remote = 0x1234;
+    NativeString directory{}, prefix{}, suffix{};
+    uintptr_t names = 0; uint64_t count = 0, capacity = 0;
+    uintptr_t task = 42; int64_t result = -1; uint64_t payload = 0, job = 17;
+};
+unsigned auxiliary_runs = 0;
+std::vector<std::string> auxiliary_files;
+bool auxiliary_delete_fails = false;
+DeleteOperationResult* auxiliary_operation(uintptr_t value, DeleteOperationResult* out) {
+    ++auxiliary_runs;
+    const auto& context = *reinterpret_cast<AuxiliaryContext*>(value);
+    const std::string prefix = std::string(context.directory.data) + "/";
+    if (!auxiliary_delete_fails) auxiliary_files.erase(std::remove_if(auxiliary_files.begin(), auxiliary_files.end(),
+        [&](const auto& name) { return name.compare(0, prefix.size(), prefix) == 0; }), auxiliary_files.end());
+    *out = {0, 1}; return out; // Native aggregate ignores individual deletion failures.
+}
+void auxiliary_contracts(Fixture& fixtures, engine::Memory& memory) {
+    for (unsigned test = 0; test < 14; ++test) {
+        Session owner; fixtures.admit(owner);
+        std::string path = owner.native_root() + (test == 1 ? "/DLC2-AUTOSAVE11" : "/GAME-AUTOSAVE0");
+        std::string name = "game.details";
+        if (test == 2) path = "GAME-AUTOSAVE0";
+        if (test == 3) path = owner.native_root() + "x/GAME-AUTOSAVE0";
+        if (test == 4) name = "../PROFILE/profile.bin";
+        if (test == 5) name = "..\\PROFILE\\profile.bin";
+        if (test == 6) name = "..";
+        if (test == 7) name = std::string("game\0.details", 13);
+        auto native_name = native_text(name);
+        AuxiliaryContext context;
+        context.directory = native_text(path); context.names = reinterpret_cast<uintptr_t>(&native_name);
+        context.count = context.capacity = 1;
+        if (test == 8) context.remote = 0x4321;
+        if (test == 9) context.capacity = 0;
+        if (test == 10) owner.fail(SessionFault::provider_identity);
+        if (test == 11) context.names = 1;
+        if (test == 12) { context.names = 0; context.count = context.capacity = 0; }
+        const auto before_context = context;
+        auxiliary_runs = 0; auxiliary_delete_fails = test == 13;
+        auxiliary_files = {"GAME-AUTOSAVE0/game.details", "PROFILE/profile.bin", path + "/game.details"};
+        const auto before = auxiliary_files;
+        DeleteOperationResult result{};
+        CHECK(delete_auxiliary_scoped(owner, memory, reinterpret_cast<uintptr_t>(&context), &result, auxiliary_operation) == &result);
+        const bool allowed = test <= 1 || test >= 12;
+        CHECK(auxiliary_runs == (allowed ? 1u : 0u) && result.outcome == (allowed ? 0 : 1) && result.value == 1);
+        CHECK(std::memcmp(&context, &before_context, sizeof(context)) == 0); // Job/ref/notification ownership untouched.
+        CHECK(auxiliary_files[0] == before[0] && auxiliary_files[1] == before[1]);
+        if (!allowed || test == 13) CHECK(auxiliary_files == before);
+        if (!allowed) CHECK(owner.routed() && !owner.native_io());
+        std::free(native_name.data); std::free(context.directory.data);
     }
 }
 void delete_contracts(Fixture& fixtures, engine::Memory& memory) {
@@ -682,7 +735,7 @@ int main(int argc, char** argv) {
             std::strcmp(argv[1], "--readback") == 0 ? run_readback_contracts : run_prerequisite_contracts;
         run([&fixture] {
             auto owner = std::make_unique<Session>(); fixture.prepare(*owner);
-            owner->install(0x1000, 0x2000, required_routes);
+            owner->install(0x1000, 0x2000, steam_20260818_routes);
             CHECK(owner->startup_enter(0x1000, 0x2000, GetCurrentThreadId()));
             return owner;
         });
@@ -692,6 +745,7 @@ int main(int argc, char** argv) {
     write_contracts(fixture, memory);
     preflight_contracts(fixture, memory);
     route_contracts(fixture, memory);
+    auxiliary_contracts(fixture, memory);
     const CollectorCalls calls{collect, assign, release};
     {
         Session off; CollectorResult result{}; Context context(off);
