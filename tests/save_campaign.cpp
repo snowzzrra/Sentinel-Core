@@ -5,7 +5,11 @@
 #include "save_collector.h"
 #include "save_native_hooks.h"
 #include "save_write.h"
+#include "save_readback.h"
 #include "save_submission.h"
+#include "save_campaign_native.h"
+#include "native_test_adapter.h"
+#include "native_runtime.h"
 #include <windows.h>
 #include <array>
 #include <cstdio>
@@ -13,8 +17,9 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <functional>
 
-#define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"campaign:%d: %s\n",__LINE__,#x); return 1; } } while(0)
+#define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"campaign:%d: %s\n",__LINE__,#x); std::exit(1); } } while(0)
 using namespace sentinel;
 using namespace sentinel::save;
 namespace {
@@ -39,23 +44,85 @@ template<class T,size_t N> void store(std::array<unsigned char,N>& bytes,size_t 
     std::memcpy(bytes.data()+offset,&value,sizeof(value));
 }
 NativeString text(std::string& value) { NativeString s{}; s.data=value.data(); s.length=static_cast<int32_t>(value.size()); s.capacity_flags=static_cast<uint32_t>(value.size()+1); return s; }
-struct CheckpointRequest { Session& owner; uint64_t operation; const std::string& directory; bool matched=false; };
-SaveReference* checkpoint_factory(uintptr_t,SaveReference* out,uint32_t,uintptr_t request) {
-    auto& item=*reinterpret_cast<CheckpointRequest*>(request);
-    item.matched=item.owner.campaign_run.write_started(item.operation,item.directory,capture_native_checkpoint(item.owner.native_writes));
-    return out;
+std::wstring transition_defect;
+std::function<void()> initial_checkpoint;
+bool nested_change=false;
+uint64_t observed_change(uintptr_t root,uintptr_t descriptor) {
+    __try { return native::test_change(root,descriptor,0); }
+    __except(GetExceptionCode()==0xe0420042?EXCEPTION_EXECUTE_HANDLER:EXCEPTION_CONTINUE_SEARCH) { return 0; }
 }
+uint64_t native_load(uintptr_t self,uintptr_t descriptor,uintptr_t files) {
+    if (transition_defect==L"abnormal") RaiseException(0xe0420042,0,0,nullptr);
+    if (transition_defect==L"nested" && !nested_change) {
+        nested_change=true;
+        native::test_free(self,[](uintptr_t,uintptr_t) {});
+        CHECK(native::test_change(self,descriptor,files)==1);
+    }
+    *reinterpret_cast<uint32_t*>(self+0x44)=transition_defect==L"partial_save"?SC_GAME_LOADING:SC_GAME_IN_GAME;
+    if (initial_checkpoint && (transition_defect==L"initial_save" || transition_defect==L"initial_save_return_failed" || transition_defect==L"save_failure" || transition_defect==L"partial_save")) initial_checkpoint();
+    if (transition_defect==L"generation") native::test_generation_gap();
+    if (transition_defect==L"state_read") { DWORD previous=0; CHECK(VirtualProtect(reinterpret_cast<void*>(self),0x1000,PAGE_NOACCESS,&previous)); }
+    if (transition_defect==L"pending_transition" || transition_defect==L"unrelated") *reinterpret_cast<uint32_t*>(self+0x44)=SC_GAME_LOADING;
+    return transition_defect==L"native_return" || transition_defect==L"initial_save_return_failed"?0:1;
+}
+int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::function<void()> checkpoint={}) {
+    transition_defect=defect; initial_checkpoint=checkpoint;
+    auto* root=static_cast<unsigned char*>(VirtualAlloc(nullptr,0x1000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE)); CHECK(root);
+    std::array<unsigned char,0x1970> request{};
+    std::vector<unsigned char> map(0xafd00);
+    std::array<unsigned char,16> cvar{};
+    std::string map_name="game/sp/initial";
+    const auto native_name=text(map_name);
+    const uintptr_t map_address=reinterpret_cast<uintptr_t>(map.data());
+    const uintptr_t setting=reinterpret_cast<uintptr_t>(cvar.data());
+    std::memcpy(root+0x50,&map_address,sizeof(map_address)); store(cvar,8,defect==L"difficulty"?(difficulty+1)%4:difficulty);
+    store(request,0x10,native_name);
+    std::memcpy(map.data()+0x9a060,&native_name,sizeof(native_name));
+    engine::Binding binding{}; binding.root=reinterpret_cast<uintptr_t>(root);
+    binding.image.base=reinterpret_cast<uintptr_t>(&setting)-0x45f8590;
+    test_campaign_binding(binding.image.base,binding.root);
+    native::test_events(binding,native_load);
+    CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==
+        (defect==L"native_return" || defect==L"abnormal" || defect==L"initial_save_return_failed"?0u:1u));
+    CHECK(native::inspect().game_state==SC_GAME_MAIN_MENU);
+    if (defect==L"state_read") { DWORD previous=0; CHECK(VirtualProtect(root,0x1000,PAGE_READWRITE,&previous)); }
+    if (defect==L"pending_transition" || defect==L"unrelated") {
+        CHECK(!session().campaign_run.snapshot().map_active && session().campaign_run.snapshot().reason=="none");
+        *reinterpret_cast<uint32_t*>(root+0x44)=SC_GAME_IN_GAME;
+        CHECK(!session().campaign_run.snapshot().map_active); // Fresh memory alone never certifies the event.
+        if (defect==L"unrelated") native::test_free(binding.root,[](uintptr_t,uintptr_t) {});
+    }
+    if (checkpoint && defect!=L"initial_save" && defect!=L"initial_save_return_failed" && defect!=L"save_failure" && defect!=L"partial_save") checkpoint();
+    const auto result=session().campaign_run.snapshot();
+    if (defect==L"pending_transition") {
+        CHECK(result.transition.game==SC_GAME_LOADING && result.checkpoint_boundary.game==SC_GAME_IN_GAME);
+        CHECK(result.transition.at_ms<=result.checkpoint_boundary.at_ms && result.map_active);
+    }
+    const std::map<std::wstring,std::string> failures{{L"native_return","native_transition_return_failed"},
+        {L"abnormal","native_transition_abnormal"},{L"initial_save_return_failed","native_transition_return_failed"},
+        {L"state_read","native_transition_state_unreadable"},{L"generation","native_transition_generation_mismatch"},
+        {L"difficulty","native_transition_difficulty_mismatch"},{L"unrelated","native_checkpoint_transition_unassociated"},
+        {L"partial_save","native_checkpoint_map_not_ready"},{L"save_failure","native_checkpoint_completion_unproven"}};
+    auto expected=failures.find(defect);
+    if (expected!=failures.end()) { CHECK(result.reason==expected->second); CHECK(!result.continuity_persisted); }
+    else CHECK(result.map_active);
+    initial_checkpoint={}; CHECK(VirtualFree(root,0,MEM_RELEASE));
+    return 0;
+}
+#include "campaign_navigation_fixture.h"
+#include "campaign_writer_fixture.h"
 }
 int wmain(int argc,wchar_t** argv) {
     CHECK(argc==4 || argc==5);
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
+    navigation_fixture::vanilla();
     storage::Descriptor descriptor{{"synthetic-campaign-host",0,1,std::string(64,'b')},argv[2],
         {resume?storage::CampaignIntent::resume:storage::CampaignIntent::create,difficulty}};
     std::unique_ptr<storage::Namespace> lease;
     CHECK((resume?storage::reopen(descriptor,lease):storage::prepare(descriptor,lease)).ok());
-    Session owner; const auto configured=owner.configure(descriptor,std::move(lease));
+    auto& owner=session(); const auto configured=owner.configure(descriptor,std::move(lease));
     if (defect==L"refuse_configuration") { CHECK(!configured.ok()); std::puts("PASS refused immutable or incomplete campaign contract"); return 0; }
     CHECK(configured.ok());
     std::array<uintptr_t,20> table{}; Remote remote{table.data(),{}};
@@ -96,7 +163,7 @@ int wmain(int argc,wchar_t** argv) {
         if (defect==L"missing_difficulty") { CHECK(!owner.campaign_run.map_begin("game/sp/initial",1)); return 0; }
         CHECK(owner.campaign_run.allow_difficulty(difficulty)); // Native consumer restores the parsed save field.
         if (defect==L"wrong_map") { CHECK(!owner.campaign_run.map_begin("other/map",1)); return 0; }
-        CHECK(owner.campaign_run.map_begin("game/sp/initial",1)); owner.campaign_run.map_end(true,2,difficulty);
+        CHECK(native_transition(difficulty)==0);
         CHECK(owner.campaign_run.snapshot().phase=="reopened");
         std::printf("PASS separate-process native source/parser/lifecycle reopen, difficulty=%u pid=%lu\n",difficulty,GetCurrentProcessId()); return 0;
     }
@@ -104,34 +171,17 @@ int wmain(int argc,wchar_t** argv) {
         CHECK(!owner.campaign_run.begin_create(false,"AUTOSAVE0",0,true));
         CHECK(!owner.campaign_run.snapshot().map_active); std::puts("PASS dirty-process refusal before reservation"); return 0;
     }
-    CHECK(owner.campaign_run.begin_create(true,"AUTOSAVE0",0,true));
-    CHECK(!owner.campaign_run.allow_difficulty((difficulty+1)%4) && owner.accepts_requests());
-    CHECK(owner.campaign_run.start_internal(difficulty,false));
-    CHECK(owner.campaign_run.map_begin("game/sp/initial",1)); owner.campaign_run.map_end(true,2,difficulty);
-    CHECK(owner.campaign_run.allow_access(source,directory,true,false));
-    auto& writes=owner.native_writes;
-    const auto operation=writes.open_provider(source,directory);
-    if (defect==L"unassociated") { CHECK(!owner.campaign_run.write_started(operation,directory,false)); return 0; }
-    CheckpointRequest request{owner,operation,directory}; SaveReference task{};
-    native_save_factory(writes,0x674744,0x674744,0x1000,&task,0,reinterpret_cast<uintptr_t>(&request),checkpoint_factory);
-    CHECK(request.matched && !capture_native_checkpoint(writes));
-    if (defect==L"pending") { CHECK(!owner.campaign_run.snapshot().continuity_persisted); return 0; }
-    CHECK(writes.attach_files(operation,files,1));
-    CHECK(writes.attach_readback(operation,source+0x10000,1));
-    const auto sequence=writes.begin(provider,files,1,directory); CHECK(sequence);
-    CHECK(prepare_sdk_payloads(writes,memory,sequence,files,1,directory,image));
-    SdkWriteObservation prepared; CHECK(writes.inspect(sequence,prepared)); auto captured=prepared.payloads[0]; captured.captured=true;
-    CHECK(writes.capture(sequence,captured)==0); writes.submitted(sequence,0,123); writes.callback(123,false,1);
-    writes.result(sequence,{0,0,1,0}); writes.provider_result(operation,{0,0,1});
-    owner.campaign_run.write_observed(operation,false,false,memory);
-    CHECK(owner.campaign_run.snapshot().native_saved && !owner.campaign_run.snapshot().readback_verified && !owner.campaign_run.snapshot().continuity_persisted);
-    writes.readback_hashes(operation); writes.readback_result(operation,true);
-    CHECK(!writes.backup(operation)); // Ordinary save has no archive dependency.
-    remote.files[directory+"/game.details"]=payload;
-    owner.campaign_run.write_observed(operation+1,true,true,memory); CHECK(!owner.campaign_run.snapshot().continuity_persisted);
-    owner.campaign_run.write_observed(operation,true,true,memory);
+    navigation_fixture::create(difficulty,defect);
+    if (defect==L"extra_life" || defect==L"ultra") return 0;
+    const bool transition_failure=defect==L"native_return" || defect==L"abnormal" || defect==L"state_read" || defect==L"generation" || defect==L"difficulty";
+    if(transition_failure) { CHECK(native_transition(difficulty,defect)==0); return 0; }
+    writer_fixture::Model writer{remote,source,files,payload,directory};
+    CHECK(native_transition(difficulty,defect==L"pending"?L"pending_save":defect,[&] { writer_fixture::save(writer,defect==L"pending"?L"pending_save":defect); })==0);
+    if(defect==L"pending" || defect==L"initial_save_return_failed" || defect==L"unassociated" || defect==L"save_failure" || defect==L"partial_save" || defect==L"unrelated") {
+        CHECK(!owner.campaign_run.snapshot().continuity_persisted); return 0;
+    }
     const auto observed=owner.campaign_run.snapshot();
     CHECK(observed.native_saved && observed.readback_verified && observed.continuity_persisted && observed.checkpoint==1);
-    CHECK(observed.operation==operation && observed.effective_difficulty==difficulty && observed.native_factory_matched);
+    CHECK(observed.operation==writer.operation && observed.effective_difficulty==difficulty && observed.native_factory_matched);
     std::printf("PASS native checkpoint correlation/continuity, difficulty=%u pid=%lu\n",difficulty,GetCurrentProcessId()); return 0;
 }

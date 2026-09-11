@@ -11,6 +11,15 @@ HANDLE file = INVALID_HANDLE_VALUE;
 bool opened = false;
 unsigned count = 0;
 std::string last;
+std::string quoted(const char* text) {
+    std::string out="\"";
+    for (const auto* p=reinterpret_cast<const unsigned char*>(text);*p;++p) {
+        if (*p=='"' || *p=='\\' || *p<32 || *p>=127) {
+            char escaped[7]{}; std::snprintf(escaped,sizeof(escaped),"\\u%04x",static_cast<unsigned>(*p)); out+=escaped;
+        } else out+=static_cast<char>(*p);
+    }
+    return out+'"';
+}
 std::string profile_step(const save::ProfileStep& s) {
     return "{\"first_ms\":" + std::to_string(s.first_ms) + ",\"changed_ms\":" + std::to_string(s.changed_ms) +
         ",\"elapsed_ms\":" + std::to_string(s.changed_ms - s.first_ms) + ",\"status\":" + std::to_string(static_cast<uint32_t>(s.status)) +
@@ -85,7 +94,29 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"operation\":"+std::to_string(campaign.operation)+",\"checkpoint\":"+std::to_string(campaign.checkpoint)+
                 ",\"source_checkpoint\":"+std::to_string(campaign.source_checkpoint)+
                 ",\"generation_before\":"+std::to_string(campaign.generation_before)+",\"generation_after\":"+std::to_string(campaign.generation_after)+
-                ",\"map_active\":"+flag(campaign.map_active)+"}";
+                ",\"map_active\":"+flag(campaign.map_active)+",\"save_ready\":"+flag(campaign.save_ready)+
+                ",\"failure_at_ms\":"+std::to_string(campaign.failure_at_ms)+
+                ",\"transition_event\":"+std::to_string(campaign.transition.event_id)+
+                ",\"transition_at_ms\":"+std::to_string(campaign.transition.at_ms)+
+                ",\"native_return\":"+std::to_string(campaign.transition.native_return)+
+                ",\"transition_depth\":"+std::to_string(campaign.transition.depth)+
+                ",\"transition_observation_reason\":"+std::to_string(campaign.transition.observation_reason)+
+                ",\"transition_observed\":"+flag(campaign.transition.observed)+
+                ",\"transition_ended\":"+flag(campaign.transition.ended)+
+                ",\"transition_abnormal\":"+flag(campaign.transition.abnormal)+
+                ",\"transition_state\":"+std::to_string(campaign.transition.game)+
+                ",\"transition_state_read\":"+flag(campaign.transition.state_read)+
+                ",\"transition_map_read\":"+flag(campaign.transition.map_read)+
+                ",\"transition_difficulty_read\":"+flag(campaign.transition.difficulty_read)+
+                ",\"transition_map\":"+quoted(campaign.transition.map.data())+
+                ",\"checkpoint_at_ms\":"+std::to_string(campaign.checkpoint_boundary.at_ms)+
+                ",\"checkpoint_generation\":"+std::to_string(campaign.checkpoint_boundary.generation_after)+
+                ",\"checkpoint_depth\":"+std::to_string(campaign.checkpoint_boundary.depth)+
+                ",\"checkpoint_state\":"+std::to_string(campaign.checkpoint_boundary.game)+
+                ",\"checkpoint_difficulty\":"+std::to_string(campaign.checkpoint_boundary.difficulty)+
+                ",\"checkpoint_state_read\":"+flag(campaign.checkpoint_boundary.state_read)+
+                ",\"checkpoint_map_read\":"+flag(campaign.checkpoint_boundary.map_read)+
+                ",\"checkpoint_difficulty_read\":"+flag(campaign.checkpoint_boundary.difficulty_read)+"}";
             const auto facts = "\"engine_reason\":" + std::to_string(engine_reason) + ",\"installation\":{\"phase\":" + std::to_string(install.phase) +
                 ",\"sequence\":" + std::to_string(install.sequence) + ",\"startup_observation\":" + std::to_string(install.startup_observation) +
                 ",\"last_completed_stage\":" + std::to_string(install.last_completed_stage) + ",\"validated\":" + std::to_string(install.validated) +

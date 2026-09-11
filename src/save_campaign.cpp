@@ -3,6 +3,7 @@
 #include "save_session.h"
 #include "save_catalog.h"
 #include "save_provider.h"
+#include "sentinel_context.h"
 #include <windows.h>
 #include <algorithm>
 #include <charconv>
@@ -63,7 +64,7 @@ bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,st
 bool Campaign::enabled() const { std::lock_guard<std::recursive_mutex> lock(mutex_); return state_.enabled; }
 CampaignSnapshot Campaign::snapshot() const { std::lock_guard<std::recursive_mutex> lock(mutex_); return state_; }
 bool Campaign::reject(const char* reason) {
-    if (state_.reason=="none") state_.reason=reason;
+    if (state_.reason=="none") { state_.reason=reason; state_.failure_at_ms=GetTickCount64(); }
     state_.phase="refused"; owner_->fail(SessionFault::native_campaign); return false;
 }
 void Campaign::refuse(const char* reason) { std::lock_guard<std::recursive_mutex> lock(mutex_); if (state_.enabled) reject(reason); }
@@ -110,7 +111,7 @@ bool Campaign::allow_access(uintptr_t data,const std::string& directory,bool wri
         owner_->native_io() && directory==directory_) return true;
     if (!owner_->accepts_requests() || !initiated_ || directory!=directory_ || erase)
         return reject("campaign_access_outside_authorized_slot");
-    if (write) return state_.map_active || reject("campaign_write_before_native_map");
+    if (write) return state_.save_ready || state_.map_active || reject("campaign_write_before_native_map");
     if (!state_.resumed || state_.phase!="resume_requested" || (load_data_ && load_data_!=data))
         return reject("unassociated_campaign_load");
     load_data_=data; return true;
@@ -122,7 +123,8 @@ bool Campaign::save_record(const std::string& record,bool create) {
 bool Campaign::write_started(uint64_t operation,const std::string& directory,bool native_factory_matched) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled || directory=="PROFILE") return true;
-    if (!native_factory_matched || !operation || directory!=directory_ || !state_.map_active || state_.phase=="native_save_pending") return reject("save_operation_conflict");
+    if (!owner_->accepts_requests() || !native_factory_matched || !operation || directory!=directory_ ||
+        (!state_.map_active && !state_.save_ready) || state_.phase=="native_save_pending") return reject("save_operation_conflict");
     // Invalidate durable completion BEFORE this specific native write can mutate
     // its files. Interrupted/failed saves cannot reuse an older success receipt.
     if (!save_record(contract_+"state=native_save_pending\n",!checkpoint_exists_)) return false;
@@ -172,6 +174,10 @@ void Campaign::write_observed(uint64_t operation,bool terminal,bool successful,e
     SdkWriteObservation manifest;
     if (!successful || !state_.native_saved || !state_.readback_verified || !owner_->native_writes.readback_manifest(operation,manifest) ||
         manifest.directory!=directory_ || manifest.payloads.size()>64) { reject("native_checkpoint_completion_unproven"); return; }
+    if (!state_.map_active) { checkpoint_awaiting_transition_=std::move(manifest); return; }
+    persist_checkpoint(manifest,memory);
+}
+void Campaign::persist_checkpoint(const SdkWriteObservation& manifest,engine::Memory& memory) {
     ProfileChoice choice{}; ProfileWrite selection{};
     if (!owner_->profile_choice(choice) || !owner_->capture_profile_write(choice.name.data(),choice.index,0,selection) ||
         !owner_->persist_profile_write(selection,memory)) { reject("checkpoint_selection_persistence_failed"); return; }
@@ -210,19 +216,72 @@ void Campaign::parser_leave(uint32_t result) {
     state_.parser_result=result; state_.parser_completed=result==0;
     if (result) reject("native_load_parser_failed"); else state_.phase="parser_succeeded";
 }
-bool Campaign::map_begin(std::string map,uint64_t generation) {
+bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_); if (!state_.enabled) return true;
     if (!owner_->accepts_requests() || !initiated_ || map_pending_ || map.empty() || map.size()>191 ||
         (!state_.resumed && state_.phase!="native_start_queued") ||
         (state_.resumed && (!state_.parser_completed || state_.loaded_difficulty!=options_.difficulty || map!=state_.map))) return reject("unexpected_campaign_lifecycle");
     if (map.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.")!=std::string::npos)
         return reject("unsupported_native_map_name");
-    state_.map=std::move(map); state_.generation_before=generation; map_pending_=true; state_.map_active=false; return true;
+    state_.map=std::move(map); state_.generation_before=generation; map_pending_=true;
+    state_.transition.event_id=event_id; state_.transition.generation_before=generation;
+    state_.transition.generation_after=generation+1; state_.map_active=false; state_.save_ready=false;
+    return true;
 }
-void Campaign::map_end(bool success,uint64_t generation,uint32_t difficulty) {
+void Campaign::map_end(const CampaignTransition& result) {
     std::lock_guard<std::recursive_mutex> lock(mutex_); if (!state_.enabled || !map_pending_) return;
-    map_pending_=false; state_.generation_after=generation; state_.effective_difficulty=difficulty;
-    if (!success || generation<=state_.generation_before || difficulty!=options_.difficulty) { reject("native_map_or_difficulty_mismatch"); return; }
-    state_.map_active=true; state_.phase=state_.resumed ? "reopened" : "native_created";
+    const auto expected=state_.transition.event_id;
+    state_.transition=result; state_.generation_after=result.generation_after; state_.effective_difficulty=result.difficulty;
+    if (state_.reason!="none") return;
+    const char* reason=nullptr;
+    if (result.abnormal) reason="native_transition_abnormal";
+    else if (!result.observed || !result.ended) reason="native_transition_not_observed";
+    else if (!result.native_return) reason="native_transition_return_failed";
+    else if (!result.state_read) reason="native_transition_state_unreadable";
+    else if (result.observation_reason) reason="native_transition_observation_failed";
+    else if (!expected || result.event_id!=expected || result.depth!=1) reason="native_transition_association_mismatch";
+    else if (result.generation_before!=state_.generation_before || result.generation_after!=state_.generation_before+1) reason="native_transition_generation_mismatch";
+    else if (result.game==SC_GAME_MAIN_MENU || result.game==SC_GAME_LOADING) {
+        // ExecuteMapChange also has a successful early return while session
+        // readiness is pending. Only this generation's native writer can later
+        // confirm readiness; a diagnostic update or unrelated event cannot.
+        state_.phase="native_transition_pending"; return;
+    }
+    else if (result.game!=SC_GAME_IN_GAME) reason="native_transition_state_unsupported";
+    else if (!result.map_read) reason="native_transition_map_unreadable";
+    else if (state_.map!=result.map.data()) reason="native_transition_map_mismatch";
+    else if (!result.difficulty_read) reason="native_transition_difficulty_unreadable";
+    else if (result.difficulty!=options_.difficulty) reason="native_transition_difficulty_mismatch";
+    if (reason) { reject(reason); return; }
+    complete_map();
+}
+void Campaign::complete_map() {
+    map_pending_=false; state_.map_active=true; state_.save_ready=true;
+    if (!state_.operation) state_.phase=state_.resumed ? "reopened" : "native_created";
+    if (checkpoint_awaiting_transition_) {
+        // The native readback object may already have been destroyed. Retain
+        // its verified exact-operation hashes, not the borrowed native object.
+        engine::LocalMemory memory; persist_checkpoint(*checkpoint_awaiting_transition_,memory);
+        checkpoint_awaiting_transition_.reset();
+    }
+}
+bool Campaign::checkpoint_ready(const CampaignTransition& result) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!state_.enabled) return true;
+    state_.checkpoint_boundary=result;
+    if (!owner_->accepts_requests()) return false;
+    if (!initiated_ || !result.observed || result.observation_reason || result.depth>1 ||
+        result.generation_after!=state_.transition.generation_after) return reject("native_checkpoint_transition_unassociated");
+    if (!result.state_read || result.game!=SC_GAME_IN_GAME || !result.map_read || state_.map!=result.map.data())
+        return reject("native_checkpoint_map_not_ready");
+    if (!result.difficulty_read || result.difficulty!=options_.difficulty) return reject("native_checkpoint_difficulty_mismatch");
+    state_.save_ready=true;
+    if (map_pending_ && state_.transition.ended) {
+        // Preserve the original return's state/time. The separately recorded
+        // native writer confirms this pending generation's readiness.
+        state_.effective_difficulty=result.difficulty;
+        complete_map();
+    }
+    return owner_->accepts_requests();
 }
 }

@@ -3,15 +3,26 @@
 #include "save_storage.h"
 #include "save_sdk_write.h"
 #include <mutex>
+#include <optional>
 
 namespace sentinel::save {
 class Session;
+// Facts captured by the native lifecycle owner, never by diagnostic publication.
+struct CampaignTransition {
+    uint64_t event_id=0, generation_before=0, generation_after=0, native_return=0, at_ms=0;
+    uint32_t game=UINT32_MAX, depth=0, observation_reason=0, difficulty=UINT32_MAX;
+    bool observed=false, abnormal=false, state_read=false, map_read=false, difficulty_read=false, campaign=false, ended=false;
+    std::array<char,192> map{};
+};
 struct CampaignSnapshot {
     bool enabled = false, resumed = false, source_verified = false, parser_completed = false;
     bool native_saved = false, readback_verified = false, continuity_persisted = false, map_active = false, native_factory_matched = false;
     uint32_t difficulty = 4, effective_difficulty = 4, loaded_difficulty = 4, changes_blocked = 0, parser_result = 0;
     uint64_t operation = 0, checkpoint = 0, source_checkpoint = 0, generation_before = 0, generation_after = 0;
     std::string phase = "disabled", reason = "none", slot, map;
+    CampaignTransition transition, checkpoint_boundary;
+    uint64_t failure_at_ms=0;
+    bool save_ready=false;
 };
 // One deliberate native UI operation in one fresh process. No inspection API
 // initiates gameplay. Durable ownership/options and payload hashes survive PID
@@ -30,13 +41,16 @@ public:
     bool verify_source(engine::Memory&, uintptr_t data, uintptr_t image);
     bool parser_enter(uintptr_t data);
     void parser_leave(uint32_t result);
-    bool map_begin(std::string map, uint64_t generation);
-    void map_end(bool success, uint64_t generation, uint32_t effective_difficulty);
+    bool map_begin(std::string map, uint64_t generation, uint64_t event_id=0);
+    void map_end(const CampaignTransition&);
+    bool checkpoint_ready(const CampaignTransition&);
     void refuse(const char* reason);
     CampaignSnapshot snapshot() const;
 private:
     bool reject(const char*);
     bool save_record(const std::string&, bool create);
+    void persist_checkpoint(const SdkWriteObservation&,engine::Memory&);
+    void complete_map();
     bool parse_checkpoint(std::string_view);
     std::string checkpoint_text(const SdkWriteObservation&) const;
     mutable std::recursive_mutex mutex_;
@@ -47,5 +61,6 @@ private:
     std::vector<SdkFileWrite> expected_;
     uintptr_t load_data_ = 0;
     bool contract_created_ = false, checkpoint_exists_ = false, initiated_ = false, map_pending_ = false;
+    std::optional<SdkWriteObservation> checkpoint_awaiting_transition_;
 };
 }

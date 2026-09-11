@@ -36,6 +36,15 @@ class CampaignContinuity(unittest.TestCase):
                 self.stage('resume', root, difficulty, 'failed_parser')
                 self.stage('resume', root, difficulty, 'wrong_map')
 
+    def test_native_transition_and_initial_writer_boundaries(self):
+        for defect in ("native_return", "abnormal", "state_read", "generation", "difficulty", "nested", "initial_save", "initial_save_return_failed", "pending_transition", "partial_save", "save_failure", "unrelated", "extra_life", "ultra"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory(prefix="sentinel-boundary-") as root:
+                self.stage("create", root, 3, defect)
+                if defect in ("nested", "initial_save", "pending_transition"):
+                    self.stage("resume", root, 3)
+                elif defect in ("partial_save", "save_failure", "initial_save_return_failed"):
+                    self.stage("resume", root, 3, "refuse_configuration")
+
     def test_pending_native_save_never_reopens_or_becomes_new(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-campaign-') as root:
             self.stage('create', root, 2, 'pending')

@@ -11,6 +11,7 @@
 #include "save_profile_prerequisite.h"
 #include "save_readback.h"
 #include "native_target.h"
+#include "native_runtime.h"
 #include "MinHook.h"
 #include <intrin.h>
 #include <cstring>
@@ -20,7 +21,7 @@ namespace {
 SubmissionCalls submission_calls{};
 NativeSaveFactory original_save_factory = nullptr;
 SaveReference* save_factory_detour(uintptr_t manager, SaveReference* out, uint32_t user, uintptr_t request) {
-    return native_save_factory(session().native_writes, reinterpret_cast<uintptr_t>(_ReturnAddress()),
+    return campaign_save_factory(reinterpret_cast<uintptr_t>(_ReturnAddress()),
         submission_calls.factory_caller, manager, out, user, request, original_save_factory);
 }
 using RootInit = void (*)(uintptr_t);

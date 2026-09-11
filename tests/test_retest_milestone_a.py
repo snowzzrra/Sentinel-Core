@@ -245,6 +245,117 @@ class RetestWorkflowTests(unittest.TestCase):
         self.assertEqual(len(current['campaign_case']['launches']), 2)
         self.assertEqual(current['captures'], 2)
 
+    def test_campaign_failure_keeps_observing_through_transient_log_error_and_normal_close(self):
+        automatic = self.configure_campaign_fixture()
+        calls = []
+        def failed(run):
+            calls.append(run.state['campaign_case']['phase'])
+            if len(calls) == 2: raise OSError('temporary log sharing failure')
+            automatic(run)
+            row = run.state['automatic_log']['records'][0]
+            row['at_ms'] = 1000 + len(calls)
+            row['campaign'].update(reason='native_transition_return_failed', phase='refused', failure_at_ms=900,
+                native_saved=False, continuity_persisted=False, map_active=False)
+            row['profile'] = {'request_id': 1, 'first_failed_stage': 'write_after_refusal', 'first_failure': {'first_ms': 950}}
+        observations = []
+        def alive_then_close(config, prefix):
+            if 'observation-' in str(prefix):
+                observations.append(str(prefix))
+                self.assertTrue((self.game / 'sentinel-prelaunch.txt').exists())
+                if len(observations) == 3: raise retest.Refused('no_game_process')
+            return copy.deepcopy(self.observed)
+        self.process_mock.side_effect = alive_then_close
+        with mock.patch.object(retest.Run, 'collect_startup_log', failed):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        state, directory = self.state()
+        self.assertNotEqual(code, 0, output)
+        self.assertEqual(len(observations), 3)
+        self.assertEqual(output.count('Teste B falhou.'), 1)
+        self.assertTrue(all(phase == 'create' for phase in calls))
+        self.assertEqual(state['campaign_case']['runtime_proof'], 'failed_closed_and_compared')
+        self.assertEqual(state['comparison']['response']['result'], 'vanilla_campaign_unchanged')
+        self.assertFalse((self.game / 'sentinel-prelaunch.txt').exists())
+        report = self.report(directory)
+        self.assertEqual(report['native_failure']['fault'], 'native_campaign')
+        self.assertEqual(report['native_failure']['ordering'], 'campaign_before_profile')
+        self.assertEqual(report['campaign_case']['failure']['at_ms'], 900)
+
+    def failed_exit(self, interrupt):
+        automatic = self.configure_campaign_fixture()
+        self.config['ObservationSeconds'] = 0
+        retest.write_json(self.config_path, self.config)
+        alive = False
+        def stopped():
+            if alive: raise retest.protection.Refused('fixture process still alive')
+        def process(config, prefix):
+            nonlocal alive
+            if 'observation-' in str(prefix):
+                alive = True
+                if interrupt: raise KeyboardInterrupt()
+            return copy.deepcopy(self.observed)
+        def failed(run):
+            automatic(run)
+            run.state['automatic_log']['records'][0]['campaign'].update(reason='native_transition_return_failed', failure_at_ms=900)
+        self.process_mock.side_effect = process
+        with mock.patch.object(retest.Run, 'collect_startup_log', failed), mock.patch.object(retest.protection, 'require_stopped', stopped):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        state, directory = self.state()
+        self.assertNotEqual(code, 0, output)
+        self.assertEqual(state['campaign_case']['phase'], 'create')
+        self.assertEqual(state['comparison']['state'], 'not_performed')
+        self.assertFalse((self.game / 'sentinel-prelaunch.txt').exists())
+        self.assertEqual(len(list(directory.glob('*-shareable.zip'))), 1)
+        expected = 'operator_interrupted_partial_evidence' if interrupt else 'game_close_deadline_process_not_stopped'
+        self.assertIn(expected, output)
+
+    def test_failed_campaign_interruption_exports_partial_without_reactivation(self):
+        self.failed_exit(True)
+
+    def test_failed_campaign_deadline_exports_partial_without_second_launch(self):
+        self.failed_exit(False)
+
+    def test_prior_profile_event_remains_causal_before_campaign(self):
+        automatic = self.configure_campaign_fixture()
+        def failed(run):
+            automatic(run)
+            row = run.state['automatic_log']['records'][0]
+            row['campaign'].update(reason='native_transition_return_failed', failure_at_ms=900)
+            row['profile'] = {'request_id': 1, 'first_failed_stage': 'decode', 'first_failure': {'first_ms': 800}}
+        with mock.patch.object(retest.Run, 'collect_startup_log', failed):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        _, directory = self.state()
+        self.assertNotEqual(code, 0, output)
+        self.assertEqual(self.report(directory)['native_failure']['ordering'], 'profile_before_campaign')
+        self.assertEqual(self.report(directory)['native_failure']['fault'], 'native_profile')
+
+    def test_explicit_corrective_case_preserves_failed_case_and_allows_new_two_launches(self):
+        automatic = self.configure_campaign_fixture()
+        def failed(run):
+            automatic(run)
+            run.state['automatic_log']['records'][0]['campaign']['reason'] = 'native_transition_return_failed'
+        with mock.patch.object(retest.Run, 'collect_startup_log', failed):
+            code, _ = self.stage('RUN', '--scenario', 'B')
+        self.assertNotEqual(code, 0)
+        old, directory = self.state()
+        old_path = directory / 'private/state.json'
+        original = old_path.read_bytes()
+        recovery = self.root / 'exact-failed-case-recovery.json'
+        retest.write_json(recovery, {'run_id': old['run_id'], 'comparison': old['comparison']['response'],
+            'reference_manifest_sha256': old['protection']['reference_manifest_sha256'],
+            'retained_evidence_sha256': {str(old_path): retest.sha(old_path)}})
+        self.config['CorrectiveCase'] = {'run_id': old['run_id'], 'state_sha256': retest.sha(old_path),
+            'recovery_file': str(recovery), 'recovery_sha256': retest.sha(recovery)}
+        retest.write_json(self.config_path, self.config)
+        with mock.patch.object(retest.Run, 'collect_startup_log', automatic):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        current, current_dir = self.state()
+        self.assertEqual(code, 0, output)
+        self.assertNotEqual(current_dir, directory)
+        self.assertEqual(old_path.read_bytes(), original)
+        self.assertEqual(current['corrects_case']['run_id'], old['run_id'])
+        self.assertNotEqual(current['campaign_case']['generation_fingerprint'], old['campaign_case']['generation_fingerprint'])
+        self.assertEqual(current['campaign_case']['phase'], 'completed')
+
     def test_run_protection_native_refusal_all_queries_and_one_report(self):
         self.process_mock.side_effect = self.closed_after_capture
         self.query_responses["save_admission"] = lambda response, code: ({**response, "state": "rejected"}, 8)

@@ -1,6 +1,7 @@
 #include "native_target.h"
 #include "save_session.h"
 #include "save_native_hooks.h"
+#include "save_campaign_native.h"
 #include "MinHook.h"
 #include "protocol.h"
 #include <windows.h>
@@ -132,6 +133,9 @@ int wmain(int argc,wchar_t** argv) {
  CHECK(!save::validate_native_helpers(null_import,memory,image,initializer));
  CHECK(null_import.inspect().primary_failure.stage==SC_INSTALL_STEAM_IMPORT && null_import.inspect().primary_failure.read_reason==0);
  memory.zero=0; save::Installation helpers; CHECK(save::validate_native_helpers(helpers,memory,image,initializer));
- std::printf("PASS supported disk image: %u targets and reference-copy caller; nonexecuting mapping, no loaded-game claim\n",record.inspect().validated);
+ save::Installation campaign;
+ for(const auto& target:save::campaign_targets(image.base))
+  CHECK(native::validate_recorded(campaign,memory,image,target,stop,GetTickCount64()+3000,4,campaign.inspect().validated)==SC_NATIVE_NONE);
+ std::printf("PASS supported disk image: %u save targets, %u campaign/UI targets and reference-copy caller; nonexecuting mapping, no loaded-game claim\n",record.inspect().validated,campaign.inspect().validated);
  CHECK(RtlDeleteFunctionTable(entries)); CloseHandle(stop); UnmapViewOfFile(bytes); CloseHandle(mapping); CloseHandle(file);
 }

@@ -20,4 +20,8 @@ struct TestAdapter {
     void (*gate)(bool executed); // Deterministic race gate in this test build only.
 };
 void test_start(const TestAdapter& adapter, const Snapshot& identity, HANDLE stop);
+void test_events(const engine::Binding&, uint64_t (*change)(uintptr_t,uintptr_t,uintptr_t));
+uint64_t test_change(uintptr_t root, uintptr_t descriptor, uintptr_t files);
+void test_free(uintptr_t root,void (*free)(uintptr_t,uintptr_t));
+void test_generation_gap();
 }

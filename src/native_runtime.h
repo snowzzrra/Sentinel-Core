@@ -17,4 +17,5 @@ sc_save_backup_snapshot backup_result(const sc_save_backup_request&, bool cancel
 // possible. True permanently requires retaining this Core instance to exit.
 bool stop();
 bool retained();
+save::CampaignTransition checkpoint_transition();
 }

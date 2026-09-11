@@ -472,6 +472,25 @@ def safe_response(query, value):
 
 
 class Run:
+    @staticmethod
+    def corrective_case(config):
+        authorized = config.get('CorrectiveCase')
+        if not authorized: return None
+        run_id = authorized.get('run_id', '')
+        if not re.fullmatch(r'retest-[0-9a-f]{32}', run_id): raise Refused('corrective_case_identity_invalid')
+        old = Path(config['EvidenceRoot']) / run_id / 'private/state.json'
+        recovery = Path(authorized['recovery_file'])
+        if sha(old) != authorized['state_sha256'] or sha(recovery) != authorized['recovery_sha256']:
+            raise Refused('corrective_case_retained_evidence_changed')
+        state, receipt = read_json(old), read_json(recovery)
+        if (state.get('run_id') != run_id or not state.get('finished') or not state.get('campaign_case') or
+            receipt.get('run_id') != run_id or receipt.get('comparison', {}).get('result') != 'vanilla_campaign_unchanged' or
+            receipt.get('reference_manifest_sha256') != state['protection']['reference_manifest_sha256'] or
+            receipt.get('retained_evidence_sha256', {}).get(str(old)) != authorized['state_sha256']):
+            raise Refused('corrective_case_safety_not_established')
+        return {'run_id': run_id, 'state_sha256': authorized['state_sha256'], 'recovery_sha256': authorized['recovery_sha256'],
+            'outcome': 'failed_preserved_exact_comparison_unchanged'}
+
     def __init__(self, config_path, stage, scenario=None, resume_case=None):
         self.config_path = Path(config_path)
         current = load_config(self.config_path)
@@ -492,6 +511,7 @@ class Run:
             self.state['finished'] = False
             return
         if stage in ("START", "RUN", "PREPARE"):
+            corrective = self.corrective_case(current)
             completed_reference = False
             prior = list(current.get("PriorRuns", []))
             if self.reference.exists():
@@ -502,7 +522,8 @@ class Run:
                 prior.append(str(previous_directory))
                 previous_state = read_json(previous_directory / 'private/state.json')
                 if stage == 'RUN' and previous_state.get('campaign_case', {}).get('phase') not in (None, 'completed'):
-                    raise Refused('pending_campaign_case_requires_explicit_ResumeCase_' + previous['run_id'])
+                    if not corrective or corrective['run_id'] != previous['run_id']:
+                        raise Refused('pending_campaign_case_requires_explicit_ResumeCase_' + previous['run_id'])
                 completed_reference = True
             self.config = current
             self.directory = Path(current["EvidenceRoot"]) / ("retest-" + uuid.uuid4().hex)
@@ -514,6 +535,9 @@ class Run:
                           "prior_runs": list(dict.fromkeys(prior)), "preparation": {"state": "not_performed"},
                           "primary_failure": None, "secondary_failures": [],
                           "debug_capture": {"state": "unavailable", "reason": "optional_process_filtered_capture_not_configured"}}
+            if corrective:
+                self.state['corrects_case'] = corrective
+                self.state['prior_runs'] = list(dict.fromkeys([*self.state['prior_runs'], str(Path(current['EvidenceRoot']) / corrective['run_id'])]))
             write_json(self.directory / "private/config.json", current, create=True)
             self.reference.parent.mkdir(parents=True, exist_ok=True)
             write_json(self.reference, {"run_directory": str(self.directory), "run_id": self.directory.name}, create=not completed_reference)
@@ -812,8 +836,20 @@ class Run:
         records = self.state.get('automatic_log', {}).get('records', [])
         current = next((row['campaign'] for row in reversed(records) if row.get('campaign', {}).get('enabled')), {})
         if not current: return {}
-        if current.get('reason') != 'none': raise Refused('native_campaign_' + str(current.get('reason')))
-        if current.get('difficulty') != case['options']['difficulty']: raise Refused('native_campaign_options_mismatch')
+        if current.get('reason') != 'none' or current.get('difficulty') != case['options']['difficulty']:
+            if not case.get('failure'):
+                causal = next((r for r in records if r.get('campaign', {}).get('reason') not in (None, 'none')), records[-1])
+                fact = causal.get('campaign', current)
+                case['failure'] = {'reason': fact.get('reason') if fact.get('reason') != 'none' else 'options_mismatch',
+                    'at_ms': fact.get('failure_at_ms') or causal.get('at_ms'),
+                    'timing': 'native_event' if fact.get('failure_at_ms') else 'first_failed_sample',
+                    'clock': 'GetTickCount64_ms_exact_process', 'campaign': fact}
+                case['runtime_proof'] = 'failed_observing_until_normal_exit'
+                self.fail(Refused('native_campaign_' + str(case['failure']['reason'])), 'native_campaign')
+                print('Teste B falhou. Feche DOOM e Steam normalmente. A coleta segura continua; nao avance para outro checkpoint ou segundo lancamento.')
+                self.save()
+            return current
+        if case.get('failure'): return current
         if current.get('continuity_persisted') and not current.get('resumed') and current.get('phase') == 'checkpoint_saved':
             message = 'Checkpoint nativo confirmado e verificado. Pode fechar DOOM e Steam normalmente; a segunda abertura usara a mesma identidade.'
         elif current.get('resumed') and current.get('source_verified') and current.get('parser_completed') and current.get('map_active'):
@@ -827,6 +863,10 @@ class Run:
         case = self.state['campaign_case']; phase = case['phase']
         current = self.campaign_progress()
         self.compare_campaign_launch()
+        if case.get('failure'):
+            case['runtime_proof'] = 'failed_closed_and_compared'
+            self.save()
+            raise Refused('campaign_failed_preserved_do_not_recreate')
         records = self.state.get('automatic_log', {}).get('records', [])
         admission = records[-1].get('admission', {}) if records else {}
         valid = (current.get('effective_difficulty') == case['options']['difficulty'] and
@@ -892,7 +932,7 @@ class Run:
             if sha(descriptor['path']) != descriptor['sha256']: raise Refused('campaign_descriptor_changed')
             validate_candidate(self.config, installed=True)
             self.state['descriptor'] = descriptor['path']; self.save()
-            instruction = ('Protecao pronta. Internet ligada: abra Steam e DOOM. Escolha New Game na campanha Base; a dificuldade da sala e fixa. '
+            instruction = ('Protecao pronta. Internet ligada: abra Steam e DOOM. Escolha New Game na campanha Base, sem escolher dificuldade; a sala define o valor. '
                 'Jogue ate o primeiro checkpoint e aguarde a confirmacao abaixo antes de sair.' if case['phase'] == 'create' else
                 'Segunda protecao pronta. Abra Steam e DOOM novamente e escolha Continue no mesmo slot AP. Confirme que o checkpoint e jogavel.')
             self.observe_launch(prepare=False, instruction=instruction)
@@ -926,20 +966,26 @@ class Run:
             rows.append({**scalars(item, ("schema", "control_sha256", "pid", "process_created", "build_id", "at_ms", "engine_reason")), "profile": profile,
                 'campaign': scalars(item.get('campaign', {}), ('enabled', 'resumed', 'phase', 'reason', 'slot', 'map', 'difficulty',
                     'effective_difficulty', 'loaded_difficulty', 'changes_blocked', 'source_verified', 'parser_completed', 'parser_result', 'native_saved',
-                    'readback_verified', 'continuity_persisted', 'native_factory_matched', 'operation', 'checkpoint', 'source_checkpoint', 'generation_before', 'generation_after', 'map_active')),
+                    'readback_verified', 'continuity_persisted', 'native_factory_matched', 'operation', 'checkpoint', 'source_checkpoint', 'generation_before', 'generation_after', 'map_active',
+                    'save_ready', 'failure_at_ms', 'transition_event', 'transition_at_ms', 'native_return', 'transition_depth', 'transition_observation_reason',
+                    'transition_observed', 'transition_ended', 'transition_abnormal', 'transition_state', 'transition_state_read', 'transition_map_read', 'transition_difficulty_read',
+                    'transition_map', 'checkpoint_at_ms', 'checkpoint_generation', 'checkpoint_depth', 'checkpoint_state', 'checkpoint_difficulty',
+                    'checkpoint_state_read', 'checkpoint_map_read', 'checkpoint_difficulty_read')),
                 "admission": scalars(item.get("admission", {}), ("state", "fault", "flags", "prepared_routes", "required_routes", "namespace_id")),
                 "installation": {**scalars(item.get("installation", {}), ("phase", "sequence", "startup_observation", "last_completed_stage", "validated", "created", "enabled")),
                     **{key: scalars(item.get("installation", {}).get(key) or {},
                       ("sequence", "stage", "reason", "at_ms", "duration_ms", "target_group", "target_index", "rva", "result", "win32_error", "minhook_status", "read_reason", "expected_bytes", "actual_bytes"))
                        for key in ("primary_failure", "cleanup_failure", "active")}}})
         self.state["automatic_log"] = {"state": "captured", "truncated": len(raw) > MAX_STARTUP_LOG, "records": rows[:128]}
+        if self.state.get('campaign_case'): self.campaign_progress()
         profile_failure = next((row["profile"] for row in rows
             if row["profile"].get("first_failed_stage") not in (None, "none") and row["profile"].get("request_id")), None)
         if profile_failure and not self.state.get("profile_failure_reported"):
             self.state["profile_failure_reported"] = True
             stage = profile_failure["first_failed_stage"]
             predicate = profile_failure["first_failure"].get("predicate", "predicate_unavailable")
-            self.fail(protection.Refused("native PROFILE initialization: " + stage + ": " + predicate,
+            label = 'native PROFILE after admission: ' if stage == 'write_after_refusal' else 'native PROFILE initialization: '
+            self.fail(protection.Refused(label + stage + ": " + predicate,
                 stage="profile_" + stage, distinction=predicate), "native_profile")
         target = self.directory / "private/automatic-startup.private.json"
         write_json(target, self.state["automatic_log"], create=not target.exists())
@@ -978,18 +1024,22 @@ class Run:
                 if time.monotonic() >= deadline: raise Refused("game_discovery_deadline_no_game_observed")
                 time.sleep(1)
             deadline = time.monotonic() + self.config.get("ObservationSeconds", 1800)
-            captures = 0; last_log = None; next_capture = 0
+            captures = 0; failure_captures = 0; last_log = None; next_capture = 0
             while self.state["process"].get("source") != "automatic_record_only":
-                self.collect_startup_log()
+                try: self.collect_startup_log()
+                except (OSError, ValueError) as error: self.fail(error, 'automatic_log_collection')
                 if launch: self.campaign_progress()
                 signature = json.dumps(self.state.get("automatic_log"), sort_keys=True)
                 retry_modules = self.state.get('capture_health', {}).get('module_state') != 'verified'
-                if captures < 8 and (captures == 0 or signature != last_log or (retry_modules and time.monotonic() >= next_capture)):
+                failed = bool(self.state.get('campaign_case', {}).get('failure'))
+                if (captures < 8 or (failed and failure_captures < 8)) and (captures == 0 or signature != last_log or
+                        ((retry_modules or failed) and time.monotonic() >= next_capture)):
                     try: self.capture()
                     except (Refused, protection.Refused, OSError, ValueError) as error:
                         self.fail(error, "safe_capture")
                         if 'replaced' in str(error) or 'identity_mismatch' in str(error) or str(error) == 'loaded_module_identity_verified_mismatch': raise
                     captures += 1; last_log = signature
+                    if failed: failure_captures += 1
                     next_capture = time.monotonic() + 30
                 attempt += 1
                 try:
@@ -1001,7 +1051,8 @@ class Run:
                     raise
                 if time.monotonic() >= deadline: raise Refused("game_close_deadline_process_not_stopped")
                 time.sleep(1)
-            self.collect_startup_log()
+            try: self.collect_startup_log()
+            except (OSError, ValueError) as error: self.fail(error, 'automatic_log_collection')
             print("DOOM fechado. Aguardando Steam encerrar para comparar a referencia deste run.")
             deadline = time.monotonic() + self.config.get("CloseSeconds", 180)
             while True:
@@ -1105,7 +1156,11 @@ class Run:
             return  # Export cannot reattribute later legitimate changes to a completed test.
         self.state["operator"] = {"attribution": "operator_supplied_not_script_verified", "catalog": args.catalog,
                                   "selection": args.selection, "rollback": args.rollback, "note": redact(args.note, self.config)}
-        if self.state.get('campaign_case') and self.state.get('comparison', {}).get('state') == 'completed': return
+        if self.state.get('campaign_case') and self.state.get('comparison', {}).get('state') == 'completed':
+            self.state['finished'] = True
+            self.state['finished_utc'] = utc()
+            self.save()
+            return
         if self.state.get("process") and self.state.get("capture_health", {}).get("module_state") in ('not_yet_observable', 'collection_unavailable'):
             self.fail(Refused("loaded_module_identity_not_established"), "capture_health")
         comparison = {"state": "not_performed", "reason": "game_not_observed_and_no_activation"}
@@ -1184,6 +1239,23 @@ class Run:
             native_failure = next((r["admission"] for r in logged if r.get("admission", {}).get("state") in (4, 5)), {})
         report["native_failure"] = {**scalars(native_failure, ("state", "fault")),
             "first_failed_stage": trace.get("first_failed_stage", "not_observed"), "first_failure": trace.get("first_failure", {})} if native_failure else None
+        campaign_failure = self.state.get('campaign_case', {}).get('failure')
+        if campaign_failure:
+            profile_time = trace.get('first_failure', {}).get('first_ms')
+            campaign_time = campaign_failure.get('at_ms')
+            profile_stage = trace.get('first_failed_stage')
+            # Native event times and failed-sample bounds share GetTickCount64
+            # for this exact process. Collector invocation order is not evidence.
+            before_profile = bool(campaign_time and profile_time and campaign_time < profile_time)
+            before_campaign = bool(campaign_failure.get('timing') == 'native_event' and campaign_time and
+                profile_time and profile_time < campaign_time and profile_stage != 'write_after_refusal')
+            if before_campaign:
+                report['native_failure'] = {'fault': 'native_profile', 'first_failed_stage': profile_stage,
+                    'first_failure': trace.get('first_failure'), 'campaign_aftermath': campaign_failure, 'ordering': 'profile_before_campaign'}
+            else:
+                report['native_failure'] = {'fault': 'native_campaign', 'first_failed_stage': 'campaign_entry_or_checkpoint',
+                    'first_failure': campaign_failure, 'profile_aftermath': profile_stage,
+                    'ordering': 'campaign_before_profile' if before_profile else 'sampled_order_not_established'}
         if process and logged and report["admission_observation"] == "not_established":
             if logged[-1].get("admission", {}).get("state") in (4, 5): report["admission_observation"] = "native_refusal_in_automatic_record"
         installations = [i.get("response", {}).get("installation", {}) for i in report["commands"] if i["query"] == "save_installation"]
@@ -1198,13 +1270,17 @@ class Run:
             report['campaign_case'].update(options=case['options'], launches=case['launches'])
             report['campaign_case']['namespace_id'] = self.state.get('namespace_id')
             report['campaign_case']['backup_verified'] = 'not_requested_or_required'
+            report['campaign_case']['failure'] = case.get('failure')
+            report['campaign_case']['corrects_case'] = self.state.get('corrects_case')
         summary = ["Milestone " + self.config['Scenario'] + " RUN", "", "Preparation: " + report["preparation"]["state"],
                    "Game: " + report["game_observation"], "Hook installation: " + report["hook_installation"], "AP admission: " + report["admission_observation"],
                    "Expected routes: " + str(report["expected"]["required_routes"]), "Runtime PASS: not claimed.", ""]
         if case:
             summary += ['Campaign case: ' + case['phase'], 'Immutable synthetic slot difficulty: ' + str(case['options']['difficulty']),
                 'Native create/save/reopen evidence: ' + case['runtime_proof'], 'Playable checkpoint and settings require maintainer confirmation.']
-            if case['phase'] != 'completed':
+            if case.get('failure'):
+                summary.append('Failed case preserved; no second launch or automatic recreation. Close normally on failure; collection continues until exit or the bounded deadline.')
+            elif case['phase'] != 'completed':
                 summary.append('Explicit continuation: the same RUN command with -ResumeCase ' + self.state['run_id'] +
                     '; close DOOM and Steam first. Unproved creation is never retried or overwritten.')
         if report["native_failure"]:

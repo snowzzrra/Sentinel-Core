@@ -104,7 +104,7 @@ uint32_t backup_prerequisite(const sc_save_backup_request& request) {
     if (owner.state() != save::SessionState::admitted || !owner.accepts_requests()) return SC_NATIVE_BINDING_FAILED;
     return std::memcmp(owner.namespace_id().data(), request.namespace_id, 64) ? SC_NATIVE_SCOPE_MISMATCH : SC_NATIVE_NONE;
 }
-bool begin_event(uintptr_t root, bool change, uintptr_t descriptor) {
+bool begin_event(uintptr_t root, bool change, uintptr_t descriptor, save::CampaignTransition* transition=nullptr) {
     if (!accepting.load(std::memory_order_acquire)) return false;
     // Root binding and same native execution role are necessary independently
     // of frame recurrence. Other-thread nesting is never deduplicated as ours.
@@ -120,7 +120,7 @@ bool begin_event(uintptr_t root, bool change, uintptr_t descriptor) {
     uint8_t flag = 0;
     bool known = false;
 #ifdef SC_NATIVE_TESTING
-    if (fixture_active) known = change && fixture.checkpoint(descriptor, flag);
+    if (fixture_active && fixture.checkpoint) known = change && fixture.checkpoint(descriptor, flag);
     else
 #endif
     known = change && read(descriptor + 0x1961, flag);
@@ -129,16 +129,21 @@ bool begin_event(uintptr_t root, bool change, uintptr_t descriptor) {
         if (!--event_depth) event_thread.store(0, std::memory_order_release);
         return false;
     }
+    if (transition) transition->generation_before=lifetime.generation;
     lifetime.begin(change, known, (flag & 2) != 0, GetTickCount64(), GetCurrentThreadId());
+    if (transition) {
+        transition->event_id=lifetime.sequence; transition->generation_after=lifetime.generation;
+        transition->depth=lifetime.depth; transition->observed=true;
+    }
     clear_context(SC_NATIVE_TRANSITION);
     ReleaseSRWLockExclusive(&lock);
     return true;
 }
-void end_event(bool change, bool success, bool abnormal) {
+void end_event(bool change, bool success, bool abnormal, save::CampaignTransition* transition=nullptr) {
     uint32_t game = UINT32_MAX;
     bool readable = false;
 #ifdef SC_NATIVE_TESTING
-    if (fixture_active) { game = fixture.game(); readable = true; }
+    if (fixture_active && fixture.game) { game = fixture.game(); readable = true; }
     else
 #endif
     readable = read(binding.root + 0x44, game);
@@ -146,9 +151,15 @@ void end_event(bool change, bool success, bool abnormal) {
     epoch.fetch_add(1, std::memory_order_acq_rel);
     if (TryAcquireSRWLockExclusive(&lock)) {
         lifetime.end(change, success && !abnormal, game, GetTickCount64(), GetCurrentThreadId());
+        if (transition) transition->generation_after=lifetime.generation;
         clear_context(SC_NATIVE_CONTEXT_UNAVAILABLE);
         ReleaseSRWLockExclusive(&lock);
     } else invalidate(SC_NATIVE_EVENT_GAP);
+    if (transition) {
+        transition->game=game; transition->state_read=readable; transition->abnormal=abnormal;
+        transition->ended=true; transition->at_ms=GetTickCount64();
+        transition->observation_reason=fault.load(std::memory_order_acquire);
+    }
     if (!--event_depth) event_thread.store(0, std::memory_order_release);
 }
 void post_frame() {
@@ -287,14 +298,18 @@ void frame_detour(uintptr_t self) {
     }
 }
 uint64_t change_detour(uintptr_t root, uintptr_t descriptor, uintptr_t files) {
-    if (!save::campaign_change_begin(root, descriptor, inspect().scope.lifecycle_generation)) return 0;
-    const bool observe = begin_event(root, true, descriptor);
+    save::CampaignTransition transition{};
+    const bool observe = begin_event(root, true, descriptor, &transition);
+    if (!save::campaign_change_begin(root, descriptor, transition)) {
+        if (observe) end_event(true,false,false,&transition);
+        return 0;
+    }
     uint64_t result = 0;
     __try { result = original_change(root, descriptor, files); }
     __finally {
-        if (observe) end_event(true, result != 0, AbnormalTermination() != FALSE);
-        const auto current = inspect();
-        save::campaign_change_end(result != 0 && AbnormalTermination() == FALSE, current.scope.lifecycle_generation, current.game_state);
+        transition.native_return=result; transition.abnormal=AbnormalTermination()!=FALSE;
+        if (observe) end_event(true, result != 0, transition.abnormal, &transition);
+        save::campaign_change_end(transition);
     }
     return result;
 }
@@ -303,7 +318,7 @@ void free_detour(uintptr_t root, uintptr_t slot) {
     bool primary = root == binding.root && slot == root + 0x50;
     bool readable = !primary || read(slot, map);
 #ifdef SC_NATIVE_TESTING
-    if (fixture_active) { primary = root == binding.root && fixture.primary(slot, map); readable = true; }
+    if (fixture_active && fixture.primary) { primary = root == binding.root && fixture.primary(slot, map); readable = true; }
 #endif
     if (primary && !readable && accepting.load()) invalidate(SC_NATIVE_READ_FAILED);
     const bool observe = primary && readable && map && begin_event(root, false, 0);
@@ -531,7 +546,27 @@ bool stop() {
     return retained();
 }
 bool retained() { return pinned.load(std::memory_order_acquire) || save::owner_retained(); }
+save::CampaignTransition checkpoint_transition() {
+    save::CampaignTransition result{};
+    result.at_ms=GetTickCount64();
+    if (owner_thread()!=GetCurrentThreadId()) { result.observation_reason=SC_NATIVE_WRONG_THREAD; return result; }
+    AcquireSRWLockShared(&lock);
+    result.generation_after=lifetime.generation; result.depth=lifetime.depth;
+    result.observation_reason=fault.load(); result.observed=accepting.load();
+    ReleaseSRWLockShared(&lock);
+    return result;
+}
 #ifdef SC_NATIVE_TESTING
+void test_events(const engine::Binding& source, uint64_t (*change)(uintptr_t,uintptr_t,uintptr_t)) {
+    binding=source; fixture={}; fixture.owner=[]() -> uint32_t { return GetCurrentThreadId(); }; fixture_active=true;
+    lifetime={}; lifetime.begin(true,true,false,GetTickCount64(),GetCurrentThreadId());
+    lifetime.end(true,true,SC_GAME_MAIN_MENU,GetTickCount64(),GetCurrentThreadId());
+    status={}; status.game_state=SC_GAME_MAIN_MENU; event_depth=0; event_thread=0;
+    original_change=change; fault=0; gaps=0; accepting=true;
+}
+uint64_t test_change(uintptr_t root, uintptr_t descriptor, uintptr_t files) { return change_detour(root,descriptor,files); }
+void test_free(uintptr_t root,void (*free)(uintptr_t,uintptr_t)) { original_free=free; free_detour(root,root+0x50); }
+void test_generation_gap() { ++lifetime.generation; }
 void test_start(const TestAdapter& adapter, const Snapshot& identity, HANDLE stop_event) {
     fixture = adapter; fixture_active = true;
     engine::LocalMemory memory; engine::Binding source;
