@@ -14,7 +14,15 @@ struct CampaignTransition {
     bool observed=false, abnormal=false, state_read=false, map_read=false, difficulty_read=false, campaign=false, ended=false;
     std::array<char,192> map{};
 };
+struct ParserObservation {
+    uint64_t at_ms=0;
+    uintptr_t caller=0, data=0;
+    std::string directory, prefix, source="unreadable", disposition="not_observed";
+    uint32_t session_state=0;
+    bool directory_read=false, prefix_read=false, native_completion=false, exact_resume=false;
+};
 struct CampaignSnapshot {
+    ParserObservation parser_observation;
     bool enabled = false, resumed = false, source_verified = false, parser_completed = false;
     bool native_saved = false, readback_verified = false, continuity_persisted = false, map_active = false, native_factory_matched = false;
     uint32_t difficulty = 4, effective_difficulty = 4, loaded_difficulty = 4, changes_blocked = 0, parser_result = 0;
@@ -40,6 +48,7 @@ public:
     void write_observed(uint64_t operation, bool terminal, bool successful, engine::Memory&);
     bool verify_source(engine::Memory&, uintptr_t data, uintptr_t image);
     bool parser_enter(uintptr_t data);
+    void observe_parser(ParserObservation);
     void parser_leave(uint32_t result);
     bool map_begin(std::string map, uint64_t generation, uint64_t event_id=0);
     void map_end(const CampaignTransition&);

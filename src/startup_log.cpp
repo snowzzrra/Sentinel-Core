@@ -6,6 +6,29 @@
 #include <cstdio>
 namespace sentinel::startup_log {
 namespace {
+std::string startup_route(const save::UnroutedTrace& t) {
+    const auto flag=[](bool value){return value?"true":"false";};
+    return std::string("{\"at_ms\":")+std::to_string(t.at_ms)+",\"adapter\":\""+t.route+
+        "\",\"operation\":\""+t.operation+"\",\"session_state\":"+std::to_string(static_cast<uint32_t>(t.state))+
+        ",\"native_phase\":\""+(t.startup_entered?"root_entered":"before_root_observation")+"\",\"startup_entered\":"+flag(t.startup_entered)+
+        ",\"root_qualified\":"+flag(t.root_qualified)+",\"manager_available\":"+flag(t.manager!=0)+
+        ",\"provider_available\":"+flag(t.provider!=0)+",\"native_user_available\":"+flag(t.identity!=0)+
+        ",\"delegated_account_query\":"+flag(t.delegated_account_query)+",\"caller_class\":\""+(t.caller?"native_return_address_retained":"unavailable")+
+        "\",\"private\":{\"manager\":"+std::to_string(t.manager)+",\"provider\":"+std::to_string(t.provider)+
+        ",\"native_user\":"+std::to_string(t.identity)+",\"caller\":"+std::to_string(t.caller)+",\"caller_rva\":"+std::to_string(t.caller_rva)+"}}";
+}
+std::string private_hex(const std::string& input) {
+    constexpr char digits[]="0123456789abcdef"; std::string out;
+    for (unsigned char c: input) { out+=digits[c>>4]; out+=digits[c&15]; } return out;
+}
+std::string parser_trace(const save::ParserObservation& p) {
+    const auto flag=[](bool value){return value?"true":"false";};
+    return std::string("{\"at_ms\":")+std::to_string(p.at_ms)+",\"source\":\""+p.source+"\",\"disposition\":\""+p.disposition+
+        "\",\"session_state\":"+std::to_string(p.session_state)+",\"directory_read\":"+flag(p.directory_read)+
+        ",\"prefix_read\":"+flag(p.prefix_read)+",\"native_completion\":"+flag(p.native_completion)+",\"exact_resume\":"+flag(p.exact_resume)+
+        ",\"private\":{\"data\":"+std::to_string(p.data)+",\"caller\":"+std::to_string(p.caller)+
+        ",\"directory_hex\":\""+private_hex(p.directory)+"\",\"prefix_hex\":\""+private_hex(p.prefix)+"\"}}";
+}
 SRWLOCK guard = SRWLOCK_INIT;
 HANDLE file = INVALID_HANDLE_VALUE;
 bool opened = false;
@@ -43,7 +66,19 @@ std::string profile(const save::ProfileTrace& trace) {
         if (i) out += ',';
         out += "\"" + std::string(names[i]) + "\":" + profile_step(trace.steps[i]);
     }
-    return out + "}}";
+    const auto& o = trace.ownership;
+    const auto yes = [](bool value) { return value ? "true" : "false"; };
+    const auto identity = [](const save::ProfileOwner& value) {
+        return "{\"profile\":" + std::to_string(value.profile) + ",\"manager\":" + std::to_string(value.manager) +
+            ",\"shell\":" + std::to_string(value.shell) + ",\"user_handle\":" + std::to_string(value.user) + "}";
+    };
+    return out + "},\"ownership\":{\"lifetime\":\"qualified_startup_session\",\"baseline_ready\":" + yes(o.baseline_ready) +
+        ",\"session_live\":" + yes(o.session_live) + ",\"stable_owner\":" + yes(o.stable_owner) +
+        ",\"same_profile\":" + yes(o.initial.profile == o.latest.profile) + ",\"same_manager\":" + yes(o.initial.manager == o.latest.manager) +
+        ",\"same_shell\":" + yes(o.initial.shell == o.latest.shell) + ",\"same_user\":" + yes(o.initial.user == o.latest.user) +
+        "},\"ownership_private\":{\"initial\":" + identity(o.initial) + ",\"latest\":" + identity(o.latest) +
+        ",\"native_manager\":" + std::to_string(o.native_manager) + ",\"provider_control\":" + std::to_string(o.provider_control) +
+        ",\"provider_object\":" + std::to_string(o.provider_object) + ",\"platform_identity\":" + std::to_string(o.platform_identity) + "}}";
 }
 std::string event(const sc_install_event& e) {
     if (!e.sequence) return "null";
@@ -84,6 +119,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
             const auto campaign = save::session().campaign_run.snapshot();
             const auto flag=[](bool v){return v?"true":"false";};
             const auto campaign_json = std::string("{\"enabled\":")+flag(campaign.enabled)+
+                ",\"parser_trace\":"+parser_trace(campaign.parser_observation)+
                 ",\"resumed\":"+flag(campaign.resumed)+",\"phase\":\""+campaign.phase+"\",\"reason\":\""+campaign.reason+
                 "\",\"slot\":\""+campaign.slot+"\",\"map\":\""+campaign.map+"\",\"difficulty\":"+std::to_string(campaign.difficulty)+
                 ",\"effective_difficulty\":"+std::to_string(campaign.effective_difficulty)+",\"changes_blocked\":"+std::to_string(campaign.changes_blocked)+
@@ -125,7 +161,8 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"active\":" + event(install.active) + "},\"admission\":{\"state\":" + std::to_string(session.state) +
                 ",\"fault\":" + std::to_string(session.fault) + ",\"flags\":" + std::to_string(session.flags) +
                 ",\"prepared_routes\":" + std::to_string(session.prepared_routes) + ",\"required_routes\":" + std::to_string(session.required_routes) +
-                ",\"namespace_id\":\"" + session.namespace_id + "\"},\"profile\":" + profile(save::session().profile_trace())+",\"campaign\":"+campaign_json;
+                ",\"namespace_id\":\"" + session.namespace_id + "\"},\"startup_route\":" + startup_route(save::session().unrouted_trace()) +
+                ",\"profile\":" + profile(save::session().profile_trace())+",\"campaign\":"+campaign_json;
             if (facts != last) {
                 const auto& wide_key = prelaunch::diagnostic_key();
                 std::string control;

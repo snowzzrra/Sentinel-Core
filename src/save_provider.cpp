@@ -140,7 +140,16 @@ const SaveFutureVtable existence_vtable{destroy_existence, poll_existence};
 }
 SaveFuture** query_exists_scoped(Session& owner, engine::Memory& memory, SaveFuture** out,
         SaveReference* identity, const char* input, const ExistenceCalls& calls) {
-    if (!owner.routed()) { owner.unrouted_import(); return calls.query(out, identity, input); }
+    if (!owner.routed()) {
+        std::string name; uintptr_t native_identity = 0;
+        if (name_at(memory, input, name) && name == "PROFILE" && identity &&
+            at(memory, identity->control, 8, native_identity) && native_identity &&
+            owner.pre_root_profile_query(calls.provider.image_base + 0x1be4b3a, native_identity))
+            return calls.query(out, identity, input);
+        owner.unrouted_import("presence_query", "query", 0, native_identity);
+        if (owner.state() == SessionState::disabled) return calls.query(out, identity, input);
+        if (identity) calls.release(identity); *out = refused_save_future(); return out;
+    }
     auto future = std::unique_ptr<ExistenceFuture>(new (std::nothrow) ExistenceFuture);
     bool valid = false, shared_profile = false;
     try {

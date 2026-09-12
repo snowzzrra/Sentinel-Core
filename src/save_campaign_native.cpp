@@ -8,6 +8,7 @@
 #include "native_target.h"
 #include "MinHook.h"
 #include <cstring>
+#include <intrin.h>
 
 namespace sentinel::save {
 namespace {
@@ -120,7 +121,13 @@ uint64_t set_cvar(uintptr_t self,const char* value,uint8_t force) {
     return original_cvar(self,value,force);
 }
 uint64_t parse_game(SaveReference* data,uintptr_t files,uintptr_t prepared,uintptr_t request) {
-    uintptr_t object=0; const bool valid=data && read(data->control,8,object) && session().campaign_run.parser_enter(object);
+    uintptr_t object=0; const bool reference_valid=data && read(data->control,8,object);
+    ParserObservation observation; observation.caller=reinterpret_cast<uintptr_t>(_ReturnAddress()); observation.data=object;
+    observation.native_completion=observation.caller==image+0x148c1c1;
+    observation.directory_read=reference_valid && name(object,0,observation.directory);
+    observation.prefix_read=reference_valid && name(object,0x70,observation.prefix);
+    session().campaign_run.observe_parser(std::move(observation));
+    const bool valid=reference_valid && session().campaign_run.parser_enter(object);
     prior_campaign=true;
     if (!valid) {
         reinterpret_cast<ReleaseSaveReference>(image+0x367770)(data);

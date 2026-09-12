@@ -342,16 +342,16 @@ void run_provider_contracts(const std::function<std::unique_ptr<Session>()>& mak
         REQUIRE(query_exists_scoped(*owner, memory, &future, &identity, test == 21 ? nullptr : input.c_str(),
             {calls, original_query, release_query}) == &future && future && !identity.control);
         REQUIRE(identity_control[0] == 1 && identity_control[1] == 1 && query_releases == before_releases + 1);
-        const bool native = test == 15 || test == 16 || test == 17;
+        const bool native = test == 15 || test == 16;
         REQUIRE(query_native_calls == before_native + (native ? 1 : 0));
         if (native) REQUIRE(queried_native_name == input && future == refused_save_future());
         if (test == 16 || test == 17) REQUIRE(context_calls == before_context);
-        const bool invalid = (test >= 7 && test <= 12) || test == 14 || (test >= 19 && test <= 22);
+        const bool invalid = (test >= 7 && test <= 12) || test == 14 || (test >= 19 && test <= 22) || test == 17;
         const bool empty = test == 2 || test == 3 || test == 5 || test == 13;
         SaveResult result{}; future->vtable->poll(future, &result, nullptr);
         REQUIRE(result.state == 0 && result.outcome == (invalid || empty || native ? 1 : 0));
         REQUIRE(result.value == (empty ? 8u : invalid || native ? 1u : test == 1 || test == 23 ? 0u : 1u));
-        if (invalid) REQUIRE(owner->fault() == SessionFault::native_collection);
+        if (invalid && test != 17) REQUIRE(owner->fault() == SessionFault::native_collection);
         else if (test != 17) REQUIRE(owner->fault() == SessionFault::none);
         if (!invalid && !native) { future->vtable->poll(future, &result, nullptr); REQUIRE(result.state == 1); }
         future->vtable->destroy(future, 1);
@@ -669,7 +669,7 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
             }
             if (test == 13) current_campaign = "DLC1-";
             if (result.state == -1) future->vtable->poll(future, &result, nullptr);
-            const bool accepted = test == 0 || test == 9 || test == 10 || test == 11 || test >= 14;
+            const bool accepted = test == 0 || test == 9 || test == 10 || test == 11 || (test >= 14 && test != 18);
             REQUIRE(result.state == 0 && result.outcome == (accepted ? 0 : 1) && result.value == 1);
             future->vtable->destroy(future, 1); return accepted;
         }, test == 10);

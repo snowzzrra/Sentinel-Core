@@ -198,7 +198,8 @@ class RetestWorkflowTests(unittest.TestCase):
                 'difficulty': 3, 'effective_difficulty': 3, 'loaded_difficulty': 3 if resumed else 4, 'native_saved': not resumed, 'readback_verified': not resumed,
                 'continuity_persisted': True, 'native_factory_matched': not resumed, 'source_verified': resumed, 'parser_completed': resumed, 'map_active': True,
                 'checkpoint': 1, 'source_checkpoint': 1 if resumed else 0, 'map': 'game/sp/initial'}
-            run.state['automatic_log'] = {'state': 'recorded', 'records': [{'campaign': campaign,
+            run.state['automatic_log'] = {'state': 'recorded', 'records': [{'campaign': campaign, 'pid': run.state['process']['pid'],
+                'process_created': run.state['process']['process_created'], 'build_id': run.state['manifest']['build_id'],
                 'admission': {'state': 3, 'fault': 0, 'flags': 7, 'prepared_routes': 63, 'required_routes': 63, 'namespace_id': run.state['namespace_id']}}]}
         return automatic
 
@@ -256,7 +257,7 @@ class RetestWorkflowTests(unittest.TestCase):
             row['at_ms'] = 1000 + len(calls)
             row['campaign'].update(reason='native_transition_return_failed', phase='refused', failure_at_ms=900,
                 native_saved=False, continuity_persisted=False, map_active=False)
-            row['profile'] = {'request_id': 1, 'first_failed_stage': 'write_after_refusal', 'first_failure': {'first_ms': 950}}
+            row['profile'] = {'request_id': 1, 'first_failed_stage': 'write_after_refusal', 'first_failure': {'first_ms': 950, 'changed_ms': 950}}
         observations = []
         def alive_then_close(config, prefix):
             if 'observation-' in str(prefix):
@@ -320,7 +321,7 @@ class RetestWorkflowTests(unittest.TestCase):
             automatic(run)
             row = run.state['automatic_log']['records'][0]
             row['campaign'].update(reason='native_transition_return_failed', failure_at_ms=900)
-            row['profile'] = {'request_id': 1, 'first_failed_stage': 'decode', 'first_failure': {'first_ms': 800}}
+            row['profile'] = {'request_id': 1, 'first_failed_stage': 'decode', 'first_failure': {'first_ms': 800, 'changed_ms': 800}}
         with mock.patch.object(retest.Run, 'collect_startup_log', failed):
             code, output = self.stage('RUN', '--scenario', 'B')
         _, directory = self.state()
@@ -355,6 +356,105 @@ class RetestWorkflowTests(unittest.TestCase):
         self.assertEqual(current['corrects_case']['run_id'], old['run_id'])
         self.assertNotEqual(current['campaign_case']['generation_fingerprint'], old['campaign_case']['generation_fingerprint'])
         self.assertEqual(current['campaign_case']['phase'], 'completed')
+
+    def test_startup_ready_failure_precedes_downstream_parser_and_retires_case(self):
+        automatic = self.configure_campaign_fixture()
+        def failed(run):
+            automatic(run)
+            row = run.state['automatic_log']['records'][0]
+            row.update(at_ms=18433390, profile={'request_id': 0, 'first_failed_stage': 'none'})
+            row['campaign'].update(phase='armed', operation=0, checkpoint=0, native_saved=False,
+                readback_verified=False, continuity_persisted=False, native_factory_matched=False)
+            row['admission'].update(state=4, fault=6, flags=0)
+            row['installation'] = {'phase': 2, 'last_completed_stage': 16, 'validated': 58, 'created': 40, 'enabled': 40,
+                'primary_failure': {'stage': 19, 'reason': 13, 'at_ms': 18433375}}
+            later = copy.deepcopy(row); later['at_ms'] = 18458515
+            later['campaign'].update(phase='refused', reason='load_parser_source_not_correlated', failure_at_ms=18458500)
+            run.state['automatic_log']['records'].append(later)
+        with mock.patch.object(retest.Run, 'collect_startup_log', failed):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        state, directory = self.state(); original = (directory / 'private/state.json').read_bytes()
+        self.assertNotEqual(code, 0, output)
+        self.assertEqual(output.count('Teste B falhou.'), 1)
+        report = self.report(directory)
+        self.assertEqual(report['hook_installation'], 'READY/PASS')
+        self.assertEqual(report['startup_observation'], 'FAILED/unobserved')
+        self.assertEqual(report['native_failure']['first_failure']['at_ms'], 18433375)
+        self.assertEqual(report['native_failure']['ordering'], 'startup_before_profile_and_campaign_parser')
+        self.assertEqual(report['campaign_case']['lifecycle'], 'terminal_failed_before_checkpoint')
+        self.assertEqual(report['campaign_case']['failure']['fault'], 'native_startup')
+        with mock.patch.object(retest.Run, 'collect_startup_log', automatic):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        current, _ = self.state()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(current['corrects_case']['run_id'], state['run_id'])
+        self.assertNotEqual(current['namespace_id'], state['namespace_id'])
+        self.assertEqual((directory / 'private/state.json').read_bytes(), original)
+
+    def test_profile_after_creation_terminal_export_prepare_and_ordinary_new_run(self):
+        automatic = self.configure_campaign_fixture()
+        def failed(run):
+            automatic(run)
+            row = run.state['automatic_log']['records'][0]
+            row['at_ms'] = 1200
+            row['campaign'].update(phase='native_created', checkpoint=0, operation=0, native_saved=False,
+                readback_verified=False, continuity_persisted=False, native_factory_matched=False)
+            row['admission'].update(state=5, fault=15)
+            row['profile'] = {'request_id': 1, 'first_failed_stage': 'overlay',
+                'first_failure': {'first_ms': 100, 'changed_ms': 1100, 'predicate': 'serializer_baseline_unavailable'}}
+            boot = copy.deepcopy(row)
+            boot['campaign']['enabled'] = False
+            boot['admission'].update(state=0, fault=0, namespace_id='')
+            boot['profile'] = {}
+            run.state['automatic_log']['records'].insert(0, boot)
+        with mock.patch.object(retest.Run, 'collect_startup_log', failed):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        old, directory = self.state(); original = (directory / 'private/state.json').read_bytes()
+        self.assertNotEqual(code, 0, output)
+        self.assertEqual(output.count('Teste B falhou.'), 1)
+        report = self.report(directory)
+        self.assertEqual(report['native_failure']['ordering'], 'profile_refusal_after_native_creation')
+        self.assertEqual(report['campaign_case']['failure']['at_ms'], 1100)
+        self.assertEqual(report['campaign_case']['lifecycle'], 'terminal_failed_before_checkpoint')
+        self.assertEqual(retest.read_json(self.config['ActiveRun'])['retired_campaign']['run_id'], old['run_id'])
+        for change in ('checkpoint', 'identity', 'comparison', 'closed', 'not_faulted', 'truncated'):
+            bad = copy.deepcopy(old)
+            if change == 'checkpoint': bad['automatic_log']['records'][-1]['campaign']['checkpoint'] = 1
+            if change == 'identity': bad['automatic_log']['records'][0]['pid'] += 1
+            if change == 'comparison': bad['comparison']['response']['modified'] = 1
+            if change == 'closed': bad['stages'][0]['failure'] = 'operator_interrupted_partial_evidence'
+            if change == 'not_faulted': bad['automatic_log']['records'][-1]['admission']['state'] = 3
+            if change == 'truncated': bad['automatic_log']['truncated'] = True
+            self.assertEqual(retest.Run.campaign_lifecycle(bad, directory)[0], 'ambiguous_or_interrupted_create')
+        self.assertNotEqual(self.stage('RUN', '--scenario', 'B', '--resume-case', old['run_id'])[0], 0)
+        code, output = self.stage('PREPARE', '--scenario', 'B')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(retest.read_json(self.config['ActiveRun'])['campaign_reference']['run_id'], old['run_id'])
+        with mock.patch.object(retest.Run, 'collect_startup_log', automatic):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        current, _ = self.state()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(current['corrects_case']['run_id'], old['run_id'])
+        self.assertNotEqual(current['campaign_case']['generation_fingerprint'], old['campaign_case']['generation_fingerprint'])
+        self.assertEqual((directory / 'private/state.json').read_bytes(), original)
+
+    def test_prepare_keeps_ambiguous_campaign_guard(self):
+        automatic = self.configure_campaign_fixture()
+        with mock.patch.object(retest.Run, 'collect_startup_log', automatic), mock.patch.object(retest.Run, 'complete_campaign_launch', side_effect=KeyboardInterrupt):
+            self.stage('RUN', '--scenario', 'B')
+        old, directory = self.state(); before = (directory / 'private/state.json').read_bytes()
+        self.assertEqual(self.stage('PREPARE', '--scenario', 'B')[0], 0)
+        code, output = self.stage('RUN', '--scenario', 'B')
+        self.assertNotEqual(code, 0)
+        self.assertIn('ResumeCase_' + old['run_id'], output)
+        self.assertEqual((directory / 'private/state.json').read_bytes(), before)
+
+    def test_overlay_start_is_not_refusal_time(self):
+        rows = [{'at_ms': 1200, 'campaign': {'enabled': True, 'reason': 'native_transition_return_failed', 'difficulty': 3, 'failure_at_ms': 900},
+            'admission': {'fault': 15}, 'profile': {'first_failed_stage': 'overlay', 'first_failure': {'first_ms': 100, 'changed_ms': 1100}}}]
+        failure = retest.Run.campaign_failure(rows, {'difficulty': 3})
+        self.assertEqual(failure['fault'], 'native_campaign')
+        self.assertEqual(failure['at_ms'], 900)
 
     def test_run_protection_native_refusal_all_queries_and_one_report(self):
         self.process_mock.side_effect = self.closed_after_capture
@@ -648,7 +748,11 @@ class RetestWorkflowTests(unittest.TestCase):
         diagnostic.mkdir(parents=True)
         record = {"schema": "sentinel-startup-v1", "pid": self.observed["pid"], "process_created": str(self.observed["process_created"]),
                   "build_id": self.manifest["build_id"], "admission": {"state": 4, "fault": 2},
-                  "installation": {"phase": 3}, "private_payload": "DO_NOT_EXPORT"}
+                  "installation": {"phase": 3}, "private_payload": "DO_NOT_EXPORT",
+                  "startup_route": {"adapter": "presence_query", "caller_class": "other_or_unretained",
+                      "private": {"caller": "PRIVATE_CALLER", "native_user": "PRIVATE_USER"}},
+                  "campaign": {"parser_trace": {"source": "foreign_or_unowned_campaign",
+                      "private": {"data": "PRIVATE_DATA", "directory_hex": "PRIVATE_DIRECTORY"}}}}
         (diagnostic / (str(self.observed["pid"])+"-"+str(self.observed["process_created"])+".jsonl")).write_text(json.dumps(record)+"\n")
         with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "log-root")}): self.stage("RUN")
         state, directory = self.state()
@@ -657,6 +761,13 @@ class RetestWorkflowTests(unittest.TestCase):
         self.assertEqual(report["preparation"]["historical_comparison"]["counts"]["removed"], 1)
         self.assertEqual(report["automatic_startup"]["state"], "captured")
         self.assertNotIn("private_payload", report["automatic_startup"]["records"][0])
+        retained = report["automatic_startup"]["records"][0]
+        self.assertEqual(retained["startup_route"]["adapter"], "presence_query")
+        self.assertEqual(retained["campaign"]["parser_trace"]["source"], "foreign_or_unowned_campaign")
+        self.assertNotIn("private", retained["startup_route"])
+        self.assertNotIn("private", retained["campaign"]["parser_trace"])
+        for private in ("PRIVATE_CALLER", "PRIVATE_USER", "PRIVATE_DATA", "PRIVATE_DIRECTORY"):
+            self.assertNotIn(private, json.dumps(report))
 
     def test_short_lived_attempt_recovered_by_exact_control_hash_without_PID_guess(self):
         import time

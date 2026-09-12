@@ -40,6 +40,15 @@ struct ProfileRead {
     uint32_t reason = 0, error = 0;
     uint64_t requested = 0, offset = 0, size = 0;
 };
+struct ProfileOwner {
+    uintptr_t profile = 0, manager = 0, shell = 0;
+    uint32_t user = UINT32_MAX;
+};
+struct ProfileOwnershipTrace {
+    ProfileOwner initial{}, latest{};
+    uintptr_t native_manager = 0, provider_control = 0, provider_object = 0, platform_identity = 0;
+    bool baseline_ready = false, session_live = false, stable_owner = false;
+};
 struct ProfileStep {
     uint64_t first_ms = 0, changed_ms = 0;
     ProfileStatus status = ProfileStatus::unobserved;
@@ -56,6 +65,23 @@ struct ProfileTrace {
     ProfileStep failure{};
     uint32_t downstream_refusals = 0;
     bool identity_matched = false;
+    ProfileOwnershipTrace ownership{};
+};
+// One immutable first unowned boundary, not a frame log. Native addresses remain private.
+struct UnroutedTrace {
+    uint64_t at_ms = 0;
+    const char* route = "not_observed";
+    const char* operation = "unknown";
+    SessionState state = SessionState::disabled;
+    bool startup_entered = false, root_qualified = false;
+    uintptr_t manager = 0, provider = 0, identity = 0, caller = 0;
+    bool delegated_account_query = false;
+    uintptr_t caller_rva = 0;
+};
+struct NativeRouteScope {
+    explicit NativeRouteScope(uintptr_t, uintptr_t image = 0);
+    ~NativeRouteScope();
+    uintptr_t previous, previous_rva;
 };
 int native_campaign_index(std::string_view);
 const char* native_campaign_prefix(unsigned);
@@ -77,7 +103,10 @@ public:
     void install(uintptr_t root, uintptr_t startup_return, uint32_t routes);
     bool startup_enter(uintptr_t root, uintptr_t caller, uint32_t thread);
     void startup_leave(bool abnormal);
-    void unrouted_import();
+    void unrouted_import(const char* route = "unspecified", const char* operation = "import",
+        uintptr_t provider = 0, uintptr_t identity = 0);
+    UnroutedTrace unrouted_trace() const;
+    bool pre_root_profile_query(uintptr_t expected_caller, uintptr_t identity);
     bool profile_read_completed();
     // The provider adapter supplies bytes read from this exact remote root before
     // campaign consumers. An offline manifest never calls this admission method.
@@ -117,8 +146,9 @@ public:
     bool take_profile_write(uintptr_t data, ProfileWrite&);
     void forget_save_data(uintptr_t data);
     bool persist_profile_write(const ProfileWrite&, engine::Memory&);
-    bool capture_profile_baseline(uintptr_t profile, uintptr_t manager, std::string name, int32_t index);
-    bool profile_baseline(uintptr_t profile, uintptr_t manager, const char*& name, int32_t& index) const;
+    bool capture_profile_baseline(const ProfileOwner&, std::string name, int32_t index);
+    bool profile_baseline(const ProfileOwner&, const char*& name, int32_t& index);
+    bool profile_output_baseline(const char*& name, int32_t& index) const;
     void fail_profile();
     void begin_profile(uintptr_t data);
     bool is_profile_request(uintptr_t data) const;
@@ -126,6 +156,7 @@ public:
         bool attempted = false, int64_t state = 0, int64_t outcome = 0, uint32_t value = 0, ProfileRead read = {});
     ProfileTrace profile_trace() const;
 private:
+    UnroutedTrace unrouted_{};
     mutable std::mutex profile_trace_mutex_;
     ProfileTrace profile_trace_{};
     uintptr_t profile_data_ = 0;
@@ -149,7 +180,7 @@ private:
     std::mutex selection_mutex_; // Serializes remote record writes, independently of Session state.
     std::array<uint64_t, 3> persisted_selection_{};
     bool choice_ready_ = false, prospective_choice_ = false, baseline_ready_ = false, profile_failed_ = false;
-    uintptr_t profile_ = 0, profile_manager_ = 0;
+    ProfileOwner profile_owner_{};
     std::string vanilla_name_; // Written once; borrowed JSON strings remain valid until process exit.
     int32_t vanilla_index_ = -1;
 };

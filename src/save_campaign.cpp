@@ -206,9 +206,21 @@ bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t ima
     if (!valid) return reject("resume_payload_set_or_hash_mismatch");
     state_.source_verified=true; state_.phase="source_verified"; return true;
 }
+void Campaign::observe_parser(ParserObservation observation) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!state_.enabled || state_.parser_observation.at_ms) return;
+    observation.at_ms=GetTickCount64(); observation.session_state=static_cast<uint32_t>(owner_->state());
+    observation.exact_resume=state_.resumed && state_.source_verified && load_data_==observation.data;
+    if (observation.directory_read) observation.source=observation.directory=="PROFILE" ? "shared_profile" :
+        observation.directory==directory_ && !directory_.empty() ? "owned_campaign" : "foreign_or_unowned_campaign";
+    observation.disposition=(owner_->state()==SessionState::rejected || owner_->state()==SessionState::faulted) ?
+        "downstream_of_terminal_session" : observation.exact_resume ? "exact_resume" : "uncorrelated_campaign_import";
+    state_.parser_observation=std::move(observation);
+}
 bool Campaign::parser_enter(uintptr_t data) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled) return true;
+    if (owner_->state()==SessionState::rejected || owner_->state()==SessionState::faulted) return false;
     return (owner_->accepts_requests() && state_.resumed && state_.source_verified && load_data_==data) || reject("load_parser_source_not_correlated");
 }
 void Campaign::parser_leave(uint32_t result) {

@@ -30,7 +30,9 @@ CollectorCalls calls{};
 DeleteCalls delete_calls{};
 DeleteCalls scoped_delete_calls{};
 DeleteOperation original_auxiliary_operation = nullptr;
+ProviderCalls provider_calls{};
 DeleteOperationResult* auxiliary_operation_detour(uintptr_t context, DeleteOperationResult* out) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return delete_auxiliary_scoped(session(), memory, context, out, original_auxiliary_operation);
 }
@@ -39,7 +41,6 @@ WriteCalls read_calls{};
 WriteCalls erase_calls{}, auxiliary_calls{};
 CreateEnumeration original_enumeration = nullptr;
 ProfileCalls profile_calls{};
-ProviderCalls provider_calls{};
 ExistenceCalls existence_calls{};
 CatalogCalls catalog_calls{};
 ProfilePrerequisiteCalls prerequisite_calls{};
@@ -78,16 +79,19 @@ PrepareWriteJob original_prepare_job = nullptr;
 CreateWriteContext original_write_context = nullptr;
 DestroySdkVector original_destroy_preparation = nullptr, original_destroy_preflight = nullptr;
 uintptr_t* prepare_job_detour(const SaveReference* source, uintptr_t* out, const SaveReference* identity) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return prepare_write_job(session(), memory, source, out, identity, original_prepare_job, sdk_calls.image_base);
 }
 SaveFuture** write_context_detour(SaveFuture** out, SaveReference* identity, const char* name, uint8_t clear, uint64_t* files) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return create_write_context(session(), memory, out, identity, name, clear, files, original_write_context, sdk_calls.image_base);
 }
 void destroy_preparation_detour(uintptr_t object) { destroy_write_job(session(), object, original_destroy_preparation); }
 void destroy_preflight_detour(uintptr_t object) { destroy_write_job(session(), object, original_destroy_preflight); }
 SdkWriteResult* sdk_poll_detour(uintptr_t context, SdkWriteResult* out, void* executor) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return poll_sdk_write(session(), memory, context, out, executor, sdk_calls);
 }
@@ -108,17 +112,20 @@ void clear_data_detour(uintptr_t data) {
 void destroy_data_detour(uintptr_t data) {
     session().forget_save_data(data); original_destroy_data(data);
 }
-void prepare_profile_detour(SaveReference* profile, SaveReference* data, uintptr_t shell, const char* suffix) {
+void prepare_profile_detour(SaveReference* profile, SaveReference* data, uintptr_t native_user, const char* suffix) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
-    prepare_profile_write(session(), memory, profile, data, shell, suffix, original_prepare_profile,
+    prepare_profile_write(session(), memory, profile, data, native_user, suffix, original_prepare_profile,
         catalog_calls.retain, profile_calls);
 }
 WritePreflightResult* preflight_detour(uintptr_t context, WritePreflightResult* out) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return preflight_scoped(session(), memory, context, out, original_preflight, sdk_calls.image_base);
 }
 std::atomic<bool> owner_pinned{false};
 SaveFuture** existence_detour(SaveFuture** out, SaveReference* identity, const char* name) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return query_exists_scoped(session(), memory, out, identity, name, existence_calls);
 }
@@ -138,28 +145,34 @@ void provider_detour(uintptr_t manager) {
     provider_initialized(session(), memory, manager, provider_calls);
 }
 CollectorResult* collector_detour(const CollectorContext* context, CollectorResult* out) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return collect_scoped(session(), memory, context, out, calls);
 }
 DeleteResult* delete_detour(DeleteFuture* future, DeleteResult* out, void* executor) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return refuse_unscoped_delete(session(), memory, future, out, executor, delete_calls);
 }
 DeleteResult* scoped_delete_detour(DeleteFuture* future, DeleteResult* out, void* executor) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return poll_scoped_delete(session(), memory, future, out, executor, scoped_delete_calls);
 }
 SaveFuture** write_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return write_scoped(session(), memory, provider, out, identity, data, write_calls);
 }
 SaveFuture** read_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return read_scoped(session(), memory, provider, out, identity, data, read_calls);
 }
 SaveFuture** catalog_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data, const char* prefix) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return enumerate_provider(session(), memory, provider, out, identity, data, prefix, catalog_calls);
@@ -169,24 +182,29 @@ SaveFuture** prerequisite_detour(uintptr_t provider, SaveFuture** out, uintptr_t
     return profile_read_prerequisite(session(), memory, provider, out, identity, data, prerequisite_calls);
 }
 SaveFuture** erase_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return delete_scoped(session(), memory, provider, out, identity, data, erase_calls, false);
 }
 SaveFuture** auxiliary_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return delete_scoped(session(), memory, provider, out, identity, data, auxiliary_calls, true);
 }
 EnumerationFuture** enumeration_detour(EnumerationFuture** out, SaveReference* identity, const char* root, const char* prefix) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return enumerate_scoped(session(), memory, out, identity, root, prefix, original_enumeration);
 }
 uint64_t profile_read_detour(SaveReference* profile, SaveReference* data) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return read_profile(session(), memory, profile, data, profile_calls);
 }
 uint32_t profile_serialize_detour(uintptr_t manager, uintptr_t profile, ProfileHolder* holder) {
+    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
     engine::LocalMemory memory;
     return serialize_profile(session(), memory, manager, profile, holder, profile_calls);
 }
@@ -277,6 +295,13 @@ bool validate_native_helpers(Installation& record, engine::Memory& memory, const
         checked_bytes(memory, image.base + event.rva, expected_factory_call.data(), expected_factory_call.size(), event);
     record.finish(event, factory_ok ? SC_NATIVE_NONE : (factory_scope ? SC_NATIVE_TARGET_BYTES : SC_NATIVE_TARGET_BOUNDARY));
     if (!factory_ok) { return false; }
+    // Only this checked native callback may delegate the shared PROFILE presence query before routing.
+    constexpr std::array<uint8_t,5> presence_call{0xe8,0x26,0x2f,0xff,0xff};
+    event=record.begin(SC_INSTALL_FACTORY_CALL,3,SC_INSTALL_UNKNOWN,0x1be4b35);
+    const bool presence_ok=image.contains(event.rva,5,IMAGE_SCN_MEM_READ|IMAGE_SCN_MEM_EXECUTE,IMAGE_SCN_MEM_WRITE) &&
+        checked_bytes(memory,image.base+event.rva,presence_call.data(),presence_call.size(),event);
+    record.finish(event,presence_ok?SC_NATIVE_NONE:SC_NATIVE_TARGET_BYTES);
+    if (!presence_ok) return false;
     InitializeSteamContext context_init = nullptr;
     event = record.begin(SC_INSTALL_STEAM_IMPORT, 3, SC_INSTALL_UNKNOWN, 0x2a1cc60);
     const auto import_read = memory.copy(image.base + event.rva, &context_init, sizeof(context_init));

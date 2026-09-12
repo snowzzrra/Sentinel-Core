@@ -39,7 +39,7 @@ bool campaign_directory(Session& owner, engine::Memory& memory, const NativeStri
 }
 DeleteResult* refuse_unscoped_delete(Session& owner, engine::Memory& memory,
         DeleteFuture* future, DeleteResult* output, void* executor, const DeleteCalls& calls) {
-    if (!owner.routed()) { owner.unrouted_import(); return calls.poll(future, output, executor); }
+    if (!owner.routed()) { owner.unrouted_import("delete_poll", "mutate"); if (owner.state() == SessionState::disabled) return calls.poll(future, output, executor); }
     DeleteFuture reference{}; uintptr_t object = 0; DeleteContext context{};
     const bool readable = memory.copy(reinterpret_cast<uintptr_t>(future), &reference, sizeof(reference)).reason == 0 &&
         reference.control && reference.control <= UINTPTR_MAX - 8 &&
@@ -68,7 +68,7 @@ DeleteResult* refuse_unscoped_delete(Session& owner, engine::Memory& memory,
 }
 DeleteResult* poll_scoped_delete(Session& owner, engine::Memory& memory,
         DeleteFuture* future, DeleteResult* output, void* executor, const DeleteCalls& calls) {
-    if (!owner.routed()) { owner.unrouted_import(); return calls.poll(future, output, executor); }
+    if (!owner.routed()) { owner.unrouted_import("delete_poll", "mutate"); if (owner.state() == SessionState::disabled) return calls.poll(future, output, executor); }
     DeleteFuture reference{}; uintptr_t object = 0; DirectoryDeleteContext context{};
     const bool readable = memory.copy(reinterpret_cast<uintptr_t>(future), &reference, sizeof(reference)).reason == 0 &&
         reference.control && reference.control <= UINTPTR_MAX - 8 &&
@@ -94,7 +94,7 @@ DeleteResult* poll_scoped_delete(Session& owner, engine::Memory& memory,
 }
 DeleteOperationResult* delete_auxiliary_scoped(Session& owner, engine::Memory& memory, uintptr_t object,
         DeleteOperationResult* out, DeleteOperation original) {
-    if (!owner.routed()) { owner.unrouted_import(); return original(object, out); }
+    if (!owner.routed()) { owner.unrouted_import("delete_auxiliary", "mutate"); if (owner.state() == SessionState::disabled) return original(object, out); }
     // 141bd71a0 -> 141bd9b40 -> 141bd3ed0 -> 141bd4d40. The native job
     // retains this context across dispatch; do not release its references.
     struct Context {

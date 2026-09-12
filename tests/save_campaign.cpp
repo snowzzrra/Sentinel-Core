@@ -22,6 +22,7 @@
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"campaign:%d: %s\n",__LINE__,#x); std::exit(1); } } while(0)
 using namespace sentinel;
 using namespace sentinel::save;
+void exercise_campaign_profile(Session&, const std::function<void(const std::function<void()>&)>&);
 namespace {
 constexpr uintptr_t image=0x10000000;
 struct Remote { uintptr_t* table; std::map<std::string,std::string> files; };
@@ -112,6 +113,7 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
 #include "campaign_navigation_fixture.h"
 #include "campaign_writer_fixture.h"
 }
+#include "startup_route_fixture.h"
 int wmain(int argc,wchar_t** argv) {
     CHECK(argc==4 || argc==5);
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume";
@@ -132,12 +134,29 @@ int wmain(int argc,wchar_t** argv) {
     const auto provider=reinterpret_cast<uintptr_t>(&remote);
     const auto directory=owner.native_root()+"/GAME-AUTOSAVE0";
     remote.files[owner.native_root()+"/sentinel-owner-"+owner.namespace_id()+".txt"]=owner.ownership_record();
-    owner.install(0x1000,0x2000,steam_20260818_routes);
+    if (defect==L"startup_parser") {
+        startup_route_fixture::exercise(owner,6);
+        const auto first=owner.unrouted_trace(); const auto before=owner.campaign_run.snapshot();
+        ParserObservation observed; observed.data=0x1234; observed.caller=image+0x148c1c1; observed.native_completion=true;
+        observed.directory="GAME-AUTOSAVE7"; observed.directory_read=true; observed.prefix="GAME-"; observed.prefix_read=true;
+        owner.campaign_run.observe_parser(observed);
+        CHECK(!owner.campaign_run.parser_enter(observed.data));
+        const auto after=owner.campaign_run.snapshot();
+        CHECK(after.phase==before.phase && after.reason==before.reason && !after.parser_completed && !after.native_saved);
+        CHECK(after.parser_observation.disposition=="downstream_of_terminal_session");
+        CHECK(after.parser_observation.source=="foreign_or_unowned_campaign" && after.parser_observation.native_completion);
+        CHECK(owner.fault()==SessionFault::missed_startup && owner.unrouted_trace().at_ms==first.at_ms);
+        std::puts("PASS startup refusal remains first; downstream foreign campaign parser never imports"); return 0;
+    }
+    startup_route_fixture::exercise(owner);
     CHECK(owner.startup_enter(0x1000,0x2000,GetCurrentThreadId()));
+    CHECK(owner.observe_provider_objects(0x9000,0x9100,provider));
     CHECK(owner.bind_provider(owner.native_root(),provider,owner.ownership_record())); owner.startup_leave(false);
+    CHECK(owner.provider_operation(provider,0x7788));
     CHECK(owner.publish_profile_catalog(provider,owner.ownership_record(),resume?std::vector<std::string>{"AUTOSAVE0"}:std::vector<std::string>{},"AUTOSAVE0",0,!resume,0));
-    CHECK(owner.capture_profile_baseline(0x4000,0x5000,"AUTOSAVE7",2));
-    CHECK(owner.profile_read_completed() && owner.accepts_requests());
+    int outcome = 0;
+    exercise_campaign_profile(owner,[&](const std::function<void()>& profile_write) {
+    outcome = [&]() -> int {
     std::string payload="synthetic encoded checkpoint payload", relative="game.details", native_directory=directory;
     std::array<unsigned char,0x180> file{}; std::array<unsigned char,0x280> data{};
     store(file,0,image+0x2a575a8); store(file,8,text(relative));
@@ -165,6 +184,7 @@ int wmain(int argc,wchar_t** argv) {
         if (defect==L"wrong_map") { CHECK(!owner.campaign_run.map_begin("other/map",1)); return 0; }
         CHECK(native_transition(difficulty)==0);
         CHECK(owner.campaign_run.snapshot().phase=="reopened");
+        profile_write();
         std::printf("PASS separate-process native source/parser/lifecycle reopen, difficulty=%u pid=%lu\n",difficulty,GetCurrentProcessId()); return 0;
     }
     if (defect==L"dirty") {
@@ -176,7 +196,12 @@ int wmain(int argc,wchar_t** argv) {
     const bool transition_failure=defect==L"native_return" || defect==L"abnormal" || defect==L"state_read" || defect==L"generation" || defect==L"difficulty";
     if(transition_failure) { CHECK(native_transition(difficulty,defect)==0); return 0; }
     writer_fixture::Model writer{remote,source,files,payload,directory};
-    CHECK(native_transition(difficulty,defect==L"pending"?L"pending_save":defect,[&] { writer_fixture::save(writer,defect==L"pending"?L"pending_save":defect); })==0);
+    CHECK(native_transition(difficulty,defect==L"pending"?L"pending_save":defect,[&] {
+        // Native PROFILE preparation receives the user context, then the exact
+        // campaign factory/provider/readback chain reaches checkpoint 1.
+        if (defect.empty()) profile_write();
+        writer_fixture::save(writer,defect==L"pending"?L"pending_save":defect);
+    })==0);
     if(defect==L"pending" || defect==L"initial_save_return_failed" || defect==L"unassociated" || defect==L"save_failure" || defect==L"partial_save" || defect==L"unrelated") {
         CHECK(!owner.campaign_run.snapshot().continuity_persisted); return 0;
     }
@@ -184,4 +209,7 @@ int wmain(int argc,wchar_t** argv) {
     CHECK(observed.native_saved && observed.readback_verified && observed.continuity_persisted && observed.checkpoint==1);
     CHECK(observed.operation==writer.operation && observed.effective_difficulty==difficulty && observed.native_factory_matched);
     std::printf("PASS native checkpoint correlation/continuity, difficulty=%u pid=%lu\n",difficulty,GetCurrentProcessId()); return 0;
+    }();
+    });
+    return outcome;
 }

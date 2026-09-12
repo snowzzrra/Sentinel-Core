@@ -14,6 +14,10 @@ EXE = Path(__file__).resolve().parents[1] / 'build/bin/sentinel_campaign_tests.e
 
 @unittest.skipUnless(os.name == 'nt', 'Windows native contracts')
 class CampaignContinuity(unittest.TestCase):
+    def test_startup_refusal_keeps_downstream_parser_closed(self):
+        with tempfile.TemporaryDirectory(prefix='sentinel-startup-parser-') as root:
+            self.stage('create', root, 3, 'startup_parser')
+
     def stage(self, mode, root, difficulty, defect=None):
         command = [str(EXE), mode, str(root), str(difficulty)]
         if defect: command.append(defect)

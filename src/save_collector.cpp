@@ -37,7 +37,12 @@ CollectorResult* refuse(Session& owner, CollectorResult* out, const CollectorCal
 }
 EnumerationFuture** enumerate_scoped(Session& owner, engine::Memory& memory, EnumerationFuture** out,
         SaveReference* identity, const char* root, const char* prefix, CreateEnumeration create) {
-    if (!owner.routed()) return create(out, identity, root, prefix);
+    if (!owner.routed()) {
+        if (owner.state() == SessionState::disabled) return create(out, identity, root, prefix);
+        owner.unrouted_import("catalog_enumeration", "enumerate");
+        // The list future owns identity cleanup; its collector refuses before storage reads.
+        return create(out, identity, owner.native_root().c_str(), prefix);
+    }
     std::array<char, 64> captured{};
     bool terminated = false;
     for (size_t i = 0; root && i < captured.size(); ++i) {
@@ -54,7 +59,11 @@ EnumerationFuture** enumerate_scoped(Session& owner, engine::Memory& memory, Enu
 }
 CollectorResult* collect_scoped(Session& owner, engine::Memory& memory,
     const CollectorContext* context, CollectorResult* out, const CollectorCalls& calls) {
-    if (!owner.routed()) return calls.collect(context, out);
+    if (!owner.routed()) {
+        if (owner.state() == SessionState::disabled) return calls.collect(context, out);
+        owner.unrouted_import("catalog_collector", "import");
+        return refuse(owner, out, calls, SessionFault::foreign_collector, false);
+    }
     CollectorContext captured{};
     std::string root, prefix;
     if (memory.copy(reinterpret_cast<uintptr_t>(context), &captured, sizeof(captured)).reason ||

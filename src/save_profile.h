@@ -27,6 +27,6 @@ uint64_t read_profile(Session&, engine::Memory&, SaveReference*, SaveReference*,
 uint32_t serialize_profile(Session&, engine::Memory&, uintptr_t manager, uintptr_t profile,
     ProfileHolder*, const ProfileCalls&);
 bool profile_payload_valid(Session&, engine::Memory&, uintptr_t data, const ProfileCalls&);
-void prepare_profile_write(Session&, engine::Memory&, SaveReference* profile, SaveReference* data, uintptr_t shell,
+void prepare_profile_write(Session&, engine::Memory&, SaveReference* profile, SaveReference* data, uintptr_t native_user,
     const char* suffix, PrepareProfile, RetainProfileReference, const ProfileCalls&);
 } // namespace sentinel::save

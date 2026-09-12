@@ -183,17 +183,21 @@ bool payload(engine::Memory& memory, uintptr_t data, const ProfileCalls& calls, 
         "native_checksum_match")) return false;
     return record(ProfileStage::parse, WireReader(bytes).read(fields), "bounded_native_tree_and_selection_fields");
 }
-bool callbacks(engine::Memory& memory, uintptr_t profile, uintptr_t shell, const ProfileCalls& calls) {
+bool callbacks(engine::Memory& memory, ProfileOwner& owner, const ProfileCalls& calls) {
+    const auto profile = owner.profile, shell = owner.shell;
     uintptr_t context = 0, major = 0, minor = 0, version = 0, serialize = 0, vtable = 0;
+    uintptr_t backlink = 0, manager = 0;
     return at(memory, profile, 0x18, context) && context == shell &&
+        at(memory, shell, 8, backlink) && backlink == profile &&
+        at(memory, shell, 16, manager) && manager == owner.manager && manager &&
+        at(memory, profile, 8, owner.user) && owner.user != UINT32_MAX &&
         at(memory, shell, 0, vtable) && vtable == calls.image_base + 0x2dbbbe8 &&
         at(memory, profile, 0x20, major) && major == calls.image_base + 0x1416b50 &&
         at(memory, profile, 0x28, minor) && minor == calls.image_base + 0x1416f10 &&
         at(memory, profile, 0x30, version) && version == calls.image_base + 0x1416ee0 &&
         at(memory, profile, 0x48, serialize) && serialize == calls.image_base + 0x141bdd0;
 }
-struct ReadContext {
-    uintptr_t profile = 0, manager = 0, shell = 0;
+struct ReadContext : ProfileOwner {
     ProfileChoice choice{};
     bool applied = false;
 };
@@ -243,7 +247,11 @@ void selection(ProfileValue* name, ProfileValue* index, const char* text, int32_
 }
 }
 uint64_t read_profile(Session& owner, engine::Memory& memory, SaveReference* reference, SaveReference* data, const ProfileCalls& calls) {
-    if (!owner.routed()) { owner.unrouted_import(); return calls.read(reference, data); }
+    if (!owner.routed()) {
+        owner.unrouted_import("profile_reader", "import");
+        if (owner.state() == SessionState::disabled) return calls.read(reference, data);
+        calls.release(reference); calls.release(data); return 0x10;
+    }
     ReadContext context{}; uintptr_t payload_object = 0;
     bool valid = false;
     const char* predicate = "allocation_failed";
@@ -257,10 +265,10 @@ uint64_t read_profile(Session& owner, engine::Memory& memory, SaveReference* ref
             require(owner.profile_choice(context.choice), "ap_catalog_choice_unavailable") &&
             require(at(memory, reference->control, 8, context.shell) && at(memory, context.shell, 8, context.profile) &&
                 at(memory, context.shell, 16, context.manager), "profile_shell_layout") &&
-            require(callbacks(memory, context.profile, context.shell, calls), "profile_callback_identity") &&
+            require(callbacks(memory, context, calls), "profile_callback_identity") &&
             require(at(memory, data->control, 8, payload_object), "profile_data_reference") &&
             require(payload(memory, payload_object, calls, fields, owner), "profile_payload_rejected") &&
-            require(owner.capture_profile_baseline(context.profile, context.manager, std::move(fields.name), fields.index),
+            require(owner.capture_profile_baseline(context, std::move(fields.name), fields.index),
                 "vanilla_selection_baseline_mismatch");
     } catch (const std::bad_alloc&) {}
     if (!valid) {
@@ -285,7 +293,13 @@ uint64_t read_profile(Session& owner, engine::Memory& memory, SaveReference* ref
 }
 uint32_t serialize_profile(Session& owner, engine::Memory& memory, uintptr_t manager, uintptr_t profile,
         ProfileHolder* holder, const ProfileCalls& calls) {
-    if (!owner.routed()) return calls.serialize(manager, profile, holder);
+    if (!owner.routed()) {
+        if (owner.state()==SessionState::disabled) return calls.serialize(manager, profile, holder);
+        ProfileHolder view{};
+        const bool write=at(memory,reinterpret_cast<uintptr_t>(holder),0,view) && view.direction==1;
+        owner.unrouted_import(write?"profile_serializer_write":"profile_serializer_read",write?"mutate":"import");
+        return 3;
+    }
     const auto refuse = [&](const char* predicate) {
         owner.profile_step(ProfileStage::overlay, ProfileStatus::refused, predicate);
         owner.fail_profile(); return 3u;
@@ -296,9 +310,10 @@ uint32_t serialize_profile(Session& owner, engine::Memory& memory, uintptr_t man
             return refuse("serializer_holder_or_direction");
         }
         const char* baseline = nullptr; int32_t baseline_index = -1;
-        if (!owner.profile_baseline(profile, manager, baseline, baseline_index)) return refuse("serializer_baseline_unavailable");
-        uintptr_t shell = 0;
-        if (!at(memory, profile, 0x18, shell) || !callbacks(memory, profile, shell, calls)) return refuse("serializer_callback_identity");
+        ProfileOwner identity{profile, manager};
+        if (!at(memory, profile, 0x18, identity.shell) || !callbacks(memory, identity, calls)) return refuse("serializer_callback_identity");
+        if (!owner.profile_baseline(identity, baseline, baseline_index)) return refuse("serializer_baseline_unavailable");
+        const auto shell = identity.shell;
         ProfileValue* name = nullptr; ProfileValue* index = nullptr;
         std::string current; int32_t current_index = -1;
         if (view.direction == 0) {
@@ -333,14 +348,17 @@ uint32_t serialize_profile(Session& owner, engine::Memory& memory, uintptr_t man
 bool profile_payload_valid(Session& owner, engine::Memory& memory, uintptr_t data, const ProfileCalls& calls) {
     try {
         const char* baseline = nullptr; int32_t index = -1; Fields fields;
-        if (owner.profile_baseline(0, 0, baseline, index) && payload(memory, data, calls, fields, owner, true) &&
+        if (owner.profile_output_baseline(baseline, index) && payload(memory, data, calls, fields, owner, true) &&
             fields.name == baseline && fields.index == index) return true;
     } catch (const std::bad_alloc&) {}
     owner.fail_profile(); return false;
 }
 void prepare_profile_write(Session& owner, engine::Memory& memory, SaveReference* profile, SaveReference* data,
-        uintptr_t shell, const char* suffix, PrepareProfile original, RetainProfileReference retain, const ProfileCalls& calls) {
-    if (!owner.routed()) { original(profile, data, shell, suffix); return; }
+        uintptr_t native_user, const char* suffix, PrepareProfile original, RetainProfileReference retain, const ProfileCalls& calls) {
+    if (!owner.routed()) {
+        owner.unrouted_import("profile_write_prepare", "mutate", 0, native_user);
+        original(profile, data, native_user, suffix); return; // Native caller still owns reference cleanup.
+    }
     if (!owner.native_io()) owner.profile_step(ProfileStage::write_after_refusal, ProfileStatus::refused,
         "native_profile_encode_attempt_after_fault");
     WriteContext context; SaveReference held{}; uintptr_t object = 0, source = 0;
@@ -348,14 +366,20 @@ void prepare_profile_write(Session& owner, engine::Memory& memory, SaveReference
         SaveReference& value; ReleaseSaveReference release;
         ~Held() { if (value.control) release(&value); }
     } held_owner{held, calls.release};
-    const bool valid = !active_write && at(memory, profile->control, 8, source) && source == shell &&
+    // 141496330 passes a native user context as argument 3, NOT the shell.
+    // 1414978e0 obtains the shell exclusively from profile->control+8; arg3 is
+    // unused by its encoder. Keep it opaque and forward it unchanged.
+    const bool valid = !active_write && at(memory, profile->control, 8, source) &&
         at(memory, source, 8, context.profile) && at(memory, source, 16, context.manager) &&
         at(memory, data->control, 8, object) && object && retain(&held, data) && held.control;
-    if (!valid) owner.fail_profile();
+    if (!valid) {
+        owner.profile_step(ProfileStage::output_validation, ProfileStatus::refused, "profile_write_reference_context");
+        owner.fail_profile();
+    }
     Writing writing(context);
     // Original owns both input refs, its local JSON/file and all native cleanup.
     // A separate strong ref keeps SaveData alive through the post-encoding check.
-    original(profile, data, shell, suffix);
+    original(profile, data, native_user, suffix);
     try {
         if (!valid || !context.write.sequence || !profile_payload_valid(owner, memory, object, calls) ||
             !owner.remember_profile_write(object, context.write)) owner.fail_profile();

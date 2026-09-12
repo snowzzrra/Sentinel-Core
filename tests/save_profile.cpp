@@ -27,6 +27,7 @@ void text(Bytes& bytes, std::string_view value) { count(bytes, value.size()); by
 struct Frame;
 Frame* active = nullptr;
 void destroy_value(ProfileValue* value);
+SaveFuture** create_success(uintptr_t, SaveFuture**, uintptr_t, SaveReference*);
 struct Json {
     std::map<std::string, ProfileValue> members;
     ProfileValue root{reinterpret_cast<uintptr_t>(&members), 7, 0, {}, 0};
@@ -86,6 +87,7 @@ struct Frame {
     bool allocation_failure = false;
     ProfileCalls calls{};
     explicit Frame(Session& value) : owner(value) {
+        put(state, 8, uint32_t{23}); // Native user handle, independent of allocation.
         put(shell, 0, uintptr_t(image_base + 0x2dbbbe8)); put(shell, 8, reinterpret_cast<uintptr_t>(state.data())); put(shell, 16, manager);
         put(state, 0x18, reinterpret_cast<uintptr_t>(shell.data())); put(state, 0x20, uintptr_t(image_base + 0x1416b50));
         put(state, 0x28, uintptr_t(image_base + 0x1416f10)); put(state, 0x30, uintptr_t(image_base + 0x1416ee0));
@@ -130,8 +132,9 @@ SaveReference* retain_reference(SaveReference* out, const SaveReference* from) {
     auto* control = reinterpret_cast<Control*>(from->control); REQUIRE(control && control->strong);
     ++control->strong; ++control->weak; *out = *from; return out;
 }
-void native_prepare(SaveReference* profile, SaveReference* data, uintptr_t shell, const char*) {
-    auto& f = *active; REQUIRE(shell == reinterpret_cast<uintptr_t>(f.shell.data()));
+void native_prepare(SaveReference* profile, SaveReference* data, uintptr_t native_user, const char*) {
+    auto& f = *active; REQUIRE(native_user == 0x24680); // Actual ABI: NOT the shell.
+    REQUIRE(reinterpret_cast<Control*>(profile->control)->object == reinterpret_cast<uintptr_t>(f.shell.data()));
     REQUIRE(!f.owner.routed() || f.data_control.strong == 3);
     f.owner.forget_save_data(reinterpret_cast<uintptr_t>(f.data.data())); // Native Clear detour.
     f.preparation(); // Serializer followed by encoder; its status is ignored.
@@ -139,7 +142,7 @@ void native_prepare(SaveReference* profile, SaveReference* data, uintptr_t shell
 }
 void prepare(Frame& f, const std::function<void()>& body) {
     f.refresh_refs(); f.preparation = body;
-    prepare_profile_write(f.owner, f.memory, &f.profile_ref, &f.data_ref, reinterpret_cast<uintptr_t>(f.shell.data()),
+    prepare_profile_write(f.owner, f.memory, &f.profile_ref, &f.data_ref, 0x24680,
         "", native_prepare, retain_reference, f.calls);
     REQUIRE(!f.profile_ref.control && !f.data_ref.control && f.data_control.strong == 1 && f.data_control.weak == 1);
     f.preparation = {};
@@ -225,7 +228,57 @@ void publish(Frame& f, bool expected, bool cancel = false) {
     REQUIRE(cancel ? notifications == 0 : notifications == 1 && completion_error == 0x10);
 }
 }
+void exercise_unowned_profile(Session& owner,unsigned mode) {
+    Frame f(owner); active=&f;
+    f.calls={native_read,native_serialize,lookup,destroy_value,checksum,release_reference,image_base};
+    frame(f,f.vanilla,f.vanilla_index);
+    if (!mode) {
+        REQUIRE(read_profile(owner,f.memory,&f.profile_ref,&f.data_ref,f.calls)==0x10);
+        REQUIRE(f.releases==2);
+    } else {
+        Json json(f.vanilla,f.vanilla_index); ProfileHolder holder{static_cast<uint8_t>(mode-1),{},&json.root};
+        REQUIRE(serialize_profile(owner,f.memory,manager,reinterpret_cast<uintptr_t>(f.state.data()),&holder,f.calls)==3);
+        REQUIRE(json.name()==f.vanilla && json.index()==f.vanilla_index);
+    }
+    REQUIRE(f.readers==0 && f.serializers==0 && !owner.native_io() && owner.fault()==SessionFault::missed_startup);
+    REQUIRE(!owner.profile_trace().ownership.baseline_ready && owner.profile_trace().request==0);
+    active=nullptr;
+}
 void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make) {
+    // A live Session owns the vanilla selection, not a PROFILE allocation.
+    for (unsigned defect = 0; defect < 14; ++defect) {
+        auto owner = make(); Frame a(*owner), b(*owner); active = &a;
+        a.calls = b.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
+        REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {}, "AUTOSAVE0", 0, true, 0));
+        frame(a, a.vanilla, a.vanilla_index);
+        if (defect != 7) REQUIRE(read_profile(*owner, a.memory, &a.profile_ref, &a.data_ref, a.calls) == 0);
+        Frame& later = defect == 6 ? a : b; active = &later; // Reuse address with another user.
+        uintptr_t later_manager = manager;
+        if (defect == 1) { later_manager += 8; put(later.shell, 16, later_manager); }
+        if (defect == 2 || defect == 6) put(later.state, 8, uint32_t{24});
+        if (defect == 3) put(later.state, 0x48, uintptr_t{0});
+        if (defect == 4) put(later.shell, 0, uintptr_t{0});
+        if (defect == 5) put(later.shell, 8, reinterpret_cast<uintptr_t>(a.state.data()));
+        if (defect == 8) owner->fail(SessionFault::native_collection);
+        if (defect == 9) REQUIRE(!owner->provider_operation(0x9999, 0x1111));
+        if (defect == 10) later.memory.campaign = "DLC1-";
+        if (defect == 11) REQUIRE(!owner->provider_operation(0x9876, 0x2222));
+        if (defect == 12) owner->provider_reset(0x9000);
+        if (defect == 13) put(later.state, 8, UINT32_MAX);
+        prepare(later, [&] {
+            Json output("AUTOSAVE0", 0); ProfileHolder holder{1, {}, &output.root};
+            const auto result = serialize_profile(*owner, later.memory, later_manager, reinterpret_cast<uintptr_t>(later.state.data()), &holder, later.calls);
+            REQUIRE((result == 0) == (defect == 0));
+            REQUIRE(output.members.at("musicVolume").payload == 27);
+            REQUIRE(defect ? output.name() == "AUTOSAVE0" : output.name() == "AUTOSAVE7" && output.index() == 2);
+            frame(later, output.name(), output.index());
+        });
+        REQUIRE(owner->native_io() == (defect == 0));
+        if (!defect) {
+            const auto trace = owner->profile_trace().ownership;
+            REQUIRE(trace.stable_owner && trace.initial.profile != trace.latest.profile && trace.initial.shell != trace.latest.shell);
+        }
+    }
     for (size_t size : {size_t(262143), size_t(262144), size_t(262145), size_t(560873), size_t(0xfa000 - 1), size_t(0xfa000)}) {
         auto owner = make(); Frame f(*owner); active = &f;
         f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
@@ -343,7 +396,7 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         REQUIRE(f.selected == "AUTOSAVE10" && f.selected_index == 1 && f.serializers == 1);
         REQUIRE(f.strings_freed == 1 && f.comments_freed == 1);
         const char* baseline = nullptr; int32_t baseline_index = -1;
-        REQUIRE(owner->profile_baseline(0, 0, baseline, baseline_index) && std::strcmp(baseline, "AUTOSAVE7") == 0 && baseline_index == 2);
+        REQUIRE(owner->profile_output_baseline(baseline, baseline_index) && std::strcmp(baseline, "AUTOSAVE7") == 0 && baseline_index == 2);
         if (test >= 30) {
             // A delayed PROFILE callback still owns valid inputs after an
             // unrelated route failed. No native import may run at that point.
@@ -418,7 +471,45 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         REQUIRE(owner->accepts_requests() && owner->profile_trace().failed_stage == ProfileStage::count);
     }
     active = nullptr;
-    std::puts("PASS production PROFILE reader/serializer and LocalMemory bounded acquisition (51 cases; synthetic host, not DOOM)");
+    std::puts("PASS production PROFILE reader/serializer and LocalMemory bounded acquisition (51 payload + 14 owner cases; synthetic host, not DOOM)");
+}
+void exercise_campaign_profile(Session& owner, const std::function<void(const std::function<void()>&)>& campaign) {
+    Frame initial(owner), later(owner); active = &initial;
+    initial.calls = later.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
+    frame(initial, initial.vanilla, initial.vanilla_index);
+    REQUIRE(read_profile(owner, initial.memory, &initial.profile_ref, &initial.data_ref, initial.calls) == 0);
+    REQUIRE(owner.accepts_requests() && initial.selected == "AUTOSAVE0");
+    active = &later;
+    campaign([&] {
+        REQUIRE(owner.campaign_run.snapshot().map_active && owner.campaign_run.snapshot().save_ready);
+        prepare(later, [&] {
+            Json output(initial.selected, initial.selected_index); ProfileHolder holder{1, {}, &output.root};
+            output.members.at("musicVolume").payload = 99;
+            REQUIRE(serialize_profile(owner, later.memory, manager, reinterpret_cast<uintptr_t>(later.state.data()), &holder, later.calls) == 0);
+            REQUIRE(output.name() == "AUTOSAVE7" && output.index() == 2 && output.members.at("musicVolume").payload == 99);
+            REQUIRE(std::strcmp(reinterpret_cast<const char*>(output.members.at("s_volume").payload), "0.02") == 0);
+            frame(later, output.name(), output.index());
+        });
+        const auto trace = owner.profile_trace().ownership;
+        REQUIRE(trace.stable_owner && trace.initial.profile != trace.latest.profile && trace.initial.user == trace.latest.user);
+        later.refresh_refs(); SaveFuture* future = nullptr; uintptr_t provider = 0;
+        REQUIRE(owner.native_provider(provider));
+        const WriteCalls calls{[](uintptr_t remote, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+            // Native encoder/Steam transport substitute; production scoped
+            // future and selection completion still own exact correlation.
+            using Put = bool(*)(uintptr_t, const char*, const void*, int32_t);
+            const auto table = *reinterpret_cast<uintptr_t**>(remote);
+            REQUIRE(reinterpret_cast<Put>(table[0])(remote, "PROFILE/profile.bin", active->bytes.data(), static_cast<int32_t>(active->bytes.size())));
+            return create_success(remote, out, identity, data);
+        }, set_name, release_reference, check_payload};
+        write_scoped(owner, later.memory, provider, &future, 0xabcd, &later.data_ref, calls);
+        REQUIRE(future && !later.data_ref.control);
+        SaveResult result{}; future->vtable->poll(future, &result, nullptr); REQUIRE(result.state == -1);
+        future->vtable->poll(future, &result, nullptr); REQUIRE(!result.state && !result.outcome && result.value == 1);
+        future->vtable->destroy(future, 1);
+        REQUIRE(owner.native_io());
+    });
+    active = nullptr;
 }
 void exercise_profile_caller(Session& owner, const std::function<bool(SaveReference&)>& provider, bool malformed) {
     Frame f(owner); active = &f;

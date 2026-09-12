@@ -8,6 +8,7 @@
 #include <functional>
 
 void run_profile_contracts(const std::function<std::unique_ptr<sentinel::save::Session>()>&);
+void exercise_unowned_profile(sentinel::save::Session&,unsigned);
 void run_provider_contracts(const std::function<std::unique_ptr<sentinel::save::Session>()>&);
 void run_catalog_contracts(const std::function<std::unique_ptr<sentinel::save::Session>()>&);
 void run_prerequisite_contracts(const std::function<std::unique_ptr<sentinel::save::Session>()>&);
@@ -96,12 +97,14 @@ struct Fixture {
         CHECK(owner.configure(descriptor, std::move(lease)).ok());
         return descriptor;
     }
-    void admit(Session& owner) {
+    void admit(Session& owner, bool profile_owner = false) {
         prepare(owner);
         owner.install(0x1000, 0x2000, steam_20260818_routes);
         CHECK(owner.startup_enter(0x1000, 0x2000, GetCurrentThreadId()));
+        if (profile_owner) CHECK(owner.observe_provider_objects(0x9000, 0x9100, 0x9876));
         CHECK(owner.bind_provider(owner.native_root(), 0x1234, owner.ownership_record()));
         owner.startup_leave(false);
+        if (profile_owner) CHECK(owner.provider_operation(0x9876, 0xabcd));
         CHECK(owner.routed() && owner.native_io() && !owner.accepts_requests());
     }
 };
@@ -582,14 +585,14 @@ void preflight_contracts(Fixture& fixtures, engine::Memory& memory) {
         const auto original_names = remote_names;
         const auto before = preflights; WritePreflightResult result{};
         CHECK(preflight_scoped(owner, memory, test == 12 ? 0 : reinterpret_cast<uintptr_t>(&context), &result, native_preflight, 0) == &result);
-        const bool accepted = test <= 3 || test == 9 || test == 17 || test == 19;
+        const bool accepted = test == 0 || test == 2 || test == 3 || test == 9 || test == 17 || test == 19;
         CHECK(preflights == before + (accepted ? 1u : 0u));
         CHECK(remote_names.size() == (accepted ? 1u : 2u));
         if (accepted) CHECK(result.tag == 0 && result.first == files && result.second == count && result.third == capacity && !context.files && !context.count);
         else CHECK(result.tag == 1 && !result.first && result.second == 1 && !result.third &&
             context.files == files && context.count == count && context.capacity == capacity && remote_names == original_names);
         if (test == 1) CHECK(owner.state() == SessionState::rejected && owner.fault() == SessionFault::missed_startup);
-        if (!accepted) CHECK(owner.routed() && owner.fault() == SessionFault::native_write);
+        if (!accepted && test != 1) CHECK(owner.routed() && owner.fault() == SessionFault::native_write);
         std::free(context.name.data);
     }
 }
@@ -720,11 +723,18 @@ void write_contracts(Fixture& fixtures, engine::Memory& memory) {
     active_write = nullptr;
 }
 }
+#include "startup_route_fixture.h"
 int main(int argc, char** argv) {
     Fixture fixture;
+    if (argc==2 && std::strcmp(argv[1],"--startup-route")==0) {
+        for (unsigned defect=0;defect<8;++defect) { Session owner; fixture.prepare(owner); startup_route_fixture::exercise(owner,defect); }
+        for (unsigned mode=0;mode<3;++mode) { Session owner; fixture.prepare(owner); exercise_unowned_profile(owner,mode); }
+        std::puts("PASS unowned PROFILE reader and serializers refuse before import (3 cases)");
+        std::puts("PASS pre-root PROFILE query and first unowned boundary (8 production adapter cases)"); return 0;
+    }
     if (argc == 2 && std::strcmp(argv[1], "--profile") == 0) {
         run_profile_contracts([&fixture] {
-            auto owner = std::make_unique<Session>(); fixture.admit(*owner); return owner;
+            auto owner = std::make_unique<Session>(); fixture.admit(*owner, true); return owner;
         });
         return 0;
     }

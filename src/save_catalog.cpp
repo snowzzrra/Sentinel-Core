@@ -110,7 +110,8 @@ bool read_campaign_prefix(engine::Memory& memory, uintptr_t image_base, std::str
 }
 SaveFuture** enumerate_provider(Session& owner, engine::Memory& memory, uintptr_t provider, SaveFuture** out,
     uintptr_t identity, SaveReference* data, const char* prefix, const CatalogCalls& calls) {
-    if (!owner.routed()) { owner.unrouted_import(); return calls.enumerate(provider, out, identity, data, prefix); }
+    if (!owner.routed()) { owner.unrouted_import("provider_catalog", "enumerate", provider, identity); if (owner.state() == SessionState::disabled) return calls.enumerate(provider, out, identity, data, prefix);
+        calls.release(data); *out = refused_save_future(); return out; }
     auto future = std::unique_ptr<CatalogFuture>(new (std::nothrow) CatalogFuture(owner, calls));
     bool valid = false;
     try {

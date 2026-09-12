@@ -173,8 +173,10 @@ bool prepare_name(Session& owner, engine::Memory& memory, SaveReference* referen
 SaveFuture** access_scoped(Session& owner, engine::Memory& memory, uintptr_t provider,
         SaveFuture** out, uintptr_t identity, SaveReference* reference, const WriteCalls& calls, Access access) {
     if (!owner.routed()) {
-        owner.unrouted_import(); // An already-started native operation also closes late admission.
-        return calls.create(provider, out, identity, reference);
+        owner.unrouted_import(access == Access::read ? "provider_read" : "provider_mutation",
+            access == Access::read ? "import" : "mutate", provider, identity); // An already-started native operation also closes late admission.
+        if (owner.state() == SessionState::disabled) return calls.create(provider, out, identity, reference);
+        calls.release(reference); *out = refused_save_future(); return out;
     }
     bool prepared = false, profile = false; ProfileWrite selection{};
     uintptr_t data = 0; std::string name;
@@ -217,7 +219,7 @@ SaveFuture* refused_save_future() { return &refusal; }
 WritePreflightResult* preflight_scoped(Session& owner, engine::Memory& memory, uintptr_t context,
         WritePreflightResult* out, WritePreflight original, uintptr_t image) {
     static_assert(sizeof(WritePreflightResult) == 32);
-    if (!owner.routed()) { owner.unrouted_import(); return original(context, out); }
+    if (!owner.routed()) { owner.unrouted_import("write_preflight", "mutate"); if (owner.state() == SessionState::disabled) return original(context, out); }
     bool scoped = false;
     try {
         uintptr_t remote = 0; std::string name; std::array<uint64_t, 3> files{};

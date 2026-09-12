@@ -473,7 +473,7 @@ void lose_write(Session& owner) { owner.native_writes.invalidate(); owner.fail(S
 }
 uintptr_t* prepare_write_job(Session& owner, engine::Memory& memory, const SaveReference* source,
         uintptr_t* out, const SaveReference* identity, PrepareWriteJob original, uintptr_t image) {
-    if (!owner.routed()) { owner.unrouted_import(); return original(source, out, identity); }
+    if (!owner.routed()) { owner.unrouted_import("write_job_prepare", "mutate"); return original(source, out, identity); }
     const auto id = WritePollScope::current(owner.native_writes);
     auto* result = original(source, out, identity);
     uintptr_t tag = 0, control = 0, object = 0, data_control = 0, data = 0;
@@ -489,7 +489,7 @@ uintptr_t* prepare_write_job(Session& owner, engine::Memory& memory, const SaveR
 SaveFuture** create_write_context(Session& owner, engine::Memory& memory, SaveFuture** out,
         SaveReference* identity, const char* name, uint8_t clear, uint64_t* files,
         CreateWriteContext original, uintptr_t image) {
-    if (!owner.routed()) { owner.unrouted_import(); return original(out, identity, name, clear, files); }
+    if (!owner.routed()) { owner.unrouted_import("write_context", "mutate"); return original(out, identity, name, clear, files); }
     const auto id = WritePollScope::current(owner.native_writes);
     auto* result = original(out, identity, name, clear, files);
     uintptr_t future = 0, table = 0, control = 0, object = 0;
@@ -513,7 +513,7 @@ void destroy_write_job(Session& owner, uintptr_t object, DestroySdkVector origin
 }
 SdkWriteResult* poll_sdk_write(Session& owner, engine::Memory& memory, uintptr_t context,
         SdkWriteResult* out, void* task, const SdkWriteCalls& calls) {
-    if (!owner.routed()) { owner.unrouted_import(); return calls.poll(context, out, task); }
+    if (!owner.routed()) { owner.unrouted_import("sdk_write_poll", "mutate"); if (owner.state() == SessionState::disabled) return calls.poll(context, out, task); }
     uintptr_t remote = 0, files = 0, table = 0; uint64_t count = 0, sequence = 0;
     WriteAsync write = nullptr; std::string directory; bool valid = false;
     try {

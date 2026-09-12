@@ -4,6 +4,11 @@
 #include <cstring>
 
 namespace sentinel::save {
+namespace { thread_local uintptr_t native_route_caller = 0, native_route_rva = 0; }
+NativeRouteScope::NativeRouteScope(uintptr_t caller, uintptr_t image) : previous(native_route_caller), previous_rva(native_route_rva) {
+    native_route_caller = caller; native_route_rva = image && caller >= image ? caller-image : 0;
+}
+NativeRouteScope::~NativeRouteScope() { native_route_caller = previous; native_route_rva = previous_rva; }
 void Session::begin_profile(uintptr_t data) {
     std::lock_guard<std::mutex> guard(profile_trace_mutex_);
     if (profile_trace_.request) return; // Retain the first startup request through later refusals.
@@ -128,9 +133,27 @@ void Session::startup_leave(bool abnormal) {
         }
     }
 }
-void Session::unrouted_import() {
+UnroutedTrace Session::unrouted_trace() const {
+    std::lock_guard<std::mutex> guard(mutex_); return unrouted_;
+}
+bool Session::pre_root_profile_query(uintptr_t expected_caller, uintptr_t identity) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    // The checked native backend only tests shared PROFILE presence. It never
+    // reads a payload or owns the AP provider, baseline, selection or admission.
+    const bool before_root=state_==SessionState::prepared && !entered_;
+    const bool before_publication=state_==SessionState::starting && qualified_ && startup_thread_==GetCurrentThreadId();
+    if ((!before_root && !before_publication) || fault_ != SessionFault::none ||
+        !root_ || !caller_ || routes_ != required_routes || !identity ||
+        !expected_caller || native_route_caller != expected_caller) return false;
+    if (!unrouted_.at_ms) unrouted_ = {GetTickCount64(), "presence_query", "query", state(), entered_, qualified_,
+        0, 0, identity, native_route_caller, true, native_route_rva};
+    return true;
+}
+void Session::unrouted_import(const char* route, const char* operation, uintptr_t provider, uintptr_t identity) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (state_ == SessionState::prepared || state_ == SessionState::starting) {
+        if (!unrouted_.at_ms || unrouted_.delegated_account_query) unrouted_ = {GetTickCount64(), route, operation, state(), entered_, qualified_,
+            native_manager_, provider ? provider : provider_object_, identity ? identity : platform_identity_, native_route_caller, false, native_route_rva};
         installation.startup(2);
         if (fault_ == SessionFault::none) fault_ = SessionFault::missed_startup;
         state_ = SessionState::rejected; requests_ = false;
@@ -298,17 +321,37 @@ void Session::forget_save_data(uintptr_t data) {
     { std::lock_guard<std::mutex> guard(profile_trace_mutex_); if (data == profile_data_) profile_data_ = 0; }
     native_writes.invalidate_source(data);
 }
-bool Session::capture_profile_baseline(uintptr_t profile, uintptr_t manager, std::string name, int32_t index) {
+bool Session::capture_profile_baseline(const ProfileOwner& owner, std::string name, int32_t index) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (!routed() || !choice_ready_ || profile_failed_ || !profile || !manager || index < 0 || index >= 12 ||
+    if (!native_io() || !choice_ready_ || profile_failed_ || !owner.profile || !owner.manager || !owner.shell ||
+        owner.user == UINT32_MAX || index < 0 || index >= 12 ||
         (!name.empty() && !steam_name_equal(name, "AUTOSAVE") && !slot_name(name))) return false;
-    if (baseline_ready_) return profile == profile_ && manager == profile_manager_ && name == vanilla_name_ && index == vanilla_index_;
-    vanilla_name_ = std::move(name); vanilla_index_ = index; profile_ = profile; profile_manager_ = manager;
+    // Only the initial native read can capture the vanilla pair. Later serializers
+    // never recapture AP/default selection, even when native recreates the shell.
+    if (baseline_ready_) return owner.profile == profile_owner_.profile && owner.manager == profile_owner_.manager &&
+        owner.shell == profile_owner_.shell && owner.user == profile_owner_.user && name == vanilla_name_ && index == vanilla_index_;
+    vanilla_name_ = std::move(name); vanilla_index_ = index; profile_owner_ = owner;
     baseline_ready_ = true; return true;
 }
-bool Session::profile_baseline(uintptr_t profile, uintptr_t manager, const char*& name, int32_t& index) const {
+bool Session::profile_baseline(const ProfileOwner& owner, const char*& name, int32_t& index) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (!baseline_ready_ || profile_failed_ || (profile && profile != profile_) || (manager && manager != profile_manager_)) return false;
+    // 141492010 GetOrCreatePlayerProfile keys shells by PROFILE+8 (native user
+    // handle); 1417e6b10/1417e7010 get/set that field. Allocation addresses are
+    // transient. The adapter proves the current shell/backlink/callback domain.
+    // Session is configured once; provider/user reset or faults close native_io.
+    const bool valid = native_io() && baseline_ready_ && !profile_failed_ && owner.profile && owner.shell &&
+        owner.manager == profile_owner_.manager && owner.user == profile_owner_.user;
+    {
+        std::lock_guard<std::mutex> trace_guard(profile_trace_mutex_);
+        profile_trace_.ownership = {profile_owner_, owner, native_manager_, provider_control_, provider_object_, platform_identity_,
+            baseline_ready_, native_io(), valid};
+    }
+    if (!valid) return false;
+    name = vanilla_name_.c_str(); index = vanilla_index_; return true;
+}
+bool Session::profile_output_baseline(const char*& name, int32_t& index) const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!native_io() || !baseline_ready_ || profile_failed_) return false;
     name = vanilla_name_.c_str(); index = vanilla_index_; return true;
 }
 void Session::fail_profile() {
