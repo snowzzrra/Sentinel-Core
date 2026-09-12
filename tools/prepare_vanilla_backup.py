@@ -403,6 +403,13 @@ def _protect(args):
         raise Refused("backup must be separate from original, AP and uninstall roots")
     if overlap(*sources.values()):
         raise Refused("source roots must not overlap")
+    run_parent = getattr(args, 'run_backup_parent', None)
+    if run_parent:
+        run_parent = explicit_path(run_parent)
+        if any(overlap(run_parent, p) for p in [*sources.values(), *excluded, destination]):
+            raise Refused("run protection parent must be separate from source, historical backup, AP and uninstall roots")
+        if not destination.is_dir():
+            raise Refused("run protection parent requires the existing historical backup")
     identity = expected_identity(args, sources)
     with contextlib.ExitStack() as stack:
         if args.action == "verify":
@@ -412,6 +419,8 @@ def _protect(args):
         args.operation_stage = "stopped_precondition"
         require_stopped()
         pinned_dirs = pin_ancestors(stack, [*sources.values(), destination.parent])
+        if run_parent:
+            pin_ancestors(stack, [run_parent])
         if not (steam_root / "remote").is_dir():
             raise Refused("explicit Steam origin lacks the required remote directory")
         args.operation_stage = "source_inventory"
@@ -449,7 +458,7 @@ def _protect(args):
         reference = getattr(args, "reference_directory", None)
         if reference:
             reference = explicit_path(reference)
-            if reference.parent != destination.parent:
+            if reference.parent not in (destination.parent, run_parent):
                 raise Refused("run reference must use the configured private backup parent", stage="reference_identity")
             if reference != destination:
                 args.operation_stage = "reference_integrity"
@@ -459,8 +468,10 @@ def _protect(args):
                 args.comparisons = getattr(args, "comparisons", []) + [{"summary": comparison, "differences": rows}]
                 if not any(comparison["counts"][c] for c in ("added", "removed", "content_changed", "metadata_only", "metadata_unavailable")):
                     destination, entries, reused = reference, candidate_entries, True
+        if run_parent and destination.parent != run_parent:
+            reused = False
         if destination.exists() and not reused:
-            destination = destination.parent / (destination.name + "-run-" + uuid.uuid4().hex)
+            destination = (run_parent or destination.parent) / (destination.name + "-run-" + uuid.uuid4().hex)
         if not reused:
             args.operation_stage = "snapshot_copy"
             destination.mkdir()  # Create-only; never resume an interrupted directory.
@@ -504,6 +515,7 @@ def main(argv=None):
     parser.add_argument("--uninstall-root", action="append", required=True)
     parser.add_argument("--diagnostic-file", help="Create-only private diagnostic outside original/backup/AP roots")
     parser.add_argument("--reference-directory", help="Exact previously completed reference; never inferred by timestamp")
+    parser.add_argument("--run-backup-parent", help="Existing separate local parent for new run snapshots; historical backup remains unchanged")
     args = parser.parse_args(argv)
     diagnostic = None
     diagnostic_pins = contextlib.ExitStack()

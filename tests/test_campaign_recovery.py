@@ -22,8 +22,8 @@ class CampaignRecovery(unittest.TestCase):
         self.assertEqual(run.returncode, code, output)
         return output
 
-    def create(self, root):
-        self.assertIn('explicit verified backup', self.stage(root, 'create'))
+    def create(self, root, defect='native_read_c'):
+        self.assertIn('explicit verified backup', self.stage(root, 'create', defect))
         archive = root / (root / 'selected-backup.txt').read_text().strip()
         manifest = (archive / 'transport.manifest').read_text()
         self.assertIn('steam_user=76561198000000001', manifest)
@@ -68,6 +68,51 @@ class CampaignRecovery(unittest.TestCase):
             root = Path(temp); self.create(root); before = self.digest(root)
             self.assertIn('recovery_already_exact', self.stage(root, 'recover'))
             self.assertEqual(self.digest(root), before)
+
+    def test_retail_primary_archive_preserves_rotation_pair_recovery_and_continue(self):
+        with tempfile.TemporaryDirectory(prefix='sentinel-c-retail-') as temp:
+            root=Path(temp); archive,target,_=self.create(root,'native_read_c_retail_pair')
+            self.assertIn('\nfiles=2\n',(archive/'transport.manifest').read_text())
+            self.assertEqual(len(self.digest(target)),4)
+            original=self.digest(target); saved=self.digest(archive)
+            self.assertIn('recovery_already_exact',self.stage(root,'recover'))
+            self.remove_payload(target); before=self.digest(target)
+            self.assertIn('recovery_native_payload_verified',self.stage(root,'recover'))
+            self.assertEqual(self.digest(target),original); self.assertEqual(self.digest(archive),saved)
+            quarantine=next(p for p in root.glob('transport-backup-*') if p!=archive)
+            self.assertTrue(all(h in (quarantine/'transport.manifest').read_text() for h in before.values()))
+            self.assertIn('checkpoint=2 files=2',self.stage(root,'resume'))
+            for name,h in original.items():
+                if name.endswith('-BACKUP'): self.assertEqual(self.digest(target)[name],h)
+
+    def test_retail_pair_does_not_authorize_unknown_or_newer_targets(self):
+        for defect in ('unpaired','unknown','primary_corrupt','aux_empty','newer'):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory(prefix='sentinel-c-retail-') as temp:
+                root=Path(temp);archive,target,_=self.create(root,'native_read_c_retail_pair')
+                if defect=='unpaired':(target/'game.details-BACKUP').unlink()
+                elif defect=='unknown':(target/'extra.dat').write_bytes(b'preserve')
+                elif defect=='primary_corrupt':(target/'game_duration.dat').write_bytes(b'corrupt')
+                elif defect=='aux_empty':(target/'game.details-BACKUP').write_bytes(b'')
+                elif defect=='newer':self.stage(root,'resume')
+                self.remove_payload(target);before=self.digest(target)
+                self.stage(root,'recover',code=2)
+                self.assertEqual(self.digest(target),before)
+                self.assertFalse(list(root.rglob('recovery.pending')))
+
+    def test_retail_auxiliary_concurrency_and_interruption_preserve_guard(self):
+        for defect in ('native_read_c_concurrent_auxiliary',*[f'native_read_c_interrupt{i}' for i in range(4)]):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory(prefix='sentinel-c-retail-') as temp:
+                root=Path(temp);archive,target,_=self.create(root,'native_read_c_retail_pair')
+                self.remove_payload(target);before=self.digest(target);saved=self.digest(archive)
+                concurrency=defect.endswith('auxiliary')
+                output=self.stage(root,'recover',defect,code=2 if concurrency else 77)
+                self.assertEqual(self.digest(archive),saved)
+                self.assertEqual(bool(list(root.rglob('recovery.pending'))),not concurrency)
+                if concurrency:self.assertIn('recovery_concurrent_target_change',output)
+                else:
+                    self.stage(root,'resume',code=2)
+                    for name,h in before.items():
+                        if name.endswith('-BACKUP'):self.assertEqual(self.digest(target)[name],h)
 
     def test_known_older_valid_target_is_quarantined_and_advanced_to_exact_backup(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-c-') as temp:

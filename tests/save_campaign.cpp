@@ -40,12 +40,13 @@ std::filesystem::path recovery_disk;
 int recovery_interrupt=-1, recovery_writes=0;
 std::wstring recovery_namespace;
 uint64_t fixture_user=76561198000000001ull;
-bool lose_provider=false, concurrent_target=false;
+bool lose_provider=false, concurrent_target=false, concurrent_auxiliary=false;
 unsigned owner_reads=0;
 uint64_t steam_owner(uintptr_t remote) {
     if(concurrent_target && ++owner_reads==3) {
         auto& files=reinterpret_cast<Remote*>(remote)->files;
-        for(auto& [name,bytes]:files) if(name.find("/game_duration.dat")!=name.npos) { bytes[0]^=1; break; }
+        const std::string suffix=concurrent_auxiliary?"/game_duration.dat-BACKUP":"/game_duration.dat";
+        for(auto& [name,bytes]:files) if(name.size()>=suffix.size() && name.compare(name.size()-suffix.size(),suffix.size(),suffix)==0) { bytes[0]^=1; break; }
     }
     return fixture_user;
 }
@@ -223,6 +224,9 @@ int wmain(int argc,wchar_t** argv) {
     const bool profile_lifecycle=defect==L"profile_lifecycle";
     const bool native_read=defect.rfind(L"native_read",0)==0;
     const bool recovery_case=defect.rfind(L"native_read_c",0)==0;
+    const auto retail_marker=std::filesystem::path(argv[2])/"retail-pair.fixture";
+    const bool retail_pair=defect==L"native_read_c_retail_pair" || std::filesystem::exists(retail_marker);
+    if(retail_pair && !resume && !recover) { std::filesystem::create_directories(argv[2]); std::ofstream(retail_marker)<<"primary operation; preserved rotation pair\n"; }
     if(recovery_case) recovery_disk=std::filesystem::path(argv[2])/"remote";
     navigation_fixture::vanilla();
     storage::Descriptor descriptor{{"synthetic-campaign-host",0,1,std::string(64,'b')},argv[2],
@@ -275,7 +279,8 @@ int wmain(int argc,wchar_t** argv) {
         if(defect.rfind(L"native_read_c_interrupt",0)==0) recovery_interrupt=std::stoi(defect.substr(23));
         if(defect==L"native_read_c_unavailable") fixture_user=0;
         lose_provider=defect==L"native_read_c_provider_loss";
-        concurrent_target=defect==L"native_read_c_concurrent";
+        concurrent_auxiliary=defect==L"native_read_c_concurrent_auxiliary";
+        concurrent_target=defect==L"native_read_c_concurrent" || concurrent_auxiliary;
         RecoveryMemory native_memory; recovery_context_remote=provider;
         const auto completed=provider_initialized(owner,native_memory,0x9000,{image,recovery_context,steam_owner});
         const auto trace=owner.btrace.snapshot();
@@ -309,7 +314,8 @@ int wmain(int argc,wchar_t** argv) {
             all_files[i+1]=reinterpret_cast<uintptr_t>(extra_files[i].data());
             if (resume && !recovery_case) remote.files[directory+"/"+extra_names[i]]=extra_payloads[i];
         }
-        store(data,0x1c0,reinterpret_cast<uintptr_t>(all_files.data())); store(data,0x1c8,int32_t{4}); store(data,0x1cc,int32_t{4});
+        const int32_t file_count=retail_pair?2:4;
+        store(data,0x1c0,reinterpret_cast<uintptr_t>(all_files.data())); store(data,0x1c8,file_count); store(data,0x1cc,file_count);
         if (resume && !recovery_case) remote.files[directory+"/game.details"]=payload;
     }
     engine::LocalMemory memory;
@@ -375,7 +381,7 @@ int wmain(int argc,wchar_t** argv) {
             const auto saved=owner.campaign_run.snapshot();
             CHECK(saved.checkpoint==2 && saved.source_checkpoint==1 && saved.native_saved && saved.readback_verified && saved.continuity_persisted);
             CHECK(remote.files.at(directory+"/game.details")==payload);
-            std::printf("PASS separate-process menu/read/parser/Continue/save checkpoint=2 files=4 pid=%lu\n",GetCurrentProcessId()); return 0;
+            std::printf("PASS separate-process menu/read/parser/Continue/save checkpoint=2 files=%u pid=%lu\n",retail_pair?2u:4u,GetCurrentProcessId()); return 0;
         }
         CHECK(owner.campaign_run.begin_resume());
         CHECK(owner.campaign_run.allow_access(source,directory,false,false));
@@ -476,6 +482,7 @@ int wmain(int argc,wchar_t** argv) {
         // Native PROFILE preparation receives the user context, then the exact
         // campaign factory/provider/readback chain reaches checkpoint 1.
         if (defect.empty() || defect==L"queued_checkpoint" || defect==L"menu_pending_save") profile_write();
+        if(retail_pair) for(size_t i=1;i<extra_names.size();++i) remote.files[directory+"/"+extra_names[i]]=extra_payloads[i];
         writer_fixture::save(writer,defect==L"pending"?L"pending_save":defect,c_backup);
     })==0);
     if(defect==L"pending" || defect==L"initial_save_return_failed" || defect==L"unassociated" || defect==L"queued_foreign" || defect==L"save_failure" || defect==L"partial_save" || defect==L"unrelated") {

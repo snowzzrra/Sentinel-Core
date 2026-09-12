@@ -167,6 +167,8 @@ def load_config(path):
     config = read_json(path)
     paths = ("GameInstall", "SteamExe", "SteamAppRoot", "LocalProviderRoot", "OriginalBackupDirectory",
              "APRoot", "Python", "PowerShell7", "CandidateManifest", "EvidenceRoot", "ActiveRun")
+    if 'RunBackupParent' in config:
+        paths += ('RunBackupParent',)
     for name in paths:
         value = config.get(name)
         if not isinstance(value, str) or not Path(value).is_absolute():
@@ -974,7 +976,8 @@ class Run:
             # and stopped game/Steam; a stale file alone never grants a new lease.
             publication = Path(self.config["GameInstall"]) / "sentinel-prelaunch.txt"
             handoff_name = previous.get('handoff_record', 'handoff.private.json')
-            if handoff_name not in ('handoff.private.json', 'handoff-create.private.json', 'handoff-resume.private.json'):
+            if handoff_name not in ('handoff.private.json', 'handoff-create.private.json', 'handoff-resume.private.json',
+                                    'handoff-closure.private.json', 'handoff-recover.private.json'):
                 raise Refused('previous_handoff_record_mismatch')
             private_handoff = directory / 'private' / handoff_name
             if publication.exists() and private_handoff.exists():
@@ -993,6 +996,8 @@ class Run:
         protection.require_stopped()
         self.recover_previous()
         params = self.source_arguments(self.config["OriginalBackupDirectory"])
+        if self.config.get('RunBackupParent'):
+            params += ['--run-backup-parent', self.config['RunBackupParent']]
         params += ["--ap-root", self.config["APRoot"], "--diagnostic-file", str(self.directory / "private/protection.private.json")]
         for root in self.config["UninstallRoots"]: params.extend(["--uninstall-root", root])
         if self.state.get("reuse_reference"): params.extend(["--reference-directory", self.state["reuse_reference"]])
@@ -1096,7 +1101,7 @@ class Run:
                 case['failure'] = failure
                 case['runtime_proof'] = 'failed_observing_until_normal_exit'
                 self.fail(Refused(failure['fault'] + '_' + str(failure['reason'])), failure['fault'])
-                print('Teste B falhou. Feche DOOM e Steam normalmente. A coleta segura continua; nao avance para outro checkpoint ou segundo lancamento.')
+                print('Teste de save AP falhou. Feche DOOM e Steam normalmente. A coleta segura continua; nao avance para outro checkpoint ou segundo lancamento.')
                 self.save()
             return current
         if not current: return {}
@@ -1188,6 +1193,8 @@ class Run:
                 raise Refused('generated_slot_options_changed')
             if case['phase'] == 'prepare_resume':
                 params = self.source_arguments(self.config['OriginalBackupDirectory'])
+                if self.config.get('RunBackupParent'):
+                    params += ['--run-backup-parent', self.config['RunBackupParent']]
                 params += ['--ap-root', self.config['APRoot'], '--reference-directory', self.state['protection']['reference_directory'],
                     '--diagnostic-file', str(self.directory / 'private/second-protection.private.json')]
                 for root in self.config['UninstallRoots']: params += ['--uninstall-root', root]

@@ -172,25 +172,44 @@ RecoveryResult recover_campaign(storage::Namespace& lease,const storage::Descrip
     if(!r.ok() && r.win32_error!=ERROR_FILE_NOT_FOUND) return refuse("recovery_target_metadata_unavailable");
     Checkpoint target;
     const bool recorded=checkpoint(current_record,contract,directory,target);
-    const bool valid=recorded && matches(target,current);
-    const bool same=equal(source,current);
+    // A normal retail write owns the primary pair. Native rotation can leave
+    // a separate BACKUP pair which that operation/continuity never claimed.
+    // Keep these opaque bytes: quarantine and recheck the FULL inventory, but
+    // classify/restore only the operation's files. Never infer backup validity.
+    auto tracked=current, expected_after=source;
+    if(source.files.size()==2 && recorded && target.files.size()==2 &&
+        target.files.count("game.details") && target.files.count("game_duration.dat")) {
+        unsigned auxiliaries=0;
+        for(const auto& f:current.files) if(f.name=="game.details-BACKUP" || f.name=="game_duration.dat-BACKUP") {
+            ++auxiliaries; expected_after.files.push_back(f);
+        }
+        if(auxiliaries==1) return refuse("recovery_auxiliary_pair_incomplete");
+        if(auxiliaries==2) {
+            tracked.files.erase(std::remove_if(tracked.files.begin(),tracked.files.end(),[](const auto& f){
+                return f.name=="game.details-BACKUP" || f.name=="game_duration.dat-BACKUP";}),tracked.files.end());
+            result.preserved_auxiliaries=2;
+        }
+    }
+    const bool valid=recorded && matches(target,tracked);
+    const bool same=equal(source,tracked);
     if(recorded && target.number>saved.number) { result.state=RecoveryState::newer; return refuse("recovery_newer_recorded_progress"); }
     if(valid && same && current_record==source.checkpoint) {
         result.state=RecoveryState::same; result.complete=true; result.reason="recovery_already_exact"; return result;
     }
     if(valid && target.number==saved.number) { result.state=RecoveryState::conflict; return refuse("recovery_valid_ordering_conflict"); }
-    result.state=valid?RecoveryState::older:current.files.size()<source.files.size()?RecoveryState::missing_incomplete:RecoveryState::corrupt_unknown;
-    if(!valid && !current.files.empty()) {
-        bool known_subset=recorded && current.files.size()<target.files.size();
-        for(const auto& f:current.files) {
+    result.state=valid?RecoveryState::older:tracked.files.size()<source.files.size()?RecoveryState::missing_incomplete:RecoveryState::corrupt_unknown;
+    if(!valid && !tracked.files.empty()) {
+        bool known_subset=recorded && tracked.files.size()<target.files.size();
+        for(const auto& f:tracked.files) {
             const auto expected=target.files.find(f.name);
             known_subset=known_subset && expected!=target.files.end() && expected->second==std::make_pair(f.size,hash(f));
         }
         if(!known_subset) { result.state=RecoveryState::corrupt_unknown; return refuse("recovery_unknown_requires_conflict_decision"); }
     }
     // No deletion API: unknown/extra files are never swept away. A complete
-    // source must cover every current target file before any write is possible.
-    for(const auto& f:current.files) if(std::none_of(source.files.begin(),source.files.end(),[&](const auto& s){return s.name==f.name;})) return refuse("recovery_target_extra_payload_conflict");
+    // source must cover every tracked target file before any write is possible.
+    // Any untracked native auxiliary pair remains byte-identical in expected.
+    for(const auto& f:tracked.files) if(std::none_of(source.files.begin(),source.files.end(),[&](const auto& s){return s.name==f.name;})) return refuse("recovery_target_extra_payload_conflict");
     Payloads replacement;
     for(size_t i=0;i<source.files.size();++i) {
         std::string bytes(source.files[i].size,'\0');
@@ -233,7 +252,7 @@ RecoveryResult recover_campaign(storage::Namespace& lease,const storage::Descrip
         result.mutated=true;
         if(!t.write(t.remote,key.c_str(),replacement.bytes[i].data(),static_cast<int32_t>(replacement.bytes[i].size()))) return refuse("recovery_native_write_failed");
     }
-    if(!owned() || !capture(t,directory,check,check_bytes) || !equal(source,check)) return refuse("recovery_target_verification_failed");
+    if(!owned() || !capture(t,directory,check,check_bytes) || !equal(expected_after,check)) return refuse("recovery_target_verification_failed");
     const auto selection="sentinel-native-selection-v1\nnamespace_id="+id+"\ncampaign=GAME-\nname=AUTOSAVE0\n";
     if(!t.write(t.remote,selection_key.c_str(),selection.data(),static_cast<int32_t>(selection.size()))) return refuse("recovery_selection_failed");
     std::string selection_check(selection.size(),'\0');
@@ -257,7 +276,8 @@ bool Session::recover_startup(const RecoveryTransport& transport) {
         if(!campaign_run.configure(*this,descriptor,*lease_)) return false;
     }
     btrace.record(BStage::resume,result.complete?BStatus::succeeded:BStatus::refused,result.reason,0,
-        {{"classification",result.state},{"mutated",result.mutated},{"complete",result.complete},{"quarantined",!result.quarantine.empty()}});
+        {{"classification",result.state},{"mutated",result.mutated},{"complete",result.complete},{"quarantined",!result.quarantine.empty()},
+         {"preserved_auxiliaries",result.preserved_auxiliaries}});
     if(!result.complete) { fail(SessionFault::native_campaign); return false; }
     return true;
 }

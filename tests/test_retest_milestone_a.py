@@ -485,13 +485,39 @@ class RetestWorkflowTests(unittest.TestCase):
             'required_routes': 63, 'namespace_id': 'a'*64},
             'b_diagnostics': {'stages': {'session': {'sequence': 229, 'status': 3,
                 'predicate': 'native_root_shutdown_provider_cleanup', 'facts': {'shutdown_rva': 0x675300}}}}}
+        for rva in (0x675300, 0x435cb9):
+            row['b_diagnostics']['stages']['session']['facts']['shutdown_rva'] = rva
+            self.assertTrue(retest.Run.campaign_admission_after_close([row], 'a'*64))
         for field, value in (('fault', 7), ('state', 5), ('flags', 1), ('namespace_id', 'b'*64)):
             invalid = copy.deepcopy(row); invalid['admission'][field] = value
             self.assertFalse(retest.Run.campaign_admission_after_close([invalid], 'a'*64))
         for field, value in (('predicate', 'session_requests_stopped'), ('status', 4), ('sequence', 0),
-                             ('facts', {'shutdown_rva': 0x675d24})):
+                             ('facts', {'shutdown_rva': 0x675d24}), ('facts', {'shutdown_rva': 0x435cb8}),
+                             ('facts', {'shutdown_rva': 0x66d601})):
             invalid = copy.deepcopy(row); invalid['b_diagnostics']['stages']['session'][field] = value
             self.assertFalse(retest.Run.campaign_admission_after_close([invalid], 'a'*64))
+
+    def test_capture_exit_race_finishes_comparison_but_other_errors_remain_failures(self):
+        automatic = self.configure_campaign_fixture()
+        capture = retest.Run.capture
+        for refusal in ('no_game_process', 'game_process_replaced', 'capture_read_error'):
+            with self.subTest(refusal=refusal):
+                # Use an independent config/ledger for each fixture launch.
+                self.config['ActiveRun'] = str(self.root / (refusal + '.active.json'))
+                retest.write_json(self.config_path, self.config)
+                def closing(run):
+                    capture(run)
+                    raise retest.Refused(refusal)
+                with mock.patch.object(retest.Run, 'collect_startup_log', automatic), mock.patch.object(retest.Run, 'capture', closing):
+                    code, output = self.stage('RUN', '--scenario', 'B')
+                state, directory = self.state()
+                self.assertEqual(state['comparison']['response']['result'], 'vanilla_campaign_unchanged')
+                if refusal == 'no_game_process':
+                    self.assertEqual(code, 0, output)
+                    self.assertIsNone(state.get('primary_failure'))
+                else:
+                    self.assertNotEqual(code, 0, output)
+                    self.assertEqual(state['primary_failure']['reason'], refusal)
 
     def test_campaign_failure_keeps_observing_through_transient_log_error_and_normal_close(self):
         automatic = self.configure_campaign_fixture()
@@ -518,7 +544,7 @@ class RetestWorkflowTests(unittest.TestCase):
         state, directory = self.state()
         self.assertNotEqual(code, 0, output)
         self.assertEqual(len(observations), 3)
-        self.assertEqual(output.count('Teste B falhou.'), 1)
+        self.assertEqual(output.count('Teste de save AP falhou.'), 1)
         self.assertTrue(all(phase == 'create' for phase in calls))
         self.assertEqual(state['campaign_case']['runtime_proof'], 'failed_closed_and_compared')
         self.assertEqual(state['comparison']['response']['result'], 'vanilla_campaign_unchanged')
@@ -649,7 +675,7 @@ class RetestWorkflowTests(unittest.TestCase):
             code, output = self.stage('RUN', '--scenario', 'B')
         state, directory = self.state(); original = (directory / 'private/state.json').read_bytes()
         self.assertNotEqual(code, 0, output)
-        self.assertEqual(output.count('Teste B falhou.'), 1)
+        self.assertEqual(output.count('Teste de save AP falhou.'), 1)
         report = self.report(directory)
         self.assertEqual(report['hook_installation'], 'READY/PASS')
         self.assertEqual(report['startup_observation'], 'FAILED/unobserved')
@@ -685,7 +711,7 @@ class RetestWorkflowTests(unittest.TestCase):
             code, output = self.stage('RUN', '--scenario', 'B')
         old, directory = self.state(); original = (directory / 'private/state.json').read_bytes()
         self.assertNotEqual(code, 0, output)
-        self.assertEqual(output.count('Teste B falhou.'), 1)
+        self.assertEqual(output.count('Teste de save AP falhou.'), 1)
         report = self.report(directory)
         self.assertEqual(report['native_failure']['ordering'], 'profile_refusal_after_native_creation')
         self.assertEqual(report['campaign_case']['failure']['at_ms'], 1100)

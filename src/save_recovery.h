@@ -23,6 +23,7 @@ struct RecoveryTransport {
 enum class RecoveryState { missing_incomplete, same, older, newer, corrupt_unknown, conflict, unavailable };
 struct RecoveryResult {
     bool complete = false, mutated = false;
+    unsigned preserved_auxiliaries = 0;
     RecoveryState state = RecoveryState::unavailable;
     const char* reason = "not_requested";
     std::wstring quarantine;
