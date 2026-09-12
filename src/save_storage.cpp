@@ -495,8 +495,14 @@ Result parse_descriptor(std::string_view text, Descriptor& descriptor) {
             !line(text, "difficulty=", value) || value.size() != 1 || value[0] < '0' || value[0] > '3')
             return {Outcome::invalid_descriptor};
         parsed.campaign.difficulty = static_cast<uint32_t>(value[0] - '0');
-        if (!line(text, "intent=", value) || (value != "create" && value != "resume")) return {Outcome::invalid_descriptor};
-        parsed.campaign.intent = value == "create" ? CampaignIntent::create : CampaignIntent::resume;
+        if (!line(text, "intent=", value) || (value != "create" && value != "resume" && value != "recover")) return {Outcome::invalid_descriptor};
+        parsed.campaign.intent = value == "create" ? CampaignIntent::create : value == "resume" ? CampaignIntent::resume : CampaignIntent::recover;
+        if (parsed.campaign.intent == CampaignIntent::recover) {
+            if (!line(text, "backup=", value) || value.empty() || value.size() > 128 ||
+                value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") != value.npos)
+                return {Outcome::invalid_descriptor};
+            parsed.campaign.recovery_basename = value;
+        }
     }
     if (!text.empty()) return {Outcome::invalid_descriptor};
     std::string id;
@@ -545,6 +551,16 @@ Result Namespace::publish_campaign_record(bool checkpoint, std::string_view text
     if (!result.ok()) return result;
     if (!SetEndOfFile(file.value) || !FlushFileBuffers(file.value)) return io_error();
     return {};
+}
+Result Namespace::recovery_record(bool complete, std::string& text) const {
+    text.clear(); Handle file;
+    const auto path = impl_->lease.metadata.path + (complete ? L"\\recovery.complete" : L"\\recovery.pending");
+    auto result = open_file(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, file);
+    return result.ok() ? read_metadata(file.value, text, 32768) : result;
+}
+Result Namespace::publish_recovery_record(bool complete, std::string_view text) {
+    if (text.empty() || text.size() > 32768) return {Outcome::invalid_descriptor};
+    return publish_metadata(impl_->lease.metadata.path, complete ? L"recovery.complete" : L"recovery.pending", std::string(text));
 }
 Result prepare(const Descriptor& descriptor, std::unique_ptr<Namespace>& output) {
     output.reset();
@@ -648,7 +664,8 @@ bool transport_name(std::string_view value) {
     return true;
 }
 bool transport_metadata(const TransportMetadata& value, const std::string& id) {
-    if (!value.process_id || !value.process_created || !value.operation_id || value.files.empty() || value.files.size() > 16)
+    if (value.quarantine && (!value.steam_user || value.operation_id)) return false;
+    if (!value.process_id || !value.process_created || (!value.operation_id && !value.quarantine) || value.files.empty() || value.files.size() > 16)
         return false;
     const auto directory = folded(value.directory), root = "ap-" + id.substr(0, 40) + "/";
     if (directory.compare(0, root.size(), root)) return false;
@@ -656,6 +673,7 @@ bool transport_metadata(const TransportMetadata& value, const std::string& id) {
     for (const char* campaign : {"game-autosave", "dlc1-autosave", "dlc2-autosave"})
         for (unsigned i = 0; i < 12; ++i) known |= slot == campaign + std::to_string(i);
     if (!known) return false;
+    if (value.provider.size() > 96 || value.contract.size() > 2048 || value.checkpoint.size() > 12000) return false;
     uint64_t total = 0;
     for (size_t i = 0; i < value.files.size(); ++i) {
         const auto& file = value.files[i];
@@ -673,8 +691,12 @@ std::string transport_text(const TransportMetadata& value, const Descriptor& des
     std::string text(transport_magic);
     text += "namespace=" + id + "\n" + identity_text(descriptor.identity) + "provenance=synthetic-fixture\nprocess_id=" +
         std::to_string(value.process_id) + "\nprocess_created=" + std::to_string(value.process_created) +
-        "\nwrite_operation=" + std::to_string(value.operation_id) + "\nnative_directory=" + value.directory +
-        "\nfiles=" + std::to_string(value.files.size()) + "\n";
+        "\nwrite_operation=" + std::to_string(value.operation_id) + "\nnative_directory=" + value.directory + "\n";
+    if (value.steam_user) text += "steam_user=" + std::to_string(value.steam_user) +
+        "\nrole=" + (value.quarantine ? "quarantine" : "checkpoint") +
+        "\nprovider_hex=" + hex(value.provider) + "\ncontract_hex=" + hex(value.contract) +
+        "\ncheckpoint_hex=" + hex(value.checkpoint) + "\n";
+    text += "files=" + std::to_string(value.files.size()) + "\n";
     for (const auto& file : value.files)
         text += "file=" + hex(file.name) + "," + std::to_string(file.size) + "," + hash_text(file) + "\n";
     return text + "state=complete\n";
@@ -703,6 +725,14 @@ Result parse_transport(std::string_view text, const Descriptor& descriptor, cons
         !line(text, "write_operation=", value) || !number64(value, out.operation_id) ||
         !line(text, "native_directory=", value)) return {Outcome::corrupt_manifest};
     out.process_id = static_cast<uint32_t>(pid); out.directory.assign(value);
+    if (text.substr(0,11) == "steam_user=") {
+        if (!line(text,"steam_user=",value) || !number64(value,out.steam_user) || !out.steam_user ||
+            !line(text,"role=",value) || (value!="checkpoint" && value!="quarantine")) return {Outcome::corrupt_manifest};
+        out.quarantine=value=="quarantine";
+        if (!line(text,"provider_hex=",value) || !unhex(value,out.provider) ||
+            !line(text,"contract_hex=",value) || !unhex(value,out.contract) ||
+            !line(text,"checkpoint_hex=",value) || !unhex(value,out.checkpoint)) return {Outcome::corrupt_manifest};
+    }
     if (!line(text, "files=", value) || !number64(value, count) || !count || count > 16) return {Outcome::corrupt_manifest};
     for (uint64_t i = 0; i < count; ++i) {
         if (!line(text, "file=", value)) return {Outcome::corrupt_manifest};

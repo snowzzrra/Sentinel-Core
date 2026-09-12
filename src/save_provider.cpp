@@ -23,6 +23,14 @@ void invalidate_provider(Session& owner, engine::Memory& memory, uintptr_t manag
         // A real unwind frame inside it proves destruction is already executing.
         if (pc > 0x675290 && pc <= 0x675d23) source.shutdown_rva = pc;
     }
+    // Retail exit removes the master user BEFORE root destruction. Supported
+    // common-frame quit -> common shutdown -> MoveToPressStart -> demotion ->
+    // BroadcastNow, at these exact return sites. MoveToPressStart/sign-out alone
+    // does not prove shutdown. No elapsed-time/menu-state exception.
+    constexpr std::array<uint32_t,5> quit_chain{{0x17c1221,0x1a5b9b2,0x66d601,0x435cb9,0x43da41}};
+    if (origin == 2 && source.caller_rva == quit_chain[0] &&
+        std::equal(quit_chain.begin(),quit_chain.end(),source.stack_rvas.begin()))
+        source.shutdown_rva = 0x435cb9;
     uintptr_t root=0, selected=0;
     source.root_manager_matches = owner.provider_root(root) &&
         !memory.copy(root+0x9b38,&selected,sizeof(selected)).reason && selected==manager;
@@ -295,6 +303,18 @@ bool provider_initialized(Session& owner, engine::Memory& memory, uintptr_t mana
             if (owner.routed()) {
                 if (at(memory, context, 0, remote) && owner.collecting(remote, owner.native_root())) return true;
                 owner.fail(SessionFault::provider_identity); return false;
+            }
+            RecoveryTransport recovery{}; recovery.owner=calls.owner;
+            if (owner.recovery_requested()) {
+                uintptr_t remote_table=0;
+                if (!at(memory,context,0,remote) || !at(memory,remote,0,remote_table) ||
+                    !at(memory,remote_table,0,recovery.write) || !at(memory,remote_table,8,recovery.read) ||
+                    !at(memory,remote_table,0x68,recovery.exists) || !at(memory,remote_table,0x78,recovery.size) ||
+                    !at(memory,remote_table,0x90,recovery.count) || !at(memory,remote_table,0x98,recovery.name)) {
+                    owner.fail(SessionFault::provider_identity); return false;
+                }
+                recovery.remote=remote;
+                if (!owner.recover_startup(recovery)) return false;
             }
             if (at(memory, context, 0, remote) && owner.acquire_native_root_lock() &&
                 inspect_remote(owner, memory, remote, catalog, true) &&

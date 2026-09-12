@@ -83,7 +83,9 @@ storage::Result Session::configure(const storage::Descriptor& descriptor,
         "\nprovenance=synthetic-fixture\n";
     lease_ = std::move(lease);
     guard.unlock(); // Campaign refusal records a Session fault through its own lock.
-    if (!campaign_run.configure(*this, descriptor, *lease_)) return {storage::Outcome::invalid_descriptor, 0};
+    if (!recovery_clear(*lease_)) { reject(SessionFault::native_campaign); return {storage::Outcome::interrupted_preparation, 0}; }
+    if (descriptor.campaign.intent == storage::CampaignIntent::recover) recovery_descriptor_ = descriptor;
+    else if (!campaign_run.configure(*this, descriptor, *lease_)) return {storage::Outcome::invalid_descriptor, 0};
     state_.store(SessionState::prepared, std::memory_order_release);
     return {storage::Outcome::ok, 0};
 }
@@ -320,13 +322,14 @@ void Session::provider_reset(uintptr_t manager, const ProviderInvalidation& sour
     {
         std::lock_guard<std::mutex> guard(mutex_);
         if (!routed() || manager != native_manager_) return;
-        const bool terminal = source.root_manager_matches && source.shutdown_rva &&
+        const auto shutdown = source.shutdown_rva ? source.shutdown_rva : shutdown_rva_;
+        const bool terminal = (provider_ended_ || (source.root_manager_matches && source.shutdown_rva)) &&
             state_ == SessionState::admitted && fault_ == SessionFault::none &&
             qualified_ && root_finished_ && profile_finished_;
         btrace.record(BStage::session,terminal?BStatus::succeeded:BStatus::refused,
             terminal?"native_root_shutdown_provider_cleanup":
                 source.origin==2?"native_account_removed_during_session":"native_provider_reset_during_session",0,
-            {{"origin",source.origin},{"caller_rva",source.caller_rva},{"shutdown_rva",source.shutdown_rva},
+            {{"origin",source.origin},{"caller_rva",source.caller_rva},{"shutdown_rva",shutdown},
              {"root_manager_matches",source.root_manager_matches},{"previous_state",state_.load()},
              {"first_fault",fault_.load()},{"routes",routes_},
              {"stack_rva_0",source.stack_rvas[0]},{"stack_rva_1",source.stack_rvas[1]},
@@ -336,7 +339,7 @@ void Session::provider_reset(uintptr_t manager, const ProviderInvalidation& sour
         if (terminal) {
             // The selected native root is being destroyed. Keep ownership/routes,
             // but never permit a new provider operation against released objects.
-            shutdown_rva_ = source.shutdown_rva;
+            shutdown_rva_ = shutdown;
             provider_ended_ = true; requests_stopped_ = true; requests_ = false;
             return;
         }

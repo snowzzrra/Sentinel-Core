@@ -4,6 +4,7 @@
 #include "save_storage.h"
 #include "save_sdk_write.h"
 #include "save_campaign.h"
+#include "save_recovery.h"
 #include "save_b_trace.h"
 #include "sentinel_save.h"
 #include <atomic>
@@ -111,6 +112,8 @@ public:
     BTrace btrace;
     ~Session();
     storage::Result configure(const storage::Descriptor&, std::unique_ptr<storage::Namespace>);
+    bool recover_startup(const RecoveryTransport&);
+    bool recovery_requested() const { return recovery_descriptor_.campaign.intent == storage::CampaignIntent::recover; }
     void reject(SessionFault);
     void install(uintptr_t root, uintptr_t startup_return, uint32_t routes);
     bool startup_enter(uintptr_t root, uintptr_t caller, uint32_t thread);
@@ -192,6 +195,7 @@ private:
     uint32_t routes_ = 0, startup_thread_ = 0;
     std::string namespace_id_, native_root_, ownership_;
     std::unique_ptr<storage::Namespace> lease_;
+    storage::Descriptor recovery_descriptor_;
     void* native_root_lock_ = nullptr;
     std::vector<std::string> profile_catalog_;
     ProfileChoice profile_choice_{};

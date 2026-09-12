@@ -613,7 +613,7 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
         reinterpret_cast<uintptr_t>(&current_campaign) - 0x397f4a8};
     const ProfilePrerequisiteCalls calls{allocate_private, construct_private, destroy_private, catalog, create_profile_read};
     active_prerequisite_calls = &calls;
-    for (unsigned test = 0; test < 20; ++test) {
+    for (unsigned test = 0; test < 30; ++test) {
         auto owner = test == 14 ? std::make_unique<Session>() : make();
         Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
         const auto root = owner->native_root();
@@ -677,7 +677,7 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
             REQUIRE(owner->state() == SessionState::binding && !owner->accepts_requests());
             owner->startup_leave(test == 17);
         }
-        REQUIRE(owner->accepts_requests() == (test == 0 || test == 11 || test == 15 || test == 16 || test == 19));
+        REQUIRE(owner->accepts_requests() == (test == 0 || test == 11 || test == 15 || test == 16 || test == 19 || test >= 20));
         const auto trace = owner->profile_trace();
         if (test == 3) REQUIRE(trace.failed_stage == ProfileStage::catalog && trace.failure.native_attempted && trace.failure.native_value == 0x40);
         if (test == 6) REQUIRE(trace.failed_stage == ProfileStage::transport && trace.failure.native_attempted && trace.failure.native_value == 0x40);
@@ -729,7 +729,29 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
                 REQUIRE(std::strcmp(first.predicate,"native_provider_reset_during_session")==0);
             }
         }
+        if (test >= 20) {
+            const auto before=remote.files;
+            uintptr_t frames[]{image+0x17c1221,image+0x1a5b9b2,image+0x66d601,image+0x435cb9,image+0x43da41};
+            if (test>=21 && test<=25) ++frames[test-21];
+            const auto callback_manager=memory.manager;
+            if (test==27) ++memory.manager;
+            if (test==29) owner->fail(SessionFault::native_campaign);
+            const auto prior=owner->btrace.snapshot().first_failure.sequence;
+            invalidate_provider(*owner,memory,callback_manager,image,image+0x17c1221,test==26?1:2,frames,test==28?4:5);
+            REQUIRE(!owner->native_io() && !owner->accepts_requests() && remote.files==before);
+            if (test==20) {
+                REQUIRE(owner->fault()==SessionFault::none && !owner->btrace.snapshot().first_failure.sequence);
+                // Retirement is final; repeated cleanup need not rediscover the
+                // outer quit stack, and can never reopen provider operations.
+                owner->provider_reset(callback_manager); owner->stop_requests();
+                REQUIRE(owner->fault()==SessionFault::none && owner->inspect().flags==5);
+                REQUIRE(!owner->provider_operation(reinterpret_cast<uintptr_t>(&provider),0x5678));
+                REQUIRE(owner->fault()==SessionFault::provider_identity);
+            } else if (test==29) {
+                REQUIRE(owner->fault()==SessionFault::native_campaign && owner->btrace.snapshot().first_failure.sequence==prior);
+            } else REQUIRE(owner->fault()==SessionFault::provider_identity);
+        }
     }
     active_prerequisite_calls = nullptr; prerequisite_model = nullptr; catalog_model = nullptr;
-    std::puts("PASS production PROFILE prerequisite, delayed scheduling, native pending, admission and cleanup (20 cases)");
+    std::puts("PASS production PROFILE prerequisite, scheduling, admission and qualified cleanup (30 cases)");
 }

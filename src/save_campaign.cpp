@@ -229,6 +229,17 @@ std::string Campaign::checkpoint_text(const SdkWriteObservation& observation) co
     for (const auto& f:observation.payloads) value+="file="+std::string(f.name.data())+","+std::to_string(f.size)+","+hex(f.sha256)+"\n";
     return value+"state=native_saved_readback_verified\n";
 }
+bool Campaign::backup_continuity(const SdkWriteObservation& observation, storage::TransportMetadata& out) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!state_.enabled || observation.operation != state_.operation || observation.directory != directory_ ||
+        state_.phase != "native_save_pending" || !state_.map_active || !state_.native_saved || state_.checkpoint == UINT64_MAX)
+        return false;
+    out.contract = contract_;
+    out.checkpoint = checkpoint_text(observation);
+    const auto old = "checkpoint=" + std::to_string(state_.checkpoint) + "\n";
+    out.checkpoint.replace(contract_.size(), old.size(), "checkpoint=" + std::to_string(state_.checkpoint + 1) + "\n");
+    return true;
+}
 bool Campaign::parse_checkpoint(std::string_view value) {
     diagnostic_stage_=BStage::resume;
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"checkpoint_metadata_parse",0,{{"bytes",value.size()},{"contract_bytes",contract_.size()}});

@@ -2,6 +2,7 @@
 #pragma once
 #include "save_storage.h"
 #include "save_sdk_write.h"
+#include "save_recovery.h"
 #include "sentinel_save_request.h"
 #include <atomic>
 #include <mutex>
@@ -24,8 +25,8 @@ struct BackupProgress {
 // retained in this request or its progress. Completion also needs the outer read.
 class BackupJob final {
 public:
-    BackupJob(uint32_t pid, uint64_t created, uint64_t deadline)
-        : pid_(pid), created_(created), deadline_(deadline) {}
+    BackupJob(uint32_t pid, uint64_t created, uint64_t deadline, SteamOwner owner = current_steam_owner)
+        : pid_(pid), created_(created), deadline_(deadline), owner_(owner) {}
     bool bind(uint64_t operation);
     void cancel() { cancel_.store(true, std::memory_order_release); }
     void readback_finished(bool success);
@@ -38,6 +39,7 @@ private:
     void settle(); // mutex_ held; never completes a still-running copy.
     const uint32_t pid_;
     const uint64_t created_, deadline_;
+    const SteamOwner owner_;
     std::atomic<bool> cancel_{false}, abandoned_{false};
     mutable std::mutex mutex_;
     BackupProgress progress_;

@@ -57,6 +57,7 @@ public:
     bool checkpoint_ready(const CampaignTransition&);
     void refuse(const char* reason,BStage stage=BStage::creation);
     CampaignSnapshot snapshot() const;
+    bool backup_continuity(const SdkWriteObservation&, storage::TransportMetadata&) const;
 private:
     bool reject(const char*,std::initializer_list<BFact> facts={});
     bool save_record(const std::string&, bool create);

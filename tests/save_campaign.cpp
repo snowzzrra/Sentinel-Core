@@ -18,6 +18,9 @@
 #include <map>
 #include <string>
 #include <functional>
+#include <filesystem>
+#include <fstream>
+#include "save_provider.h"
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"campaign:%d: %s\n",__LINE__,#x); std::exit(1); } } while(0)
 using namespace sentinel;
@@ -33,8 +36,57 @@ void diagnostic_stage_observed(const BSnapshot& trace,BStage stage) {
     const auto& event=trace.stages[static_cast<size_t>(stage)]; CHECK(event.sequence && event.thread && event.predicate);
 }
 struct Remote { uintptr_t* table; std::map<std::string,std::string> files; };
+std::filesystem::path recovery_disk;
+int recovery_interrupt=-1, recovery_writes=0;
+std::wstring recovery_namespace;
+uint64_t fixture_user=76561198000000001ull;
+bool lose_provider=false, concurrent_target=false;
+unsigned owner_reads=0;
+uint64_t steam_owner(uintptr_t remote) {
+    if(concurrent_target && ++owner_reads==3) {
+        auto& files=reinterpret_cast<Remote*>(remote)->files;
+        for(auto& [name,bytes]:files) if(name.find("/game_duration.dat")!=name.npos) { bytes[0]^=1; break; }
+    }
+    return fixture_user;
+}
+uintptr_t recovery_context_remote=0;
+uintptr_t recovery_context(uintptr_t record) { CHECK(record==image+0x397fb88); return reinterpret_cast<uintptr_t>(&recovery_context_remote); }
+struct RecoveryMemory final:engine::Memory {
+    engine::LocalMemory local;
+    engine::ReadResult copy(uintptr_t address,void* out,size_t length) override {
+        const std::map<uintptr_t,uintptr_t> native{{0x1000+0x9b38,0x9000},{0x9000,0x9100},{0x9108,0x9200},{0x9200,image+0x2e90658}};
+        const auto it=native.find(address);
+        if(it!=native.end() && length==sizeof(uintptr_t)) { std::memcpy(out,&it->second,length); return {}; }
+        return local.copy(address,out,length);
+    }
+};
+void persist_remote(const Remote& remote) {
+    if(recovery_disk.empty()) return;
+    for(const auto& [name,bytes]:remote.files) {
+        const auto path=recovery_disk/name; std::filesystem::create_directories(path.parent_path());
+        std::ofstream out(path,std::ios::binary|std::ios::trunc); out.write(bytes.data(),bytes.size()); CHECK(out.good());
+    }
+}
+void load_remote(Remote& remote) {
+    if(!std::filesystem::exists(recovery_disk)) return;
+    for(const auto& f:std::filesystem::recursive_directory_iterator(recovery_disk)) if(f.is_regular_file()) {
+        std::ifstream in(f.path(),std::ios::binary);
+        remote.files[std::filesystem::relative(f.path(),recovery_disk).generic_string()]={std::istreambuf_iterator<char>(in),{}};
+    }
+}
 bool put(uintptr_t p,const char* name,const void* bytes,int32_t length) {
-    reinterpret_cast<Remote*>(p)->files[name]=std::string(static_cast<const char*>(bytes),static_cast<size_t>(length)); return true;
+    if(recovery_interrupt==0) ExitProcess(77);
+    auto& remote=*reinterpret_cast<Remote*>(p);
+    remote.files[name]=std::string(static_cast<const char*>(bytes),static_cast<size_t>(length));
+    persist_remote(remote);
+    if(lose_provider) ++fixture_user;
+    if(recovery_interrupt>0) {
+        ++recovery_writes;
+        if(recovery_interrupt<6 && recovery_writes==recovery_interrupt) ExitProcess(77);
+        if(recovery_writes==5 && recovery_interrupt==6) CHECK(CreateFileW((recovery_namespace+L"\\campaign.checkpoint").c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr)!=INVALID_HANDLE_VALUE);
+        if(recovery_writes==5 && recovery_interrupt==7) CHECK(CreateFileW((recovery_namespace+L"\\recovery.complete").c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,0,nullptr)!=INVALID_HANDLE_VALUE);
+    }
+    return true;
 }
 int32_t get(uintptr_t p,const char* name,void* bytes,int32_t length) {
     const auto& files=reinterpret_cast<Remote*>(p)->files; const auto found=files.find(name);
@@ -165,17 +217,27 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
 #include "startup_route_fixture.h"
 int wmain(int argc,wchar_t** argv) {
     CHECK(argc==4 || argc==5);
-    const std::wstring mode=argv[1]; const bool resume=mode==L"resume";
+    const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
     const bool profile_lifecycle=defect==L"profile_lifecycle";
     const bool native_read=defect.rfind(L"native_read",0)==0;
+    const bool recovery_case=defect.rfind(L"native_read_c",0)==0;
+    if(recovery_case) recovery_disk=std::filesystem::path(argv[2])/"remote";
     navigation_fixture::vanilla();
     storage::Descriptor descriptor{{"synthetic-campaign-host",0,1,std::string(64,'b')},argv[2],
-        {resume?storage::CampaignIntent::resume:storage::CampaignIntent::create,difficulty}};
+        {recover?storage::CampaignIntent::recover:resume?storage::CampaignIntent::resume:storage::CampaignIntent::create,difficulty,{}}};
+    if(recover) {
+        std::ifstream selected(std::filesystem::path(argv[2])/"selected-backup.txt");
+        std::getline(selected,descriptor.campaign.recovery_basename); CHECK(!descriptor.campaign.recovery_basename.empty());
+    }
     std::unique_ptr<storage::Namespace> lease;
-    CHECK((resume?storage::reopen(descriptor,lease):storage::prepare(descriptor,lease)).ok());
+    const auto opened=(resume||recover)?storage::reopen(descriptor,lease):storage::prepare(descriptor,lease);
+    if(!opened.ok()) std::printf("storage=%s win32=%u\n",storage::outcome_name(opened.outcome),opened.win32_error);
+    CHECK(opened.ok());
+    recovery_namespace=lease->metadata().path;
     auto& owner=session(); const auto configured=owner.configure(descriptor,std::move(lease));
+    if(recovery_case && !configured.ok()) { std::puts("REFUSED interrupted recovery or invalid campaign admission"); return 2; }
     if (defect==L"refuse_configuration") {
         CHECK(!configured.ok()); const auto trace=owner.btrace.snapshot(); CHECK(trace.first_failure.sequence);
         CHECK(trace.first_failure.stage==(resume?BStage::resume:BStage::creation));
@@ -189,7 +251,8 @@ int wmain(int argc,wchar_t** argv) {
     table[18]=reinterpret_cast<uintptr_t>(count); table[19]=reinterpret_cast<uintptr_t>(entry);
     const auto provider=reinterpret_cast<uintptr_t>(&remote);
     const auto directory=owner.native_root()+"/GAME-AUTOSAVE0";
-    remote.files[owner.native_root()+"/sentinel-owner-"+owner.namespace_id()+".txt"]=owner.ownership_record();
+    if(recovery_case && (resume||recover)) load_remote(remote);
+    else remote.files[owner.native_root()+"/sentinel-owner-"+owner.namespace_id()+".txt"]=owner.ownership_record();
     if (defect==L"startup_parser") {
         startup_route_fixture::exercise(owner,6);
         const auto first=owner.unrouted_trace(); const auto before=owner.campaign_run.snapshot();
@@ -206,7 +269,19 @@ int wmain(int argc,wchar_t** argv) {
     }
     startup_route_fixture::exercise(owner);
     CHECK(owner.startup_enter(0x1000,0x2000,GetCurrentThreadId()));
-    CHECK(owner.observe_provider_objects(0x9000,0x9100,provider));
+    if(!recover) CHECK(owner.observe_provider_objects(0x9000,0x9100,provider));
+    if(recover) {
+        if(defect==L"native_read_c_wrong_user") ++fixture_user;
+        if(defect.rfind(L"native_read_c_interrupt",0)==0) recovery_interrupt=std::stoi(defect.substr(23));
+        if(defect==L"native_read_c_unavailable") fixture_user=0;
+        lose_provider=defect==L"native_read_c_provider_loss";
+        concurrent_target=defect==L"native_read_c_concurrent";
+        RecoveryMemory native_memory; recovery_context_remote=provider;
+        const auto completed=provider_initialized(owner,native_memory,0x9000,{image,recovery_context,steam_owner});
+        const auto trace=owner.btrace.snapshot();
+        std::printf("%s recovery %s\n",completed?"PASS":"REFUSED",trace.stages[static_cast<size_t>(BStage::resume)].predicate);
+        persist_remote(remote); return completed?0:2;
+    }
     CHECK(owner.bind_provider(owner.native_root(),provider,owner.ownership_record())); owner.startup_leave(false);
     CHECK(owner.provider_operation(provider,0x7788));
     CHECK(owner.publish_profile_catalog(provider,owner.ownership_record(),resume?std::vector<std::string>{"AUTOSAVE0"}:std::vector<std::string>{},"AUTOSAVE0",0,!resume,0));
@@ -232,10 +307,10 @@ int wmain(int argc,wchar_t** argv) {
             store(extra_files[i],0x150,uint64_t(extra_payloads[i].size())); store(extra_files[i],0x158,uint64_t(extra_payloads[i].size()));
             store(extra_files[i],0x168,reinterpret_cast<uintptr_t>(extra_payloads[i].data()));
             all_files[i+1]=reinterpret_cast<uintptr_t>(extra_files[i].data());
-            if (resume) remote.files[directory+"/"+extra_names[i]]=extra_payloads[i];
+            if (resume && !recovery_case) remote.files[directory+"/"+extra_names[i]]=extra_payloads[i];
         }
         store(data,0x1c0,reinterpret_cast<uintptr_t>(all_files.data())); store(data,0x1c8,int32_t{4}); store(data,0x1cc,int32_t{4});
-        if (resume) remote.files[directory+"/game.details"]=payload;
+        if (resume && !recovery_case) remote.files[directory+"/game.details"]=payload;
     }
     engine::LocalMemory memory;
     // A later save owns a different native SaveData/file and different bytes;
@@ -288,7 +363,14 @@ int wmain(int argc,wchar_t** argv) {
             store(file,0x168,reinterpret_cast<uintptr_t>(payload.data()));
             CHECK(native_transition(difficulty,L"",[&] {
                 CHECK(owner.campaign_run.snapshot().phase=="reopened");
-                writer_fixture::save(reader,L"queued_checkpoint");
+                const auto next_backup=defect==L"native_read_c_backup_next"?
+                    std::make_shared<BackupJob>(GetCurrentProcessId(),1,GetTickCount64()+30000,steam_owner):std::shared_ptr<BackupJob>{};
+                writer_fixture::save(reader,L"queued_checkpoint",next_backup);
+                if(next_backup) {
+                    const auto progress=next_backup->progress(); CHECK(progress.state==BackupState::complete);
+                    std::ofstream selected(std::filesystem::path(argv[2])/"selected-backup.txt");
+                    selected<<std::filesystem::path(progress.output.path).filename().string()<<'\n';
+                }
             })==0);
             const auto saved=owner.campaign_run.snapshot();
             CHECK(saved.checkpoint==2 && saved.source_checkpoint==1 && saved.native_saved && saved.readback_verified && saved.continuity_persisted);
@@ -363,6 +445,8 @@ int wmain(int argc,wchar_t** argv) {
     const bool transition_failure=defect==L"native_return" || defect==L"abnormal" || defect==L"state_read" || defect==L"generation" || defect==L"difficulty" || defect==L"terminal_cleanup";
     if(transition_failure) { CHECK(native_transition(difficulty,defect)==0); return 0; }
     writer_fixture::Model writer{remote,source,files,payload,directory};
+    std::shared_ptr<BackupJob> c_backup;
+    if(recovery_case) c_backup=std::make_shared<BackupJob>(GetCurrentProcessId(),1,GetTickCount64()+30000,steam_owner);
     if (profile_lifecycle) {
         writer_fixture::Model next{remote,next_source,next_stream,next_payload,directory};
         CHECK(native_transition(difficulty,L"initial_save",[&] {
@@ -392,7 +476,7 @@ int wmain(int argc,wchar_t** argv) {
         // Native PROFILE preparation receives the user context, then the exact
         // campaign factory/provider/readback chain reaches checkpoint 1.
         if (defect.empty() || defect==L"queued_checkpoint" || defect==L"menu_pending_save") profile_write();
-        writer_fixture::save(writer,defect==L"pending"?L"pending_save":defect);
+        writer_fixture::save(writer,defect==L"pending"?L"pending_save":defect,c_backup);
     })==0);
     if(defect==L"pending" || defect==L"initial_save_return_failed" || defect==L"unassociated" || defect==L"queued_foreign" || defect==L"save_failure" || defect==L"partial_save" || defect==L"unrelated") {
         CHECK(!owner.campaign_run.snapshot().continuity_persisted); return 0;
@@ -406,8 +490,16 @@ int wmain(int argc,wchar_t** argv) {
     const auto& continuity=trace.stages[static_cast<size_t>(BStage::continuity)];
     CHECK(continuity.status==BStatus::succeeded && std::strcmp(continuity.predicate,"checkpoint_continuity_persisted")==0);
     CHECK(diagnostic_fact(continuity,"checkpoint")==1 && diagnostic_fact(continuity,"continuity_persisted")==1);
+    if(c_backup) {
+        const auto progress=c_backup->progress();
+        CHECK(progress.state==BackupState::complete && progress.operation==observed.operation);
+        const auto basename=std::filesystem::path(progress.output.path).filename().string();
+        std::ofstream selected(std::filesystem::path(argv[2])/"selected-backup.txt"); selected<<basename<<'\n';
+        std::printf("PASS explicit verified backup operation=%llu basename=%s\n",static_cast<unsigned long long>(progress.operation),basename.c_str());
+    }
     std::printf("PASS native checkpoint correlation/continuity, difficulty=%u pid=%lu\n",difficulty,GetCurrentProcessId()); return 0;
     }();
     });
+    persist_remote(remote);
     return outcome;
 }

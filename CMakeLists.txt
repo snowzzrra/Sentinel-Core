@@ -51,6 +51,7 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   src/save_sdk_write.h src/save_sdk_write.cpp
   include/sentinel_save_request.h src/save_readback.h src/save_readback.cpp
   src/save_backup.h src/save_backup.cpp src/save_submission.h src/save_submission.cpp
+  src/save_recovery.h src/save_recovery.cpp
   tools/backup_probe.cpp tools/installation_probe.h tools/installation_probe.cpp
   include/sentinel_save_installation.h src/save_installation.h src/save_installation.cpp
   tools/retest_milestone_a.py tools/Retest-MilestoneA.ps1
@@ -101,6 +102,7 @@ add_library(sentinel_native_model STATIC src/native_model.cpp)
 target_include_directories(sentinel_native_model PUBLIC include src)
 add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp src/save_campaign.cpp)
 target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
+target_sources(sentinel_save_session PRIVATE src/save_recovery.cpp)
 add_executable(sentinel_campaign_tests tests/save_campaign.cpp tests/save_profile.cpp src/native_runtime.cpp src/native_target.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp)
 target_include_directories(sentinel_campaign_tests PRIVATE tests)
 target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)

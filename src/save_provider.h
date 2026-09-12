@@ -6,7 +6,7 @@
 
 namespace sentinel::save {
 using InitializeSteamContext = uintptr_t (*)(uintptr_t);
-struct ProviderCalls { uintptr_t image_base; InitializeSteamContext context; };
+struct ProviderCalls { uintptr_t image_base; InitializeSteamContext context; SteamOwner owner = current_steam_owner; };
 using QueryExists = SaveFuture** (*)(SaveFuture**, SaveReference*, const char*);
 struct ExistenceCalls { ProviderCalls provider; QueryExists query; ReleaseSaveReference release; };
 // Backend runs after the native identity future resolves and consumes that

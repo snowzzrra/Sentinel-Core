@@ -1124,7 +1124,8 @@ class Run:
             event = row.get('b_diagnostics', {}).get('stages', {}).get('session', {})
             if (row.get('admission', {}).get('namespace_id') == namespace and
                 event.get('status') == 3 and event.get('predicate') == 'native_root_shutdown_provider_cleanup' and
-                event.get('sequence', 0) > 0 and 0x675290 < event.get('facts', {}).get('shutdown_rva', 0) <= 0x675d23):
+                event.get('sequence', 0) > 0 and (0x675290 < event.get('facts', {}).get('shutdown_rva', 0) <= 0x675d23 or
+                    event.get('facts', {}).get('shutdown_rva') == 0x435cb9)):
                 return True
         return False
 
@@ -1337,6 +1338,10 @@ class Run:
                         ((retry_modules or failed) and time.monotonic() >= next_capture)):
                     try: self.capture()
                     except (Refused, protection.Refused, OSError, ValueError) as error:
+                        # The already-observed process can exit between a log
+                        # sample and capture's identity query. Finish collection
+                        # and comparison; prior failures remain authoritative.
+                        if isinstance(error, Refused) and str(error) == 'no_game_process': break
                         self.fail(error, "safe_capture")
                         if 'replaced' in str(error) or 'identity_mismatch' in str(error) or str(error) == 'loaded_module_identity_verified_mismatch': raise
                     captures += 1; last_log = signature

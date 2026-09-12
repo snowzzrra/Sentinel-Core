@@ -2,6 +2,7 @@
 #include "save_backup.h"
 #include "save_session.h"
 #include "save_collector.h"
+#include "save_recovery.h"
 #include <windows.h>
 #include <new>
 
@@ -75,6 +76,12 @@ void BackupJob::copy(Session& owner, engine::Memory& memory, const SdkWriteObser
         storage::TransportMetadata metadata;
         metadata.directory = manifest.directory; metadata.process_id = pid_;
         metadata.process_created = created_; metadata.operation_id = manifest.operation;
+        if (owner.campaign_run.enabled()) {
+            metadata.steam_user = owner_ ? owner_(manifest.remote) : 0;
+            metadata.provider = recovery_provider;
+            if (!metadata.steam_user || !owner.collecting(manifest.remote, owner.native_root()) ||
+                !owner.campaign_run.backup_continuity(manifest, metadata)) failure = BackupFailure::native;
+        }
         const std::string prefix = manifest.directory + "/";
         for (const auto& file : manifest.payloads) {
             const std::string full(file.name.data());

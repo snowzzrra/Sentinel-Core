@@ -16,10 +16,11 @@ struct Identity {
     std::optional<uint32_t> slot;
     std::string generation_fingerprint;
 };
-enum class CampaignIntent { none, create, resume };
+enum class CampaignIntent { none, create, resume, recover };
 struct CampaignOptions {
     CampaignIntent intent = CampaignIntent::none;
     uint32_t difficulty = 4; // No default gameplay difficulty; 4 is unsupported Ultra-Nightmare.
+    std::string recovery_basename; // Explicit retained transport archive; never latest.
 };
 struct Descriptor { Identity identity; std::wstring root; CampaignOptions campaign; };
 enum class Outcome {
@@ -59,6 +60,11 @@ struct TransportMetadata {
     uint32_t process_id = 0;
     uint64_t process_created = 0, operation_id = 0;
     std::vector<TransportFile> files;
+    // Optional extension of the existing v1 archive. Legacy archives remain
+    // inspectable, but cannot authorize recovery without these ownership facts.
+    uint64_t steam_user = 0;
+    std::string provider, contract, checkpoint;
+    bool quarantine = false;
 };
 // The native adapter owns the immutable streams for the entire synchronous call.
 // Storage verifies the written bytes; native completion proof belongs to the adapter.
@@ -110,6 +116,8 @@ public:
     // reopen. This is continuity metadata, never native payload or an archive.
     Result campaign_record(bool checkpoint, std::string& text) const;
     Result publish_campaign_record(bool checkpoint, std::string_view text, bool create);
+    Result recovery_record(bool complete, std::string& text) const;
+    Result publish_recovery_record(bool complete, std::string_view text);
 private:
     struct Impl;
     explicit Namespace(std::unique_ptr<Impl> impl);

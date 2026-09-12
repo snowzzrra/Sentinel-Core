@@ -179,7 +179,7 @@ SaveReference* factory(uintptr_t,SaveReference* out,uint32_t,uintptr_t) {
     else write_scoped(session(),memory,reinterpret_cast<uintptr_t>(&model->remote),&model->future,0x7788,&model->source_ref,calls);
     return out;
 }
-void save(Model& m,const std::wstring& defect) {
+void save(Model& m,const std::wstring& defect,const std::shared_ptr<BackupJob>& backup = {}) {
     const auto before=session().campaign_run.snapshot();
     model=&m; m.failure=defect==L"save_failure"; m.pending=defect==L"pending_save";
     m.foreign=defect==L"queued_foreign"; m.queued=defect==L"queued_checkpoint" || m.foreign || defect==L"menu_pending_save";
@@ -195,6 +195,7 @@ void save(Model& m,const std::wstring& defect) {
     const auto started=session().campaign_run.snapshot();
     if (!rejected) {
         CHECK(started.operation && started.operation!=before.operation && started.checkpoint==before.checkpoint);
+        if (backup) CHECK(session().native_writes.request_backup(started.operation,backup));
         CHECK(!started.continuity_persisted && !started.native_saved && !started.readback_verified);
     }
     SaveResult result{}; std::array<unsigned char,32> native_task{};
@@ -212,7 +213,7 @@ void save(Model& m,const std::wstring& defect) {
         const auto completed=session().campaign_run.snapshot();
         CHECK(completed.operation==m.operation && completed.readback_verified);
         CHECK(completed.checkpoint==before.checkpoint+(completed.continuity_persisted?1u:0u));
-        CHECK(!session().native_writes.backup(m.operation));
+        CHECK(session().native_writes.backup(m.operation)==backup);
     }
     m.future->vtable->destroy(m.future,1); m.future=nullptr;
 }

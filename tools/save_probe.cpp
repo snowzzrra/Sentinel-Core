@@ -87,10 +87,12 @@ int save_storage_command(int argc, wchar_t** argv) {
     const char* operation = std::wcscmp(mode, L"--save-session-plan") == 0 ? "save_session_plan" :
         std::wcscmp(mode, L"--save-session-prepare") == 0 ? "save_session_prepare" :
         std::wcscmp(mode, L"--save-session-backup") == 0 ? "save_session_backup" :
-        std::wcscmp(mode, L"--save-session-reopen") == 0 ? "save_session_reopen" : nullptr;
+        std::wcscmp(mode, L"--save-session-reopen") == 0 ? "save_session_reopen" :
+        std::wcscmp(mode, L"--save-session-verify-backup") == 0 ? "save_session_verify_backup" : nullptr;
+    const bool verify=std::wcscmp(mode,L"--save-session-verify-backup")==0;
     sentinel::storage::Metadata metadata;
     sentinel::storage::Backup backup;
-    if (!operation || mode_index != 1 || argc != 3)
+    if (!operation || mode_index != 1 || argc != (verify?4:3))
         return print_result(operation ? operation : "save_session", {Outcome::invalid_descriptor,
             ERROR_INVALID_PARAMETER}, metadata, backup, false, true);
 
@@ -113,6 +115,17 @@ int save_storage_command(int argc, wchar_t** argv) {
             sentinel::storage::prepare(descriptor, storage) : sentinel::storage::reopen(descriptor, storage);
         if (result.ok()) {
             metadata = storage->metadata();
+            if(verify) {
+                std::unique_ptr<sentinel::storage::TransportArchive> archive;
+                result=storage->reopen_transport(argv[3],archive);
+                if(!result.ok()) return print_result(operation,result,metadata,backup,true);
+                const auto& stored=archive->metadata();
+                std::printf("{\"operation\":\"save_session_verify_backup\",\"archive_verified\":true,\"namespace\":%s,\"basename\":%s,"
+                    "\"write_operation\":%llu,\"files\":%u,\"owner_bound\":%s,\"quarantine\":%s,\"native_load_verified\":false}\n",
+                    quoted(metadata.namespace_id).c_str(),quoted(utf8(argv[3])).c_str(),stored.operation_id,
+                    static_cast<unsigned>(stored.files.size()),stored.steam_user?"true":"false",stored.quarantine?"true":"false");
+                return 0;
+            }
             if (std::wcscmp(mode, L"--save-session-backup") == 0) result = storage->backup_offline(backup);
         }
     }
