@@ -30,5 +30,7 @@ uint64_t test_campaign_action(uintptr_t screen,uintptr_t action);
 void test_campaign_internal(uintptr_t menu,uint32_t difficulty,uint8_t extra,uint32_t policy);
 void test_campaign_new(uintptr_t menu,uint32_t difficulty,uint8_t extra);
 uint64_t test_campaign_cvar(uintptr_t object,const char* value,uint8_t force);
+void test_campaign_parser(uint64_t(*)(SaveReference*,uintptr_t,uintptr_t,uintptr_t),ReleaseSaveReference);
+uint64_t test_campaign_parse(uintptr_t caller,SaveReference*,uintptr_t request);
 #endif
 }

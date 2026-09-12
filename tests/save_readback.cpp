@@ -122,7 +122,12 @@ ReadWorkerResult* native_prepare(uintptr_t context, ReadWorkerResult* out, SaveR
     *out = {0, 1, 0}; return out;
 }
 ReadWorkerResult* native_decode(uintptr_t, ReadWorkerResult* out) {
-    ++active->decoded; *out = {0, active->mode == 9 ? 0u : 1u, 0}; return out;
+    ++active->decoded; *out = {0, active->mode == 9 ? 0u : 1u, 0};
+    if (active->mode >= 19) {
+        *out = {active->mode == 21 ? 1 : 0, 0x800091aau, 0xa5a5a5a5u};
+        *reinterpret_cast<uint8_t*>(&out->value) = active->mode == 20 ? 0 : 1;
+    }
+    return out;
 }
 struct ReadFuture : SaveFuture { SaveReference data{}; unsigned stage = 0; };
 SaveFuture* destroy_read(SaveFuture* base, uint32_t) {
@@ -159,7 +164,8 @@ SaveResult* poll_read(SaveFuture* base, SaveResult* out, void* task) {
     verify_readback(m.owner, m.memory, reinterpret_cast<uintptr_t>(context.data()), &result, native_decode, image);
     field<uintptr_t>(stream, 0x168) = buffer;
     release(&m.job); static_cast<uint8_t*>(task)[8] = 0;
-    *out = {0, result.outcome, result.value, 0}; return out;
+    if (m.mode >= 19) CHECK(result.value == (m.mode == 20 ? 0x80009100u : 0x80009101u) && result.padding == 0xa5a5a5a5u);
+    *out = {0, result.outcome, result.active_value(), 0}; return out;
 }
 const SaveFutureVtable read_table{destroy_read, poll_read};
 SaveFuture** create_read(uintptr_t, SaveFuture** out, uintptr_t identity, SaveReference* data) {
@@ -322,8 +328,8 @@ static void ordinary_worker_contracts(const std::function<std::unique_ptr<Sessio
     }
 }
 void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& make) {
-    for (unsigned mode = 0; mode <= 18; ++mode) {
-        const bool verified = mode == 0 || mode == 18;
+    for (unsigned mode = 0; mode <= 21; ++mode) {
+        const bool verified = mode == 0 || mode == 18 || mode == 19;
         auto owner = make(); Model m(*owner); active = &m; m.mode = mode;
         m.table[15] = reinterpret_cast<uintptr_t>(size);
         m.operation = owner->native_writes.open_provider(0x123, m.directory); CHECK(m.operation);
@@ -364,15 +370,16 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
         }
         if (result.state == -1) { CHECK(task[8]); future->vtable->poll(future, &result, task.data()); }
         CHECK(result.state == 0 && (verified ? result.outcome == 0 && result.value == 1 : result.outcome == 1));
-        CHECK(m.decoded == (verified || mode == 9 ? 1u : 0u));
+        CHECK(m.decoded == (verified || mode == 9 || mode >= 20 ? 1u : 0u));
         constexpr const char* failures[]{nullptr, "readback_sha256_mismatch", "readback_storage_file_size",
             "readback_storage_file_size", "readback_storage_file_size", "readback_stream_error",
             "readback_manifest_name_mismatch", "readback_native_cancelled", "readback_loaded_size_mismatch",
             "readback_native_decode_result", "readback_stream_flags_mismatch", "payload_hash_bytes_unreadable",
             "readback_native_prepare_exception", "readback_file_sdk_proof_missing", nullptr, nullptr,
-            "readback_stream_allocation_failed", "readback_terminal_hash_proof_missing"};
+            "readback_stream_allocation_failed", "readback_terminal_hash_proof_missing", nullptr, nullptr,
+            "readback_native_decode_result", "readback_native_decode_result"};
         const auto diagnostic = owner->btrace.snapshot().first_failure;
-        if (mode == 0) {
+        if (mode == 0 || mode == 19) {
             if (diagnostic.sequence) {
                 std::fprintf(stderr, "readback success first failure stage=%s predicate=%s operation=%llu\n",
                     b_stage_names[static_cast<size_t>(diagnostic.stage)], diagnostic.predicate,

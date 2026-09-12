@@ -63,15 +63,22 @@ InitializeProvider original_provider = nullptr;
 InitializeProvider original_provider_reset = nullptr;
 using AccountRemoved = void (*)(uintptr_t, uintptr_t, uintptr_t);
 AccountRemoved original_account_removed = nullptr;
+void observe_provider_invalidation(uintptr_t manager, uintptr_t caller, uint32_t origin) {
+    void* frames[32]{};
+    const auto count = RtlCaptureStackBackTrace(1,32,frames,nullptr);
+    engine::LocalMemory memory;
+    invalidate_provider(session(),memory,manager,provider_calls.image_base,caller,origin,
+        reinterpret_cast<const uintptr_t*>(frames),count);
+}
 void account_removed_detour(uintptr_t callback, uintptr_t manager, uintptr_t user) {
     // A removed native account may later reuse an identity address. Refuse the
     // transition before the manager releases its cached references, even if the
     // process-wide Steam RemoteStorage singleton has not changed address.
-    session().provider_reset(manager);
+    observe_provider_invalidation(manager,reinterpret_cast<uintptr_t>(_ReturnAddress()),2);
     original_account_removed(callback, manager, user);
 }
 void provider_reset_detour(uintptr_t manager) {
-    session().provider_reset(manager); // Fault before native invalidation; retain routed jobs.
+    observe_provider_invalidation(manager,reinterpret_cast<uintptr_t>(_ReturnAddress()),1);
     original_provider_reset(manager);
 }
 WritePreflight original_preflight = nullptr;

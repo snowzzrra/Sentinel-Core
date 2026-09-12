@@ -76,6 +76,26 @@ class CampaignContinuity(unittest.TestCase):
             self.stage('create', root, 1, 'dirty')
             self.assertFalse(list(Path(root).rglob('campaign.contract')))
 
+    def test_native_menu_reads_complete_primary_or_backup_then_continue_and_save(self):
+        for selected in ('native_read', 'native_read_backup'):
+            with self.subTest(selected=selected), tempfile.TemporaryDirectory(prefix='sentinel-native-read-') as root:
+                self.stage('create', root, 3, 'native_read')
+                checkpoint, = Path(root).rglob('campaign.checkpoint')
+                self.assertIn('files=4\n', checkpoint.read_text())
+                result = self.stage('resume', root, 3, selected)
+                self.assertIn('menu/read/parser/Continue/save checkpoint=2 files=4', result)
+                self.assertIn('checkpoint=2\n', checkpoint.read_text())
+
+    def test_native_menu_and_continue_refuse_missing_duplicate_mixed_failed_or_uncorrelated_reads(self):
+        with tempfile.TemporaryDirectory(prefix='sentinel-native-read-refusal-') as root:
+            self.stage('create', root, 3, 'native_read')
+            checkpoint, = Path(root).rglob('campaign.checkpoint')
+            original = checkpoint.read_bytes()
+            for defect in ('missing', 'duplicate', 'mixed', 'failed', 'wrong_mode', 'wrong_caller', 'hash'):
+                with self.subTest(defect=defect):
+                    self.stage('resume', root, 3, 'native_read_' + defect)
+                    self.assertEqual(checkpoint.read_bytes(), original)
+
     def test_unassociated_write_refuses_before_native_payload_mutation(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-campaign-') as root:
             self.stage('create', root, 2, 'unassociated')

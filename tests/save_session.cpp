@@ -560,7 +560,7 @@ void preflight_contracts(Fixture& fixtures, engine::Memory& memory) {
         if (test == 7) name = root;
         PreflightContext context; context.name = native_text(name);
         std::array<unsigned char, 0x300> payloads{};
-        const uintptr_t table = 0x2a575a8;
+        const uintptr_t table = 0x2a57348; // Native prepared idFile_Memory vector.
         for (unsigned i = 0; i < 2; ++i) {
             auto* entry = payloads.data() + i * 0x180;
             NativeString file{}; file.data = const_cast<char*>(i ? "SlotFile" : "game.details");

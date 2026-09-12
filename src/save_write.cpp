@@ -66,7 +66,7 @@ SaveResult* poll_access(SaveFuture* base, SaveResult* out, void* task) {
         }
     }
     future.terminal = true;
-    { engine::LocalMemory memory;
+    if (future.access == Access::write) { engine::LocalMemory memory;
       future.owner.campaign_run.write_observed(future.operation, true, !result.state && !result.outcome && result.value == 1, memory); }
     if (result.state != 0 || result.outcome != 0 || result.value != 1) {
         future.owner.fail(future.failure); result = {0, 1, 1, 0};

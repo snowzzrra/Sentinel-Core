@@ -192,28 +192,41 @@ uint64_t set_cvar(uintptr_t self,const char* value,uint8_t force) {
     }
     return original_cvar(self,value,force);
 }
-uint64_t parse_game(SaveReference* data,uintptr_t files,uintptr_t prepared,uintptr_t request) {
+ReleaseSaveReference parser_release=nullptr;
+uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uintptr_t prepared,uintptr_t request) {
     uintptr_t object=0; const bool reference_valid=data && read(data->control,8,object);
-    ParserObservation observation; observation.caller=reinterpret_cast<uintptr_t>(_ReturnAddress()); observation.data=object;
+    ParserObservation observation; observation.caller=caller; observation.data=object;
     observation.native_completion=observation.caller==image+0x148c1c1;
     observation.directory_read=reference_valid && name(object,0,observation.directory);
     observation.prefix_read=reference_valid && name(object,0x70,observation.prefix);
-    session().campaign_run.observe_parser(std::move(observation));
+    // 14148bf80 passes its request at +0x10. Byte +0xc8 selects duration/
+    // metadata hydration; only the zero branch restores difficulty and calls
+    // 140672e10 to apply a gameplay load. Preserve both native consumers.
+    uint8_t mode=0;
+    const bool mode_read=read(request,0xb8,mode);
+    const bool metadata_only=observation.native_completion && mode_read && mode==1;
+    session().btrace.record(BStage::parser,BStatus::entered,"native_parser_purpose",0,
+        {{"native_completion",observation.native_completion},{"request_mode_read",mode_read},{"request_mode",mode},
+         {"metadata_only",metadata_only},{"caller_rva",caller>=image?caller-image:0}},object);
+    session().campaign_run.observe_parser(std::move(observation),metadata_only);
     if (!reference_valid) session().btrace.record(BStage::parser,BStatus::refused,"parser_reference_unreadable",0,
         {{"reference_present",data!=nullptr},{"object_present",object!=0}},reinterpret_cast<uintptr_t>(data));
-    const bool valid=reference_valid && session().campaign_run.parser_enter(object);
-    prior_campaign=true;
+    const bool valid=reference_valid && session().campaign_run.parser_enter(object,metadata_only);
+    if (!metadata_only) prior_campaign=true;
     if (!valid) {
         session().btrace.record(BStage::parser,BStatus::blocked,"parser_refusal_release_enter",0,
             {{"reference_valid",reference_valid},{"session_state",session().state()},{"session_fault",session().fault()}},object);
-        reinterpret_cast<ReleaseSaveReference>(image+0x367770)(data);
+        parser_release(data);
         session().btrace.record(BStage::parser,BStatus::blocked,"parser_refusal_release_returned",0,{{"native_result",0x10}},object);
         return 0x10; // Same parser refusal, consumed reference; no reset/create fallback.
     }
     session().btrace.record(BStage::parser,BStatus::entered,"native_parser_call",0,
         {{"reference_valid",reference_valid},{"files_present",files!=0},{"prepared_present",prepared!=0},{"request_present",request!=0}},object);
     const auto result=original_parse(data,files,prepared,request);
-    session().campaign_run.parser_leave(static_cast<uint32_t>(result)); return result;
+    session().campaign_run.parser_leave(static_cast<uint32_t>(result),metadata_only); return result;
+}
+uint64_t parse_game(SaveReference* data,uintptr_t files,uintptr_t prepared,uintptr_t request) {
+    return parse_game_at(reinterpret_cast<uintptr_t>(_ReturnAddress()),data,files,prepared,request);
 }
 }
 bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransition& transition) {
@@ -351,6 +364,7 @@ bool install_campaign_hooks(const engine::Binding& binding,HANDLE stop) {
     original_new=reinterpret_cast<NewGame>(originals[0]); original_internal=reinterpret_cast<NewInternal>(originals[1]);
     original_load=reinterpret_cast<LoadGame>(originals[2]); original_parse=reinterpret_cast<ParseGame>(originals[3]); original_cvar=reinterpret_cast<SetCvar>(originals[4]);
     original_action=reinterpret_cast<CampaignAction>(originals[5]);
+    parser_release=reinterpret_cast<ReleaseSaveReference>(image+0x367770);
     set_integer=reinterpret_cast<SetInteger>(targets[6].address); selected_slot=reinterpret_cast<SelectedSlot>(targets[7].address);
     select_slot=reinterpret_cast<SelectSlot>(targets[8].address); main_menu=reinterpret_cast<Menu>(targets[9].address);
     for (unsigned i=0;i<6;++i) if (session().installation.hook(SC_INSTALL_SAVE_ENABLE,4,i,static_cast<uint32_t>(targets[i].address-image),[&]{
@@ -367,5 +381,11 @@ uint64_t test_campaign_action(uintptr_t screen,uintptr_t action) { return campai
 void test_campaign_internal(uintptr_t menu,uint32_t difficulty,uint8_t extra,uint32_t policy) { new_internal(menu,difficulty,extra,policy); }
 void test_campaign_new(uintptr_t menu,uint32_t difficulty,uint8_t extra) { new_game(menu,difficulty,extra); }
 uint64_t test_campaign_cvar(uintptr_t object,const char* value,uint8_t force) { return set_cvar(object,value,force); }
+void test_campaign_parser(uint64_t(*parse)(SaveReference*,uintptr_t,uintptr_t,uintptr_t),ReleaseSaveReference release) {
+    original_parse=parse; parser_release=release;
+}
+uint64_t test_campaign_parse(uintptr_t caller,SaveReference* data,uintptr_t request) {
+    return parse_game_at(caller,data,1,1,request);
+}
 #endif
 }

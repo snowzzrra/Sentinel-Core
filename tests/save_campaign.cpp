@@ -169,6 +169,7 @@ int wmain(int argc,wchar_t** argv) {
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
     const bool profile_lifecycle=defect==L"profile_lifecycle";
+    const bool native_read=defect.rfind(L"native_read",0)==0;
     navigation_fixture::vanilla();
     storage::Descriptor descriptor{{"synthetic-campaign-host",0,1,std::string(64,'b')},argv[2],
         {resume?storage::CampaignIntent::resume:storage::CampaignIntent::create,difficulty}};
@@ -214,13 +215,28 @@ int wmain(int argc,wchar_t** argv) {
     outcome = [&]() -> int {
     std::string payload=resume && profile_lifecycle?"second encoded checkpoint payload":"synthetic encoded checkpoint payload";
     std::string relative="game.details", native_directory=directory;
-    std::array<unsigned char,0x180> file{}; std::array<unsigned char,0x280> data{};
+    std::array<unsigned char,0x190> file{}; std::array<unsigned char,0x280> data{};
     store(file,0,image+0x2a575a8); store(file,8,text(relative));
     const uint64_t length=payload.size(); const uintptr_t buffer=reinterpret_cast<uintptr_t>(payload.data());
     store(file,0x150,length); store(file,0x158,length); store(file,0x168,buffer); file[0x178]=1;
     const uintptr_t files=reinterpret_cast<uintptr_t>(file.data()), source=reinterpret_cast<uintptr_t>(data.data());
     const std::array<uintptr_t,1> file_list{files};
     store(data,0,text(native_directory)); store(data,0x1c0,reinterpret_cast<uintptr_t>(file_list.data())); store(data,0x1c8,int32_t{1}); store(data,0x1cc,int32_t{1});
+    std::array<std::string,3> extra_names{"game_duration.dat","game.details-BACKUP","game_duration.dat-BACKUP"};
+    std::array<std::string,3> extra_payloads{"encoded duration checkpoint","older details checkpoint","older duration checkpoint"};
+    std::array<std::array<unsigned char,0x190>,3> extra_files{};
+    std::array<uintptr_t,4> all_files{files};
+    if (native_read) {
+        for (size_t i=0;i<extra_files.size();++i) {
+            extra_files[i]=file; store(extra_files[i],8,text(extra_names[i]));
+            store(extra_files[i],0x150,uint64_t(extra_payloads[i].size())); store(extra_files[i],0x158,uint64_t(extra_payloads[i].size()));
+            store(extra_files[i],0x168,reinterpret_cast<uintptr_t>(extra_payloads[i].data()));
+            all_files[i+1]=reinterpret_cast<uintptr_t>(extra_files[i].data());
+            if (resume) remote.files[directory+"/"+extra_names[i]]=extra_payloads[i];
+        }
+        store(data,0x1c0,reinterpret_cast<uintptr_t>(all_files.data())); store(data,0x1c8,int32_t{4}); store(data,0x1cc,int32_t{4});
+        if (resume) remote.files[directory+"/game.details"]=payload;
+    }
     engine::LocalMemory memory;
     // A later save owns a different native SaveData/file and different bytes;
     // reopening checkpoint2 must not accidentally validate checkpoint1.
@@ -238,6 +254,47 @@ int wmain(int argc,wchar_t** argv) {
     };
     if (resume) {
         CHECK(owner.campaign_run.snapshot().source_checkpoint==(profile_lifecycle?2u:1u));
+        if (native_read) {
+            writer_fixture::Model reader{remote,source,files,payload,directory};
+            const bool corrupt=defect==L"native_read_hash";
+            const bool metadata_ok=writer_fixture::load(reader,true,corrupt?L"native_read":defect);
+            if (!metadata_ok) {
+                const std::map<std::wstring,const char*> expected{
+                    {L"native_read_missing","resume_file_count_mismatch"},
+                    {L"native_read_duplicate","resume_file_duplicate"},
+                    {L"native_read_mixed","resume_file_group_mixed"},
+                    {L"native_read_failed","ordinary_native_decode_result"},
+                    {L"native_read_wrong_mode","load_parser_source_not_correlated"},
+                    {L"native_read_wrong_caller","load_parser_source_not_correlated"}};
+                const auto first=owner.btrace.snapshot().first_failure;
+                CHECK(expected.count(defect) && std::strcmp(first.predicate,expected.at(defect))==0);
+                CHECK(first.operation==0 && !owner.campaign_run.snapshot().parser_completed);
+                CHECK(owner.campaign_run.snapshot().checkpoint==1);
+                std::puts("PASS precise ordinary-read/parser refusal without invented checkpoint completion"); return 0;
+            }
+            CHECK(owner.campaign_run.snapshot().phase=="armed");
+            CHECK(owner.campaign_run.begin_resume());
+            if (corrupt) remote.files[directory+"/game.details"][0]='X';
+            const bool loaded=writer_fixture::load(reader,false,defect);
+            if (corrupt) {
+                CHECK(!loaded); const auto first=owner.btrace.snapshot().first_failure;
+                CHECK(std::strcmp(first.predicate,"resume_payload_hash_mismatch")==0 && diagnostic_fact(first,"file_index")==1);
+                CHECK(!owner.campaign_run.snapshot().parser_completed);
+                std::puts("PASS explicit gameplay source hash failure after successful menu hydration"); return 0;
+            }
+            CHECK(loaded && owner.campaign_run.allow_difficulty(difficulty));
+            payload="new primary checkpoint after native Continue";
+            store(file,0x150,uint64_t(payload.size())); store(file,0x158,uint64_t(payload.size()));
+            store(file,0x168,reinterpret_cast<uintptr_t>(payload.data()));
+            CHECK(native_transition(difficulty,L"",[&] {
+                CHECK(owner.campaign_run.snapshot().phase=="reopened");
+                writer_fixture::save(reader,L"queued_checkpoint");
+            })==0);
+            const auto saved=owner.campaign_run.snapshot();
+            CHECK(saved.checkpoint==2 && saved.source_checkpoint==1 && saved.native_saved && saved.readback_verified && saved.continuity_persisted);
+            CHECK(remote.files.at(directory+"/game.details")==payload);
+            std::printf("PASS separate-process menu/read/parser/Continue/save checkpoint=2 files=4 pid=%lu\n",GetCurrentProcessId()); return 0;
+        }
         CHECK(owner.campaign_run.begin_resume());
         CHECK(owner.campaign_run.allow_access(source,directory,false,false));
         if (defect==L"wrong_source") {

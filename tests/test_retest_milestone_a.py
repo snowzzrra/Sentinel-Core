@@ -466,6 +466,33 @@ class RetestWorkflowTests(unittest.TestCase):
         self.assertEqual(len(current['campaign_case']['launches']), 2)
         self.assertEqual(current['captures'], 2)
 
+    def test_campaign_native_root_shutdown_completes_both_launches(self):
+        automatic = self.configure_campaign_fixture()
+        def shutdown(run):
+            automatic(run)
+            row = run.state['automatic_log']['records'][0]
+            row['admission']['flags'] = 5
+            row['b_diagnostics'] = {'stages': {'session': {'sequence': 229, 'status': 3,
+                'predicate': 'native_root_shutdown_provider_cleanup', 'facts': {'shutdown_rva': 0x675300}}}}
+        with mock.patch.object(retest.Run, 'collect_startup_log', shutdown):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.state()[0]['campaign_case']['phase'], 'completed')
+
+    def test_campaign_terminal_admission_requires_exact_shutdown_and_no_fault(self):
+        import copy
+        row = {'admission': {'state': 3, 'fault': 0, 'flags': 5, 'prepared_routes': 63,
+            'required_routes': 63, 'namespace_id': 'a'*64},
+            'b_diagnostics': {'stages': {'session': {'sequence': 229, 'status': 3,
+                'predicate': 'native_root_shutdown_provider_cleanup', 'facts': {'shutdown_rva': 0x675300}}}}}
+        for field, value in (('fault', 7), ('state', 5), ('flags', 1), ('namespace_id', 'b'*64)):
+            invalid = copy.deepcopy(row); invalid['admission'][field] = value
+            self.assertFalse(retest.Run.campaign_admission_after_close([invalid], 'a'*64))
+        for field, value in (('predicate', 'session_requests_stopped'), ('status', 4), ('sequence', 0),
+                             ('facts', {'shutdown_rva': 0x675d24})):
+            invalid = copy.deepcopy(row); invalid['b_diagnostics']['stages']['session'][field] = value
+            self.assertFalse(retest.Run.campaign_admission_after_close([invalid], 'a'*64))
+
     def test_campaign_failure_keeps_observing_through_transient_log_error_and_normal_close(self):
         automatic = self.configure_campaign_fixture()
         calls = []

@@ -296,20 +296,52 @@ bool Session::observe_provider_objects(uintptr_t manager, uintptr_t control, uin
     return native_io() && manager == native_manager_ && control == provider_control_ && object == provider_object_;
 }
 bool Session::provider_operation(uintptr_t object, uintptr_t identity) {
-    bool valid = false;
+    bool valid = false, object_matches = false, identity_matches = false;
     {
         std::lock_guard<std::mutex> guard(mutex_);
-        valid = native_io() && object && object == provider_object_ && identity &&
-            (!platform_identity_ || identity == platform_identity_);
+        object_matches = object && object == provider_object_;
+        identity_matches = identity && (!platform_identity_ || identity == platform_identity_);
+        valid = native_io() && object_matches && identity_matches;
         if (valid) platform_identity_ = identity;
     }
-    if (!valid) fail(SessionFault::provider_identity);
+    if (!valid) {
+        btrace.record(BStage::session,BStatus::refused,"provider_operation_identity_mismatch",0,
+            {{"caller_rva",native_route_rva},{"object_matches",object_matches},
+             {"identity_matches",identity_matches},{"identity_present",identity!=0},
+             {"provider_ended",provider_ended_.load()}});
+        fail(SessionFault::provider_identity);
+    }
     return valid;
 }
 void Session::provider_reset(uintptr_t manager) {
-    bool affected = false;
-    { std::lock_guard<std::mutex> guard(mutex_); affected = routed() && manager == native_manager_; }
-    if (affected) fail(SessionFault::provider_identity);
+    provider_reset(manager, ProviderInvalidation{});
+}
+void Session::provider_reset(uintptr_t manager, const ProviderInvalidation& source) {
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!routed() || manager != native_manager_) return;
+        const bool terminal = source.root_manager_matches && source.shutdown_rva &&
+            state_ == SessionState::admitted && fault_ == SessionFault::none &&
+            qualified_ && root_finished_ && profile_finished_;
+        btrace.record(BStage::session,terminal?BStatus::succeeded:BStatus::refused,
+            terminal?"native_root_shutdown_provider_cleanup":
+                source.origin==2?"native_account_removed_during_session":"native_provider_reset_during_session",0,
+            {{"origin",source.origin},{"caller_rva",source.caller_rva},{"shutdown_rva",source.shutdown_rva},
+             {"root_manager_matches",source.root_manager_matches},{"previous_state",state_.load()},
+             {"first_fault",fault_.load()},{"routes",routes_},
+             {"stack_rva_0",source.stack_rvas[0]},{"stack_rva_1",source.stack_rvas[1]},
+             {"stack_rva_2",source.stack_rvas[2]},{"stack_rva_3",source.stack_rvas[3]},
+             {"stack_rva_4",source.stack_rvas[4]},{"stack_rva_5",source.stack_rvas[5]},
+             {"stack_rva_6",source.stack_rvas[6]},{"stack_rva_7",source.stack_rvas[7]}});
+        if (terminal) {
+            // The selected native root is being destroyed. Keep ownership/routes,
+            // but never permit a new provider operation against released objects.
+            shutdown_rva_ = source.shutdown_rva;
+            provider_ended_ = true; requests_stopped_ = true; requests_ = false;
+            return;
+        }
+    }
+    fail(SessionFault::provider_identity);
 }
 void Session::stop_requests() {
     installation.startup(3);
@@ -317,13 +349,15 @@ void Session::stop_requests() {
     const auto previous=state_.load();
     const bool missed=previous==SessionState::prepared || previous==SessionState::starting;
     btrace.record(BStage::session,missed?BStatus::refused:BStatus::succeeded,
-        missed?(entered_?"requests_stopped_during_startup":"requests_stopped_before_startup"):"session_requests_stopped",0,
+        missed?(entered_?"requests_stopped_during_startup":"requests_stopped_before_startup"):
+            provider_ended_?"native_root_shutdown_provider_cleanup":"session_requests_stopped",0,
         {{"previous_state",previous},{"first_fault",fault_.load()},
          {"requested_fault",missed?SessionFault::missed_startup:SessionFault::none},
          {"startup_entered",entered_},{"qualified",qualified_},{"routed",routed()},
          {"thread_equal",startup_thread_==GetCurrentThreadId()},{"root_finished",root_finished_},
          {"profile_finished",profile_finished_},{"requests_stopped",requests_stopped_},
-         {"routes",routes_},{"required_routes",required_routes},{"caller_rva",native_route_rva}});
+         {"routes",routes_},{"required_routes",required_routes},{"caller_rva",native_route_rva},
+         {"shutdown_rva",shutdown_rva_}});
     requests_stopped_ = true; requests_ = false;
     if (state_ == SessionState::prepared || state_ == SessionState::starting) {
         if (fault_ == SessionFault::none) fault_ = SessionFault::missed_startup;

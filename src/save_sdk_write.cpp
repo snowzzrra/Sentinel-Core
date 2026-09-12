@@ -453,7 +453,11 @@ bool prepare_sdk_payloads(NativeWrites& writes, engine::Memory& memory, uint64_t
         NativeString name{}; std::array<char, 260> relative{}; SdkFileWrite file{};
         if (!trace.check(GetTickCount64() < deadline, "payload_prepare_deadline", {{"file_index", i}, {"count", count}}) ||
             !trace.read(memory, entry, 0, table, "payload_vtable_unreadable") ||
-            !trace.check(table == image + 0x2a575a8, "payload_vtable_mismatch", {{"file_index", i}, {"vtable_rva", table - image}}) ||
+            // 141bdcbc0 prepares inline idFile_Memory objects through 141ac89e0.
+            // idFile_SaveGame belongs to the upstream pointer vector, not this 0x180-stride vector.
+            !trace.check(table == image + 0x2a57348, "payload_vtable_mismatch",
+                {{"file_index", i}, {"vtable_rva", table - image}, {"expected_vtable_rva", 0x2a57348},
+                 {"file_type", table == image + 0x2a575a8 ? 2 : 0}, {"expected_file_type", 1}}) ||
             !trace.read(memory, entry, 8, name, "payload_name_header_unreadable") ||
             !trace.check(name.data && name.length >= 1 && name.length < 260, "payload_name_extent_invalid",
                 {{"file_index", i}, {"length", name.length}, {"null_bytes", !name.data}}) ||
@@ -479,7 +483,7 @@ bool prepare_sdk_payloads(NativeWrites& writes, engine::Memory& memory, uint64_t
     if (!trace.check(GetTickCount64() < deadline, "payload_prepare_deadline", {{"count", count}}) ||
         !writes.prepared(sequence, std::move(captured))) return false;
     if (diagnostics) diagnostics->record(BStage::sdk_prepare, BStatus::succeeded, "payloads_prepared", operation,
-        {{"sdk_sequence", sequence}, {"count", count}});
+        {{"sdk_sequence", sequence}, {"count", count}, {"file_type", 1}, {"entry_stride", 0x180}});
     return true;
 }
 void NativeWrites::submitted(uint64_t sequence, uint32_t index, uint64_t handle) {

@@ -57,7 +57,7 @@ struct Model {
     void prepared_files() {
         for (unsigned i = 0; i < 2; ++i) {
             auto* entry = storage.data() + i * 0x180;
-            const auto table = image + 0x2a575a8;
+            const auto table = image + 0x2a57348; // Native prepared vector contains idFile_Memory.
             NativeString name{}; name.data = const_cast<char*>(i ? "SlotFile" : "game.details"); name.length = i ? 8 : 12;
             const auto& bytes = i ? second : first;
             const uint64_t size = bytes.size(), capacity = size + 1;
@@ -365,7 +365,7 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
         writes.provider_result(1, {0, 0, 1, 0});
         CHECK(writes.snapshot(1).state == SC_SAVE_WRITE_NATIVE_SUCCEEDED); // No prepared/captured hashes or SDK result.
     }
-    for (unsigned test = 0; test < 9; ++test) {
+    for (unsigned test = 0; test < 10; ++test) {
         auto owner = make(); Model model(*owner); active = &model;
         CHECK(owner->bind_provider(owner->native_root(), model.context.remote, owner->ownership_record()));
         owner->startup_leave(false); CHECK(source(model) == 1);
@@ -379,6 +379,7 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
         if (test == 6) { const uintptr_t pointer = UINTPTR_MAX - 1; std::memcpy(entry + 0x168, &pointer, 8); }
         if (test == 7) { const int32_t length = 260; std::memcpy(entry + 0x18, &length, 4); }
         if (test == 8) { model.first.assign(65547, 'a'); model.prepared_files(); }
+        if (test == 9) { const auto table = image + 0x2a575a8; std::memcpy(entry + 0x180, &table, 8); }
         Preparation input{model.context.remote, model.context.name, 1, model.context.files};
         const auto before = input; const auto original = model.storage;
         WritePreflightResult result{};
@@ -395,9 +396,17 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
             CHECK(!observed.payloads[0].prepared); // Failed preparation never publishes a partial manifest.
             constexpr const char* expected[]{"payload_not_owned", "payload_size_limit", "payload_capacity_short",
                 "payload_duplicate_name", "payload_hash_bytes_unreadable", "payload_vtable_mismatch",
-                "payload_hash_extent_invalid", "payload_name_extent_invalid"};
+                "payload_hash_extent_invalid", "payload_name_extent_invalid", "", "payload_vtable_mismatch"};
             const auto first = owner->btrace.snapshot().first_failure;
             CHECK(first.sequence && first.operation == 1 && std::strcmp(first.predicate, expected[test]) == 0);
+            if (test == 9) {
+                const auto fact = [&](const char* key) {
+                    for (const auto& item : first.facts) if (item.key && !std::strcmp(item.key, key)) return item.value;
+                    return int64_t{-1};
+                };
+                CHECK(fact("file_index") == 1 && fact("file_type") == 2 && fact("expected_file_type") == 1);
+                CHECK(fact("vtable_rva") == 0x2a575a8 && fact("expected_vtable_rva") == 0x2a57348);
+            }
             // Downstream refusals cannot replace the actionable original field.
             owner->btrace.record(BStage::provider, BStatus::refused, "fixture_later_provider_failure", 1);
             CHECK(owner->btrace.snapshot().first_failure.sequence == first.sequence);
@@ -409,7 +418,7 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
             }
         }
     }
-    std::puts("PASS prepared native payload ownership, worker hashing and pre-deletion refusals (9 cases)");
+    std::puts("PASS prepared idFile_Memory payload type, ownership, hashing and pre-deletion refusals (10 cases)");
     for (unsigned test = 0; test < 19; ++test) {
         auto owner = make(); Model model(*owner); active = &model; model.mode = test;
         if (test == 12) {

@@ -8,6 +8,26 @@
 #include <new>
 
 namespace sentinel::save {
+void invalidate_provider(Session& owner, engine::Memory& memory, uintptr_t manager, uintptr_t image,
+                         uintptr_t caller, uint32_t origin, const uintptr_t* frames, size_t count) {
+    Session::ProviderInvalidation source{}; source.origin = origin;
+    const auto rva = [image](uintptr_t address) -> uint32_t {
+        return address >= image && address-image <= UINT32_MAX ? static_cast<uint32_t>(address-image) : 0;
+    };
+    source.caller_rva = rva(caller);
+    size_t logged = 0;
+    for (size_t i=0;i<count;++i) {
+        const auto pc = rva(frames[i]);
+        if (pc && logged < source.stack_rvas.size()) source.stack_rvas[logged++] = pc;
+        // Supported PE .pdata owns [675290,675d23): native root shutdown.
+        // A real unwind frame inside it proves destruction is already executing.
+        if (pc > 0x675290 && pc <= 0x675d23) source.shutdown_rva = pc;
+    }
+    uintptr_t root=0, selected=0;
+    source.root_manager_matches = owner.provider_root(root) &&
+        !memory.copy(root+0x9b38,&selected,sizeof(selected)).reason && selected==manager;
+    owner.provider_reset(manager,source);
+}
 namespace {
 // ISteamRemoteStorage014, also identified by the selected native context
 // initializer 141bd87d0. These are API methods, not native allocator/ref helpers.

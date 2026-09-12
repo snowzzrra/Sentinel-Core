@@ -137,6 +137,7 @@ bool Campaign::begin_resume() {
     if (!choice_valid || choice.name.data()!=state_.slot) return reject("resume_selection_mismatch",
         {{"choice_valid",choice_valid},{"slot_equal",choice.name.data()==state_.slot},{"index",choice.index}});
     initiated_=true; state_.phase="resume_requested";
+    metadata_data_=0; metadata_verified_=false;
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"resume_requested",0,{{"source_checkpoint",state_.source_checkpoint},{"expected_files",expected_.size()}});
     return true;
 }
@@ -177,10 +178,12 @@ bool Campaign::allow_access(uintptr_t data,const std::string& directory,bool wri
         {{"write",write},{"erase",erase},{"directory_equal",directory==directory_},{"accepting",owner_->accepts_requests()},
          {"initiated",initiated_},{"resumed",state_.resumed},{"phase",phase_id(state_.phase)},{"source_equal",load_data_==data}},data);
     // Native catalog hydration is read-only and precedes PROFILE admission.
-    // It never associates a gameplay load; parser entry still requires the
+    // It never associates a gameplay load; gameplay parser entry requires the
     // explicit later LoadGameSlot operation and its exact SaveData identity.
     if (!write && !erase && state_.resumed && !initiated_ && state_.phase=="armed" &&
-        owner_->native_io() && directory==directory_) return true;
+        owner_->native_io() && directory==directory_) {
+        metadata_data_=data; metadata_verified_=false; return true;
+    }
     if (!owner_->accepts_requests() || !initiated_ || directory!=directory_ || erase)
         return reject("campaign_access_outside_authorized_slot",{{"accepting",owner_->accepts_requests()},
             {"initiated",initiated_},{"directory_equal",directory==directory_},{"erase",erase},{"write",write}});
@@ -313,16 +316,27 @@ void Campaign::persist_checkpoint(const SdkWriteObservation& manifest,engine::Me
 }
 bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t image) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!state_.enabled || data!=load_data_) return true;
+    if (!state_.enabled || (data!=load_data_ && data!=metadata_data_)) return true;
+    const bool metadata_only=data==metadata_data_ && !initiated_;
     diagnostic_stage_=BStage::resume;
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_source_validate",state_.operation,
-        {{"expected_files",expected_.size()},{"source_checkpoint",state_.source_checkpoint}},data);
+        {{"expected_files",expected_.size()},{"source_checkpoint",state_.source_checkpoint},{"metadata_only",metadata_only}},data);
     uintptr_t files=0; int32_t count=0; std::string directory;
     if (!text(memory,data,0,directory)) return reject("resume_directory_unreadable");
     if (directory!=directory_) return reject("resume_directory_mismatch",{{"directory_equal",false}});
     if (!read(memory,data,0x1c0,files)) return reject("resume_file_vector_unreadable");
     if (!read(memory,data,0x1c8,count)) return reject("resume_file_count_unreadable");
-    if (count<=0 || static_cast<size_t>(count)!=expected_.size()) return reject("resume_file_count_mismatch",{{"actual_count",count},{"expected_count",expected_.size()}});
+    // 1414972b0 requests the primary streams OR their -BACKUP counterparts.
+    // A native write receipt contains both groups. Require one complete group,
+    // not every persisted version and not an arbitrary matching subset.
+    const auto backup=[](std::string_view name) {
+        constexpr std::string_view suffix="-BACKUP";
+        return name.size()>=suffix.size() && steam_name_equal(name.substr(name.size()-suffix.size()),suffix);
+    };
+    const auto primary_count=std::count_if(expected_.begin(),expected_.end(),[&](const auto& f){return !backup(f.name.data());});
+    if (count<=0 || count!=primary_count) return reject("resume_file_count_mismatch",
+        {{"actual_count",count},{"expected_count",primary_count},{"persisted_count",expected_.size()},{"metadata_only",metadata_only}});
+    bool backup_group=false;
     std::vector<std::string> seen;
     for (int32_t i=0;i<count;++i) {
         owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_payload_validate",state_.operation,{{"file_index",i},{"file_count",count}},data);
@@ -331,11 +345,13 @@ bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t ima
         if (!read(memory,file,0,table)) return reject("resume_file_type_unreadable");
         if (table!=image+0x2a575a8) return reject("resume_file_type_mismatch",{{"file_index",i},{"type_equal",false}});
         if (!text(memory,file,8,name)) return reject("resume_file_name_unreadable");
+        if (!i) backup_group=backup(name);
+        else if (backup(name)!=backup_group) return reject("resume_file_group_mixed",{{"file_index",i},{"backup_group",backup_group}});
         const auto full=directory_+"/"+name;
         const auto expected=std::find_if(expected_.begin(),expected_.end(),[&](const auto& f){return steam_name_equal(f.name.data(),full);});
         std::array<unsigned char,32> hash{};
         if (expected==expected_.end()) return reject("resume_file_not_in_checkpoint",{{"file_index",i},{"expected_count",expected_.size()}});
-        if (std::find(seen.begin(),seen.end(),full)!=seen.end()) return reject("resume_file_duplicate",{{"file_index",i}});
+        if (std::find(seen.begin(),seen.end(),expected->name.data())!=seen.end()) return reject("resume_file_duplicate",{{"file_index",i}});
         if (!read(memory,file,0x150,size)) return reject("resume_file_size_unreadable");
         if (size!=expected->size) return reject("resume_file_size_mismatch",{{"file_index",i},{"actual_size",size},{"expected_size",expected->size}});
         if (!read(memory,file,0x158,capacity)) return reject("resume_file_capacity_unreadable");
@@ -347,13 +363,15 @@ bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t ima
         if (!digest_payload(memory,buffer,expected->size,hash,deadline,&owner_->btrace,BStage::resume,state_.operation,i)) return reject("resume_payload_digest_failed",
             {{"file_index",i},{"size",size},{"elapsed_ms",GetTickCount64()-begin},{"deadline_elapsed",GetTickCount64()>=deadline},{"buffer_present",buffer!=0}});
         if (hash!=expected->sha256) return reject("resume_payload_hash_mismatch",{{"file_index",i},{"actual_size",size},{"expected_size",expected->size},{"hash_equal",false}});
-        seen.push_back(full);
+        seen.emplace_back(expected->name.data());
     }
-    state_.source_verified=true; state_.phase="source_verified";
-    owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"resume_source_verified",state_.operation,
-        {{"file_count",count},{"expected_count",expected_.size()},{"all_hashes_equal",true},{"source_checkpoint",state_.source_checkpoint}},data); return true;
+    if (metadata_only) metadata_verified_=true;
+    else { state_.source_verified=true; state_.phase="source_verified"; }
+    owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,metadata_only?"metadata_source_verified":"resume_source_verified",state_.operation,
+        {{"file_count",count},{"expected_count",primary_count},{"persisted_count",expected_.size()},{"backup_group",backup_group},
+         {"metadata_only",metadata_only},{"all_hashes_equal",true},{"source_checkpoint",state_.source_checkpoint}},data); return true;
 }
-void Campaign::observe_parser(ParserObservation observation) {
+void Campaign::observe_parser(ParserObservation observation,bool metadata_only) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled) return;
     diagnostic_stage_=BStage::parser;
@@ -368,25 +386,39 @@ void Campaign::observe_parser(ParserObservation observation) {
     if (observation.directory_read) observation.source=observation.directory=="PROFILE" ? "shared_profile" :
         observation.directory==directory_ && !directory_.empty() ? "owned_campaign" : "foreign_or_unowned_campaign";
     observation.disposition=(owner_->state()==SessionState::rejected || owner_->state()==SessionState::faulted) ?
-        "downstream_of_terminal_session" : observation.exact_resume ? "exact_resume" : "uncorrelated_campaign_import";
+        "downstream_of_terminal_session" : observation.exact_resume ? "exact_resume" :
+        metadata_only && metadata_verified_ && metadata_data_==observation.data && !initiated_ ?
+        "verified_metadata_read" : "uncorrelated_campaign_import";
     state_.parser_observation=std::move(observation);
 }
-bool Campaign::parser_enter(uintptr_t data) {
+bool Campaign::parser_enter(uintptr_t data,bool metadata_only) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled) return true;
     diagnostic_stage_=BStage::parser;
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"native_parser_enter",state_.operation,
-        {{"accepting",owner_->accepts_requests()},{"resumed",state_.resumed},{"source_verified",state_.source_verified},
-         {"source_equal",load_data_==data},{"session_state",owner_->state()},{"session_fault",owner_->fault()}},data);
+        {{"accepting",owner_->accepts_requests()},{"resumed",state_.resumed},{"source_verified",state_.source_verified},{"metadata_only",metadata_only},
+         {"source_equal",(metadata_only?metadata_data_:load_data_)==data},{"session_state",owner_->state()},{"session_fault",owner_->fault()}},data);
     if (owner_->state()==SessionState::rejected || owner_->state()==SessionState::faulted) {
         owner_->btrace.record(diagnostic_stage_,BStatus::blocked,"native_parser_after_terminal_session",state_.operation,
             {{"session_state",owner_->state()},{"session_fault",owner_->fault()},{"source_equal",load_data_==data}},data); return false;
     }
-    return (owner_->accepts_requests() && state_.resumed && state_.source_verified && load_data_==data) || reject("load_parser_source_not_correlated");
+    if (metadata_only) {
+        const bool valid=owner_->native_io() && state_.resumed && !initiated_ && state_.phase=="armed" &&
+            metadata_data_==data && metadata_verified_;
+        metadata_data_=0; metadata_verified_=false;
+        return valid || reject("metadata_parser_source_not_correlated",{{"metadata_only",true},{"initiated",initiated_}});
+    }
+    return (owner_->accepts_requests() && state_.resumed && state_.source_verified && load_data_==data) || reject("load_parser_source_not_correlated",
+        {{"metadata_only",false},{"initiated",initiated_},{"source_verified",state_.source_verified},{"source_equal",load_data_==data}});
 }
-void Campaign::parser_leave(uint32_t result) {
+void Campaign::parser_leave(uint32_t result,bool metadata_only) {
     std::lock_guard<std::recursive_mutex> lock(mutex_); if (!state_.enabled) return;
     diagnostic_stage_=BStage::parser;
+    if (metadata_only) {
+        if (result) reject("native_metadata_parser_failed",{{"native_result",result}});
+        else owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"native_metadata_parser_succeeded",0,{{"native_result",result}});
+        return; // Hydration does not prove a gameplay load or activate its map.
+    }
     state_.parser_result=result; state_.parser_completed=result==0;
     if (result) reject("native_load_parser_failed",{{"native_result",result},{"expected_result",0},{"source_verified",state_.source_verified}});
     else {

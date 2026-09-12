@@ -48,9 +48,9 @@ public:
     bool write_started(uint64_t operation, const std::string& directory, bool native_factory_matched);
     void write_observed(uint64_t operation, bool terminal, bool successful, engine::Memory&);
     bool verify_source(engine::Memory&, uintptr_t data, uintptr_t image);
-    bool parser_enter(uintptr_t data);
-    void observe_parser(ParserObservation);
-    void parser_leave(uint32_t result);
+    bool parser_enter(uintptr_t data, bool metadata_only = false);
+    void observe_parser(ParserObservation, bool metadata_only = false);
+    void parser_leave(uint32_t result, bool metadata_only = false);
     bool map_begin(std::string map, uint64_t generation, uint64_t event_id=0);
     bool menu_begin();
     void map_end(const CampaignTransition&);
@@ -72,6 +72,8 @@ private:
     std::string contract_, directory_;
     std::vector<SdkFileWrite> expected_;
     uintptr_t load_data_ = 0;
+    uintptr_t metadata_data_ = 0;
+    bool metadata_verified_ = false;
     bool contract_created_ = false, checkpoint_exists_ = false, initiated_ = false, map_pending_ = false;
     std::optional<SdkWriteObservation> checkpoint_awaiting_transition_;
 };

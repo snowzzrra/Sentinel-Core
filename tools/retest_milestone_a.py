@@ -1110,6 +1110,24 @@ class Run:
             print(message); case['prompt_phase'] = case['phase']; self.save()
         return current
 
+    @staticmethod
+    def campaign_admission_after_close(records, namespace):
+        admission = records[-1].get('admission', {}) if records else {}
+        if (admission.get('state') != 3 or admission.get('fault') != 0 or
+            admission.get('prepared_routes') != 63 or admission.get('required_routes') != 63 or
+            admission.get('namespace_id') != namespace): return False
+        flags = admission.get('flags', 0) & 7
+        if flags == 7: return True
+        if flags != 5: return False
+        # Only native proof of root destruction permits retired requests here.
+        for row in records:
+            event = row.get('b_diagnostics', {}).get('stages', {}).get('session', {})
+            if (row.get('admission', {}).get('namespace_id') == namespace and
+                event.get('status') == 3 and event.get('predicate') == 'native_root_shutdown_provider_cleanup' and
+                event.get('sequence', 0) > 0 and 0x675290 < event.get('facts', {}).get('shutdown_rva', 0) <= 0x675d23):
+                return True
+        return False
+
     def complete_campaign_launch(self):
         case = self.state['campaign_case']; phase = case['phase']
         current = self.campaign_progress()
@@ -1119,11 +1137,9 @@ class Run:
             self.save()
             raise Refused('campaign_failed_preserved_do_not_recreate')
         records = automatic_rows(self.state.get('automatic_log', {}))
-        admission = records[-1].get('admission', {}) if records else {}
         valid = (current.get('effective_difficulty') == case['options']['difficulty'] and
             self.state.get('capture_health', {}).get('module_state') == 'verified' and self.state.get('process', {}).get('instance_id') and
-            admission.get('state') == 3 and admission.get('fault') == 0 and admission.get('flags', 0) & 7 == 7 and
-            admission.get('prepared_routes') == admission.get('required_routes') == 63 and admission.get('namespace_id') == self.state['namespace_id'])
+            self.campaign_admission_after_close(records, self.state['namespace_id']))
         if phase == 'create':
             valid = valid and all(current.get(k) for k in ('native_saved', 'readback_verified', 'continuity_persisted', 'native_factory_matched'))
         else:

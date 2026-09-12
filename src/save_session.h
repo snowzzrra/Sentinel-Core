@@ -128,7 +128,13 @@ public:
     bool provider_root(uintptr_t& root) const;
     bool observe_provider_objects(uintptr_t manager, uintptr_t control, uintptr_t object);
     bool provider_operation(uintptr_t object, uintptr_t identity);
+    struct ProviderInvalidation {
+        uint32_t origin = 1, caller_rva = 0, shutdown_rva = 0;
+        bool root_manager_matches = false;
+        std::array<uint32_t, 8> stack_rvas{};
+    };
     void provider_reset(uintptr_t manager);
+    void provider_reset(uintptr_t manager, const ProviderInvalidation&);
     bool acquire_native_root_lock();
     void stop_requests();
     void fail(SessionFault);
@@ -136,7 +142,8 @@ public:
     bool routed() const { return ever_routed_.load(std::memory_order_acquire); }
     bool native_io() const {
         const auto current = state();
-        return current == SessionState::binding || current == SessionState::admitted;
+        return !provider_ended_.load(std::memory_order_acquire) &&
+            (current == SessionState::binding || current == SessionState::admitted);
     }
     bool configured() const { return state_.load() != SessionState::disabled; }
     bool collecting(uintptr_t provider, std::string_view root) const;
@@ -176,6 +183,8 @@ private:
     std::atomic<SessionState> state_{SessionState::disabled};
     std::atomic<SessionFault> fault_{SessionFault::none};
     std::atomic<bool> requests_{false}, ever_routed_{false};
+    std::atomic<bool> provider_ended_{false};
+    uint32_t shutdown_rva_ = 0;
     bool attempted_ = false, entered_ = false, qualified_ = false;
     bool root_finished_ = false, profile_finished_ = false, requests_stopped_ = false;
     uintptr_t root_ = 0, caller_ = 0, provider_ = 0;

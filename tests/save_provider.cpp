@@ -707,6 +707,28 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
         if (test == 1 || test == 2 || test == 12 || test == 14 || test == 18) REQUIRE(!model.creates);
         if (test == 1 || test == 2 || test == 7 || test == 12)
             REQUIRE(prerequisite.profile_polled == 0);
+        if (test == 11 || test == 15 || test == 16) {
+            const auto before = remote.files;
+            const auto callback_manager = memory.manager;
+            uintptr_t frames[]{image+0x1490000,image+(test==15?0x675d24:0x675300)};
+            if (test==16) ++memory.manager;
+            invalidate_provider(*owner,memory,callback_manager,image,image+0x1490010,1,frames,2);
+            REQUIRE(owner->routed() && !owner->native_io() && !owner->accepts_requests());
+            REQUIRE(remote.files==before);
+            if (test==11) {
+                REQUIRE(owner->state()==SessionState::admitted && owner->fault()==SessionFault::none);
+                REQUIRE(!owner->btrace.snapshot().first_failure.sequence);
+                invalidate_provider(*owner,memory,callback_manager,image,image+0x1490020,2,frames,2);
+                owner->stop_requests();
+                REQUIRE(owner->fault()==SessionFault::none && owner->inspect().flags==5);
+                REQUIRE(!owner->provider_operation(reinterpret_cast<uintptr_t>(&provider),0x5678));
+                REQUIRE(owner->fault()==SessionFault::provider_identity);
+            } else {
+                REQUIRE(owner->fault()==SessionFault::provider_identity);
+                const auto first=owner->btrace.snapshot().first_failure;
+                REQUIRE(std::strcmp(first.predicate,"native_provider_reset_during_session")==0);
+            }
+        }
     }
     active_prerequisite_calls = nullptr; prerequisite_model = nullptr; catalog_model = nullptr;
     std::puts("PASS production PROFILE prerequisite, delayed scheduling, native pending, admission and cleanup (20 cases)");

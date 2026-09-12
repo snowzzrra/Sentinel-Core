@@ -199,9 +199,9 @@ ReadWorkerResult* prepare_readback(Session& owner, engine::Memory& memory, uintp
             auto* result = original(context, out, waiter);
             if (profile) owner.profile_step(ProfileStage::prepare,
                 result->outcome == 0 ? ProfileStatus::succeeded : ProfileStatus::refused,
-                "native_profile_prepare_result", true, 0, result->outcome, result->value);
+                "native_profile_prepare_result", true, 0, result->outcome, result->active_value());
             owner.btrace.record(BStage::readback_prepare, result->outcome == 0 ? BStatus::succeeded : BStatus::refused,
-                "ordinary_native_read_prepare_result", 0, {{"profile", profile}, {"outcome", result->outcome}, {"value", result->value}}, data);
+                "ordinary_native_read_prepare_result", 0, {{"profile", profile}, {"outcome", result->outcome}, {"value", result->active_value()}}, data);
             return result;
         }
         if (owner.is_profile_request(data)) owner.profile_step(ProfileStage::prepare, ProfileStatus::refused, "profile_remote_or_directory_gate");
@@ -224,7 +224,7 @@ ReadWorkerResult* prepare_readback(Session& owner, engine::Memory& memory, uintp
     SizeProxy proxy{size_table.data(), remote, size, manifest, owner, id};
     auto* result = invoke_prepare(original, context, out, waiter, reinterpret_cast<uintptr_t>(&proxy), remote, &owner.btrace, id);
     owner.btrace.record(BStage::readback_prepare, result->outcome == 0 ? BStatus::succeeded : BStatus::refused,
-        "readback_native_prepare_result", id, {{"manifest_valid", valid}, {"outcome", result->outcome}, {"value", result->value}});
+        "readback_native_prepare_result", id, {{"manifest_valid", valid}, {"outcome", result->outcome}, {"value", result->active_value()}});
     return result;
 }
 ReadWorkerResult* verify_readback(Session& owner, engine::Memory& memory, uintptr_t context,
@@ -241,10 +241,10 @@ ReadWorkerResult* verify_readback(Session& owner, engine::Memory& memory, uintpt
         auto* result = original(context, out);
         if (profile) owner.profile_step(ProfileStage::decode,
             result->outcome == 0 ? ProfileStatus::succeeded : ProfileStatus::refused,
-            result->outcome == 0 ? "native_decode_completed" : result->value == 4 ? "native_authentication_refused" : "native_decode_result",
-            true, 0, result->outcome, result->value);
+            result->outcome == 0 ? "native_decode_completed" : result->active_value() == 4 ? "native_authentication_refused" : "native_decode_result",
+            true, 0, result->outcome, result->active_value());
         if (owner.routed()) owner.btrace.record(BStage::readback_verify, result->outcome == 0 ? BStatus::succeeded : BStatus::refused,
-            "ordinary_native_decode_result", 0, {{"profile", profile}, {"outcome", result->outcome}, {"value", result->value}}, data);
+            "ordinary_native_decode_result", 0, {{"profile", profile}, {"outcome", result->outcome}, {"value", result->active_value()}}, data);
         return result;
     }
     trace.trace = &owner.btrace; trace.operation = id; trace.source = data; trace.failure_status = BStatus::refused;
@@ -297,9 +297,9 @@ ReadWorkerResult* verify_readback(Session& owner, engine::Memory& memory, uintpt
     owner.native_writes.readback_hashes(id);
     owner.btrace.record(BStage::readback_verify, BStatus::succeeded, "readback_hashes_verified", id, {{"count", buffers.size()}});
     auto* result = original(context, out);
-    owner.btrace.record(BStage::readback_verify, !result->outcome && result->value == 1 ? BStatus::succeeded : BStatus::refused,
-        "readback_native_decode_result", id, {{"outcome", result->outcome}, {"value", result->value}, {"count", buffers.size()}});
-    if (!result->outcome && result->value == 1) {
+    owner.btrace.record(BStage::readback_verify, !result->outcome && result->active_value() == 1 ? BStatus::succeeded : BStatus::refused,
+        "readback_native_decode_result", id, {{"outcome", result->outcome}, {"value", result->active_value()}, {"count", buffers.size()}});
+    if (!result->outcome && result->active_value() == 1) {
         if (auto job = owner.native_writes.backup(id)) job->copy(owner, memory, manifest, buffers);
     }
     return result;
