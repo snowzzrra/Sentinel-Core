@@ -41,12 +41,12 @@ class CampaignContinuity(unittest.TestCase):
                 self.stage('resume', root, difficulty, 'wrong_map')
 
     def test_native_transition_and_initial_writer_boundaries(self):
-        for defect in ("native_return", "abnormal", "state_read", "generation", "difficulty", "nested", "initial_save", "initial_save_return_failed", "pending_transition", "partial_save", "save_failure", "unrelated", "extra_life", "ultra"):
+        for defect in ("native_return", "abnormal", "state_read", "generation", "difficulty", "nested", "initial_save", "initial_save_return_failed", "pending_transition", "queued_checkpoint", "menu_pending_save", "queued_foreign", "terminal_cleanup", "partial_save", "save_failure", "unrelated", "extra_life", "ultra"):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory(prefix="sentinel-boundary-") as root:
                 self.stage("create", root, 3, defect)
-                if defect in ("nested", "initial_save", "pending_transition"):
+                if defect in ("nested", "initial_save", "pending_transition", "queued_checkpoint", "menu_pending_save"):
                     self.stage("resume", root, 3)
-                elif defect in ("partial_save", "save_failure", "initial_save_return_failed"):
+                elif defect in ("partial_save", "save_failure", "initial_save_return_failed", "queued_foreign"):
                     self.stage("resume", root, 3, "refuse_configuration")
 
     def test_pending_native_save_never_reopens_or_becomes_new(self):
@@ -54,6 +54,22 @@ class CampaignContinuity(unittest.TestCase):
             self.stage('create', root, 2, 'pending')
             self.stage('resume', root, 2, 'refuse_configuration')
             self.stage('create', root, 2, 'refuse_configuration')
+
+    def test_profile_new_game_cutscene_checkpoint_menu_and_reopen_save(self):
+        with tempfile.TemporaryDirectory(prefix='sentinel-profile-lifecycle-') as root:
+            created = self.stage('create', root, 3, 'profile_lifecycle')
+            self.assertIn('checkpoint=2 profile_writes=4', created)
+            checkpoint, = Path(root).rglob('campaign.checkpoint')
+            second = checkpoint.read_text()
+            self.assertIn('checkpoint=2\n', second)
+            self.assertIn('state=native_saved_readback_verified\n', second)
+            resumed = self.stage('resume', root, 3, 'profile_lifecycle')
+            self.assertIn('separate-process checkpoint=3 source_checkpoint=2 profile_writes=2', resumed)
+            self.assertNotEqual(created.split('pid=')[1], resumed.split('pid=')[1])
+            third = checkpoint.read_text()
+            self.assertIn('checkpoint=3\n', third)
+            self.assertNotEqual(second, third)
+            self.stage('resume', root, 2, 'refuse_configuration')
 
     def test_dirty_process_refuses_before_reservation(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-campaign-') as root:

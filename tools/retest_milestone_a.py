@@ -24,6 +24,10 @@ REQUIRED = ("sentinel_core.dll", "msimg32.dll", "sentinel_probe.exe", "prepare_v
 QUERIES = ("basic", "engine", "native", "save_admission", "save_installation", "save_context", "save_write")
 MAX_OUTPUT = 256 * 1024
 MAX_STARTUP_LOG = 1024 * 1024  # 128 bounded native transition records, including PROFILE stages.
+MAX_STARTUP_RECORD = 65536
+B_STAGES = frozenset(('session profile_read profile_output profile_choice profile_capture profile_prepare '
+    'profile_publish catalog creation difficulty transition checkpoint_factory provider sdk_prepare sdk_submit '
+    'sdk_callback sdk_result readback_create readback_prepare readback_verify continuity resume parser startup_gate').split())
 COMMON = "result operation wire_version core_abi core_version build_id target_pid server_pid process_created instance_id failure_stage win32_error target_state target_wait_error verified_process_created".split()
 ALLOWED = {
     "basic": "host_kind core_state ipc_state ipc_error core_capabilities inspection_capabilities initialization_count last_result engine_integration gameplay_safety game_build",
@@ -43,6 +47,86 @@ EVENT = "stage target_group target_index target_name rva signature_offset sequen
 
 class Refused(Exception):
     pass
+
+
+def startup_records(path, status):
+    """Bound both input and individual allocations; discard overlong records."""
+    remaining = MAX_STARTUP_LOG
+    pending = bytearray()
+    oversized = False
+    with path.open('rb') as stream:
+        while remaining:
+            part = stream.readline(min(65536, remaining))
+            if not part: break
+            remaining -= len(part)
+            if not oversized and len(pending) + len(part) <= 65536:
+                pending.extend(part)
+            else:
+                oversized = True
+                status['truncated'] = True
+            if part.endswith(b'\n'):
+                if not oversized:
+                    try: value = json.loads(pending)
+                    except (ValueError, UnicodeError): value = None
+                    if isinstance(value, dict): yield value
+                    else: status['malformed_records'] = status.get('malformed_records', 0) + 1
+                pending.clear()
+                oversized = False
+        past_limit = remaining == 0 and bool(stream.read(1))
+        if past_limit or oversized: status['truncated'] = True
+        if pending and not oversized and not past_limit:
+            try: value = json.loads(pending)
+            except (ValueError, UnicodeError): status['truncated'] = True
+            else:
+                if isinstance(value, dict): yield value
+
+
+def startup_latest(path):
+    """The atomic final snapshot has its own bound, independent of history."""
+    pending = bytearray()
+    with path.open('rb') as stream:
+        while len(pending) <= MAX_STARTUP_RECORD:
+            part = stream.read(min(8192, MAX_STARTUP_RECORD + 1 - len(pending)))
+            if not part: break
+            pending.extend(part)
+    if len(pending) > MAX_STARTUP_RECORD: raise ValueError('snapshot_oversized')
+    value = json.loads(pending)
+    if not isinstance(value, dict): raise ValueError('snapshot_not_object')
+    return value
+
+
+def automatic_rows(log):
+    rows = list(log.get('records', []))
+    latest = log.get('latest')
+    if latest and (not rows or latest != rows[-1]): rows.append(latest)
+    return rows
+
+
+def safe_b_diagnostics(value):
+    """Only literal event labels and bounded numeric facts cross the ZIP boundary."""
+    if not isinstance(value, dict): return {}
+    def number(value, signed=False):
+        return type(value) is int and (-(1 << 63) if signed else 0) <= value < (1 << 63)
+    def event(value):
+        if not isinstance(value, dict) or value.get('stage') not in B_STAGES: return {}
+        result = {key: value[key] for key in ('sequence', 'at_ms', 'operation', 'thread', 'status')
+                  if number(value.get(key))}
+        if not result.get('sequence') or result.get('status') not in range(1, 6): return {}
+        result['stage'] = value['stage']
+        predicate = value.get('predicate')
+        result['predicate'] = predicate if isinstance(predicate, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,95}', predicate) else 'redacted_nonprotocol_predicate'
+        facts = value.get('facts', {})
+        result['facts'] = {key: item for key, item in list(facts.items())[:16]
+                           if isinstance(key, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,47}', key) and
+                           not re.search(r'(?:^|_)(?:address|pointer|ptr|handle|steamid|accountid|user_id)(?:_|$)', key) and
+                           number(item, signed=True)} if isinstance(facts, dict) else {}
+        return result
+    result = {'sequence': value['sequence']} if number(value.get('sequence')) else {}
+    result['first_failure'] = event(value.get('first_failure'))
+    stages = value.get('stages', {})
+    result['stages'] = {key: parsed for key in B_STAGES if isinstance(stages, dict)
+                        and (parsed := event(stages.get(key))) and parsed['stage'] == key}
+    return result
 
 
 class CollectionUnavailable(Refused):
@@ -471,12 +555,51 @@ def safe_response(query, value):
     return result
 
 
+def safe_startup_record(item):
+    trace = item.get("profile", {})
+    step_keys = ("first_ms", "changed_ms", "elapsed_ms", "status", "predicate", "native_attempted", "native_state", "native_outcome", "native_value",
+                 "read_reason", "read_error", "read_requested", "read_offset", "read_size")
+    profile = {**scalars(trace, ("request_id", "identity_kind", "identity_matched", "deadline_basis", "account_network_state", "downstream_refusals", "first_failed_stage")),
+        "ownership": scalars(trace.get("ownership", {}), ("lifetime", "baseline_ready", "session_live", "stable_owner", "same_profile", "same_manager", "same_shell", "same_user")),
+        "first_failure": scalars(trace.get("first_failure", {}), step_keys),
+        "steps": {key: scalars(trace.get("steps", {}).get(key, {}), step_keys) for key in
+            ("request", "profile_created", "catalog_created", "first_poll", "prepare", "decode", "transport", "catalog_poll", "catalog", "reader", "framing", "checksum", "parse", "overlay", "application", "root", "admission", "write_after_refusal", "output_validation")}}
+    row = {**scalars(item, ("schema", "control_sha256", "pid", "process_created", "build_id", "at_ms", "engine_reason")), "profile": profile,
+        "startup_route": scalars(item.get("startup_route", {}), ("at_ms", "adapter", "operation", "session_state", "native_phase", "startup_entered", "root_qualified", "manager_available", "provider_available", "native_user_available", "delegated_account_query", "caller_class", "caller_rva", "source_kind", "source_length", "source_step", "source_read_reason", "source_read_error", "stack_count", *(f"stack_rva_{i}" for i in range(8)))),
+        'campaign': scalars(item.get('campaign', {}), ('enabled', 'resumed', 'phase', 'reason', 'slot', 'map', 'difficulty',
+            'effective_difficulty', 'loaded_difficulty', 'changes_blocked', 'source_verified', 'parser_completed', 'parser_result', 'native_saved',
+            'readback_verified', 'continuity_persisted', 'native_factory_matched', 'operation', 'checkpoint', 'source_checkpoint', 'generation_before', 'generation_after', 'map_active',
+            'save_ready', 'failure_at_ms', 'transition_event', 'transition_at_ms', 'native_return', 'transition_depth', 'transition_observation_reason',
+            'transition_observed', 'transition_ended', 'transition_abnormal', 'transition_state', 'transition_state_read', 'transition_map_read', 'transition_difficulty_read',
+            'transition_map', 'checkpoint_at_ms', 'checkpoint_generation', 'checkpoint_depth', 'checkpoint_state', 'checkpoint_difficulty',
+            'checkpoint_state_read', 'checkpoint_map_read', 'checkpoint_difficulty_read')),
+        "admission": scalars(item.get("admission", {}), ("state", "fault", "flags", "prepared_routes", "required_routes", "namespace_id")),
+        "installation": {**scalars(item.get("installation", {}), ("phase", "sequence", "startup_observation", "last_completed_stage", "validated", "created", "enabled")),
+            **{key: scalars(item.get("installation", {}).get(key) or {},
+              ("sequence", "stage", "reason", "at_ms", "duration_ms", "target_group", "target_index", "rva", "result", "win32_error", "minhook_status", "read_reason", "expected_bytes", "actual_bytes"))
+               for key in ("primary_failure", "cleanup_failure", "active")}}}
+    row['campaign']['parser_trace'] = scalars(item.get('campaign', {}).get('parser_trace', {}),
+        ('at_ms', 'source', 'disposition', 'session_state', 'directory_read', 'prefix_read', 'native_completion', 'exact_resume'))
+    row["b_diagnostics"] = safe_b_diagnostics(item.get("b_diagnostics"))
+    storage = item.get('diagnostic_storage', {})
+    row['diagnostic_storage'] = {key: storage[key] for key in ('history_records', 'history_bytes', 'history_error', 'latest_error')
+        if isinstance(storage, dict) and type(storage.get(key)) is int and 0 <= storage[key] < (1 << 63)}
+    return row
+
+
+
+
 class Run:
     @staticmethod
     def campaign_failure(records, options):
         failures = []
         for row in records:
             fact, trace = row.get('campaign', {}), row.get('profile', {})
+            diagnostic = row.get('b_diagnostics', {}).get('first_failure', {})
+            if diagnostic.get('status') == 4 and diagnostic.get('sequence'):
+                failures.append({'fault': 'native_b', 'reason': diagnostic['predicate'],
+                    'at_ms': diagnostic.get('at_ms') or row.get('at_ms'), 'timing': 'native_b_event',
+                    'first_failed_stage': diagnostic['stage'], 'first_failure': diagnostic, 'campaign': fact})
             startup = row.get('installation', {}).get('primary_failure', {})
             if startup.get('stage') in (19, 'startup') and row.get('admission', {}).get('fault') in (6, 'missed_startup'):
                 failures.append({'fault': 'native_startup', 'reason': 'missed_startup',
@@ -493,7 +616,7 @@ class Run:
                     'at_ms': refusal.get('changed_ms') or row.get('at_ms'), 'timing': 'native_profile_refusal',
                     'first_failed_stage': trace['first_failed_stage'], 'first_failure': refusal, 'campaign': fact})
         if not failures: return None
-        result = min(failures, key=lambda item: item.get('at_ms') or float('inf'))
+        result = min(failures, key=lambda item: (item.get('at_ms') or float('inf'), item.get('fault') != 'native_b'))
         return {**result, 'clock': 'GetTickCount64_ms_exact_process'}
 
     @staticmethod
@@ -502,7 +625,7 @@ class Run:
         if not case: return 'no_campaign', None
         if case['phase'] == 'completed': return 'completed_B', None
         if case['phase'] in ('prepare_resume', 'resume'): return 'completed_create_awaiting_resume', None
-        records = state.get('automatic_log', {}).get('records', [])
+        records = automatic_rows(state.get('automatic_log', {}))
         process = state.get('process') or {}
         failure = Run.campaign_failure(records, case['options'])
         comparison = state.get('comparison', {})
@@ -552,13 +675,55 @@ class Run:
         if sha(old) != authorized['state_sha256'] or sha(recovery) != authorized['recovery_sha256']:
             raise Refused('corrective_case_retained_evidence_changed')
         state, receipt = read_json(old), read_json(recovery)
-        if (state.get('run_id') != run_id or not state.get('finished') or not state.get('campaign_case') or
+        if (state.get('run_id') != run_id or not state.get('campaign_case') or
             receipt.get('run_id') != run_id or receipt.get('comparison', {}).get('result') != 'vanilla_campaign_unchanged' or
             receipt.get('reference_manifest_sha256') != state['protection']['reference_manifest_sha256'] or
             receipt.get('retained_evidence_sha256', {}).get(str(old)) != authorized['state_sha256']):
             raise Refused('corrective_case_safety_not_established')
+        if not state.get('finished'):
+            Run.verify_interrupted_recovery(config, state, receipt, old)
+            outcome = 'interrupted_failed_create_preserved_stopped_comparison_unchanged'
+        else: outcome = 'failed_preserved_exact_comparison_unchanged'
         return {'run_id': run_id, 'state_sha256': authorized['state_sha256'], 'recovery_sha256': authorized['recovery_sha256'],
-            'outcome': 'failed_preserved_exact_comparison_unchanged'}
+            'outcome': outcome}
+
+    @staticmethod
+    def verify_interrupted_recovery(config, state, receipt, old):
+        """Explicit hashed recovery proves a fresh case safe, never normal exit."""
+        protection.require_stopped()
+        case, comparison = state['campaign_case'], receipt.get('comparison', {})
+        process = state.get('process', {})
+        namespace = state.get('namespace_id', '')
+        reference = Path(state['protection']['reference_directory']) / protection.MANIFEST
+        if (receipt.get('classification') != 'interrupted_failed_create_preserved' or
+            receipt.get('stopped_before_and_after') is not True or receipt.get('normal_exit_observed') is not False or
+            receipt.get('original_case_modified') is not False or receipt.get('source_case_finished') is not False or
+            receipt.get('runtime_B_passed') is not False or case.get('phase') != 'create' or case.get('launches') or
+            not case.get('failure') or receipt.get('build_id') != state['manifest']['build_id'] or
+            not re.fullmatch(r'[0-9a-f]{64}', namespace) or receipt.get('namespace_id') != namespace or
+            any(receipt.get('process', {}).get(key) != process.get(key) or not process.get(key)
+                for key in ('pid', 'process_created', 'instance_id')) or
+            any(comparison.get(key) != 0 for key in ('added', 'removed', 'modified')) or
+            not comparison.get('baseline_campaign_files') or comparison['baseline_campaign_files'] != comparison.get('current_campaign_files') or
+            receipt.get('comparison_details', {}).get('differences') != [] or sha(reference) != receipt['reference_manifest_sha256']):
+            raise Refused('interrupted_corrective_case_safety_not_established')
+        retained = receipt.get('retained_evidence_sha256', {})
+        expected_evidence = {str(path) for path in old.parent.parent.rglob('*') if path.is_file()} | {str(reference)}
+        if set(retained) != expected_evidence or any(sha(path) != digest for path, digest in retained.items()):
+            raise Refused('interrupted_corrective_case_retained_evidence_changed')
+        original_config = read_json(old.parent / 'config.json')
+        if any(original_config.get(key) != config.get(key) for key in ('APRoot', 'SteamAppRoot', 'SteamAccount32', 'LocalProviderRoot')):
+            raise Refused('interrupted_corrective_case_namespace_roots_changed')
+        ap_root = Path(config['APRoot']) / namespace
+        steam_root = Path(config['SteamAppRoot']) / 'remote' / ('ap-' + namespace[:40])
+        expected_namespace = {ap_root / name for name in ('campaign.contract', 'owner.lock', 'session.manifest')}
+        expected_namespace.add(steam_root / ('sentinel-owner-' + namespace + '.txt'))
+        observed = {path for root in (ap_root, steam_root) for path in root.rglob('*') if path.is_file()}
+        inventory = receipt.get('namespace_files', [])
+        if (observed != expected_namespace or {Path(row['path']) for row in inventory} != expected_namespace or len(inventory) != 4 or
+            any(Path(row['path']).stat().st_size != row['size'] or sha(row['path']) != row['sha256'] for row in inventory)):
+            raise Refused('interrupted_corrective_case_namespace_payload_or_change')
+        protection.require_stopped()
 
     def __init__(self, config_path, stage, scenario=None, resume_case=None):
         self.config_path = Path(config_path)
@@ -602,7 +767,7 @@ class Run:
                     if terminal: corrective = terminal
                 else: lifecycle = 'no_campaign'
                 if stage == 'RUN' and lifecycle not in ('no_campaign', 'completed_B', 'terminal_failed_before_checkpoint'):
-                    if not corrective or corrective['run_id'] != previous['run_id']:
+                    if not corrective or corrective['run_id'] != campaign_reference['run_id']:
                         raise Refused('pending_campaign_case_requires_explicit_ResumeCase_' + campaign_reference['run_id'])
                 completed_reference = True
             self.config = current
@@ -862,6 +1027,13 @@ class Run:
         self.save()
 
     def discover_recorded_process(self):
+        try:
+            return self._discover_recorded_process()
+        except (MemoryError, OSError) as error:
+            self.collection_degraded(error)
+            return False
+
+    def _discover_recorded_process(self):
         """Recover a short-lived attempt by exact control hash, never newest file/PID."""
         root = Path(os.environ.get("LOCALAPPDATA", "")) / "SentinelCore/diagnostics"
         if not root.is_dir(): return False
@@ -869,15 +1041,15 @@ class Run:
         matches = {}
         for index, path in enumerate(root.iterdir()):
             if index >= 4096: raise Refused("automatic_record_scan_limit_exact_identity_not_resolved")
-            match = re.fullmatch(r"([0-9]+)-([0-9]+)\.jsonl", path.name)
+            match = re.fullmatch(r"([0-9]+)-([0-9]+)\.(jsonl|latest\.json)", path.name)
             if not match or int(match[2]) < earliest: continue
-            with path.open("rb") as stream: data = stream.read(MAX_STARTUP_LOG)
-            for line in data.splitlines():
-                try: value = json.loads(line)
-                except (ValueError, UnicodeError): continue
-                if (isinstance(value, dict) and value.get("control_sha256") == self.state.get("control_sha256") and
+            try:
+                candidates = [startup_latest(path)] if match[3] == 'latest.json' else startup_records(path, {})
+                for value in candidates:
+                    if (isinstance(value, dict) and value.get('schema') == 'sentinel-startup-v1' and value.get("control_sha256") == self.state.get("control_sha256") and
                     value.get("build_id") == self.state["manifest"]["build_id"] and str(value.get("pid")) == match[1] and str(value.get("process_created")) == match[2]):
-                    matches[path.name] = {"pid": int(match[1]), "process_created": match[2], "path": None, "modules": [], "source": "automatic_record_only"}
+                        matches[(match[1], match[2])] = {"pid": int(match[1]), "process_created": match[2], "path": None, "modules": [], "source": "automatic_record_only"}
+            except (ValueError, UnicodeError): continue
         if len(matches) > 1: raise Refused("multiple_process_records_for_this_run_no_identity_guess")
         if not matches: return False
         self.state["process"] = next(iter(matches.values())); self.save()
@@ -916,9 +1088,8 @@ class Run:
 
     def campaign_progress(self):
         case = self.state['campaign_case']
-        records = self.state.get('automatic_log', {}).get('records', [])
+        records = automatic_rows(self.state.get('automatic_log', {}))
         current = next((row['campaign'] for row in reversed(records) if row.get('campaign', {}).get('enabled')), {})
-        if not current: return {}
         failure = self.campaign_failure(records, case['options'])
         if failure:
             if not case.get('failure'):
@@ -928,6 +1099,7 @@ class Run:
                 print('Teste B falhou. Feche DOOM e Steam normalmente. A coleta segura continua; nao avance para outro checkpoint ou segundo lancamento.')
                 self.save()
             return current
+        if not current: return {}
         if case.get('failure'): return current
         if current.get('continuity_persisted') and not current.get('resumed') and current.get('phase') == 'checkpoint_saved':
             message = 'Checkpoint nativo confirmado e verificado. Pode fechar DOOM e Steam normalmente; a segunda abertura usara a mesma identidade.'
@@ -946,7 +1118,7 @@ class Run:
             case['runtime_proof'] = 'failed_closed_and_compared'
             self.save()
             raise Refused('campaign_failed_preserved_do_not_recreate')
-        records = self.state.get('automatic_log', {}).get('records', [])
+        records = automatic_rows(self.state.get('automatic_log', {}))
         admission = records[-1].get('admission', {}) if records else {}
         valid = (current.get('effective_difficulty') == case['options']['difficulty'] and
             self.state.get('capture_health', {}).get('module_state') == 'verified' and self.state.get('process', {}).get('instance_id') and
@@ -1021,45 +1193,74 @@ class Run:
         self.save()
 
     def collect_startup_log(self):
+        try:
+            self._collect_startup_log()
+        except (MemoryError, OSError) as error:
+            # Optional collection never discards the last complete observation
+            # or interrupts waiting for stopped-process comparison/export.
+            self.collection_degraded(error)
+
+    def collection_degraded(self, error):
+        self.state['collection_degradation'] = type(error).__name__
+        try: self.save()
+        except (MemoryError, OSError): pass
+
+    def _collect_startup_log(self):
         process = self.state.get("process")
         if not process: return
         path = Path(os.environ["LOCALAPPDATA"]) / "SentinelCore/diagnostics" / (str(process["pid"]) + "-" + str(process["process_created"]) + ".jsonl")
-        if not path.exists():
-            self.state["automatic_log"] = {"state": "unavailable", "reason": "exact_process_log_not_present"}
-            return
-        with path.open("rb") as stream: raw = stream.read(MAX_STARTUP_LOG + 1)
+        previous = self.state.get('automatic_log', {})
+        status = {'truncated': previous.get('truncated', False), 'latest_state': 'unavailable'}
+        def validated(item):
+            if (item.get('schema') != 'sentinel-startup-v1' or str(item.get('pid')) != str(process['pid']) or
+                str(item.get('process_created')) != str(process['process_created']) or item.get('build_id') != self.state['manifest']['build_id']):
+                raise ValueError('process_or_build_identity_mismatch')
+            actual = item.get('admission', {}).get('namespace_id')
+            expected = self.state.get('namespace_id')
+            if expected and actual and actual != expected and not (actual == '0' * 64 and item.get('admission', {}).get('state') == 0):
+                raise ValueError('namespace_identity_mismatch')
+            if self.state.get('control_sha256') and item.get('control_sha256') and item['control_sha256'] != self.state['control_sha256']:
+                raise ValueError('control_identity_mismatch')
+            return safe_startup_record(item)
         rows = []
-        for line in raw[:MAX_STARTUP_LOG].splitlines():
-            try: item = json.loads(line)
-            except ValueError: continue
-            if (str(item.get("pid")) != str(process["pid"]) or str(item.get("process_created")) != str(process["process_created"]) or
-                item.get("build_id") != self.state["manifest"]["build_id"]):
-                raise Refused("automatic_log_process_or_build_identity_mismatch")
-            trace = item.get("profile", {})
-            step_keys = ("first_ms", "changed_ms", "elapsed_ms", "status", "predicate", "native_attempted", "native_state", "native_outcome", "native_value",
-                         "read_reason", "read_error", "read_requested", "read_offset", "read_size")
-            profile = {**scalars(trace, ("request_id", "identity_kind", "identity_matched", "deadline_basis", "account_network_state", "downstream_refusals", "first_failed_stage")),
-                "ownership": scalars(trace.get("ownership", {}), ("lifetime", "baseline_ready", "session_live", "stable_owner", "same_profile", "same_manager", "same_shell", "same_user")),
-                "first_failure": scalars(trace.get("first_failure", {}), step_keys),
-                "steps": {key: scalars(trace.get("steps", {}).get(key, {}), step_keys) for key in
-                    ("request", "profile_created", "catalog_created", "first_poll", "prepare", "decode", "transport", "catalog_poll", "catalog", "reader", "framing", "checksum", "parse", "overlay", "application", "root", "admission", "write_after_refusal", "output_validation")}}
-            rows.append({**scalars(item, ("schema", "control_sha256", "pid", "process_created", "build_id", "at_ms", "engine_reason")), "profile": profile,
-                "startup_route": scalars(item.get("startup_route", {}), ("at_ms", "adapter", "operation", "session_state", "native_phase", "startup_entered", "root_qualified", "manager_available", "provider_available", "native_user_available", "delegated_account_query", "caller_class")),
-                'campaign': scalars(item.get('campaign', {}), ('enabled', 'resumed', 'phase', 'reason', 'slot', 'map', 'difficulty',
-                    'effective_difficulty', 'loaded_difficulty', 'changes_blocked', 'source_verified', 'parser_completed', 'parser_result', 'native_saved',
-                    'readback_verified', 'continuity_persisted', 'native_factory_matched', 'operation', 'checkpoint', 'source_checkpoint', 'generation_before', 'generation_after', 'map_active',
-                    'save_ready', 'failure_at_ms', 'transition_event', 'transition_at_ms', 'native_return', 'transition_depth', 'transition_observation_reason',
-                    'transition_observed', 'transition_ended', 'transition_abnormal', 'transition_state', 'transition_state_read', 'transition_map_read', 'transition_difficulty_read',
-                    'transition_map', 'checkpoint_at_ms', 'checkpoint_generation', 'checkpoint_depth', 'checkpoint_state', 'checkpoint_difficulty',
-                    'checkpoint_state_read', 'checkpoint_map_read', 'checkpoint_difficulty_read')),
-                "admission": scalars(item.get("admission", {}), ("state", "fault", "flags", "prepared_routes", "required_routes", "namespace_id")),
-                "installation": {**scalars(item.get("installation", {}), ("phase", "sequence", "startup_observation", "last_completed_stage", "validated", "created", "enabled")),
-                    **{key: scalars(item.get("installation", {}).get(key) or {},
-                      ("sequence", "stage", "reason", "at_ms", "duration_ms", "target_group", "target_index", "rva", "result", "win32_error", "minhook_status", "read_reason", "expected_bytes", "actual_bytes"))
-                       for key in ("primary_failure", "cleanup_failure", "active")}}})
-            rows[-1]['campaign']['parser_trace'] = scalars(item.get('campaign', {}).get('parser_trace', {}),
-                ('at_ms', 'source', 'disposition', 'session_state', 'directory_read', 'prefix_read', 'native_completion', 'exact_resume'))
-        self.state["automatic_log"] = {"state": "captured", "truncated": len(raw) > MAX_STARTUP_LOG, "records": rows[:128]}
+        try:
+            for item in startup_records(path, status):
+                if len(rows) == 128:
+                    status['truncated'] = True
+                    status['history_record_limit'] = True
+                    break
+                try: rows.append(validated(item))
+                except (ValueError, TypeError, AttributeError): status['rejected_records'] = status.get('rejected_records', 0) + 1
+        except (MemoryError, OSError) as error:
+            status['history_state'] = type(error).__name__
+        # A transient failed/truncated read cannot erase records already retained.
+        if len(rows) < len(previous.get('records', [])): rows = previous['records']
+        latest = previous.get('latest')
+        try:
+            candidate = validated(startup_latest(path.with_suffix('.latest.json')))
+            prior = latest or (rows[-1] if rows else {})
+            if (candidate.get('at_ms', 0) < prior.get('at_ms', 0) or
+                candidate.get('b_diagnostics', {}).get('sequence', 0) < prior.get('b_diagnostics', {}).get('sequence', 0)):
+                raise ValueError('stale_snapshot')
+            latest = candidate
+            status['latest_state'] = 'captured'
+        except FileNotFoundError: pass
+        except (ValueError, TypeError, AttributeError, UnicodeError) as error:
+            status.update(latest_state='rejected', latest_reason=str(error) if str(error) in
+                ('process_or_build_identity_mismatch', 'namespace_identity_mismatch', 'control_identity_mismatch', 'stale_snapshot', 'snapshot_oversized', 'snapshot_not_object') else 'malformed_snapshot')
+        except (MemoryError, OSError) as error:
+            status['latest_state'] = type(error).__name__
+        self.state['automatic_log'] = {'state': 'captured' if rows or latest else 'unavailable', **status, 'records': rows}
+        if latest:
+            self.state['automatic_log']['latest'] = latest
+            last = rows[-1].get('b_diagnostics', {}).get('sequence', 0) if rows else 0
+            status['sequence_gap'] = max(0, latest.get('b_diagnostics', {}).get('sequence', 0) - last - 1)
+            self.state['automatic_log']['sequence_gap'] = status['sequence_gap']
+        rows = automatic_rows(self.state['automatic_log'])
+        causes = [r.get('b_diagnostics', {}).get('first_failure') for r in rows]
+        causes.append(previous.get('first_failure'))
+        causes = [cause for cause in causes if cause and cause.get('sequence')]
+        if causes: self.state['automatic_log']['first_failure'] = min(causes, key=lambda cause: cause['sequence'])
         if self.state.get('campaign_case'): self.campaign_progress()
         profile_failure = next((row["profile"] for row in rows
             if row["profile"].get("first_failed_stage") not in (None, "none") and row["profile"].get("request_id")), None)
@@ -1144,7 +1345,7 @@ class Run:
                 except protection.Refused:
                     if time.monotonic() >= deadline: raise Refused("post_test_comparison_waiting_for_Steam_to_exit")
                     time.sleep(1)
-        except (Refused, protection.Refused, OSError, ValueError, KeyboardInterrupt) as error:
+        except (Refused, protection.Refused, OSError, ValueError, MemoryError, KeyboardInterrupt) as error:
             self.fail(Refused("operator_interrupted_partial_evidence") if isinstance(error, KeyboardInterrupt) else error, "RUN")
             raise
         finally:
@@ -1299,6 +1500,7 @@ class Run:
             "automatic_startup": self.state.get("automatic_log", {"state": "not_observed"}),
             "capture_health": self.state.get("capture_health", {"module_state": "not_observed", "module_history": []}),
             "collection_health": self.state.get('collection_health', {'operations': {}}),
+            "collection_degradation": self.state.get('collection_degradation'),
             "module_evidence_limit": "verified mapped paths and current disk hashes do not attest every loaded byte",
             "process": {**scalars(process or {}, ("pid", "process_created", "instance_id")), "modules": modules},
             "stages": self.state["stages"], "commands": self.state["commands"],
@@ -1316,7 +1518,7 @@ class Run:
         report["admission_observation"] = ("admitted_in_read_only_snapshot" if admitted else
             "native_refusal_observed" if any(i.get("response", {}).get("state") in ("rejected", "faulted") for i in admissions) else
             "NOT_TESTED" if not process else "not_established")
-        logged = report["automatic_startup"].get("records", [])
+        logged = automatic_rows(report["automatic_startup"])
         trace = next((r["profile"] for r in reversed(logged) if r.get("profile", {}).get("request_id")), {})
         report["profile_initialization"] = trace or {"state": "not_observed"}
         native_failure = next((i.get("response", {}) for i in admissions if i.get("response", {}).get("state") in ("rejected", "faulted")), {})
@@ -1335,7 +1537,10 @@ class Run:
             before_profile = bool(campaign_time and profile_time and campaign_time < profile_time)
             before_campaign = bool(campaign_failure.get('timing') == 'native_event' and campaign_time and
                 profile_time and profile_time < campaign_time and profile_stage != 'write_after_refusal')
-            if campaign_failure.get('fault') == 'native_startup':
+            if campaign_failure.get('fault') == 'native_b':
+                report['native_failure'] = {'fault': 'native_b', 'first_failed_stage': campaign_failure['first_failed_stage'],
+                    'first_failure': campaign_failure['first_failure'], 'ordering': 'first_causal_b_event_exact_process'}
+            elif campaign_failure.get('fault') == 'native_startup':
                 report['native_failure'] = {'fault': 'native_startup', 'session_state': 'rejected', 'session_fault': 'missed_startup',
                     'first_failed_stage': 'startup', 'first_failure': campaign_failure,
                     'ordering': 'startup_before_profile_and_campaign_parser'}
@@ -1465,7 +1670,7 @@ def main(argv=None):
                 if args.stage == "PREPARE": run.prepare(activate=False)
                 elif args.stage not in ("EXPORT", "FINISH"): getattr(run, args.stage.lower())()
                 stage["state"] = "completed"
-            except (Refused, protection.Refused, OSError, ValueError, KeyError, TypeError, KeyboardInterrupt) as error:
+            except (Refused, protection.Refused, OSError, ValueError, KeyError, TypeError, MemoryError, KeyboardInterrupt) as error:
                 stage["state"] = "cancelled" if isinstance(error, KeyboardInterrupt) else "failed"
                 if isinstance(error, KeyboardInterrupt): error = Refused("operator_interrupted_partial_evidence")
                 stage["failure"] = safe_failure(error, run.config, args.stage)["reason"]
@@ -1480,12 +1685,12 @@ def main(argv=None):
             elif args.stage == "EXPORT": run.export("recovered-" + uuid.uuid4().hex[:8])
             print("Evidence directory: " + str(run.directory))
             return 0 if stage["state"] == "completed" and not run.state.get("primary_failure") else 1
-    except (Refused, protection.Refused, OSError, ValueError, KeyError, TypeError) as error:
+    except (Refused, protection.Refused, OSError, ValueError, KeyError, TypeError, MemoryError) as error:
         if run:
             run.fail(error, "cleanup_or_export")
             # A failed export never replaces the first preparation/capture failure.
             try: run.export("partial-" + uuid.uuid4().hex[:8])
-            except (OSError, ValueError) as secondary: print("Secondary export error: " + type(secondary).__name__)
+            except (OSError, ValueError, MemoryError) as secondary: print("Secondary export error: " + type(secondary).__name__)
         else:
             print("Run unavailable: " + (str(error) if isinstance(error, (Refused, protection.Refused)) else type(error).__name__), file=sys.stderr)
         return 1

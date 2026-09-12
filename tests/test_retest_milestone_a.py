@@ -33,6 +33,226 @@ finally:
     sys.path.pop(0)
 
 
+class StartupStreamingTests(unittest.TestCase):
+    def diagnostic_run(self):
+        temporary = tempfile.TemporaryDirectory(prefix='diagnostics-', dir=Path(__file__).parent)
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        run = object.__new__(retest.Run)
+        run.directory = root
+        (root / 'private').mkdir()
+        run.state = {'process': {'pid': 123, 'process_created': '456'}, 'manifest': {'build_id': 'a' * 64},
+                     'namespace_id': 'b' * 64}
+        run.save = mock.Mock(); run.fail = mock.Mock()
+        patch = mock.patch.dict(os.environ, {'LOCALAPPDATA': str(root)})
+        patch.start(); self.addCleanup(patch.stop)
+        path = root / 'SentinelCore/diagnostics/123-456.jsonl'
+        path.parent.mkdir(parents=True)
+        event = {'sequence': 301, 'at_ms': 801, 'operation': 9, 'thread': 2, 'stage': 'profile_output', 'status': 4,
+                 'predicate': 'profile_selection_invalid', 'facts': {'native_result': -1, 'expected_slot': 0},
+                 'private': {'source': '0x7FFFAABBCCDDEE'}}
+        row = {'schema': 'sentinel-startup-v1', 'pid': 123, 'process_created': '456', 'build_id': 'a' * 64,
+               'at_ms': 900, 'admission': {'namespace_id': 'b' * 64}, 'b_diagnostics': {
+                   'sequence': 400, 'first_failure': event, 'stages': {'profile_output': event}}}
+        return run, path, row
+
+    def test_latest_failure_survives_both_history_caps(self):
+        for padding, count in ((0, 130), (20000, 100)):
+            with self.subTest(padding=padding):
+                run, path, latest = self.diagnostic_run()
+                prior = {**latest, 'at_ms': 1, 'b_diagnostics': {'sequence': 1}, 'padding': 'x' * padding}
+                path.write_text((json.dumps(prior) + '\n') * count)
+                retest.write_json(path.with_suffix('.latest.json'), latest)
+                run.collect_startup_log()
+                log = run.state['automatic_log']
+                self.assertTrue(log['truncated'])
+                self.assertLessEqual(len(log['records']), 128)
+                self.assertEqual(log['latest_state'], 'captured')
+                self.assertEqual(log['first_failure']['predicate'], 'profile_selection_invalid')
+                self.assertEqual(log['sequence_gap'], 398)
+                cause = retest.Run.campaign_failure(retest.automatic_rows(log), {'difficulty': 3})
+                self.assertEqual(cause['timing'], 'native_b_event')
+                self.assertEqual(cause['first_failure']['facts']['native_result'], -1)
+                self.assertNotIn('0x7FFF', json.dumps(log))
+
+    def test_latest_rejects_foreign_identity_and_stale_sequence_preserving_prior(self):
+        run, path, row = self.diagnostic_run()
+        retest.write_json(path.with_suffix('.latest.json'), row)
+        run.collect_startup_log()
+        retained = copy.deepcopy(run.state['automatic_log']['latest'])
+        for key, value in (('pid', 124), ('process_created', '457'), ('build_id', 'c' * 64),
+                           ('admission', {'namespace_id': 'c' * 64}), ('at_ms', 899),
+                           ('b_diagnostics', {'sequence': 399})):
+            with self.subTest(key=key):
+                retest.write_json(path.with_suffix('.latest.json'), {**row, key: value})
+                run.collect_startup_log()
+                self.assertEqual(run.state['automatic_log']['latest_state'], 'rejected')
+                self.assertEqual(run.state['automatic_log']['latest'], retained)
+                self.assertEqual(run.state['automatic_log']['first_failure']['sequence'], 301)
+
+    def test_latest_malformed_memory_and_io_degrade_without_erasing_first_cause(self):
+        run, path, row = self.diagnostic_run()
+        retest.write_json(path.with_suffix('.latest.json'), row)
+        run.collect_startup_log()
+        retained = copy.deepcopy(run.state['automatic_log']['latest'])
+        for content in ('{', '[]', 'x' * 65537, json.dumps({**row, 'profile': None})):
+            path.with_suffix('.latest.json').write_text(content)
+            run.collect_startup_log()
+            self.assertEqual(run.state['automatic_log']['latest_state'], 'rejected')
+            self.assertEqual(run.state['automatic_log']['latest'], retained)
+        for error in (MemoryError(), OSError('DO_NOT_EXPORT private path')):
+            with mock.patch.object(retest, 'startup_latest', side_effect=error): run.collect_startup_log()
+            self.assertEqual(run.state['automatic_log']['latest_state'], type(error).__name__)
+            self.assertEqual(run.state['automatic_log']['latest'], retained)
+            self.assertNotIn('DO_NOT_EXPORT', json.dumps(run.state))
+
+    def test_b_diagnostic_sanitizer_rejects_nonprotocol_fields(self):
+        run, path, row = self.diagnostic_run()
+        event = row['b_diagnostics']['first_failure']
+        event['facts'].update({'payload': 'DO_NOT_EXPORT', 'memory_address': 123456, 'bad/key': 8,
+                               'overflow': 1 << 63, 'negative': -(1 << 63), 'boolean': True})
+        event['private'] = {'source': 'DO_NOT_EXPORT'}
+        safe = retest.safe_b_diagnostics(row['b_diagnostics'])
+        self.assertEqual(safe['first_failure']['facts'], {'native_result': -1, 'expected_slot': 0, 'negative': -(1 << 63)})
+        self.assertNotIn('DO_NOT_EXPORT', json.dumps(safe))
+        event['predicate'] = 'private/path DO_NOT_EXPORT'
+        self.assertEqual(retest.safe_b_diagnostics(row['b_diagnostics'])['first_failure']['predicate'], 'redacted_nonprotocol_predicate')
+
+    def test_startup_gate_stage_preserves_relative_context(self):
+        gate = {'sequence': 7, 'at_ms': 900, 'thread': 42, 'status': 3, 'stage': 'startup_gate',
+                'predicate': 'startup_gate_root_released',
+                'facts': {'install_begin_ms': 100, 'arm_ms': 200, 'startup_enter_ms': 300,
+                          'first_wait_ms': 301, 'install_complete_ms': 600,
+                          'startup_thread': 42, 'manager_present': 0, 'root_equals_binding': 1,
+                          'init_slot_equals_target0': 1, 'caller_rva': 0x4323fc,
+                          'image_base': 'PRIVATE_BASE', 'source_name': 'PRIVATE_SOURCE_NAME'},
+                'source': 123456}
+        safe = retest.safe_b_diagnostics({'stages': {'startup_gate': gate}})
+        self.assertEqual(safe['stages']['startup_gate']['facts']['caller_rva'], 0x4323fc)
+        self.assertEqual(safe['stages']['startup_gate']['facts']['startup_enter_ms'], 300)
+        self.assertEqual(safe['stages']['startup_gate']['facts']['first_wait_ms'], 301)
+        self.assertEqual(safe['stages']['startup_gate']['facts']['install_complete_ms'], 600)
+        self.assertEqual(safe['stages']['startup_gate']['facts']['root_equals_binding'], 1)
+        self.assertNotIn('PRIVATE', json.dumps(safe))
+        self.assertNotIn('source', safe['stages']['startup_gate'])
+
+    def test_b_failure_before_campaign_activation_stops_manual_progress(self):
+        run, path, row = self.diagnostic_run()
+        run.state['campaign_case'] = {'phase': 'create', 'options': {'difficulty': 3}}
+        row['b_diagnostics']['first_failure']['stage'] = 'catalog'
+        row['b_diagnostics']['first_failure']['predicate'] = 'catalog_selection_ambiguous'
+        retest.write_json(path.with_suffix('.latest.json'), row)
+        with contextlib.redirect_stdout(io.StringIO()): run.collect_startup_log()
+        self.assertEqual(run.state['campaign_case']['failure']['reason'], 'catalog_selection_ambiguous')
+        self.assertEqual(run.state['campaign_case']['runtime_proof'], 'failed_observing_until_normal_exit')
+        run.fail.assert_called_once()
+
+    def test_bounded_chunks_recover_after_oversized_and_invalid_records(self):
+        content = b'{"n":1}\n' + b'x' * 150000 + b'\n\xff\n' + b'{"n":2}'
+        class Bounded(io.BytesIO):
+            def readline(self, size=-1):
+                if not 0 < size <= 65536: raise AssertionError(size)
+                return super().readline(size)
+            def read(self, size=-1):
+                if size != 1: raise AssertionError(size)
+                return super().read(size)
+        path = mock.Mock(); path.open.return_value = Bounded(content)
+        status = {}
+        self.assertEqual(list(retest.startup_records(path, status)), [{'n': 1}, {'n': 2}])
+        self.assertTrue(status['truncated'])
+
+    def test_total_limit_never_parses_the_last_record_prefix(self):
+        path = mock.Mock(); path.open.return_value = io.BytesIO(b'{"n":1}\n{"n":22}\n')
+        status = {}
+        with mock.patch.object(retest, 'MAX_STARTUP_LOG', 12):
+            self.assertEqual(list(retest.startup_records(path, status)), [{'n': 1}])
+        self.assertTrue(status['truncated'])
+
+    def test_collection_memory_or_io_failure_keeps_prior_evidence_and_process(self):
+        for error in (MemoryError(), OSError('private path must not be exported')):
+            run = object.__new__(retest.Run)
+            run.state = {'process': {'pid': 123}, 'automatic_log': {'records': [{'at_ms': 7}]},
+                         'primary_failure': {'distinction': 'native_profile'}}
+            before = copy.deepcopy(run.state)
+            run.save = mock.Mock()
+            run._collect_startup_log = mock.Mock(side_effect=error)
+            run.collect_startup_log()
+            self.assertEqual(run.state, {**before, 'collection_degradation': type(error).__name__})
+            run._discover_recorded_process = mock.Mock(side_effect=error)
+            self.assertFalse(run.discover_recorded_process())
+            self.assertEqual(run.state['process'], before['process'])
+
+
+class InterruptedRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='interrupted-recovery-', dir=Path(__file__).parent)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.old = self.root / ('retest-' + '1' * 32) / 'private/state.json'
+        self.old.parent.mkdir(parents=True)
+        self.reference = self.root / 'backup' / retest.protection.MANIFEST
+        self.reference.parent.mkdir(); self.reference.write_bytes(b'fixture reference')
+        self.config = {'EvidenceRoot': str(self.root), 'APRoot': str(self.root / 'ap'), 'SteamAppRoot': str(self.root / 'steam'),
+                       'SteamAccount32': 123, 'LocalProviderRoot': str(self.root / 'local')}
+        self.namespace = 'a' * 64
+        self.state = {'run_id': self.old.parent.parent.name, 'finished': False, 'namespace_id': self.namespace,
+            'manifest': {'build_id': 'b' * 64}, 'process': {'pid': 12, 'process_created': '34', 'instance_id': 'c' * 32},
+            'campaign_case': {'phase': 'create', 'failure': {'reason': 'profile_failed'}, 'launches': []},
+            'protection': {'reference_directory': str(self.reference.parent), 'reference_manifest_sha256': retest.sha(self.reference)}}
+        retest.write_json(self.old, self.state)
+        retest.write_json(self.old.parent / 'config.json', self.config)
+        ap = Path(self.config['APRoot']) / self.namespace
+        steam = Path(self.config['SteamAppRoot']) / 'remote' / ('ap-' + self.namespace[:40])
+        ap.mkdir(parents=True); steam.mkdir(parents=True)
+        files = [ap / name for name in ('campaign.contract', 'owner.lock', 'session.manifest')]
+        files.append(steam / ('sentinel-owner-' + self.namespace + '.txt'))
+        for path in files: path.write_bytes(b'fixture metadata')
+        self.receipt = {'run_id': self.state['run_id'], 'build_id': 'b' * 64, 'process': self.state['process'],
+            'namespace_id': self.namespace, 'reference_manifest_sha256': retest.sha(self.reference),
+            'comparison': {'result': 'vanilla_campaign_unchanged', 'baseline_campaign_files': 30,
+                'current_campaign_files': 30, 'added': 0, 'removed': 0, 'modified': 0}, 'comparison_details': {'differences': []},
+            'retained_evidence_sha256': {str(path): retest.sha(path) for path in (self.old, self.old.parent / 'config.json', self.reference)},
+            'namespace_files': [{'path': str(path), 'sha256': retest.sha(path), 'size': path.stat().st_size} for path in files],
+            'classification': 'interrupted_failed_create_preserved', 'stopped_before_and_after': True,
+            'normal_exit_observed': False, 'original_case_modified': False, 'source_case_finished': False, 'runtime_B_passed': False}
+        self.recovery = self.root / 'recovery.private.json'
+        patch = mock.patch.object(retest.protection, 'require_stopped')
+        self.stopped = patch.start(); self.addCleanup(patch.stop)
+
+    def authorize(self, receipt=None):
+        retest.write_json(self.recovery, receipt or self.receipt)
+        self.config['CorrectiveCase'] = {'run_id': self.state['run_id'], 'state_sha256': retest.sha(self.old),
+            'recovery_file': str(self.recovery), 'recovery_sha256': retest.sha(self.recovery)}
+
+    def test_exact_interrupted_recovery_authorizes_new_case_without_edit_or_exit_claim(self):
+        original = self.old.read_bytes()
+        self.authorize()
+        result = retest.Run.corrective_case(self.config)
+        self.assertEqual(result['outcome'], 'interrupted_failed_create_preserved_stopped_comparison_unchanged')
+        self.assertEqual(self.old.read_bytes(), original)
+        self.assertFalse(retest.read_json(self.old)['finished'])
+        self.assertEqual(self.stopped.call_count, 2)
+
+    def test_interrupted_recovery_requires_every_identity_and_comparison_predicate(self):
+        for key, value in (('stopped_before_and_after', False), ('normal_exit_observed', True),
+                           ('original_case_modified', True), ('source_case_finished', True), ('runtime_B_passed', True),
+                           ('build_id', 'd' * 64), ('namespace_id', 'd' * 64), ('process', {'pid': 999}),
+                           ('comparison', {**self.receipt['comparison'], 'modified': 1}),
+                           ('comparison_details', {'differences': ['changed']})):
+            with self.subTest(key=key):
+                self.authorize({**self.receipt, key: value})
+                with self.assertRaises(retest.Refused): retest.Run.corrective_case(self.config)
+
+    def test_interrupted_recovery_rejects_changed_evidence_and_any_campaign_payload(self):
+        self.authorize()
+        retained = self.old.parent / 'config.json'
+        original = retained.read_bytes(); retained.write_bytes(original + b' ')
+        with self.assertRaisesRegex(retest.Refused, 'retained_evidence_changed'): retest.Run.corrective_case(self.config)
+        retained.write_bytes(original)
+        (Path(self.config['APRoot']) / self.namespace / 'checkpoint.bin').write_bytes(b'not metadata')
+        with self.assertRaisesRegex(retest.Refused, 'namespace_payload_or_change'): retest.Run.corrective_case(self.config)
+
+
 @unittest.skipUnless(os.name == "nt", "Windows protected source and PowerShell7 contract")
 class RetestWorkflowTests(unittest.TestCase):
     def setUp(self):
@@ -329,7 +549,7 @@ class RetestWorkflowTests(unittest.TestCase):
         self.assertEqual(self.report(directory)['native_failure']['ordering'], 'profile_before_campaign')
         self.assertEqual(self.report(directory)['native_failure']['fault'], 'native_profile')
 
-    def test_explicit_corrective_case_preserves_failed_case_and_allows_new_two_launches(self):
+    def corrective_case_fixture(self):
         automatic = self.configure_campaign_fixture()
         def failed(run):
             automatic(run)
@@ -347,6 +567,10 @@ class RetestWorkflowTests(unittest.TestCase):
         self.config['CorrectiveCase'] = {'run_id': old['run_id'], 'state_sha256': retest.sha(old_path),
             'recovery_file': str(recovery), 'recovery_sha256': retest.sha(recovery)}
         retest.write_json(self.config_path, self.config)
+        return automatic, old, directory, old_path, original
+
+    def test_explicit_corrective_case_preserves_failed_case_and_allows_new_two_launches(self):
+        automatic, old, directory, old_path, original = self.corrective_case_fixture()
         with mock.patch.object(retest.Run, 'collect_startup_log', automatic):
             code, output = self.stage('RUN', '--scenario', 'B')
         current, current_dir = self.state()
@@ -356,6 +580,29 @@ class RetestWorkflowTests(unittest.TestCase):
         self.assertEqual(current['corrects_case']['run_id'], old['run_id'])
         self.assertNotEqual(current['campaign_case']['generation_fingerprint'], old['campaign_case']['generation_fingerprint'])
         self.assertEqual(current['campaign_case']['phase'], 'completed')
+
+    def test_explicit_corrective_case_prepare_keeps_campaign_identity_for_ordinary_run(self):
+        automatic, old, directory, old_path, original = self.corrective_case_fixture()
+        self.assertEqual(retest.Run.campaign_lifecycle(old, directory)[0], 'ambiguous_or_interrupted_create')
+        code, output = self.stage('PREPARE', '--scenario', 'B')
+        self.assertEqual(code, 0, output)
+        prepared, prepared_dir = self.state()
+        active = retest.read_json(self.config['ActiveRun'])
+        self.assertEqual(active['run_id'], prepared['run_id'])
+        self.assertEqual(active['campaign_reference']['run_id'], old['run_id'])
+        self.assertEqual(prepared['corrects_case']['run_id'], old['run_id'])
+        self.assertEqual(prepared['preparation']['state'], 'protected')
+        self.assertFalse(prepared.get('campaign_case'))
+        self.assertFalse(prepared.get('descriptor'))
+        with mock.patch.object(retest.Run, 'collect_startup_log', automatic):
+            code, output = self.stage('RUN', '--scenario', 'B')
+        current, current_dir = self.state()
+        self.assertEqual(code, 0, output)
+        self.assertNotIn(current_dir, (directory, prepared_dir))
+        self.assertEqual(current['corrects_case']['run_id'], old['run_id'])
+        self.assertNotEqual(current['campaign_case']['generation_fingerprint'], old['campaign_case']['generation_fingerprint'])
+        self.assertEqual(current['campaign_case']['phase'], 'completed')
+        self.assertEqual(old_path.read_bytes(), original)
 
     def test_startup_ready_failure_precedes_downstream_parser_and_retires_case(self):
         automatic = self.configure_campaign_fixture()
@@ -619,6 +866,34 @@ class RetestWorkflowTests(unittest.TestCase):
         self.assertIn("Native game failure:", summary)
         self.assertIn("native_authentication_refused", summary)
 
+    def test_latest_b_failure_beyond_history_limit_is_precise_and_shareable(self):
+        run = retest.Run(self.config_path, 'RUN')
+        run.prepare()
+        run.state['process'] = copy.deepcopy(self.observed)
+        run.state['campaign_case'] = {'phase': 'create', 'options': {'difficulty': 3}, 'launches': [], 'runtime_proof': 'pending'}
+        root = self.root / 'latest-log/SentinelCore/diagnostics'
+        root.mkdir(parents=True)
+        path = root / (str(self.observed['pid']) + '-' + self.observed['process_created'] + '.jsonl')
+        event = {'sequence': 200, 'at_ms': 800, 'operation': 8, 'thread': 99, 'stage': 'profile_prepare', 'status': 4,
+            'predicate': 'prepared_profile_payload_invalid', 'facts': {'files': 2, 'native_result': -9},
+            'private': {'source': 'DO_NOT_EXPORT'}}
+        row = {'schema': 'sentinel-startup-v1', 'pid': self.observed['pid'], 'process_created': self.observed['process_created'],
+            'build_id': self.manifest['build_id'], 'admission': {'state': 5, 'fault': 15, 'namespace_id': run.state['namespace_id']},
+            'at_ms': 900, 'campaign': {'enabled': True, 'difficulty': 3, 'reason': 'none', 'phase': 'native_created'},
+            'b_diagnostics': {'sequence': 250, 'first_failure': event, 'stages': {'profile_prepare': event}}}
+        prior = {**row, 'at_ms': 100, 'b_diagnostics': {}, 'campaign': {}, 'private_payload': 'DO_NOT_EXPORT' * 1500}
+        path.write_text((json.dumps(prior) + '\n') * 150)
+        retest.write_json(path.with_suffix('.latest.json'), row)
+        with mock.patch.dict(os.environ, {'LOCALAPPDATA': str(self.root / 'latest-log')}): run.collect_startup_log()
+        run.export()
+        report = self.report(run.directory)
+        self.assertEqual(report['native_failure']['first_failed_stage'], 'profile_prepare')
+        self.assertEqual(report['native_failure']['first_failure']['predicate'], 'prepared_profile_payload_invalid')
+        self.assertEqual(report['native_failure']['first_failure']['facts']['native_result'], -9)
+        self.assertEqual(report['automatic_startup']['latest_state'], 'captured')
+        self.assertTrue(report['automatic_startup']['truncated'])
+        self.assertIn('prepared_profile_payload_invalid', (run.directory / 'shareable/SUMMARY.md').read_text())
+
     def test_module_roles_include_system_forwarder_reject_wrong_paths_and_duplicates(self):
         state, rows = retest.module_roles(self.config, self.manifest, self.module_observed)
         self.assertEqual(state, 'verified')
@@ -750,7 +1025,10 @@ class RetestWorkflowTests(unittest.TestCase):
                   "build_id": self.manifest["build_id"], "admission": {"state": 4, "fault": 2},
                   "installation": {"phase": 3}, "private_payload": "DO_NOT_EXPORT",
                   "startup_route": {"adapter": "presence_query", "caller_class": "other_or_unretained",
-                      "private": {"caller": "PRIVATE_CALLER", "native_user": "PRIVATE_USER"}},
+                      "caller_rva": 0x148e225, "source_name": "PRIVATE_SOURCE_NAME", "image_base": "PRIVATE_BASE",
+                      "source_kind": 2, "source_length": 7, "source_step": 5, "source_read_reason": 0, "source_read_error": 0,
+                      "stack_count": 2, "stack_rva_0": 0x148e225, "stack_rva_1": 0x1499160, "stack_rva_8": "PRIVATE_STACK",
+                      "private": {"caller": "PRIVATE_CALLER", "native_user": "PRIVATE_USER", "source_name_hex": "PRIVATE_HEX"}},
                   "campaign": {"parser_trace": {"source": "foreign_or_unowned_campaign",
                       "private": {"data": "PRIVATE_DATA", "directory_hex": "PRIVATE_DIRECTORY"}}}}
         (diagnostic / (str(self.observed["pid"])+"-"+str(self.observed["process_created"])+".jsonl")).write_text(json.dumps(record)+"\n")
@@ -763,10 +1041,14 @@ class RetestWorkflowTests(unittest.TestCase):
         self.assertNotIn("private_payload", report["automatic_startup"]["records"][0])
         retained = report["automatic_startup"]["records"][0]
         self.assertEqual(retained["startup_route"]["adapter"], "presence_query")
+        self.assertEqual(retained["startup_route"]["caller_rva"], 0x148e225)
+        self.assertEqual(retained["startup_route"]["source_kind"], 2)
+        self.assertEqual(retained["startup_route"]["source_step"], 5)
+        self.assertEqual(retained["startup_route"]["stack_rva_1"], 0x1499160)
         self.assertEqual(retained["campaign"]["parser_trace"]["source"], "foreign_or_unowned_campaign")
         self.assertNotIn("private", retained["startup_route"])
         self.assertNotIn("private", retained["campaign"]["parser_trace"])
-        for private in ("PRIVATE_CALLER", "PRIVATE_USER", "PRIVATE_DATA", "PRIVATE_DIRECTORY"):
+        for private in ("PRIVATE_CALLER", "PRIVATE_USER", "PRIVATE_DATA", "PRIVATE_DIRECTORY", "PRIVATE_BASE", "PRIVATE_SOURCE_NAME", "PRIVATE_HEX", "PRIVATE_STACK"):
             self.assertNotIn(private, json.dumps(report))
 
     def test_short_lived_attempt_recovered_by_exact_control_hash_without_PID_guess(self):

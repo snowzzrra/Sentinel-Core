@@ -51,6 +51,11 @@ void create(uint32_t difficulty,const std::wstring& defect) {
         char other[]{static_cast<char>('0'+(difficulty+1)%4),0};
         CHECK(test_campaign_cvar(base+0x45f8590,other,1)==0);
         CHECK(*reinterpret_cast<uint32_t*>(cvar.data()+8)==difficulty);
+        const auto diagnostics=session().btrace.snapshot();
+        const auto& blocked=diagnostics.stages[static_cast<size_t>(BStage::difficulty)];
+        CHECK(blocked.status==BStatus::blocked && std::strcmp(blocked.predicate,"room_difficulty_change_blocked")==0);
+        CHECK(diagnostic_fact(blocked,"actual")==(difficulty+1)%4 && diagnostic_fact(blocked,"expected")==difficulty);
+        CHECK(!diagnostics.first_failure.sequence);
         argument[1]=8; CHECK(test_campaign_action(1,action)==77 && choices==2);
     }
     CHECK(VirtualFree(allocation,0,MEM_RELEASE));

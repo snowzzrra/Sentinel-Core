@@ -25,6 +25,13 @@ using namespace sentinel::save;
 void exercise_campaign_profile(Session&, const std::function<void(const std::function<void()>&)>&);
 namespace {
 constexpr uintptr_t image=0x10000000;
+int64_t diagnostic_fact(const BEvent& event,const char* key) {
+    for (const auto& fact:event.facts) if (fact.key && std::strcmp(fact.key,key)==0) return fact.value;
+    CHECK(false); return 0;
+}
+void diagnostic_stage_observed(const BSnapshot& trace,BStage stage) {
+    const auto& event=trace.stages[static_cast<size_t>(stage)]; CHECK(event.sequence && event.thread && event.predicate);
+}
 struct Remote { uintptr_t* table; std::map<std::string,std::string> files; };
 bool put(uintptr_t p,const char* name,const void* bytes,int32_t length) {
     reinterpret_cast<Remote*>(p)->files[name]=std::string(static_cast<const char*>(bytes),static_cast<size_t>(length)); return true;
@@ -47,12 +54,22 @@ template<class T,size_t N> void store(std::array<unsigned char,N>& bytes,size_t 
 NativeString text(std::string& value) { NativeString s{}; s.data=value.data(); s.length=static_cast<int32_t>(value.size()); s.capacity_flags=static_cast<uint32_t>(value.size()+1); return s; }
 std::wstring transition_defect;
 std::function<void()> initial_checkpoint;
+std::function<void()> menu_transition;
+std::function<void()> menu_profile;
 bool nested_change=false;
+unsigned native_cleanups=0;
 uint64_t observed_change(uintptr_t root,uintptr_t descriptor) {
     __try { return native::test_change(root,descriptor,0); }
     __except(GetExceptionCode()==0xe0420042?EXCEPTION_EXECUTE_HANDLER:EXCEPTION_CONTINUE_SEARCH) { return 0; }
 }
 uint64_t native_load(uintptr_t self,uintptr_t descriptor,uintptr_t files) {
+    if (transition_defect==L"terminal_cleanup" && !session().native_io()) {
+        ++native_cleanups; *reinterpret_cast<uint32_t*>(self+0x44)=SC_GAME_MAIN_MENU; return 7;
+    }
+    if (*reinterpret_cast<uint8_t*>(descriptor+0x1960)&0x10) {
+        if (menu_profile) menu_profile();
+        *reinterpret_cast<uint32_t*>(self+0x44)=SC_GAME_MAIN_MENU; return 1;
+    }
     if (transition_defect==L"abnormal") RaiseException(0xe0420042,0,0,nullptr);
     if (transition_defect==L"nested" && !nested_change) {
         nested_change=true;
@@ -66,8 +83,9 @@ uint64_t native_load(uintptr_t self,uintptr_t descriptor,uintptr_t files) {
     if (transition_defect==L"pending_transition" || transition_defect==L"unrelated") *reinterpret_cast<uint32_t*>(self+0x44)=SC_GAME_LOADING;
     return transition_defect==L"native_return" || transition_defect==L"initial_save_return_failed"?0:1;
 }
-int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::function<void()> checkpoint={}) {
-    transition_defect=defect; initial_checkpoint=checkpoint;
+int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::function<void()> checkpoint={},
+        std::function<void()> after_ready={},std::function<void()> on_menu={}) {
+    transition_defect=defect; initial_checkpoint=checkpoint; menu_profile=on_menu;
     auto* root=static_cast<unsigned char*>(VirtualAlloc(nullptr,0x1000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE)); CHECK(root);
     std::array<unsigned char,0x1970> request{};
     std::vector<unsigned char> map(0xafd00);
@@ -83,9 +101,25 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
     binding.image.base=reinterpret_cast<uintptr_t>(&setting)-0x45f8590;
     test_campaign_binding(binding.image.base,binding.root);
     native::test_events(binding,native_load);
+    menu_transition=[&] {
+        request[0x1960]=0x10;
+        CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==1);
+    };
     CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==
         (defect==L"native_return" || defect==L"abnormal" || defect==L"initial_save_return_failed"?0u:1u));
     CHECK(native::inspect().game_state==SC_GAME_MAIN_MENU);
+    if (defect==L"terminal_cleanup") {
+        session().fail_profile();
+        const auto first=session().btrace.snapshot().first_failure;
+        CHECK(first.sequence);
+        CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==7);
+        CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==7);
+        CHECK(native_cleanups==2 && session().fault()==SessionFault::native_profile && !session().native_io());
+        CHECK(session().btrace.snapshot().first_failure.sequence==first.sequence);
+        CHECK(session().campaign_run.snapshot().reason=="lifecycle_after_session_refusal");
+        CHECK(!session().campaign_run.snapshot().native_saved);
+        CHECK(VirtualFree(root,0,MEM_RELEASE)); return 0;
+    }
     if (defect==L"state_read") { DWORD previous=0; CHECK(VirtualProtect(root,0x1000,PAGE_READWRITE,&previous)); }
     if (defect==L"pending_transition" || defect==L"unrelated") {
         CHECK(!session().campaign_run.snapshot().map_active && session().campaign_run.snapshot().reason=="none");
@@ -94,6 +128,7 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
         if (defect==L"unrelated") native::test_free(binding.root,[](uintptr_t,uintptr_t) {});
     }
     if (checkpoint && defect!=L"initial_save" && defect!=L"initial_save_return_failed" && defect!=L"save_failure" && defect!=L"partial_save") checkpoint();
+    if (after_ready) after_ready();
     const auto result=session().campaign_run.snapshot();
     if (defect==L"pending_transition") {
         CHECK(result.transition.game==SC_GAME_LOADING && result.checkpoint_boundary.game==SC_GAME_IN_GAME);
@@ -105,9 +140,23 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
         {L"difficulty","native_transition_difficulty_mismatch"},{L"unrelated","native_checkpoint_transition_unassociated"},
         {L"partial_save","native_checkpoint_map_not_ready"},{L"save_failure","native_checkpoint_completion_unproven"}};
     auto expected=failures.find(defect);
-    if (expected!=failures.end()) { CHECK(result.reason==expected->second); CHECK(!result.continuity_persisted); }
-    else CHECK(result.map_active);
-    initial_checkpoint={}; CHECK(VirtualFree(root,0,MEM_RELEASE));
+    if (expected!=failures.end()) {
+        CHECK(result.reason==expected->second); CHECK(!result.continuity_persisted);
+        const auto trace=session().btrace.snapshot(); CHECK(trace.first_failure.sequence && trace.first_failure.status==BStatus::refused);
+        diagnostic_stage_observed(trace,BStage::transition);
+        if (defect==L"difficulty") {
+            CHECK(std::strcmp(trace.first_failure.predicate,"native_transition_difficulty_mismatch")==0);
+            CHECK(diagnostic_fact(trace.first_failure,"actual_difficulty")!=diagnostic_fact(trace.first_failure,"expected_difficulty"));
+        }
+    }
+    else CHECK(result.map_active || defect==L"menu_pending_save");
+    if (result.continuity_persisted && result.map_active) {
+        menu_transition();
+        const auto menu=session().campaign_run.snapshot();
+        CHECK(session().accepts_requests() && menu.continuity_persisted && menu.checkpoint==result.checkpoint);
+        CHECK(!menu.map_active && !menu.save_ready && menu.map==result.map && menu.phase==result.phase);
+    }
+    initial_checkpoint={}; menu_transition={}; menu_profile={}; CHECK(VirtualFree(root,0,MEM_RELEASE));
     return 0;
 }
 #include "campaign_navigation_fixture.h"
@@ -119,13 +168,19 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
+    const bool profile_lifecycle=defect==L"profile_lifecycle";
     navigation_fixture::vanilla();
     storage::Descriptor descriptor{{"synthetic-campaign-host",0,1,std::string(64,'b')},argv[2],
         {resume?storage::CampaignIntent::resume:storage::CampaignIntent::create,difficulty}};
     std::unique_ptr<storage::Namespace> lease;
     CHECK((resume?storage::reopen(descriptor,lease):storage::prepare(descriptor,lease)).ok());
     auto& owner=session(); const auto configured=owner.configure(descriptor,std::move(lease));
-    if (defect==L"refuse_configuration") { CHECK(!configured.ok()); std::puts("PASS refused immutable or incomplete campaign contract"); return 0; }
+    if (defect==L"refuse_configuration") {
+        CHECK(!configured.ok()); const auto trace=owner.btrace.snapshot(); CHECK(trace.first_failure.sequence);
+        CHECK(trace.first_failure.stage==(resume?BStage::resume:BStage::creation));
+        CHECK(std::strcmp(trace.first_failure.predicate,"resume_checkpoint_incomplete_or_invalid")!=0);
+        std::puts("PASS refused immutable or incomplete campaign contract with exact diagnostic predicate"); return 0;
+    }
     CHECK(configured.ok());
     std::array<uintptr_t,20> table{}; Remote remote{table.data(),{}};
     table[0]=reinterpret_cast<uintptr_t>(put); table[1]=reinterpret_cast<uintptr_t>(get);
@@ -157,7 +212,8 @@ int wmain(int argc,wchar_t** argv) {
     int outcome = 0;
     exercise_campaign_profile(owner,[&](const std::function<void()>& profile_write) {
     outcome = [&]() -> int {
-    std::string payload="synthetic encoded checkpoint payload", relative="game.details", native_directory=directory;
+    std::string payload=resume && profile_lifecycle?"second encoded checkpoint payload":"synthetic encoded checkpoint payload";
+    std::string relative="game.details", native_directory=directory;
     std::array<unsigned char,0x180> file{}; std::array<unsigned char,0x280> data{};
     store(file,0,image+0x2a575a8); store(file,8,text(relative));
     const uint64_t length=payload.size(); const uintptr_t buffer=reinterpret_cast<uintptr_t>(payload.data());
@@ -166,24 +222,74 @@ int wmain(int argc,wchar_t** argv) {
     const std::array<uintptr_t,1> file_list{files};
     store(data,0,text(native_directory)); store(data,0x1c0,reinterpret_cast<uintptr_t>(file_list.data())); store(data,0x1c8,int32_t{1}); store(data,0x1cc,int32_t{1});
     engine::LocalMemory memory;
+    // A later save owns a different native SaveData/file and different bytes;
+    // reopening checkpoint2 must not accidentally validate checkpoint1.
+    std::string next_payload=resume?"third encoded checkpoint payload":"second encoded checkpoint payload";
+    auto next_file=file; auto next_data=data;
+    const uintptr_t next_stream=reinterpret_cast<uintptr_t>(next_file.data()), next_source=reinterpret_cast<uintptr_t>(next_data.data());
+    const std::array<uintptr_t,1> next_list{next_stream};
+    store(next_file,0x150,uint64_t{next_payload.size()}); store(next_file,0x158,uint64_t{next_payload.size()});
+    store(next_file,0x168,reinterpret_cast<uintptr_t>(next_payload.data()));
+    store(next_data,0x1c0,reinterpret_cast<uintptr_t>(next_list.data()));
+    unsigned profile_writes=0;
+    const auto write_profile=[&] {
+        profile_write(); ++profile_writes;
+        CHECK(owner.native_io() && owner.accepts_requests() && !owner.btrace.snapshot().first_failure.sequence);
+    };
     if (resume) {
-        CHECK(owner.campaign_run.snapshot().source_checkpoint==1);
+        CHECK(owner.campaign_run.snapshot().source_checkpoint==(profile_lifecycle?2u:1u));
         CHECK(owner.campaign_run.begin_resume());
         CHECK(owner.campaign_run.allow_access(source,directory,false,false));
         if (defect==L"wrong_source") {
             payload[0]='X'; CHECK(!owner.campaign_run.verify_source(memory,source,image));
-            CHECK(!owner.campaign_run.parser_enter(source)); std::puts("PASS source hash refusal before parser"); return 0;
+            const auto failure=owner.btrace.snapshot().first_failure;
+            CHECK(failure.stage==BStage::resume && std::strcmp(failure.predicate,"resume_payload_hash_mismatch")==0);
+            CHECK(diagnostic_fact(failure,"file_index")==0 && diagnostic_fact(failure,"hash_equal")==0);
+            CHECK(diagnostic_fact(failure,"actual_size")==static_cast<int64_t>(payload.size()));
+            CHECK(diagnostic_fact(failure,"expected_size")==static_cast<int64_t>(payload.size()));
+            CHECK(!owner.campaign_run.parser_enter(source));
+            const auto after=owner.btrace.snapshot(); CHECK(after.first_failure.sequence==failure.sequence);
+            CHECK(after.stages[static_cast<size_t>(BStage::parser)].status==BStatus::blocked);
+            std::puts("PASS source hash refusal before parser, exact inputs and first cause retained"); return 0;
         }
         CHECK(owner.campaign_run.verify_source(memory,source,image));
         CHECK(owner.campaign_run.parser_enter(source));
         owner.campaign_run.parser_leave(defect==L"failed_parser"?0x10:0);
-        if (defect==L"failed_parser") { CHECK(!owner.campaign_run.map_begin("game/sp/initial",1)); std::puts("PASS original parser failure retained"); return 0; }
+        if (defect==L"failed_parser") {
+            const auto failure=owner.btrace.snapshot().first_failure;
+            CHECK(failure.stage==BStage::parser && std::strcmp(failure.predicate,"native_load_parser_failed")==0);
+            CHECK(diagnostic_fact(failure,"native_result")==0x10);
+            CHECK(!owner.campaign_run.map_begin("game/sp/initial",1));
+            CHECK(owner.btrace.snapshot().first_failure.sequence==failure.sequence);
+            std::puts("PASS original parser failure and result retained"); return 0;
+        }
         if (defect==L"wrong_difficulty") { CHECK(!owner.campaign_run.allow_difficulty((difficulty+1)%4)); CHECK(!owner.accepts_requests()); return 0; }
         if (defect==L"missing_difficulty") { CHECK(!owner.campaign_run.map_begin("game/sp/initial",1)); return 0; }
         CHECK(owner.campaign_run.allow_difficulty(difficulty)); // Native consumer restores the parsed save field.
         if (defect==L"wrong_map") { CHECK(!owner.campaign_run.map_begin("other/map",1)); return 0; }
+        if (profile_lifecycle) {
+            writer_fixture::Model next{remote,next_source,next_stream,next_payload,directory};
+            CHECK(native_transition(difficulty,L"",[&] {
+                CHECK(owner.campaign_run.snapshot().phase=="reopened");
+                write_profile(); writer_fixture::save(next,L"queued_checkpoint");
+                CHECK(owner.campaign_run.snapshot().checkpoint==3);
+            },{},[&] {
+                CHECK(!owner.campaign_run.snapshot().map_active && !owner.campaign_run.snapshot().save_ready);
+                write_profile();
+            })==0);
+            const auto saved=owner.campaign_run.snapshot();
+            CHECK(saved.source_checkpoint==2 && saved.checkpoint==3 && saved.parser_completed);
+            CHECK(saved.native_saved && saved.readback_verified && saved.continuity_persisted && !saved.map_active);
+            CHECK(saved.operation==next.operation && remote.files.at(directory+"/game.details")==next_payload);
+            CHECK(profile_writes==2);
+            std::printf("PASS profile lifecycle separate-process checkpoint=3 source_checkpoint=2 profile_writes=%u difficulty=%u pid=%lu\n",
+                profile_writes,difficulty,GetCurrentProcessId()); return 0;
+        }
         CHECK(native_transition(difficulty)==0);
         CHECK(owner.campaign_run.snapshot().phase=="reopened");
+        const auto resumed_trace=owner.btrace.snapshot();
+        for (auto stage:{BStage::resume,BStage::parser,BStage::transition,BStage::difficulty}) diagnostic_stage_observed(resumed_trace,stage);
+        CHECK(!resumed_trace.first_failure.sequence);
         profile_write();
         std::printf("PASS separate-process native source/parser/lifecycle reopen, difficulty=%u pid=%lu\n",difficulty,GetCurrentProcessId()); return 0;
     }
@@ -193,21 +299,56 @@ int wmain(int argc,wchar_t** argv) {
     }
     navigation_fixture::create(difficulty,defect);
     if (defect==L"extra_life" || defect==L"ultra") return 0;
-    const bool transition_failure=defect==L"native_return" || defect==L"abnormal" || defect==L"state_read" || defect==L"generation" || defect==L"difficulty";
+    if (profile_lifecycle) {
+        CHECK(!owner.campaign_run.snapshot().map_active && owner.campaign_run.snapshot().phase=="native_start_queued");
+        write_profile(); // New Game's PROFILE save precedes map readiness.
+    }
+    const bool transition_failure=defect==L"native_return" || defect==L"abnormal" || defect==L"state_read" || defect==L"generation" || defect==L"difficulty" || defect==L"terminal_cleanup";
     if(transition_failure) { CHECK(native_transition(difficulty,defect)==0); return 0; }
     writer_fixture::Model writer{remote,source,files,payload,directory};
+    if (profile_lifecycle) {
+        writer_fixture::Model next{remote,next_source,next_stream,next_payload,directory};
+        CHECK(native_transition(difficulty,L"initial_save",[&] {
+            CHECK(!owner.campaign_run.snapshot().map_active);
+            write_profile(); // Initial cutscene: native map transition has not returned.
+            writer_fixture::save(writer,L"");
+            CHECK(!owner.campaign_run.snapshot().continuity_persisted);
+        },[&] {
+            CHECK(owner.campaign_run.snapshot().checkpoint==1 && owner.campaign_run.snapshot().continuity_persisted);
+            CHECK(remote.files.at(directory+"/game.details")==payload);
+            write_profile(); writer_fixture::save(next,L"queued_checkpoint");
+            CHECK(next.operation && next.operation!=writer.operation);
+            CHECK(owner.campaign_run.snapshot().checkpoint==2);
+        },[&] {
+            CHECK(!owner.campaign_run.snapshot().map_active && !owner.campaign_run.snapshot().save_ready);
+            write_profile(); // ExitMainMenu still emits the native PROFILE save.
+        })==0);
+        const auto saved=owner.campaign_run.snapshot();
+        CHECK(saved.checkpoint==2 && saved.native_saved && saved.readback_verified && saved.continuity_persisted);
+        CHECK(!saved.map_active && !saved.save_ready && saved.operation==next.operation);
+        CHECK(remote.files.at(directory+"/game.details")==next_payload && profile_writes==4);
+        CHECK(!owner.btrace.snapshot().first_failure.sequence);
+        std::printf("PASS profile lifecycle checkpoint=2 profile_writes=%u difficulty=%u pid=%lu\n",
+            profile_writes,difficulty,GetCurrentProcessId()); return 0;
+    }
     CHECK(native_transition(difficulty,defect==L"pending"?L"pending_save":defect,[&] {
         // Native PROFILE preparation receives the user context, then the exact
         // campaign factory/provider/readback chain reaches checkpoint 1.
-        if (defect.empty()) profile_write();
+        if (defect.empty() || defect==L"queued_checkpoint" || defect==L"menu_pending_save") profile_write();
         writer_fixture::save(writer,defect==L"pending"?L"pending_save":defect);
     })==0);
-    if(defect==L"pending" || defect==L"initial_save_return_failed" || defect==L"unassociated" || defect==L"save_failure" || defect==L"partial_save" || defect==L"unrelated") {
+    if(defect==L"pending" || defect==L"initial_save_return_failed" || defect==L"unassociated" || defect==L"queued_foreign" || defect==L"save_failure" || defect==L"partial_save" || defect==L"unrelated") {
         CHECK(!owner.campaign_run.snapshot().continuity_persisted); return 0;
     }
     const auto observed=owner.campaign_run.snapshot();
     CHECK(observed.native_saved && observed.readback_verified && observed.continuity_persisted && observed.checkpoint==1);
     CHECK(observed.operation==writer.operation && observed.effective_difficulty==difficulty && observed.native_factory_matched);
+    const auto trace=owner.btrace.snapshot();
+    for (auto stage:{BStage::creation,BStage::difficulty,BStage::transition,BStage::checkpoint_factory,BStage::continuity}) diagnostic_stage_observed(trace,stage);
+    CHECK(!trace.first_failure.sequence);
+    const auto& continuity=trace.stages[static_cast<size_t>(BStage::continuity)];
+    CHECK(continuity.status==BStatus::succeeded && std::strcmp(continuity.predicate,"checkpoint_continuity_persisted")==0);
+    CHECK(diagnostic_fact(continuity,"checkpoint")==1 && diagnostic_fact(continuity,"continuity_persisted")==1);
     std::printf("PASS native checkpoint correlation/continuity, difficulty=%u pid=%lu\n",difficulty,GetCurrentProcessId()); return 0;
     }();
     });

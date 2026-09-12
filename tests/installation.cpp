@@ -121,7 +121,7 @@ int wmain(int argc,wchar_t** argv) {
   CHECK(reason==SC_NATIVE_NONE);
  }
  CHECK(native::function_window(memory,image,image.base+0x148dd10,image.base+0x148de8c,5));
- for(auto rva:{0x367510u,0x67473fu,0x1be4b35u,0x2a1cc60u}) {
+ for(auto rva:{0x367510u,0x67473fu,0x14897adu,0x1be4b35u,0x2a1cc60u}) {
   save::Installation refused; memory.fail=image.base+rva; uintptr_t initializer=0;
   CHECK(!save::validate_native_helpers(refused,memory,image,initializer));
   const auto e=refused.inspect().primary_failure;

@@ -6,7 +6,7 @@ template<class T> T& field(uintptr_t p,size_t offset) { return *reinterpret_cast
 struct Control { uint32_t strong,weak; uintptr_t data; DestroySaveData destroy; };
 struct Model {
     Remote& remote; uintptr_t source,file; std::string& payload; std::string directory;
-    bool failure=false,pending=false; unsigned creates=0,reads=0,writer_polls=0; uint64_t operation=0;
+    bool failure=false,pending=false,queued=false,foreign=false; unsigned creates=0,reads=0,writer_polls=0; uint64_t operation=0;
     SaveFuture* future=nullptr; SaveReference source_ref{};
 };
 Model* model=nullptr;
@@ -78,7 +78,11 @@ SaveResult* poll_write(SaveFuture*,SaveResult* out,void*) {
     CHECK(!result.tag);
     auto sequence=writes.snapshot(m.operation).sdk_sequence; SdkWriteObservation prepared; CHECK(writes.inspect(sequence,prepared));
     auto file=prepared.payloads.at(0); file.captured=true; CHECK(writes.capture(sequence,file)==0);
-    writes.submitted(sequence,0,123); writes.callback(123,m.failure,m.failure?0:1);
+    // Each native async submission has its own handle. Reusing 123 would send
+    // a later checkpoint's callback to the first operation's retained receipt.
+    const auto handle=m.operation;
+    writes.submitted(sequence,0,handle); writes.callback(handle,m.failure,m.failure?0:1);
+    CHECK(writes.inspect(sequence,prepared) && prepared.payloads.at(0).handle==handle && prepared.payloads.at(0).callback);
     writes.result(sequence,{0,m.failure?1u:0u,1,0});
     if(!m.failure) m.remote.files[m.directory+"/game.details"]=m.payload;
     *out={0,m.failure?1:0,1,0}; return out;
@@ -90,24 +94,44 @@ SaveFuture** write(uintptr_t,SaveFuture** out,uintptr_t identity,SaveReference* 
 SaveReference* factory(uintptr_t,SaveReference* out,uint32_t,uintptr_t) {
     ReadbackCalls readback{{allocate,construct,destroy_data,{nullptr,retain,release,name,nullptr,image},read},stream};
     WriteCalls calls{write,name,release,nullptr,image,nullptr,&readback};
-    write_scoped(session(),memory,reinterpret_cast<uintptr_t>(&model->remote),&model->future,0x7788,&model->source_ref,calls);
+    if (model->queued) campaign_write_provider(image+(model->foreign?0x14897c4:0x14897c3),memory,
+        reinterpret_cast<uintptr_t>(&model->remote),&model->future,0x7788,&model->source_ref,calls);
+    else write_scoped(session(),memory,reinterpret_cast<uintptr_t>(&model->remote),&model->future,0x7788,&model->source_ref,calls);
     return out;
 }
 void save(Model& m,const std::wstring& defect) {
+    const auto before=session().campaign_run.snapshot();
     model=&m; m.failure=defect==L"save_failure"; m.pending=defect==L"pending_save";
+    m.foreign=defect==L"queued_foreign"; m.queued=defect==L"queued_checkpoint" || m.foreign || defect==L"menu_pending_save";
     auto* control=static_cast<Control*>(allocate(sizeof(Control))); *control={1,1,m.source,nullptr}; m.source_ref.control=reinterpret_cast<uintptr_t>(control);
     SaveReference task{};
-    campaign_save_factory(defect==L"unassociated"?0:0x674744,0x674744,0x1000,&task,0,0,factory);
+    if (m.queued) {
+        CHECK(!capture_native_checkpoint(session().native_writes));
+        factory(0x1000,&task,0,0); // Earlier mode0 factory has returned; no TLS scope remains.
+    } else campaign_save_factory(defect==L"unassociated"?0:0x674744,0x674744,0x1000,&task,0,0,factory);
     CHECK(!m.source_ref.control && m.future && !capture_native_checkpoint(session().native_writes));
-    const bool rejected=defect==L"unrelated" || defect==L"partial_save" || defect==L"unassociated";
+    const bool rejected=defect==L"unrelated" || defect==L"partial_save" || defect==L"unassociated" || m.foreign;
     CHECK(m.creates==(rejected?0u:1u));
+    const auto started=session().campaign_run.snapshot();
+    if (!rejected) {
+        CHECK(started.operation && started.operation!=before.operation && started.checkpoint==before.checkpoint);
+        CHECK(!started.continuity_persisted && !started.native_saved && !started.readback_verified);
+    }
     SaveResult result{}; std::array<unsigned char,32> native_task{};
     m.future->vtable->poll(m.future,&result,native_task.data());
     if(!rejected && !m.failure && !m.pending) {
-        CHECK(result.state==-1 && !session().campaign_run.snapshot().continuity_persisted);
-        CHECK(session().campaign_run.snapshot().native_saved && !session().campaign_run.snapshot().readback_verified);
+        const auto waiting=session().campaign_run.snapshot();
+        CHECK(result.state==-1);
+        CHECK(waiting.operation==started.operation && waiting.operation==m.operation && waiting.checkpoint==before.checkpoint);
+        CHECK(!waiting.continuity_persisted && waiting.native_saved && !waiting.readback_verified);
+        if (defect==L"menu_pending_save") {
+            menu_transition();
+            CHECK(session().native_io() && !session().campaign_run.snapshot().map_active);
+        }
         m.future->vtable->poll(m.future,&result,native_task.data()); CHECK(!result.state && !result.outcome && result.value==1);
-        CHECK(session().campaign_run.snapshot().readback_verified);
+        const auto completed=session().campaign_run.snapshot();
+        CHECK(completed.operation==m.operation && completed.readback_verified);
+        CHECK(completed.checkpoint==before.checkpoint+(completed.continuity_persisted?1u:0u));
         CHECK(!session().native_writes.backup(m.operation));
     }
     m.future->vtable->destroy(m.future,1); m.future=nullptr;

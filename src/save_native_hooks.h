@@ -4,7 +4,8 @@
 #include "save_submission.h"
 namespace sentinel::save {
 // Admission policy for the sole validated native composition. Published only
-// after every target/trampoline is prepared; RootInit is enabled last.
+// after every target/trampoline is prepared; the early RootInit gate releases
+// only after every route hook has also been enabled.
 inline constexpr uint32_t steam_20260818_routes = startup_route | collector_route |
     campaign_routes | profile_route | provider_identity_route | metadata_route;
 // Worker/bootstrap preparation, never DllMain or an IPC dispatch operation.

@@ -2,6 +2,7 @@
 #pragma once
 #include "save_storage.h"
 #include "save_sdk_write.h"
+#include "save_b_trace.h"
 #include <mutex>
 #include <optional>
 
@@ -51,12 +52,13 @@ public:
     void observe_parser(ParserObservation);
     void parser_leave(uint32_t result);
     bool map_begin(std::string map, uint64_t generation, uint64_t event_id=0);
+    bool menu_begin();
     void map_end(const CampaignTransition&);
     bool checkpoint_ready(const CampaignTransition&);
-    void refuse(const char* reason);
+    void refuse(const char* reason,BStage stage=BStage::creation);
     CampaignSnapshot snapshot() const;
 private:
-    bool reject(const char*);
+    bool reject(const char*,std::initializer_list<BFact> facts={});
     bool save_record(const std::string&, bool create);
     void persist_checkpoint(const SdkWriteObservation&,engine::Memory&);
     void complete_map();
@@ -66,6 +68,7 @@ private:
     Session* owner_ = nullptr; storage::Namespace* lease_ = nullptr;
     storage::CampaignOptions options_;
     CampaignSnapshot state_;
+    BStage diagnostic_stage_=BStage::creation;
     std::string contract_, directory_;
     std::vector<SdkFileWrite> expected_;
     uintptr_t load_data_ = 0;

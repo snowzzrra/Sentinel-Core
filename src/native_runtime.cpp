@@ -300,10 +300,12 @@ void frame_detour(uintptr_t self) {
 uint64_t change_detour(uintptr_t root, uintptr_t descriptor, uintptr_t files) {
     save::CampaignTransition transition{};
     const bool observe = begin_event(root, true, descriptor, &transition);
-    if (!save::campaign_change_begin(root, descriptor, transition)) {
-        if (observe) end_event(true,false,false,&transition);
-        return 0;
-    }
+    // Admission/parser/provider boundaries enforce AP ownership. A campaign
+    // observation failure must not replace the native transition with return0:
+    // native ExecuteMapChange owns transition progress and menu cleanup.
+    // Keep its real return/cleanup even after Session refusal; all persistence
+    // and campaign parser routes remain closed by that same terminal Session.
+    save::campaign_change_begin(root, descriptor, transition);
     uint64_t result = 0;
     __try { result = original_change(root, descriptor, files); }
     __finally {

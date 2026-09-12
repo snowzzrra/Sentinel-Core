@@ -1,6 +1,7 @@
 #include "prelaunch.h"
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #include "save_native_hooks.h"
+#include "save_startup_gate.h"
 #include "save_campaign_native.h"
 #include "save_collector.h"
 #include "save_delete.h"
@@ -26,6 +27,8 @@ SaveReference* save_factory_detour(uintptr_t manager, SaveReference* out, uint32
 }
 using RootInit = void (*)(uintptr_t);
 RootInit original_root = nullptr;
+StartupGate startup_gate;
+uintptr_t startup_image=0, startup_expected_root=0, startup_expected_caller=0;
 CollectorCalls calls{};
 DeleteCalls delete_calls{};
 DeleteCalls scoped_delete_calls{};
@@ -133,11 +136,25 @@ void root_provider_ready() {
     engine::LocalMemory memory;
     bind_root_provider(session(), memory, provider_calls);
 }
-void root_detour(uintptr_t root) {
-    const bool entered = session().startup_enter(root,
-        reinterpret_cast<uintptr_t>(_ReturnAddress()), GetCurrentThreadId());
+void invoke_root(uintptr_t root,bool entered) {
     __try { original_root(root); if (entered) root_provider_ready(); }
     __finally { if (entered) session().startup_leave(AbnormalTermination() != FALSE); }
+}
+void root_detour(uintptr_t root) {
+    const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
+    NativeRouteScope route(caller,startup_image);
+    startup_gate.entered(root==startup_expected_root,caller==startup_expected_caller,
+        caller>=startup_image?caller-startup_image:0);
+    startup_gate.record(session().btrace,BStatus::pending,"startup_gate_root_waiting",StartupGate::State::pending);
+    const auto result=startup_gate.wait();
+    const bool ready=result.state==StartupGate::State::ready;
+    startup_gate.record(session().btrace,ready?BStatus::succeeded:BStatus::refused,
+        ready?"startup_gate_root_released":"startup_gate_root_installation_unavailable",result.state,result.error);
+    if (!ready) session().reject(SessionFault::installation);
+    const bool entered=ready && session().startup_enter(root,caller,GetCurrentThreadId());
+    // RootInit has a void ABI, so installation refusal cannot fabricate a native
+    // success by skipping initialization. Existing lower routing guards remain.
+    invoke_root(root,entered);
 }
 void provider_detour(uintptr_t manager) {
     original_provider(manager);
@@ -160,10 +177,11 @@ DeleteResult* scoped_delete_detour(DeleteFuture* future, DeleteResult* out, void
     return poll_scoped_delete(session(), memory, future, out, executor, scoped_delete_calls);
 }
 SaveFuture** write_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    NativeRouteScope route(caller, provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
-    return write_scoped(session(), memory, provider, out, identity, data, write_calls);
+    return campaign_write_provider(caller, memory, provider, out, identity, data, write_calls);
 }
 SaveFuture** read_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
     NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
@@ -295,6 +313,15 @@ bool validate_native_helpers(Installation& record, engine::Memory& memory, const
         checked_bytes(memory, image.base + event.rva, expected_factory_call.data(), expected_factory_call.size(), event);
     record.finish(event, factory_ok ? SC_NATIVE_NONE : (factory_scope ? SC_NATIVE_TARGET_BYTES : SC_NATIVE_TARGET_BOUNDARY));
     if (!factory_ok) { return false; }
+    constexpr std::array<uint8_t, 22> checkpoint_call{
+        0x49,0x8b,0x02,0x4c,0x8d,0x4c,0x24,0x38,0x4d,0x8b,0xc7,
+        0x48,0x8d,0x54,0x24,0x58,0x49,0x8b,0xca,0xff,0x50,0x18};
+    event = record.begin(SC_INSTALL_FACTORY_CALL, 3, SC_INSTALL_UNKNOWN, 0x14897ad);
+    const bool checkpoint_ok = image.contains(event.rva, checkpoint_call.size(),
+        IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE) &&
+        checked_bytes(memory, image.base + event.rva, checkpoint_call.data(), checkpoint_call.size(), event);
+    record.finish(event, checkpoint_ok ? SC_NATIVE_NONE : SC_NATIVE_TARGET_BYTES);
+    if (!checkpoint_ok) return false;
     // Only this checked native callback may delegate the shared PROFILE presence query before routing.
     constexpr std::array<uint8_t,5> presence_call{0xe8,0x26,0x2f,0xff,0xff};
     event=record.begin(SC_INSTALL_FACTORY_CALL,3,SC_INSTALL_UNKNOWN,0x1be4b35);
@@ -325,10 +352,72 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     record.finish(event);
     engine::LocalMemory memory;
     std::array<native::Target, 45> targets;
-    for (unsigned i = 0; i < targets.size(); ++i) {
+    // RootInit must become reachable before the remaining save/campaign scans.
+    // native::start already pins this module before entering this installer.
+    if (!startup_gate.arm()) {
+        session().btrace.record(BStage::startup_gate,BStatus::refused,"startup_gate_event_creation_failed",0,
+            {{"win32",GetLastError()}});
+        session().reject(SessionFault::installation); return;
+    }
+    StartupGate::Completion gate_completion(startup_gate,&session().btrace);
+    const auto cancelled=[&] {
+        if (!stop || WaitForSingleObject(stop,0)==WAIT_TIMEOUT) return false;
+        gate_completion.cancel(); return true;
+    };
+    startup_image=binding.image.base; startup_expected_root=binding.root;
+    startup_expected_caller=binding.image.base+0x4323fc;
+    targets[0]=native::save_target(binding.image.base,0);
+    if (native::validate_recorded(record,memory,binding.image,targets[0],stop,GetTickCount64()+3000,2,0)) {
+        cancelled(); session().reject(SessionFault::installation); return;
+    }
+    void* root_original=nullptr;
+    if (record.hook(SC_INSTALL_SAVE_CREATE,2,0,static_cast<uint32_t>(targets[0].address-binding.image.base),[&] {
+            return MH_CreateHook(reinterpret_cast<void*>(targets[0].address),reinterpret_cast<void*>(root_detour),&root_original); })!=MH_OK) {
+        session().reject(SessionFault::installation); return;
+    }
+    original_root=reinterpret_cast<RootInit>(root_original);
+    StartupGate::Arm arm{}; arm.at_ms=GetTickCount64();
+    uintptr_t manager=0,dispatch_root=0,dispatch_vtable=0,dispatch_init=0;
+    const auto manager_read=memory.copy(binding.root+0x9b38,&manager,sizeof(manager));
+    arm.manager_read_reason=manager_read.reason; arm.manager_present=!manager_read.reason && manager!=0;
+    const auto root_read=memory.copy(binding.image.base+0x38913a0,&dispatch_root,sizeof(dispatch_root));
+    arm.root_read_reason=root_read.reason; arm.root_equals_binding=!root_read.reason && dispatch_root==binding.root;
+    arm.vtable_read_reason=arm.init_read_reason=root_read.reason?SC_REASON_PARENT_UNAVAILABLE:SC_REASON_PARENT_NULL;
+    if (!root_read.reason && dispatch_root) {
+        const auto vtable_read=memory.copy(dispatch_root,&dispatch_vtable,sizeof(dispatch_vtable));
+        arm.vtable_read_reason=vtable_read.reason;
+        arm.init_read_reason=vtable_read.reason?SC_REASON_PARENT_UNAVAILABLE:SC_REASON_PARENT_NULL;
+        if (!vtable_read.reason && dispatch_vtable) {
+            const auto init_read=memory.copy(dispatch_vtable+0x18,&dispatch_init,sizeof(dispatch_init));
+            arm.init_read_reason=init_read.reason; arm.init_equals_target=!init_read.reason && dispatch_init==targets[0].address;
+        }
+    }
+    startup_gate.observe_arm(arm);
+    // Presence is evidence only: neither a null manager nor a matching dispatch
+    // can retrospectively qualify a native startup that already passed.
+    startup_gate.record(session().btrace,BStatus::pending,arm.manager_present?
+        "startup_gate_manager_already_published":"startup_gate_arming",StartupGate::State::pending);
+    event=record.begin(SC_INSTALL_SAVE_ENABLE,2,0,static_cast<uint32_t>(targets[0].address-binding.image.base));
+    const bool root_cancelled=cancelled();
+    if (root_cancelled || !checked_bytes(memory,targets[0].address,targets[0].bytes.data(),32,event)) {
+        record.finish(event,root_cancelled?SC_NATIVE_CANCELLED:SC_NATIVE_TARGET_BYTES);
+        record.hook(SC_INSTALL_REMOVE,2,0,static_cast<uint32_t>(targets[0].address-binding.image.base),[&] {
+            return MH_RemoveHook(reinterpret_cast<void*>(targets[0].address)); });
+        session().reject(SessionFault::installation); return;
+    }
+    const auto root_enabled=MH_EnableHook(reinterpret_cast<void*>(targets[0].address));
+    record.finish(event,root_enabled==MH_OK?SC_NATIVE_NONE:SC_NATIVE_HOOK_FAILED,static_cast<uint32_t>(root_enabled));
+    if (root_enabled!=MH_OK) {
+        record.hook(SC_INSTALL_REMOVE,2,0,static_cast<uint32_t>(targets[0].address-binding.image.base),[&] {
+            return MH_RemoveHook(reinterpret_cast<void*>(targets[0].address)); });
+        session().reject(SessionFault::installation); return;
+    }
+    // From this point RootInit/trampoline/event remain process-lifetime objects.
+    // No early-return cleanup may remove this reachable gate.
+    for (unsigned i = 1; i < targets.size(); ++i) {
         targets[i] = native::save_target(binding.image.base, i);
         if (native::validate_recorded(record, memory, binding.image, targets[i], stop, GetTickCount64() + 3000, 2, i)) {
-            session().reject(SessionFault::installation); return;
+            cancelled(); session().reject(SessionFault::installation); return;
         }
     }
     uintptr_t initializer = 0;
@@ -336,6 +425,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     const auto context_init = reinterpret_cast<InitializeSteamContext>(initializer);
     constexpr unsigned hooks[] = {0, 1, 4, 6, 8, 9, 13, 14, 15, 16, 17, 18, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34, 35, 37, 38, 40, 41, 42, 43, 44};
     void* originals[std::size(hooks)]{};
+    originals[0]=root_original;
     void* detours[] = {reinterpret_cast<void*>(root_detour), reinterpret_cast<void*>(collector_detour),
         reinterpret_cast<void*>(delete_detour), reinterpret_cast<void*>(write_detour),
         reinterpret_cast<void*>(profile_read_detour), reinterpret_cast<void*>(profile_serialize_detour),
@@ -353,19 +443,18 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         reinterpret_cast<void*>(auxiliary_operation_detour), reinterpret_cast<void*>(provider_reset_detour),
         reinterpret_cast<void*>(account_removed_detour)};
     static_assert(std::size(detours) == std::size(hooks));
-    unsigned created = 0;
+    unsigned created = 1;
     for (; created < std::size(hooks); ++created) {
         const auto index = hooks[created];
         if (record.hook(SC_INSTALL_SAVE_CREATE, 2, index, static_cast<uint32_t>(targets[index].address - binding.image.base), [&] {
                 return MH_CreateHook(reinterpret_cast<void*>(targets[index].address), detours[created], &originals[created]); }) != MH_OK) break;
     }
     if (created != std::size(hooks)) {
-        for (unsigned i = 0; i < created; ++i) record.hook(SC_INSTALL_REMOVE, 2, hooks[i],
+        for (unsigned i = 1; i < created; ++i) record.hook(SC_INSTALL_REMOVE, 2, hooks[i],
             static_cast<uint32_t>(targets[hooks[i]].address - binding.image.base), [&] {
                 return MH_RemoveHook(reinterpret_cast<void*>(targets[hooks[i]].address)); });
         session().reject(SessionFault::installation); return;
     }
-    original_root = reinterpret_cast<RootInit>(originals[0]);
     original_provider = reinterpret_cast<InitializeProvider>(originals[10]);
     original_preflight = reinterpret_cast<WritePreflight>(originals[12]);
     original_prepare_profile = reinterpret_cast<PrepareProfile>(originals[13]);
@@ -419,10 +508,11 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     const bool published = session().inspect().prepared_routes == steam_20260818_routes;
     record.finish(event, published ? SC_NATIVE_NONE : SC_NATIVE_CANCELLED);
     if (!published) { session().reject(SessionFault::installation); return; }
-    if (!install_campaign_hooks(binding, stop)) { session().reject(SessionFault::installation); return; }
-    // All immutable pointers and policy are ready BEFORE the one-time startup
-    // hook is reachable. The existing observer accepting flag is independent.
-    for (unsigned index : {1u, 4u, 6u, 8u, 9u, 13u, 14u, 15u, 16u, 17u, 18u, 23u, 24u, 25u, 26u, 27u, 28u, 29u, 30u, 32u, 33u, 34u, 35u, 37u, 38u, 40u, 41u, 42u, 43u, 44u, 0u}) {
+    if (!install_campaign_hooks(binding, stop)) { cancelled(); session().reject(SessionFault::installation); return; }
+    // Publish every immutable pointer/policy/hook before releasing RootInit.
+    // Target0 is already patched: do not revalidate or enable it a second time.
+    for (unsigned index : {1u, 4u, 6u, 8u, 9u, 13u, 14u, 15u, 16u, 17u, 18u, 23u, 24u, 25u, 26u, 27u, 28u, 29u, 30u, 32u, 33u, 34u, 35u, 37u, 38u, 40u, 41u, 42u, 43u, 44u}) {
+        if (cancelled()) { session().reject(SessionFault::installation); return; }
         event = record.begin(SC_INSTALL_SAVE_ENABLE, 2, index, static_cast<uint32_t>(targets[index].address - binding.image.base));
         if (!checked_bytes(memory, targets[index].address, targets[index].bytes.data(), 32, event)) {
             record.finish(event, SC_NATIVE_TARGET_BYTES);
@@ -435,7 +525,9 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
             session().reject(SessionFault::installation); return;
         }
     }
+    if (cancelled()) { session().reject(SessionFault::installation); return; }
     record.finish(record.begin(SC_INSTALL_READY));
+    gate_completion.ready();
 }
 SubmissionResult submit_native_backup(const std::shared_ptr<BackupJob>& job, std::string_view directory) {
     return submit_native_save(session().native_writes, job, directory, submission_calls);

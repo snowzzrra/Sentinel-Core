@@ -35,7 +35,7 @@ struct WriteCalls {
 // and runs its finalizer after consuming the result. No job or receipt is made.
 SaveFuture* refused_save_future();
 SaveFuture** write_scoped(Session&, engine::Memory&, uintptr_t provider,
-    SaveFuture**, uintptr_t identity, SaveReference*, const WriteCalls&);
+    SaveFuture**, uintptr_t identity, SaveReference*, const WriteCalls&, bool native_checkpoint = false);
 SaveFuture** read_scoped(Session&, engine::Memory&, uintptr_t provider,
     SaveFuture**, uintptr_t identity, SaveReference*, const WriteCalls&);
 SaveFuture** delete_scoped(Session&, engine::Memory&, uintptr_t provider,

@@ -4,6 +4,7 @@
 #include "save_storage.h"
 #include "save_sdk_write.h"
 #include "save_campaign.h"
+#include "save_b_trace.h"
 #include "sentinel_save.h"
 #include <atomic>
 #include <array>
@@ -67,6 +68,13 @@ struct ProfileTrace {
     bool identity_matched = false;
     ProfileOwnershipTrace ownership{};
 };
+// Diagnostic metadata only: no payload import or admission follows from these reads.
+struct UnroutedSource {
+    uintptr_t data = 0;
+    std::array<char, 64> name{};
+    int32_t length = 0;
+    uint32_t step = 0, reason = 0, error = 0, kind = 0;
+};
 // One immutable first unowned boundary, not a frame log. Native addresses remain private.
 struct UnroutedTrace {
     uint64_t at_ms = 0;
@@ -77,6 +85,9 @@ struct UnroutedTrace {
     uintptr_t manager = 0, provider = 0, identity = 0, caller = 0;
     bool delegated_account_query = false;
     uintptr_t caller_rva = 0;
+    UnroutedSource source{};
+    std::array<uint32_t, 8> stack_rvas{};
+    uint32_t stack_count = 0;
 };
 struct NativeRouteScope {
     explicit NativeRouteScope(uintptr_t, uintptr_t image = 0);
@@ -97,6 +108,7 @@ public:
     Installation installation;
     NativeWrites native_writes;
     Campaign campaign_run;
+    BTrace btrace;
     ~Session();
     storage::Result configure(const storage::Descriptor&, std::unique_ptr<storage::Namespace>);
     void reject(SessionFault);
@@ -104,7 +116,7 @@ public:
     bool startup_enter(uintptr_t root, uintptr_t caller, uint32_t thread);
     void startup_leave(bool abnormal);
     void unrouted_import(const char* route = "unspecified", const char* operation = "import",
-        uintptr_t provider = 0, uintptr_t identity = 0);
+        uintptr_t provider = 0, uintptr_t identity = 0, const UnroutedSource& source = {});
     UnroutedTrace unrouted_trace() const;
     bool pre_root_profile_query(uintptr_t expected_caller, uintptr_t identity);
     bool profile_read_completed();

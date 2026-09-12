@@ -26,6 +26,10 @@ void run_readback_contracts(const std::function<std::unique_ptr<sentinel::save::
 using namespace sentinel;
 using namespace sentinel::save;
 namespace {
+int64_t diagnostic_fact(const BEvent& event,const char* key) {
+    for (const auto& fact:event.facts) if (fact.key && std::strcmp(fact.key,key)==0) return fact.value;
+    CHECK(false); return 0;
+}
 std::vector<std::string> supplied;
 unsigned collections = 0, releases = 0, assignments = 0;
 bool fail_copy = false;
@@ -601,14 +605,35 @@ void write_contracts(Fixture& fixtures, engine::Memory& memory) {
         [](Session&, engine::Memory&, uintptr_t) { return true; }}; // PROFILE delegation; full policy has its own host.
     const auto invoke = [&](Session& owner, WriteFixture& f, bool reading = false) {
         active_write = &f; SaveFuture* future = nullptr;
-        const auto access = reading ? read_scoped : write_scoped;
-        CHECK(access(owner, memory, 0x9876, &future, 0xabcd, &f.reference, calls) == &future);
+        const auto result = reading ? read_scoped(owner, memory, 0x9876, &future, 0xabcd, &f.reference, calls) :
+            write_scoped(owner, memory, 0x9876, &future, 0xabcd, &f.reference, calls);
+        CHECK(result == &future);
         CHECK(future && f.released == 1 && !f.reference.control && f.control.strong == 1);
         return future;
     };
     {
         Session off; WriteFixture f("native-other-domain");
         CHECK(invoke(off, f) == &success_future && f.creates == 1 && !f.assigns);
+    }
+    for (unsigned defect=0;defect<6;++defect) {
+        Session owner; fixtures.prepare(owner);
+        WriteFixture f(defect==1?"GAME-AUTOSAVE0":defect==2?"ap-fixture/GAME-AUTOSAVE0":defect==3?"foreign-name":"PROFILE");
+        if (defect==4) f.name.length=64;
+        if (defect==5) f.control.data=1;
+        NativeRouteScope route(0x1148e225,0x10000000);
+        auto future=invoke(owner,f,true); SaveResult result{};
+        future->vtable->poll(future,&result,nullptr); future->vtable->destroy(future,1);
+        CHECK(!f.creates && !f.assigns && result.state==0 && result.outcome==1);
+        CHECK(owner.fault()==SessionFault::missed_startup && !owner.routed());
+        const auto trace=owner.unrouted_trace();
+        CHECK(trace.caller_rva==0x148e225 && trace.source.kind==(defect>=4?1u:defect+2));
+        CHECK(trace.source.step==(defect>=4?3u:5u));
+        CHECK((trace.source.reason!=0)==(defect>=4));
+        if (defect<4) CHECK(std::strcmp(trace.source.name.data(),f.text)==0);
+        const auto first=owner.btrace.snapshot().first_failure;
+        CHECK(std::strcmp(first.predicate,"unrouted_import_before_root_observation")==0);
+        CHECK(diagnostic_fact(first,"source_kind")==trace.source.kind);
+        owner.stop_requests(); CHECK(owner.unrouted_trace().source.kind==trace.source.kind);
     }
     for (auto name : {"GAME-AUTOSAVE7", "game-autosave7", "DLC1-AUTOSAVE11", "DLC1-autosave11",
                      "PROFILE", "foreign/GAME-AUTOSAVE0"}) {
@@ -676,7 +701,8 @@ void write_contracts(Fixture& fixtures, engine::Memory& memory) {
         f.files = reinterpret_cast<uintptr_t>(files); f.file_count = f.file_capacity = 1;
         WriteCalls file_calls = calls; file_calls.image_base = 0x10000000;
         SaveFuture* future = nullptr;
-        (reading ? read_scoped : write_scoped)(owner, memory, 0x9876, &future, 0xabcd, &f.reference, file_calls);
+        if (reading) read_scoped(owner, memory, 0x9876, &future, 0xabcd, &f.reference, file_calls);
+        else write_scoped(owner, memory, 0x9876, &future, 0xabcd, &f.reference, file_calls);
         const bool valid = std::strcmp(name, "game.details") == 0;
         CHECK(f.creates == (valid ? 1u : 0u) && f.assigns == (valid ? 1u : 0u));
         CHECK(successful(future) == valid && f.released == 1 && f.control.strong == 1);
@@ -771,24 +797,36 @@ int main(int argc, char** argv) {
         partial.install(0x1000, 0x2000, startup_route | collector_route);
         CHECK(!partial.startup_enter(0x1000, 0x2000, GetCurrentThreadId()));
         CHECK(partial.fault() == SessionFault::incomplete_routes && !partial.routed());
+        const auto first=partial.btrace.snapshot().first_failure;
+        CHECK(first.stage==BStage::session && std::strcmp(first.predicate,"startup_routes_incomplete")==0);
+        CHECK(diagnostic_fact(first,"routes")==3 && diagnostic_fact(first,"required_routes")==required_routes);
+        CHECK(diagnostic_fact(first,"qualified")==1 && diagnostic_fact(first,"startup_entered")==0);
         const auto status = partial.inspect();
         CHECK(status.size == 160 && status.abi_version == SC_SAVE_ADMISSION_ABI_VERSION);
         CHECK(status.state == SC_SAVE_SESSION_REJECTED && status.prepared_routes == 3 && status.required_routes == 63);
         CHECK(status.flags == SC_SAVE_SESSION_STARTUP_QUALIFIED);
         partial.install(0x1000, 0x2000, required_routes);
         CHECK(!partial.startup_enter(0x1000, 0x2000, GetCurrentThreadId()));
+        CHECK(partial.btrace.snapshot().first_failure.sequence==first.sequence);
     }
     {
         Session missed; fixture.prepare(missed);
         missed.install(0x1000, 0x2000, required_routes); missed.stop_requests();
+        const auto first=missed.btrace.snapshot().first_failure;
+        CHECK(first.stage==BStage::session && std::strcmp(first.predicate,"requests_stopped_before_startup")==0);
+        CHECK(diagnostic_fact(first,"requested_fault")==static_cast<int64_t>(SessionFault::missed_startup));
         CHECK(!missed.startup_enter(0x1000, 0x2000, GetCurrentThreadId()));
         CHECK(missed.fault() == SessionFault::missed_startup && !missed.routed());
+        CHECK(missed.btrace.snapshot().first_failure.sequence==first.sequence);
     }
     {
         Session wrong; fixture.prepare(wrong); wrong.install(0x1000, 0x2000, required_routes);
         CHECK(!wrong.startup_enter(0x1000, 0x2001, GetCurrentThreadId()));
         CHECK(wrong.fault() == SessionFault::startup_context && !wrong.routed());
         CHECK(!(wrong.inspect().flags & SC_SAVE_SESSION_STARTUP_QUALIFIED));
+        const auto first=wrong.btrace.snapshot().first_failure;
+        CHECK(first.stage==BStage::session && std::strcmp(first.predicate,"startup_caller_mismatch")==0);
+        CHECK(diagnostic_fact(first,"root_equal")==1 && diagnostic_fact(first,"caller_equal")==0);
     }
     for (bool started : {false, true}) {
         Session late; fixture.prepare(late); late.install(0x1000, 0x2000, required_routes);
@@ -798,9 +836,15 @@ int main(int argc, char** argv) {
             CHECK(late.state() == SessionState::starting && !late.accepts_requests());
         }
         late.unrouted_import();
+        const auto first=late.btrace.snapshot().first_failure;
+        CHECK(first.stage==BStage::session && std::strcmp(first.predicate,started?
+            "unrouted_import_before_provider_binding":"unrouted_import_before_root_observation")==0);
+        CHECK(diagnostic_fact(first,"startup_entered")==static_cast<int64_t>(started) &&
+            diagnostic_fact(first,"qualified")==static_cast<int64_t>(started));
         CHECK(late.installation.inspect().primary_failure.stage == SC_INSTALL_STARTUP && late.installation.inspect().startup_observation == 2);
         CHECK(!late.bind_provider(late.native_root(), 0x1234, late.ownership_record()));
         CHECK(late.fault() == SessionFault::missed_startup && !late.routed());
+        CHECK(late.btrace.snapshot().first_failure.sequence==first.sequence);
     }
     {
         Session pending; fixture.admit(pending);
@@ -808,11 +852,17 @@ int main(int argc, char** argv) {
         CHECK(pending.inspect().state == SC_SAVE_SESSION_BINDING && !pending.accepts_requests());
         pending.startup_leave(true);
         CHECK(pending.state() == SessionState::faulted && pending.routed() && !pending.native_io());
+        const auto first=pending.btrace.snapshot().first_failure;
+        CHECK(first.stage==BStage::session && std::strcmp(first.predicate,"startup_root_return_abnormal")==0);
+        CHECK(diagnostic_fact(first,"abnormal")==1 && diagnostic_fact(first,"routed")==1);
     }
     {
         Session foreign; fixture.prepare(foreign); foreign.install(0x1000, 0x2000, required_routes);
         CHECK(foreign.startup_enter(0x1000, 0x2000, GetCurrentThreadId()));
         CHECK(!foreign.bind_provider(foreign.native_root(), 0x1234, "foreign native ownership"));
+        const auto first=foreign.btrace.snapshot().first_failure;
+        CHECK(std::strcmp(first.predicate,"provider_binding_ownership_mismatch")==0);
+        CHECK(diagnostic_fact(first,"ownership_equal")==0 && diagnostic_fact(first,"thread_equal")==1);
         foreign.startup_leave(false); CHECK(!foreign.routed());
     }
     {
@@ -823,6 +873,9 @@ int main(int argc, char** argv) {
         CHECK(owner.bind_provider(owner.native_root(), 0x1234, owner.ownership_record()));
         owner.startup_leave(false); owner.stop_requests();
         CHECK(owner.routed() && !owner.accepts_requests());
+        const auto stopped=owner.btrace.snapshot(); CHECK(!stopped.first_failure.sequence);
+        const auto& session_event=stopped.stages[static_cast<size_t>(BStage::session)];
+        CHECK(session_event.status==BStatus::succeeded && std::strcmp(session_event.predicate,"session_requests_stopped")==0);
         CHECK(owner.inspect().flags == (SC_SAVE_SESSION_ROUTED | SC_SAVE_SESSION_STARTUP_QUALIFIED));
         storage::Metadata metadata;
         CHECK(storage::inspect(descriptor, metadata).outcome == storage::Outcome::ownership_conflict);

@@ -46,7 +46,7 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   src/native_target.h src/native_target.cpp src/native_runtime.h src/native_runtime.cpp
   include/sentinel_save.h src/save_observer.h src/save_observer.cpp
   src/save_storage.h src/save_storage.cpp src/prelaunch.h src/prelaunch.cpp src/startup_log.h src/startup_log.cpp tools/save_probe.h tools/save_probe.cpp
-  src/save_session.h src/save_session.cpp src/save_collector.h src/save_collector.cpp
+  src/save_b_trace.h src/save_b_io_trace.h src/save_session.h src/save_session.cpp src/save_collector.h src/save_collector.cpp
   src/save_delete.h src/save_delete.cpp src/save_write.h src/save_write.cpp
   src/save_sdk_write.h src/save_sdk_write.cpp
   include/sentinel_save_request.h src/save_readback.h src/save_readback.cpp
@@ -60,7 +60,7 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   src/save_provider.h src/save_provider.cpp
   src/save_catalog.h src/save_catalog.cpp
   src/save_profile_prerequisite.h src/save_profile_prerequisite.cpp
-  src/save_native_hooks.h src/save_native_hooks.cpp
+  src/save_native_hooks.h src/save_native_hooks.cpp src/save_startup_gate.h
   third_party/minhook/include/MinHook.h third_party/minhook/src/hook.c
   third_party/minhook/src/buffer.c third_party/minhook/src/buffer.h
   third_party/minhook/src/trampoline.c third_party/minhook/src/trampoline.h

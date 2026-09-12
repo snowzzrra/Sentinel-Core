@@ -393,6 +393,20 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
             CHECK(result.tag == 1 && result.second == 1 && owner->fault() == SessionFault::native_write);
             CHECK(input.files == before.files && input.count == before.count && input.capacity == before.capacity);
             CHECK(!observed.payloads[0].prepared); // Failed preparation never publishes a partial manifest.
+            constexpr const char* expected[]{"payload_not_owned", "payload_size_limit", "payload_capacity_short",
+                "payload_duplicate_name", "payload_hash_bytes_unreadable", "payload_vtable_mismatch",
+                "payload_hash_extent_invalid", "payload_name_extent_invalid"};
+            const auto first = owner->btrace.snapshot().first_failure;
+            CHECK(first.sequence && first.operation == 1 && std::strcmp(first.predicate, expected[test]) == 0);
+            // Downstream refusals cannot replace the actionable original field.
+            owner->btrace.record(BStage::provider, BStatus::refused, "fixture_later_provider_failure", 1);
+            CHECK(owner->btrace.snapshot().first_failure.sequence == first.sequence);
+            if (test == 4) {
+                bool reason = false;
+                for (const auto& fact : first.facts)
+                    if (fact.key && !std::strcmp(fact.key, "memory_reason")) reason = fact.value == SC_REASON_READ_FAILED;
+                CHECK(reason);
+            }
         }
     }
     std::puts("PASS prepared native payload ownership, worker hashing and pre-deletion refusals (9 cases)");
@@ -423,7 +437,11 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
         if (test == 9) model.context.remote = 0x1234;
         struct { SdkWriteResult result{}; uint64_t canary = 0xd00dbeefcafef00d; } output;
         try { poll_sdk_write(*owner, model.memory, reinterpret_cast<uintptr_t>(&model.context), &output.result, nullptr, calls); }
-        catch (const std::runtime_error&) { CHECK(test == 10 && model.thrown); }
+        catch (const std::runtime_error&) {
+            CHECK(test == 10 && model.thrown);
+            const auto diagnostic = owner->btrace.snapshot().first_failure;
+            CHECK(diagnostic.operation == 1 && !std::strcmp(diagnostic.predicate, "sdk_native_poll_exception"));
+        }
         CHECK(output.canary == 0xd00dbeefcafef00d);
         CHECK(model.context.remote == (test == 9 ? 0x1234 : real_remote));
         if (test == 9 || test == 11) {
@@ -432,6 +450,19 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
             CHECK(owner->native_writes.lost()); continue;
         }
         auto first = inspect(model);
+        if (test == 0) {
+            const auto diagnostic = owner->btrace.snapshot().first_failure;
+            if (diagnostic.sequence) {
+                std::fprintf(stderr, "sdk success first failure stage=%s predicate=%s operation=%llu\n",
+                    b_stage_names[static_cast<size_t>(diagnostic.stage)], diagnostic.predicate,
+                    static_cast<unsigned long long>(diagnostic.operation));
+                for (const auto& fact : diagnostic.facts) if (fact.key)
+                    std::fprintf(stderr, " %s=%lld\n", fact.key, static_cast<long long>(fact.value));
+            }
+            CHECK(!diagnostic.sequence);
+        }
+        if (test == 5) CHECK(!std::strcmp(owner->btrace.snapshot().first_failure.predicate, "sdk_submission_zero_handle"));
+        if (test >= 16) CHECK(!std::strcmp(owner->btrace.snapshot().first_failure.predicate, "sdk_payload_changed_since_preflight"));
         CHECK(first.submitted == 1 && !first.terminal && !first.released);
         CHECK(first.payloads[0].handle == model.handles[0] && !first.payloads[0].completed);
         CHECK(first.payloads[0].size == (test == 17 ? 4u : 3u) && std::string(first.payloads[0].name.data()) ==

@@ -4,18 +4,28 @@
 #include <windows.h>
 #include <string>
 #include <cstdio>
+#include <stdexcept>
 namespace sentinel::startup_log {
 namespace {
+std::string private_hex(const std::string& input);
 std::string startup_route(const save::UnroutedTrace& t) {
     const auto flag=[](bool value){return value?"true":"false";};
+    std::string stack;
+    for (size_t i=0;i<t.stack_rvas.size();++i)
+        stack+=",\"stack_rva_"+std::to_string(i)+"\":"+std::to_string(t.stack_rvas[i]);
     return std::string("{\"at_ms\":")+std::to_string(t.at_ms)+",\"adapter\":\""+t.route+
         "\",\"operation\":\""+t.operation+"\",\"session_state\":"+std::to_string(static_cast<uint32_t>(t.state))+
         ",\"native_phase\":\""+(t.startup_entered?"root_entered":"before_root_observation")+"\",\"startup_entered\":"+flag(t.startup_entered)+
         ",\"root_qualified\":"+flag(t.root_qualified)+",\"manager_available\":"+flag(t.manager!=0)+
         ",\"provider_available\":"+flag(t.provider!=0)+",\"native_user_available\":"+flag(t.identity!=0)+
         ",\"delegated_account_query\":"+flag(t.delegated_account_query)+",\"caller_class\":\""+(t.caller?"native_return_address_retained":"unavailable")+
-        "\",\"private\":{\"manager\":"+std::to_string(t.manager)+",\"provider\":"+std::to_string(t.provider)+
-        ",\"native_user\":"+std::to_string(t.identity)+",\"caller\":"+std::to_string(t.caller)+",\"caller_rva\":"+std::to_string(t.caller_rva)+"}}";
+        "\",\"caller_rva\":"+std::to_string(t.caller_rva)+",\"source_kind\":"+std::to_string(t.source.kind)+
+        ",\"source_length\":"+std::to_string(t.source.length)+",\"source_step\":"+std::to_string(t.source.step)+
+        ",\"source_read_reason\":"+std::to_string(t.source.reason)+",\"source_read_error\":"+std::to_string(t.source.error)+
+        ",\"stack_count\":"+std::to_string(t.stack_count)+stack+",\"private\":{\"manager\":"+std::to_string(t.manager)+",\"provider\":"+std::to_string(t.provider)+
+        ",\"native_user\":"+std::to_string(t.identity)+",\"caller\":"+std::to_string(t.caller)+",\"caller_rva\":"+std::to_string(t.caller_rva)+
+        ",\"source\":"+std::to_string(t.source.data)+",\"source_name_hex\":\""+
+        private_hex(std::string(t.source.name.data(),t.source.name.size()))+"\"}}";
 }
 std::string private_hex(const std::string& input) {
     constexpr char digits[]="0123456789abcdef"; std::string out;
@@ -33,6 +43,9 @@ SRWLOCK guard = SRWLOCK_INIT;
 HANDLE file = INVALID_HANDLE_VALUE;
 bool opened = false;
 unsigned count = 0;
+size_t history_bytes=0;
+DWORD history_error=0,latest_error=0;
+std::wstring latest_path,temporary_path;
 std::string last;
 std::string quoted(const char* text) {
     std::string out="\"";
@@ -52,6 +65,34 @@ std::string profile_step(const save::ProfileStep& s) {
         ",\"read_reason\":" + std::to_string(s.read.reason) + ",\"read_error\":" + std::to_string(s.read.error) +
         ",\"read_requested\":" + std::to_string(s.read.requested) + ",\"read_offset\":" + std::to_string(s.read.offset) +
         ",\"read_size\":" + std::to_string(s.read.size) + "}";
+}
+std::string b_event(const save::BEvent& e) {
+    if(!e.sequence) return "null";
+    auto out="{\"sequence\":"+std::to_string(e.sequence)+",\"at_ms\":"+std::to_string(e.at_ms)+
+        ",\"operation\":"+std::to_string(e.operation)+",\"thread\":"+std::to_string(e.thread)+
+        ",\"stage\":"+quoted(save::b_stage_names[static_cast<size_t>(e.stage)])+",\"status\":"+
+        std::to_string(static_cast<uint32_t>(e.status))+",\"predicate\":"+quoted(e.predicate)+",\"facts\":{";
+    bool first=true;
+    for(const auto& fact:e.facts) if(fact.key) { if(!first) out+=','; first=false; out+=quoted(fact.key)+":"+std::to_string(fact.value); }
+    return out+"},\"private\":{\"source\":"+std::to_string(e.source)+"}}";
+}
+std::string b_trace(const save::BSnapshot& s) {
+    auto out="{\"sequence\":"+std::to_string(s.sequence)+",\"first_failure\":"+b_event(s.first_failure)+",\"stages\":{";
+    for(size_t i=0;i<s.stages.size();++i) { if(i) out+=','; out+=quoted(save::b_stage_names[i])+":"+b_event(s.stages[i]); }
+    return out+"}}";
+}
+bool publish_latest(const std::string& line) {
+    const auto output=CreateFileW(temporary_path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(output==INVALID_HANDLE_VALUE) { latest_error=GetLastError(); return false; }
+    DWORD written=0;
+    const bool complete=WriteFile(output,line.data(),static_cast<DWORD>(line.size()),&written,nullptr) && written==line.size() && FlushFileBuffers(output);
+    if(!complete) latest_error=GetLastError();
+    CloseHandle(output);
+    if(!complete) return false;
+    if(!MoveFileExW(temporary_path.c_str(),latest_path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+        latest_error=GetLastError(); return false;
+    }
+    latest_error=0; return true;
 }
 std::string profile(const save::ProfileTrace& trace) {
     constexpr const char* names[]{"request", "profile_created", "catalog_created", "first_poll", "prepare", "decode", "transport",
@@ -106,14 +147,17 @@ void open(const Snapshot& core) {
     directory += L"\\diagnostics";
     if (!CreateDirectoryW(directory.c_str(),nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return;
     const auto path = directory + L"\\" + std::to_wstring(core.pid) + L"-" + std::to_wstring(core.process_created) + L".jsonl";
+    latest_path=path.substr(0,path.size()-6)+L".latest.json";
+    temporary_path=latest_path+L".pending";
     file = CreateFileW(path.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(file==INVALID_HANDLE_VALUE) history_error=GetLastError();
 }
 }
 void record(const Snapshot& core, uint32_t engine_reason) noexcept {
     AcquireSRWLockExclusive(&guard);
     try {
         if (!opened) open(core);
-        if (file != INVALID_HANDLE_VALUE && count < 128) {
+        if (!latest_path.empty()) {
             const auto install = save::session().installation.inspect();
             const auto session = save::session().inspect();
             const auto campaign = save::session().campaign_run.snapshot();
@@ -162,18 +206,27 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"fault\":" + std::to_string(session.fault) + ",\"flags\":" + std::to_string(session.flags) +
                 ",\"prepared_routes\":" + std::to_string(session.prepared_routes) + ",\"required_routes\":" + std::to_string(session.required_routes) +
                 ",\"namespace_id\":\"" + session.namespace_id + "\"},\"startup_route\":" + startup_route(save::session().unrouted_trace()) +
-                ",\"profile\":" + profile(save::session().profile_trace())+",\"campaign\":"+campaign_json;
+                ",\"profile\":" + profile(save::session().profile_trace())+",\"campaign\":"+campaign_json+
+                ",\"b_diagnostics\":"+b_trace(save::session().btrace.snapshot());
             if (facts != last) {
                 const auto& wide_key = prelaunch::diagnostic_key();
                 std::string control;
                 if (wide_key.size() >= 64) for (auto digit : wide_key.substr(wide_key.size()-64)) control.push_back(static_cast<char>(digit));
                 const auto line = "{\"schema\":\"sentinel-startup-v1\",\"control_sha256\":\"" + control + "\",\"pid\":" + std::to_string(core.pid) +
                     ",\"process_created\":\"" + std::to_string(core.process_created) + "\",\"build_id\":\"" + core.core.build_id +
-                    "\",\"at_ms\":" + std::to_string(GetTickCount64()) + "," + facts + "}\n";
-                DWORD written = 0;
-                if (!WriteFile(file,line.data(),static_cast<DWORD>(line.size()),&written,nullptr) || written != line.size()) {
-                    CloseHandle(file); file = INVALID_HANDLE_VALUE;
-                } else { FlushFileBuffers(file); last = facts; ++count; }
+                    "\",\"at_ms\":" + std::to_string(GetTickCount64()) + ",\"diagnostic_storage\":{\"history_records\":"+
+                    std::to_string(count)+",\"history_bytes\":"+std::to_string(history_bytes)+",\"history_error\":"+
+                    std::to_string(history_error)+",\"latest_error\":"+std::to_string(latest_error)+"}," + facts + "}\n";
+                // History and the latest snapshot have independent limits. The
+                // first refusal and each stage survive arbitrary later polling.
+                if(line.size()>65536) throw std::length_error("diagnostic_snapshot_limit");
+                if(file!=INVALID_HANDLE_VALUE && count<128 && history_bytes+line.size()<=1024*1024) {
+                    DWORD written=0;
+                    if(!WriteFile(file,line.data(),static_cast<DWORD>(line.size()),&written,nullptr) || written!=line.size()) {
+                        history_error=GetLastError(); CloseHandle(file); file=INVALID_HANDLE_VALUE;
+                    } else { FlushFileBuffers(file); history_bytes+=line.size(); ++count; }
+                }
+                if(publish_latest(line)) last=facts;
             }
         }
     } catch (...) { /* Diagnostics never change admission or inspection availability. */ }

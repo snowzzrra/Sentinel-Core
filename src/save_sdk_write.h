@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include "sentinel_save.h"
+#include "save_b_trace.h"
 
 namespace sentinel::engine { struct Memory; }
 namespace sentinel::save {
@@ -65,6 +66,8 @@ struct NativeWriteJob { uint64_t operation = 0; bool preflight = false; };
 // provider completion, gameplay reopen, global idle, or cloud quiescence.
 class NativeWrites final {
 public:
+    void bind_diagnostics(BTrace&);
+    uint64_t operation_id(uint64_t sequence) const;
     uint64_t open_provider(uintptr_t data, const std::string& directory);
     void close_provider(uint64_t);
     void provider_result(uint64_t, const SaveResult&);
@@ -82,7 +85,7 @@ public:
     uint32_t capture(uint64_t sequence, const SdkFileWrite&);
     void submitted(uint64_t sequence, uint32_t index, uint64_t handle);
     void utilities(uint64_t sequence, uintptr_t);
-    void callback(uint64_t handle, bool failed, int32_t result);
+    void callback(uint64_t handle, bool failed, int32_t result, uint32_t memory_reason = 0, uint32_t memory_error = 0);
     void result(uint64_t sequence, const SdkWriteResult&);
     uint64_t detach_vector(uintptr_t files);
     void finish_vector(uint64_t operation);
@@ -108,6 +111,7 @@ private:
     std::map<uintptr_t, NativeWriteJob> jobs_;
     uint64_t next_ = 0, next_operation_ = 0;
     bool lost_ = false;
+    BTrace* diagnostics_ = nullptr; // Session-owned; all access is under mutex_.
 };
 // Lexical ownership of the exact native child being polled. Nothing from this
 // stack scope is retained by a job; constructors copy its stable operation ID.
@@ -131,9 +135,11 @@ void destroy_write_job(Session&, uintptr_t, DestroySdkVector);
 // Runs on the native preflight worker, before deletion. Prepared files are
 // privately owned until vector teardown; SDK polling only reads these buffers.
 bool digest_payload(engine::Memory&, uintptr_t bytes, uint32_t size,
-    std::array<unsigned char, 32>&, uint64_t deadline);
+    std::array<unsigned char, 32>&, uint64_t deadline, BTrace* = nullptr,
+    BStage = BStage::sdk_prepare, uint64_t operation = 0, uint64_t file_index = 0);
 bool prepare_sdk_payloads(NativeWrites&, engine::Memory&, uint64_t sequence,
-    uintptr_t files, uint64_t count, const std::string& directory, uintptr_t image);
+    uintptr_t files, uint64_t count, const std::string& directory, uintptr_t image,
+    BTrace* = nullptr, uint64_t operation = 0);
 SdkWriteResult* poll_sdk_write(Session&, engine::Memory&, uintptr_t, SdkWriteResult*, void*, const SdkWriteCalls&);
 void sdk_write_callback(Session&, engine::Memory&, uintptr_t, const int32_t*, bool, SdkWriteCallback);
 void destroy_sdk_vector(Session&, engine::Memory&, uintptr_t, DestroySdkVector);

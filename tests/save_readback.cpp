@@ -365,6 +365,29 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
         if (result.state == -1) { CHECK(task[8]); future->vtable->poll(future, &result, task.data()); }
         CHECK(result.state == 0 && (verified ? result.outcome == 0 && result.value == 1 : result.outcome == 1));
         CHECK(m.decoded == (verified || mode == 9 ? 1u : 0u));
+        constexpr const char* failures[]{nullptr, "readback_sha256_mismatch", "readback_storage_file_size",
+            "readback_storage_file_size", "readback_storage_file_size", "readback_stream_error",
+            "readback_manifest_name_mismatch", "readback_native_cancelled", "readback_loaded_size_mismatch",
+            "readback_native_decode_result", "readback_stream_flags_mismatch", "payload_hash_bytes_unreadable",
+            "readback_native_prepare_exception", "readback_file_sdk_proof_missing", nullptr, nullptr,
+            "readback_stream_allocation_failed", "readback_terminal_hash_proof_missing"};
+        const auto diagnostic = owner->btrace.snapshot().first_failure;
+        if (mode == 0) {
+            if (diagnostic.sequence) {
+                std::fprintf(stderr, "readback success first failure stage=%s predicate=%s operation=%llu\n",
+                    b_stage_names[static_cast<size_t>(diagnostic.stage)], diagnostic.predicate,
+                    static_cast<unsigned long long>(diagnostic.operation));
+                for (const auto& fact : diagnostic.facts) if (fact.key)
+                    std::fprintf(stderr, " %s=%lld\n", fact.key, static_cast<long long>(fact.value));
+            }
+            CHECK(!diagnostic.sequence); // Pending, successful native calls and readback are not faults.
+        }
+        else if (mode < std::size(failures) && failures[mode]) {
+            CHECK(diagnostic.sequence && diagnostic.operation == m.operation);
+            CHECK(!std::strcmp(diagnostic.predicate, failures[mode]));
+            owner->btrace.record(BStage::provider, BStatus::refused, "fixture_later_provider_failure", m.operation);
+            CHECK(owner->btrace.snapshot().first_failure.sequence == diagnostic.sequence);
+        }
         const auto snapshot = owner->native_writes.snapshot(m.operation);
         CHECK(snapshot.state == static_cast<uint32_t>(verified ? SC_SAVE_WRITE_READBACK_CONFIRMED :
             mode == 13 ? SC_SAVE_WRITE_NATIVE_SUCCEEDED : SC_SAVE_WRITE_READBACK_FAILED));
@@ -383,6 +406,15 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
             CHECK(ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr));
             CloseHandle(file); CHECK(std::string(bytes.data(), count) == m.bytes);
         } else CHECK(saved.state == BackupState::failed && !saved.storage_attempted && saved.output.path.empty());
+    }
+    for (unsigned allocation = 1; allocation <= 2; ++allocation) {
+        auto owner = make(); Model m(*owner); active = &m; m.fail_allocation = allocation;
+        m.operation = owner->native_writes.open_provider(0x123, m.directory); CHECK(m.operation);
+        CHECK(!create_write_readback(*owner, m.operation, 0x777, 0x7788, m.directory, calls()));
+        CHECK(!m.reads && !m.streams && !m.freed_data);
+        const auto first = owner->btrace.snapshot().first_failure;
+        CHECK(first.operation == m.operation && !std::strcmp(first.predicate, allocation == 1 ?
+            "readback_control_allocation_failed" : "readback_data_allocation_failed"));
     }
     ordinary_worker_contracts(make);
     for (const auto count : {1u, 17u}) {

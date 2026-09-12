@@ -6,6 +6,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <memory>
 #include <new>
 
 using namespace sentinel;
@@ -30,7 +31,10 @@ void destroy_value(ProfileValue* value);
 SaveFuture** create_success(uintptr_t, SaveFuture**, uintptr_t, SaveReference*);
 struct Json {
     std::map<std::string, ProfileValue> members;
+    std::unique_ptr<Json> preferences;
+    std::unique_ptr<Json> master_level;
     ProfileValue root{reinterpret_cast<uintptr_t>(&members), 7, 0, {}, 0};
+    Json() = default;
     Json(const std::string& name, int index, bool comment = true) {
         auto copy = static_cast<char*>(std::malloc(name.size() + 1)); REQUIRE(copy);
         std::memcpy(copy, name.c_str(), name.size() + 1);
@@ -41,6 +45,13 @@ struct Json {
         members["musicVolume"] = {27, 1, 0, {}, 0};
         members["s_volume"] = {reinterpret_cast<uintptr_t>("0.02"), 4, 0, {}, 0};
         members["s_musicvolume"] = {reinterpret_cast<uintptr_t>("1.0"), 4, 0, {}, 0};
+        preferences=std::make_unique<Json>();
+        preferences->members["equippedSkin"]={reinterpret_cast<uintptr_t>("fixture-skin-7"),4,0,{},0};
+        preferences->members["invertMouse"]={1,5,0,{},0};
+        members["preferences"]=preferences->root;
+        master_level=std::make_unique<Json>();
+        master_level->members["completionInfo"]={}; // Native zero-resource case is null, not an array.
+        members["idMasterLevelManager"]=master_level->root;
     }
     ~Json() { for (auto& entry : members) destroy_value(&entry.second); }
     std::string name() const { return reinterpret_cast<const char*>(members.at("lastSaveGameName").payload); }
@@ -86,6 +97,7 @@ struct Frame {
     uint32_t serialize_result = 0;
     bool allocation_failure = false;
     ProfileCalls calls{};
+    Json* native_output = nullptr;
     explicit Frame(Session& value) : owner(value) {
         put(state, 8, uint32_t{23}); // Native user handle, independent of allocation.
         put(shell, 0, uintptr_t(image_base + 0x2dbbbe8)); put(shell, 8, reinterpret_cast<uintptr_t>(state.data())); put(shell, 16, manager);
@@ -108,10 +120,10 @@ void destroy_value(ProfileValue* value) {
     *value = {};
 }
 ProfileValue* lookup(ProfileValue* root, const char* name) {
-    static ProfileValue shared_null{};
     REQUIRE(root->type == 7);
     auto& members = *reinterpret_cast<std::map<std::string, ProfileValue>*>(root->payload);
-    const auto it = members.find(name); return it == members.end() ? &shared_null : &it->second;
+    const auto it = members.find(name); return it == members.end() ?
+        reinterpret_cast<ProfileValue*>(image_base+0x4275fb0) : &it->second;
 }
 // Fixture checksum is deliberately independent of the binary scanner. Production
 // calls the validated native 141ddab90; this host tests framing and failure flow.
@@ -145,6 +157,7 @@ void prepare(Frame& f, const std::function<void()>& body) {
     prepare_profile_write(f.owner, f.memory, &f.profile_ref, &f.data_ref, 0x24680,
         "", native_prepare, retain_reference, f.calls);
     REQUIRE(!f.profile_ref.control && !f.data_ref.control && f.data_control.strong == 1 && f.data_control.weak == 1);
+    REQUIRE(f.profile_control.strong==1 && f.profile_control.weak==1);
     f.preparation = {};
 }
 uint32_t native_serialize(uintptr_t context, uintptr_t profile, ProfileHolder* holder) {
@@ -153,10 +166,38 @@ uint32_t native_serialize(uintptr_t context, uintptr_t profile, ProfileHolder* h
     if (!holder->direction) {
         auto name = lookup(holder->root, "lastSaveGameName"); auto index = lookup(holder->root, "lastUsedGameSlot");
         f.selected = reinterpret_cast<const char*>(name->payload); f.selected_index = static_cast<int>(index->payload);
+        put(f.shell, 0x1234c, f.selected_index);
+        put(f.shell, 0x12350, NativeString{0, f.selected.data(), static_cast<int32_t>(f.selected.size()), 64, {}});
         REQUIRE(lookup(holder->root, "musicVolume")->payload == 27);
         REQUIRE(lookup(holder->root, "s_volume")->type == 4 &&
             std::strcmp(reinterpret_cast<const char*>(lookup(holder->root, "s_volume")->payload), "0.02") == 0);
         REQUIRE(std::strcmp(reinterpret_cast<const char*>(lookup(holder->root, "s_musicvolume")->payload), "1.0") == 0);
+    }
+    if (holder->direction && f.native_output) {
+        // 1414978e0 begins with a null JSON root. The native serializer creates
+        // fields from shell state (141417ff0), not fixture-provided output JSON.
+        REQUIRE(holder->root->type == 0 && f.native_output->members.empty());
+        NativeString name{}; int32_t index = -1;
+        std::memcpy(&name, f.shell.data()+0x12350, sizeof(name));
+        std::memcpy(&index, f.shell.data()+0x1234c, sizeof(index));
+        Json serialized(std::string(name.data, name.length), index);
+        serialized.members.at("musicVolume").payload = 99;
+        f.native_output->members = std::move(serialized.members);
+        f.native_output->preferences=std::move(serialized.preferences);
+        f.native_output->master_level=std::move(serialized.master_level);
+        *holder->root = {reinterpret_cast<uintptr_t>(&f.native_output->members), 7, 0, {}, 0};
+    }
+    // 140e5d570: push root -> idMasterLevelManager -> completionInfo, then
+    // exactly one pop, even with no resources. The caller encodes the entry
+    // document; the returned cursor stays in idMasterLevelManager (type7).
+    if (holder->direction) {
+        std::vector<ProfileValue*> stack{holder->root};
+        holder->root=lookup(holder->root,"idMasterLevelManager");
+        stack.push_back(holder->root);
+        holder->root=lookup(holder->root,"completionInfo");
+        REQUIRE(holder->root->type==0);
+        holder->root=stack.back(); stack.pop_back();
+        REQUIRE(stack.size()==1 && holder->root->type==7);
     }
     return f.serialize_result;
 }
@@ -201,6 +242,31 @@ void frame(Frame& f, const std::string& name, int index, unsigned variant = 0, s
     f.bytes.insert(f.bytes.end(), body.begin(), body.end());
     put(f.file, 0x150, uint64_t(f.bytes.size())); put(f.file, 0x158, uint64_t(f.bytes.size()));
     put(f.file, 0x168, reinterpret_cast<uintptr_t>(f.bytes.data()));
+}
+void encode_value(Bytes& body,const ProfileValue& value) {
+    switch(value.type) {
+    case 0: body.push_back(0); break;
+    case 1: body.push_back(4); number(body,value.payload,8); break;
+    case 2: body.push_back(8); number(body,value.payload,8); break;
+    case 4: body.push_back(10); text(body,reinterpret_cast<const char*>(value.payload)); break;
+    case 5: body.push_back(value.payload?12:11); break;
+    case 7: {
+        const auto& fields=*reinterpret_cast<const std::map<std::string,ProfileValue>*>(value.payload);
+        body.push_back(14); count(body,static_cast<uint32_t>(fields.size()));
+        for(const auto& field:fields) { text(body,field.first); encode_value(body,field.second); }
+        break;
+    }
+    default: REQUIRE(false);
+    }
+}
+void encoded_profile(Frame& f,const Json& document) {
+    Bytes body; encode_value(body,document.root);
+    f.bytes={0xa9,0x0d,0x8d,0xaa,0,0,0,2};
+    const auto hash=static_cast<uint32_t>(checksum(body.data(),body.size()));
+    for(int shift:{24,16,8,0}) f.bytes.push_back(static_cast<uint8_t>(hash>>shift));
+    f.bytes.insert(f.bytes.end(),body.begin(),body.end());
+    put(f.file,0x150,uint64_t(f.bytes.size())); put(f.file,0x158,uint64_t(f.bytes.size()));
+    put(f.file,0x168,reinterpret_cast<uintptr_t>(f.bytes.data()));
 }
 bool check_payload(Session& owner, engine::Memory& memory, uintptr_t data) { return profile_payload_valid(owner, memory, data, active->calls); }
 SaveFuture** create(uintptr_t, SaveFuture** out, uintptr_t, SaveReference* ref) {
@@ -446,6 +512,20 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
                 REQUIRE(owner->take_profile_write(data, absent) && std::strcmp(absent.choice.name.data(), "AUTOSAVE10") == 0);
             }
         }
+        if (failure) {
+            const auto trace = owner->profile_trace();
+            REQUIRE(trace.failed_stage == ProfileStage::output_validation);
+            const auto expected = test == 15 ? "native_output_serializer_result" :
+                test == 16 ? "serializer_callback_identity" : test == 29 ? "profile_write_choice_or_campaign_mismatch" :
+                "serialized_selection_not_in_owned_catalog";
+            REQUIRE(std::strcmp(trace.failure.predicate, expected) == 0);
+            const auto causal=owner->btrace.snapshot().first_failure;
+            const auto cause=test==15 ? "native_output_serializer_result" : test==16 ? "profile_major_callback" :
+                test==29 ? "profile_choice_capture" : "choice_pair_not_catalog_or_prospective";
+            REQUIRE(causal.sequence && causal.status==BStatus::refused && std::strcmp(causal.predicate,cause)==0);
+            owner->btrace.record(BStage::session,BStatus::refused,"fixture_downstream_refusal");
+            REQUIRE(owner->btrace.snapshot().first_failure.sequence==causal.sequence);
+        }
         publish(f, !failure && test != 17 && test != 27 && test != 28, test == 25);
         REQUIRE(f.strings_freed == (test == 28 ? 3u : 2u) && f.comments_freed == (test == 28 ? 3u : 2u));
     }
@@ -470,8 +550,52 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         REQUIRE(f.selected == "AUTOSAVE0" && f.selected_index == 0 && before == f.bytes);
         REQUIRE(owner->accepts_requests() && owner->profile_trace().failed_stage == ProfileStage::count);
     }
+    for(unsigned defect=0;defect<6;++defect) {
+        auto owner=make(); Frame f(*owner); active=&f;
+        f.calls={native_read,native_serialize,lookup,destroy_value,checksum,release_reference,image_base};
+        REQUIRE(owner->publish_profile_catalog(0x1234,owner->ownership_record(),{},"AUTOSAVE0",0,true,0));
+        frame(f,f.vanilla,f.vanilla_index);
+        REQUIRE(read_profile(*owner,f.memory,&f.profile_ref,&f.data_ref,f.calls)==0);
+        prepare(f,[&] {
+            Json output("AUTOSAVE0",0);
+            // A valid pair in the final cursor must never repair a broken entry
+            // document. Native encoding still uses output.root after failure.
+            auto& child=output.master_level->members;
+            child["lastSaveGameName"]={reinterpret_cast<uintptr_t>("AUTOSAVE0"),4,0,{},0};
+            child["lastUsedGameSlot"]={0,1,0,{},0}; child["magicNumber"]={magic,1,0,{},0};
+            if(defect>=1 && defect<=3) {
+                const char* key=defect==1?"lastSaveGameName":defect==2?"lastUsedGameSlot":"magicNumber";
+                destroy_value(&output.members.at(key)); output.members.erase(key);
+            } else if(defect==4) output.members.at("lastUsedGameSlot").type=2;
+            else if(defect==5) output.members.at("magicNumber").payload^=0x100;
+            Bytes settings_before; encode_value(settings_before,output.members.at("preferences"));
+            ProfileHolder holder{1,{},&output.root};
+            const auto result=serialize_profile(*owner,f.memory,manager,reinterpret_cast<uintptr_t>(f.state.data()),&holder,f.calls);
+            REQUIRE((result==0)==(defect==0) && holder.root==&output.members.at("idMasterLevelManager"));
+            Bytes settings_after; encode_value(settings_after,output.members.at("preferences"));
+            REQUIRE(settings_before==settings_after);
+            if(!defect) REQUIRE(output.name()==f.vanilla && output.index()==f.vanilla_index);
+            else {
+                const auto failure=owner->btrace.snapshot().first_failure;
+                REQUIRE(failure.stage==BStage::profile_output && failure.status==BStatus::refused);
+                const char* expected=defect<=3?"serialized_selection_member_missing":
+                    defect==4?"serialized_slot_type_or_read":"serialized_magic_type_or_value";
+                REQUIRE(std::strcmp(failure.predicate,expected)==0);
+                bool cursor_fact=false,missing_fact=false;
+                const char* missing=defect==1?"name_present":defect==2?"index_present":"magic_present";
+                for(const auto& fact:failure.facts) if(fact.key) {
+                    if(std::strcmp(fact.key,"cursor_state")==0) cursor_fact=fact.value==0;
+                    if(std::strcmp(fact.key,missing)==0) missing_fact=fact.value==0;
+                }
+                REQUIRE(cursor_fact && (defect>3 || missing_fact));
+            }
+            // Like 1414978e0, encode after the callback even when it failed.
+            encoded_profile(f,output);
+        });
+        publish(f,defect==0); // Refused structured output cannot reach the backend.
+    }
     active = nullptr;
-    std::puts("PASS production PROFILE reader/serializer and LocalMemory bounded acquisition (51 payload + 14 owner cases; synthetic host, not DOOM)");
+    std::puts("PASS production PROFILE reader/serializer and LocalMemory bounded acquisition (51 payload + 14 owner + 6 output document cases; synthetic host, not DOOM)");
 }
 void exercise_campaign_profile(Session& owner, const std::function<void(const std::function<void()>&)>& campaign) {
     Frame initial(owner), later(owner); active = &initial;
@@ -479,17 +603,26 @@ void exercise_campaign_profile(Session& owner, const std::function<void(const st
     frame(initial, initial.vanilla, initial.vanilla_index);
     REQUIRE(read_profile(owner, initial.memory, &initial.profile_ref, &initial.data_ref, initial.calls) == 0);
     REQUIRE(owner.accepts_requests() && initial.selected == "AUTOSAVE0");
+    later.selected = initial.selected;
+    put(later.shell, 0x1234c, initial.selected_index);
+    put(later.shell, 0x12350, NativeString{0, later.selected.data(), static_cast<int32_t>(later.selected.size()), 64, {}});
     active = &later;
     campaign([&] {
-        REQUIRE(owner.campaign_run.snapshot().map_active && owner.campaign_run.snapshot().save_ready);
+        REQUIRE(owner.native_io()); // PROFILE also saves before map-ready and during menu cleanup.
+        const auto session_before=owner.btrace.snapshot().stages[static_cast<size_t>(BStage::session)].sequence;
         prepare(later, [&] {
-            Json output(initial.selected, initial.selected_index); ProfileHolder holder{1, {}, &output.root};
-            output.members.at("musicVolume").payload = 99;
+            Json output; output.root = {}; later.native_output = &output;
+            ProfileHolder holder{1, {}, &output.root};
             REQUIRE(serialize_profile(owner, later.memory, manager, reinterpret_cast<uintptr_t>(later.state.data()), &holder, later.calls) == 0);
+            REQUIRE(holder.root==&output.members.at("idMasterLevelManager") && holder.root!=&output.root);
+            later.native_output = nullptr;
             REQUIRE(output.name() == "AUTOSAVE7" && output.index() == 2 && output.members.at("musicVolume").payload == 99);
             REQUIRE(std::strcmp(reinterpret_cast<const char*>(output.members.at("s_volume").payload), "0.02") == 0);
-            frame(later, output.name(), output.index());
+            REQUIRE(std::strcmp(reinterpret_cast<const char*>(output.preferences->members.at("equippedSkin").payload),"fixture-skin-7")==0);
+            REQUIRE(output.preferences->members.at("invertMouse").payload==1);
+            encoded_profile(later,output); // Encode the complete entry tree, never the final cursor.
         });
+        REQUIRE(owner.btrace.snapshot().stages[static_cast<size_t>(BStage::session)].sequence==session_before);
         const auto trace = owner.profile_trace().ownership;
         REQUIRE(trace.stable_owner && trace.initial.profile != trace.latest.profile && trace.initial.user == trace.latest.user);
         later.refresh_refs(); SaveFuture* future = nullptr; uintptr_t provider = 0;
@@ -507,6 +640,7 @@ void exercise_campaign_profile(Session& owner, const std::function<void(const st
         SaveResult result{}; future->vtable->poll(future, &result, nullptr); REQUIRE(result.state == -1);
         future->vtable->poll(future, &result, nullptr); REQUIRE(!result.state && !result.outcome && result.value == 1);
         future->vtable->destroy(future, 1);
+        REQUIRE(later.data_control.strong==1 && later.data_control.weak==1);
         REQUIRE(owner.native_io());
     });
     active = nullptr;

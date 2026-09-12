@@ -204,35 +204,49 @@ bool read_native_catalog(Session& owner, engine::Memory& memory, std::string_vie
 }
 bool Session::persist_profile_write(const ProfileWrite& write, engine::Memory& memory) {
     std::lock_guard<std::mutex> guard(selection_mutex_);
+    btrace.record(BStage::profile_publish,BStatus::entered,"selection_persistence_enter",write.sequence,
+        {{"campaign",write.campaign},{"index",write.choice.index}});
+    const auto refuse=[&](const char* why,std::initializer_list<BFact> facts=std::initializer_list<BFact>{}) {
+        btrace.record(BStage::profile_publish,BStatus::refused,why,write.sequence,facts); return false;
+    };
     try {
         uintptr_t remote = 0;
-        if (!native_provider(remote)) return false;
-        if (write.sequence <= persisted_selection_[write.campaign]) return true;
+        if (!native_provider(remote)) return refuse("selection_provider_unavailable");
+        if (write.sequence <= persisted_selection_[write.campaign]) {
+            btrace.record(BStage::profile_publish,BStatus::succeeded,"selection_older_completion_ignored",write.sequence,
+                {{"persisted_sequence",persisted_selection_[write.campaign]}}); return true;
+        }
         NativeCatalogSource catalog;
-        if (!inspect_remote(*this, memory, remote, catalog, false)) return false;
+        if (!inspect_remote(*this, memory, remote, catalog, false)) return refuse("selection_owned_remote_catalog_invalid");
         const auto& inventory = catalog[write.campaign]; std::string selected;
-        if (!slot_name(write.choice.name.data(), selected)) return false;
+        if (!slot_name(write.choice.name.data(), selected)) return refuse("selection_record_slot_shape");
         const bool prospective = inventory.slots.empty() && selected == "AUTOSAVE0";
         if (!prospective && std::none_of(inventory.slots.begin(), inventory.slots.end(),
-                [&](const auto& slot) { return steam_name_equal(slot, selected); })) return false;
+                [&](const auto& slot) { return steam_name_equal(slot, selected); })) return refuse("selection_slot_absent_from_remote",{{"remote_slots",inventory.slots.size()}});
         if (inventory.selected != selected) {
             uintptr_t table = 0; FileWrite put = nullptr; FileRead read = nullptr; FileSize size = nullptr;
             if (!at(memory, remote, 0, table) || !at(memory, table, 0, put) || !put ||
-                !at(memory, table, 8, read) || !read || !at(memory, table, 0x78, size) || !size) return false;
+                !at(memory, table, 8, read) || !read || !at(memory, table, 0x78, size) || !size) return refuse("selection_remote_callbacks_unreadable");
             std::string campaign(native_campaign_prefix(write.campaign));
             const auto key = native_root() + "/sentinel-selection-" + campaign.substr(0, campaign.size() - 1) + ".txt";
             const auto record = "sentinel-native-selection-v1\nnamespace_id=" + namespace_id() +
                 "\ncampaign=" + campaign + "\nname=" + selected + "\n";
             std::string check(record.size(), '\0');
-            if (!collecting(remote, native_root()) || !put(remote, key.c_str(), record.data(), static_cast<int32_t>(record.size())) ||
-                size(remote, key.c_str()) != static_cast<int32_t>(record.size()) ||
-                read(remote, key.c_str(), check.data(), static_cast<int32_t>(check.size())) != static_cast<int32_t>(check.size()) || check != record) return false;
+            if (!collecting(remote, native_root())) return refuse("selection_namespace_ownership_changed");
+            if (!put(remote,key.c_str(),record.data(),static_cast<int32_t>(record.size()))) return refuse("selection_record_write_failed",{{"expected_size",record.size()}});
+            const auto actual_size=size(remote,key.c_str());
+            if(actual_size!=static_cast<int32_t>(record.size())) return refuse("selection_record_size_mismatch",{{"actual_size",actual_size},{"expected_size",record.size()}});
+            const auto actual_read=read(remote,key.c_str(),check.data(),static_cast<int32_t>(check.size()));
+            if(actual_read!=static_cast<int32_t>(check.size()) || check!=record) return refuse("selection_record_readback_mismatch",
+                {{"actual_read",actual_read},{"expected_size",check.size()},{"bytes_equal",check==record}});
         }
         persisted_selection_[write.campaign] = write.sequence;
+        btrace.record(BStage::profile_publish,BStatus::succeeded,"selection_record_verified",write.sequence,
+            {{"campaign",write.campaign},{"index",write.choice.index},{"remote_slots",inventory.slots.size()},{"prospective",prospective}});
         // This is only the AP selection record for a completed PROFILE write.
         // It is not a gameplay-save, cloud-quiescence or matching-reopen receipt.
         return true;
-    } catch (const std::bad_alloc&) { return false; }
+    } catch (const std::bad_alloc&) { return refuse("selection_persistence_allocation_failed"); }
 }
 bool bind_root_provider(Session& owner, engine::Memory& memory, const ProviderCalls& calls) {
     uintptr_t root = 0, manager = 0;

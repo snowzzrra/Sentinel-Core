@@ -32,6 +32,12 @@ void Session::profile_step(ProfileStage stage, ProfileStatus status, const char*
     step.changed_ms = now; step.status = status; step.predicate = predicate;
     step.native_attempted = attempted; step.native_state = state; step.native_outcome = outcome; step.native_value = value;
     step.read = read;
+    btrace.record(stage==ProfileStage::output_validation || stage==ProfileStage::write_after_refusal ? BStage::profile_output : BStage::profile_read,
+        status==ProfileStatus::refused ? BStatus::refused : status==ProfileStatus::succeeded ? BStatus::succeeded :
+            status==ProfileStatus::pending ? BStatus::pending : BStatus::entered, predicate, 0,
+        {{"profile_stage",stage},{"native_attempted",attempted},{"native_state",state},{"native_outcome",outcome},
+         {"native_value",value},{"read_reason",read.reason},{"read_error",read.error},{"read_requested",read.requested},
+         {"read_offset",read.offset},{"read_size",read.size}});
     if (status == ProfileStatus::refused) {
         if (profile_trace_.failed_stage == ProfileStage::count) {
             profile_trace_.failed_stage = stage; profile_trace_.failure = step;
@@ -83,6 +89,10 @@ storage::Result Session::configure(const storage::Descriptor& descriptor,
 }
 void Session::reject(SessionFault why) {
     std::lock_guard<std::mutex> guard(mutex_);
+    btrace.record(BStage::session,BStatus::refused,"session_refused",0,
+        {{"previous_state",state_.load()},{"first_fault",fault_.load()},{"requested_fault",why},
+         {"routed",routed()},{"accepting",requests_.load()},{"startup_entered",entered_},{"qualified",qualified_},
+         {"root_finished",root_finished_},{"profile_finished",profile_finished_},{"routes",routes_}});
     attempted_ = true;
     if (fault_ == SessionFault::none) fault_ = why;
     requests_ = false;
@@ -97,27 +107,53 @@ bool Session::startup_enter(uintptr_t root, uintptr_t caller, uint32_t thread) {
     installation.startup(1);
     std::lock_guard<std::mutex> guard(mutex_);
     if (state_ == SessionState::disabled) return false;
+    const auto previous=state_.load(); const bool entered_before=entered_;
+    const auto trace=[&](BStatus status,const char* predicate,SessionFault requested) {
+        btrace.record(BStage::session,status,predicate,0,
+            {{"previous_state",previous},{"first_fault",fault_.load()},{"requested_fault",requested},
+             {"startup_entered",entered_before},{"qualified",qualified_},{"root_available",root_!=0},{"caller_available",caller_!=0},
+             {"root_equal",root==root_},{"caller_equal",caller==caller_},{"thread_present",thread!=0},
+             {"thread_equal",thread==GetCurrentThreadId()},{"routes",routes_},{"required_routes",required_routes},
+             {"routes_equal",routes_==required_routes},{"caller_rva",native_route_rva}});
+    };
+    trace(BStatus::entered,"startup_context_enter",SessionFault::none);
     SessionFault why = SessionFault::none;
+    const char* predicate="startup_context_qualified";
     if (!entered_ && state_ == SessionState::prepared && root_ && caller_ &&
         root == root_ && caller == caller_ && thread) qualified_ = true;
-    if (entered_ || state_ != SessionState::prepared) why = SessionFault::repeated_startup;
-    else if (!root_ || !caller_ || root != root_ || caller != caller_ || !thread)
+    if (entered_ || state_ != SessionState::prepared) {
+        why = SessionFault::repeated_startup;
+        predicate=entered_?"startup_already_entered":"startup_state_not_prepared";
+    } else if (!root_ || !caller_ || root != root_ || caller != caller_ || !thread) {
         why = SessionFault::startup_context;
-    else if (routes_ != required_routes) why = SessionFault::incomplete_routes;
+        predicate=!root_?"startup_expected_root_missing":!caller_?"startup_expected_caller_missing":
+            root!=root_?"startup_root_mismatch":caller!=caller_?"startup_caller_mismatch":"startup_thread_missing";
+    } else if (routes_ != required_routes) {
+        why = SessionFault::incomplete_routes; predicate="startup_routes_incomplete";
+    }
     entered_ = true;
     if (why != SessionFault::none) {
+        trace(BStatus::refused,predicate,why);
         if (fault_ == SessionFault::none) fault_ = why;
         state_ = routed() ? SessionState::faulted : SessionState::rejected;
         requests_ = false; return false;
     }
     startup_thread_ = thread;
     state_.store(SessionState::starting, std::memory_order_release);
+    trace(BStatus::succeeded,predicate,SessionFault::none);
     return true;
 }
 void Session::startup_leave(bool abnormal) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    btrace.record(BStage::session,abnormal?BStatus::refused:BStatus::succeeded,
+        abnormal?"startup_root_return_abnormal":"startup_root_return_normal",0,
+        {{"previous_state",state_.load()},{"first_fault",fault_.load()},
+         {"requested_fault",abnormal?SessionFault::provider_identity:SessionFault::none},{"abnormal",abnormal},
+         {"startup_entered",entered_},{"qualified",qualified_},{"thread_equal",startup_thread_==GetCurrentThreadId()},
+         {"routes",routes_},{"required_routes",required_routes},{"root_finished",root_finished_},
+         {"profile_finished",profile_finished_},{"routed",routed()},{"requests_stopped",requests_stopped_},{"caller_rva",native_route_rva}});
     profile_step(ProfileStage::root, abnormal ? ProfileStatus::refused : ProfileStatus::succeeded,
         abnormal ? "abnormal_root_return" : "qualified_root_return");
-    std::lock_guard<std::mutex> guard(mutex_);
     if (abnormal) {
         if (fault_ == SessionFault::none) fault_ = SessionFault::provider_identity;
         state_ = routed() ? SessionState::faulted : SessionState::rejected;
@@ -149,11 +185,35 @@ bool Session::pre_root_profile_query(uintptr_t expected_caller, uintptr_t identi
         0, 0, identity, native_route_caller, true, native_route_rva};
     return true;
 }
-void Session::unrouted_import(const char* route, const char* operation, uintptr_t provider, uintptr_t identity) {
+void Session::unrouted_import(const char* route, const char* operation, uintptr_t provider, uintptr_t identity,
+        const UnroutedSource& source) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (state_ == SessionState::prepared || state_ == SessionState::starting) {
-        if (!unrouted_.at_ms || unrouted_.delegated_account_query) unrouted_ = {GetTickCount64(), route, operation, state(), entered_, qualified_,
-            native_manager_, provider ? provider : provider_object_, identity ? identity : platform_identity_, native_route_caller, false, native_route_rva};
+        btrace.record(BStage::session,BStatus::refused,
+            state_==SessionState::prepared?"unrouted_import_before_root_observation":"unrouted_import_before_provider_binding",0,
+            {{"previous_state",state_.load()},{"first_fault",fault_.load()},{"requested_fault",SessionFault::missed_startup},
+             {"startup_entered",entered_},{"qualified",qualified_},{"root_available",root_!=0},{"caller_available",caller_!=0},
+             {"thread_equal",startup_thread_==GetCurrentThreadId()},{"routes",routes_},{"required_routes",required_routes},
+             {"routes_equal",routes_==required_routes},{"manager_available",native_manager_!=0},
+             {"provider_available",provider!=0 || provider_object_!=0},{"native_user_available",identity!=0 || platform_identity_!=0},
+             {"caller_rva",native_route_rva},{"source_kind",source.kind}});
+        if (!unrouted_.at_ms || unrouted_.delegated_account_query) {
+            unrouted_ = {GetTickCount64(), route, operation, state(), entered_, qualified_,
+                native_manager_, provider ? provider : provider_object_, identity ? identity : platform_identity_, native_route_caller, false, native_route_rva};
+            unrouted_.source = source;
+            // Retain only supported-image RVAs, never foreign-module addresses.
+            // The immediate caller is independent evidence when unwinding is incomplete.
+            if (native_route_rva && native_route_caller >= native_route_rva) {
+                const uintptr_t image = native_route_caller - native_route_rva;
+                void* frames[32]{};
+                const auto count = RtlCaptureStackBackTrace(1, 32, frames, nullptr);
+                for (USHORT i = 0; i < count && unrouted_.stack_count < unrouted_.stack_rvas.size(); ++i) {
+                    const auto address = reinterpret_cast<uintptr_t>(frames[i]);
+                    if (address >= image && address - image < 0x7431000)
+                        unrouted_.stack_rvas[unrouted_.stack_count++] = static_cast<uint32_t>(address-image);
+                }
+            }
+        }
         installation.startup(2);
         if (fault_ == SessionFault::none) fault_ = SessionFault::missed_startup;
         state_ = SessionState::rejected; requests_ = false;
@@ -173,6 +233,13 @@ bool Session::bind_provider(std::string_view root, uintptr_t provider, std::stri
     std::lock_guard<std::mutex> guard(mutex_);
     if (state_ != SessionState::starting || GetCurrentThreadId() != startup_thread_ || !provider ||
         root != native_root_ || ownership != ownership_) {
+        const char* predicate=state_!=SessionState::starting?"provider_binding_state_invalid":
+            GetCurrentThreadId()!=startup_thread_?"provider_binding_thread_mismatch":!provider?"provider_binding_object_missing":
+            root!=native_root_?"provider_binding_root_mismatch":"provider_binding_ownership_mismatch";
+        btrace.record(BStage::session,BStatus::refused,predicate,0,
+            {{"previous_state",state_.load()},{"first_fault",fault_.load()},{"requested_fault",SessionFault::provider_identity},
+             {"thread_equal",GetCurrentThreadId()==startup_thread_},{"provider_available",provider!=0},
+             {"root_equal",root==native_root_},{"ownership_equal",ownership==ownership_},{"caller_rva",native_route_rva}});
         if (fault_ == SessionFault::none) fault_ = SessionFault::provider_identity;
         state_ = routed() ? SessionState::faulted : SessionState::rejected;
         requests_ = false; return false;
@@ -247,6 +314,16 @@ void Session::provider_reset(uintptr_t manager) {
 void Session::stop_requests() {
     installation.startup(3);
     std::lock_guard<std::mutex> guard(mutex_);
+    const auto previous=state_.load();
+    const bool missed=previous==SessionState::prepared || previous==SessionState::starting;
+    btrace.record(BStage::session,missed?BStatus::refused:BStatus::succeeded,
+        missed?(entered_?"requests_stopped_during_startup":"requests_stopped_before_startup"):"session_requests_stopped",0,
+        {{"previous_state",previous},{"first_fault",fault_.load()},
+         {"requested_fault",missed?SessionFault::missed_startup:SessionFault::none},
+         {"startup_entered",entered_},{"qualified",qualified_},{"routed",routed()},
+         {"thread_equal",startup_thread_==GetCurrentThreadId()},{"root_finished",root_finished_},
+         {"profile_finished",profile_finished_},{"requests_stopped",requests_stopped_},
+         {"routes",routes_},{"required_routes",required_routes},{"caller_rva",native_route_rva}});
     requests_stopped_ = true; requests_ = false;
     if (state_ == SessionState::prepared || state_ == SessionState::starting) {
         if (fault_ == SessionFault::none) fault_ = SessionFault::missed_startup;
@@ -288,10 +365,18 @@ bool Session::profile_choice(ProfileChoice& out) const {
 }
 bool Session::observe_profile_choice(std::string_view name, int32_t index) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (!choice_ready_ || profile_failed_ || index < 0 || !slot_name(name)) return false;
-    const bool listed = static_cast<size_t>(index) < profile_catalog_.size() && steam_name_equal(profile_catalog_[index], name);
+    const bool shape=slot_name(name);
+    const bool listed = index>=0 && static_cast<size_t>(index) < profile_catalog_.size() && steam_name_equal(profile_catalog_[index], name);
     const bool prospective = prospective_choice_ && index == profile_choice_.index && steam_name_equal(profile_choice_.name.data(), name);
-    if (!listed && !prospective) return false;
+    const bool valid=choice_ready_ && !profile_failed_ && index>=0 && shape && (listed || prospective);
+    const char* why=!choice_ready_ ? "choice_not_ready" : profile_failed_ ? "choice_after_profile_refusal" :
+        index<0 ? "choice_negative_index" : !shape ? "choice_name_not_slot" : !listed && !prospective ?
+        "choice_pair_not_catalog_or_prospective" : "choice_observed";
+    btrace.record(BStage::profile_choice,valid?BStatus::succeeded:BStatus::refused,why,0,
+        {{"actual_index",index},{"expected_index",profile_choice_.index},{"catalog_count",profile_catalog_.size()},
+         {"name_length",name.size()},{"slot_shape",shape},{"name_matches",steam_name_equal(name,profile_choice_.name.data())},
+         {"listed",listed},{"prospective",prospective},{"prospective_allowed",prospective_choice_},{"campaign",profile_campaign_}});
+    if (!valid) return false;
     profile_choice_ = {}; std::memcpy(profile_choice_.name.data(), name.data(), name.size());
     profile_choice_.index = index; prospective_choice_ = prospective;
     return true;
@@ -300,20 +385,30 @@ bool Session::capture_profile_write(std::string_view name, int32_t index, unsign
     std::lock_guard<std::mutex> guard(mutex_);
     // observe_profile_choice already validated the serialized pair; require the
     // same observation and campaign here, before anything asynchronous escapes.
-    if (!native_io() || profile_failed_ || !choice_ready_ || campaign != profile_campaign_ ||
-        index != profile_choice_.index || !steam_name_equal(name, profile_choice_.name.data()) ||
-        profile_sequence_ == UINT64_MAX) return false;
+    const bool name_matches=steam_name_equal(name,profile_choice_.name.data());
+    const bool valid=native_io() && !profile_failed_ && choice_ready_ && campaign==profile_campaign_ &&
+        index==profile_choice_.index && name_matches && profile_sequence_!=UINT64_MAX;
+    btrace.record(BStage::profile_capture,valid?BStatus::succeeded:BStatus::refused,"profile_choice_capture",profile_sequence_,
+        {{"native_io",native_io()},{"profile_failed",profile_failed_},{"choice_ready",choice_ready_},
+         {"campaign",campaign},{"expected_campaign",profile_campaign_},{"index",index},{"expected_index",profile_choice_.index},
+         {"name_matches",name_matches},{"sequence_exhausted",profile_sequence_==UINT64_MAX}});
+    if (!valid) return false;
     out = {profile_choice_, campaign, ++profile_sequence_}; return true;
 }
 bool Session::remember_profile_write(uintptr_t data, const ProfileWrite& write) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (!native_io() || profile_failed_ || !data || !write.sequence || profile_writes_.size() >= 64) return false;
-    return profile_writes_.emplace(data, write).second;
+    const bool valid=native_io() && !profile_failed_ && data && write.sequence && profile_writes_.size()<64;
+    const bool stored=valid && profile_writes_.emplace(data,write).second;
+    btrace.record(BStage::profile_prepare,stored?BStatus::succeeded:BStatus::refused,"profile_source_registration",write.sequence,
+        {{"native_io",native_io()},{"profile_failed",profile_failed_},{"data_present",data!=0},
+         {"pending_sources",profile_writes_.size()},{"valid_sequence",write.sequence!=0},{"duplicate",valid && !stored}},data);
+    return stored;
 }
 bool Session::take_profile_write(uintptr_t data, ProfileWrite& out) {
     std::lock_guard<std::mutex> guard(mutex_);
     const auto found = profile_writes_.find(data);
     if (found == profile_writes_.end()) return false;
+    btrace.record(BStage::profile_prepare,BStatus::succeeded,"profile_source_transferred",found->second.sequence,{},data);
     out = found->second; profile_writes_.erase(found); return true;
 }
 void Session::forget_save_data(uintptr_t data) {
@@ -341,6 +436,10 @@ bool Session::profile_baseline(const ProfileOwner& owner, const char*& name, int
     // Session is configured once; provider/user reset or faults close native_io.
     const bool valid = native_io() && baseline_ready_ && !profile_failed_ && owner.profile && owner.shell &&
         owner.manager == profile_owner_.manager && owner.user == profile_owner_.user;
+    btrace.record(BStage::profile_capture,valid?BStatus::succeeded:BStatus::refused,"profile_semantic_baseline",0,
+        {{"native_io",native_io()},{"baseline_ready",baseline_ready_},{"profile_failed",profile_failed_},
+         {"profile_present",owner.profile!=0},{"shell_present",owner.shell!=0},{"manager_matches",owner.manager==profile_owner_.manager},
+         {"user_matches",owner.user==profile_owner_.user},{"baseline_index",vanilla_index_}},owner.profile);
     {
         std::lock_guard<std::mutex> trace_guard(profile_trace_mutex_);
         profile_trace_.ownership = {profile_owner_, owner, native_manager_, provider_control_, provider_object_, platform_identity_,
