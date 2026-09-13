@@ -589,6 +589,10 @@ void test_events(const engine::Binding& source, uint64_t (*change)(uintptr_t,uin
 uint64_t test_change(uintptr_t root, uintptr_t descriptor, uintptr_t files) { return change_detour(root,descriptor,files); }
 void test_free(uintptr_t root,void (*free)(uintptr_t,uintptr_t)) { original_free=free; free_detour(root,root+0x50); }
 void test_generation_gap() { ++lifetime.generation; }
+void test_dispatch_adapter(const TestAdapter& adapter, const sc_native_scope& scope) {
+    fixture=adapter; fixture_active=true; status.scope=scope;
+}
+void test_post_frame() { post_frame(); }
 void test_start(const TestAdapter& adapter, const Snapshot& identity, HANDLE stop_event) {
     fixture = adapter; fixture_active = true;
     engine::LocalMemory memory; engine::Binding source;

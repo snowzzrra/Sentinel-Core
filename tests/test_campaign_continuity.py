@@ -14,6 +14,19 @@ EXE = Path(__file__).resolve().parents[1] / 'build/bin/sentinel_campaign_tests.e
 
 @unittest.skipUnless(os.name == 'nt', 'Windows native contracts')
 class CampaignContinuity(unittest.TestCase):
+    def test_cross_map_save_and_wup_share_the_admitted_session(self):
+        # Stable native ownership regression: the second map must not re-enter
+        # NewGame/Continue admission. The fixture exercises the real dispatch,
+        # lifecycle, PROFILE, writer, SDK and readback adapters in one Session.
+        with tempfile.TemporaryDirectory(prefix='sentinel-cross-map-') as root:
+            created = self.stage('create', root, 3, 'cross_map')
+            self.assertIn('map=game/hub/hub generation=3 checkpoint=3 WUP=6', created)
+            self.assertIn('map=game/sp/e1m2_battle/e1m2_battle generation=4 checkpoint=5 WUP=9', created)
+            resumed = self.stage('resume', root, 3, 'cross_map')
+            self.assertIn('map=game/sp/e1m3_cult/e1m3_cult generation=3 checkpoint=8 WUP=6', resumed)
+        with tempfile.TemporaryDirectory(prefix='sentinel-cross-map-gap-') as root:
+            self.assertIn('unobserved generation gap refused', self.stage('create', root, 3, 'cross_map_gap'))
+
     def test_startup_refusal_keeps_downstream_parser_closed(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-startup-parser-') as root:
             self.stage('create', root, 3, 'startup_parser')

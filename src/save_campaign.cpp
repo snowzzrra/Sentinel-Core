@@ -465,14 +465,28 @@ bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id) 
     if (!initiated_) return reject("lifecycle_before_campaign_request");
     if (map_pending_) return reject("lifecycle_previous_transition_pending");
     if (map.empty() || map.size()>191) return reject("lifecycle_map_name_length");
-    if (!state_.resumed && state_.phase!="native_start_queued") return reject("lifecycle_create_phase_mismatch");
-    if (state_.resumed) {
+    // Create/Continue constrain the first gameplay entry in this process.
+    // Later native travel belongs to the completed active generation, not to
+    // the original NewGame phase or the original Continue map/parser payload.
+    const bool continuing=state_.map_active;
+    if (continuing) {
+        if (generation!=state_.generation_after) return reject("lifecycle_continuation_generation_mismatch",
+            {{"generation",generation},{"expected_generation",state_.generation_after}});
+        if (state_.phase=="native_save_pending") return reject("lifecycle_continuation_save_pending");
+    } else if (!state_.resumed && state_.phase!="native_start_queued") return reject("lifecycle_create_phase_mismatch");
+    if (!continuing && state_.resumed) {
         if (!state_.parser_completed) return reject("lifecycle_resume_parser_incomplete");
         if (state_.loaded_difficulty!=options_.difficulty) return reject("lifecycle_resume_difficulty_mismatch");
         if (map!=state_.map) return reject("lifecycle_resume_map_mismatch");
     }
     if (map.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.")!=std::string::npos)
         return reject("unsupported_native_map_name");
+    if (continuing) {
+        // The durable outgoing checkpoint remains valid on disk. Its receipt
+        // cannot certify the destination's balance/payload before its own save.
+        state_.native_saved=false; state_.readback_verified=false; state_.continuity_persisted=false;
+        state_.native_factory_matched=false;
+    }
     state_.map=std::move(map); state_.generation_before=generation; map_pending_=true;
     state_.transition.event_id=event_id; state_.transition.generation_before=generation;
     state_.transition.generation_after=generation+1; state_.map_active=false; state_.save_ready=false;

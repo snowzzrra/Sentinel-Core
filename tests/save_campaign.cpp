@@ -124,6 +124,11 @@ uint64_t native_load(uintptr_t self,uintptr_t descriptor,uintptr_t files) {
         *reinterpret_cast<uint32_t*>(self+0x44)=SC_GAME_MAIN_MENU; return 1;
     }
     if (transition_defect==L"abnormal") RaiseException(0xe0420042,0,0,nullptr);
+    if (transition_defect==L"travel") {
+        native::test_free(self,[](uintptr_t,uintptr_t) {});
+        const auto map=*reinterpret_cast<uintptr_t*>(self+0x50);
+        std::memcpy(reinterpret_cast<void*>(map+0x9a060),reinterpret_cast<void*>(descriptor+0x10),sizeof(NativeString));
+    }
     if (transition_defect==L"nested" && !nested_change) {
         nested_change=true;
         native::test_free(self,[](uintptr_t,uintptr_t) {});
@@ -214,6 +219,7 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
 }
 #include "campaign_navigation_fixture.h"
 #include "campaign_writer_fixture.h"
+#include "campaign_travel_fixture.h"
 }
 #include "startup_route_fixture.h"
 int wmain(int argc,wchar_t** argv) {
@@ -333,6 +339,20 @@ int wmain(int argc,wchar_t** argv) {
         profile_write(); ++profile_writes;
         CHECK(owner.native_io() && owner.accepts_requests() && !owner.btrace.snapshot().first_failure.sequence);
     };
+    if (defect.rfind(L"cross_map",0)==0) {
+        if (resume) {
+            CHECK(owner.campaign_run.begin_resume());
+            CHECK(owner.campaign_run.allow_access(source,directory,false,false));
+            CHECK(owner.campaign_run.verify_source(memory,source,image));
+            CHECK(owner.campaign_run.parser_enter(source)); owner.campaign_run.parser_leave(0);
+            CHECK(owner.campaign_run.allow_difficulty(difficulty));
+        } else navigation_fixture::create(difficulty,L"");
+        return travel_fixture::run(difficulty,defect,[&] {
+            write_profile();
+            writer_fixture::Model next{remote,source,files,payload,directory};
+            writer_fixture::save(next,L"queued_checkpoint");
+        });
+    }
     if (resume) {
         CHECK(owner.campaign_run.snapshot().source_checkpoint==(profile_lifecycle?2u:1u));
         if (native_read) {
