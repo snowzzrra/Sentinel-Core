@@ -65,6 +65,9 @@ bool backup_options(const sc_save_backup_request& b) {
     }
     return true;
 }
+bool same_points(const Diagnostics::Slot& s, const sc_weapon_points_request* p) {
+    return s.is_weapon_points == (p != nullptr) && (!p || weapon_points::same(s.weapon_points_request, *p));
+}
 }
 void Diagnostics::queue_detail(Slot& s) {
     s.detail.revision = SC_DIAGNOSTIC_DETAIL_REVISION;
@@ -98,17 +101,19 @@ void Diagnostics::collect(uint64_t now) {
     }
 }
 sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_t reject, uint64_t now,
-        sc_diagnostic_detail* detail, const sc_save_backup_request* backup) {
+        sc_diagnostic_detail* detail, const sc_save_backup_request* backup, const sc_weapon_points_request* points) {
     if (detail) { *detail = {}; detail->revision = SC_DIAGNOSTIC_DETAIL_REVISION; detail->stage = SC_STAGE_ADMISSION; }
     collect(now);
     auto out = initial(r);
     for (auto& s : slots_) if (s.state.load(std::memory_order_acquire) != SC_DIAGNOSTIC_UNKNOWN && key(s.request, r)) {
-        if (!same_scope(s.request.expected, r.expected) || s.request.deadline_ms != r.deadline_ms || !same_backup(s, backup)) {
+        if (!same_scope(s.request.expected, r.expected) || s.request.deadline_ms != r.deadline_ms ||
+            !same_backup(s, backup) || !same_points(s, points)) {
             out.state = SC_DIAGNOSTIC_REJECTED; out.reason = SC_NATIVE_DUPLICATE_MISMATCH; return out;
         }
-        return retrieve(r, false, now, detail, backup);
+        return retrieve(r, false, now, detail, backup, points);
     }
     if (!reject && backup && !backup_options(*backup)) reject = SC_NATIVE_SCOPE_MISMATCH;
+    if (!reject && points && (backup || !weapon_points::valid(*points))) reject = SC_NATIVE_SCOPE_MISMATCH;
     if (!reject && (r.deadline_ms == 0 || r.deadline_ms > SC_DIAGNOSTIC_MAX_DEADLINE_MS)) reject = SC_NATIVE_DEADLINE;
     if (reject) { out.state = SC_DIAGNOSTIC_REJECTED; out.reason = reject; return out; }
     for (auto& s : slots_) if (s.state.load(std::memory_order_acquire) == SC_DIAGNOSTIC_UNKNOWN) {
@@ -119,6 +124,9 @@ sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_
             out.state = SC_DIAGNOSTIC_REJECTED; out.reason = SC_NATIVE_BINDING_FAILED; return out;
         }
         s.is_backup = backup != nullptr; s.backup_request = backup ? *backup : sc_save_backup_request{};
+        s.is_weapon_points = points != nullptr;
+        s.weapon_points_request = points ? *points : sc_weapon_points_request{};
+        s.weapon_points_result = points ? weapon_points::initial(*points) : sc_weapon_points_result{};
         s.backup = std::move(job); s.submission = {};
         s.awaiting_backup.store(false, std::memory_order_relaxed);
         s.request = r; s.cancel.store(false, std::memory_order_relaxed);
@@ -131,13 +139,14 @@ sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_
     out.state = SC_DIAGNOSTIC_REJECTED; out.reason = SC_NATIVE_QUEUE_FULL; return out;
 }
 sc_diagnostic_result Diagnostics::retrieve(const sc_diagnostic_request& r, bool cancel, uint64_t now,
-        sc_diagnostic_detail* detail, const sc_save_backup_request* backup) {
+        sc_diagnostic_detail* detail, const sc_save_backup_request* backup, const sc_weapon_points_request* points) {
     if (detail) { *detail = {}; detail->revision = SC_DIAGNOSTIC_DETAIL_REVISION; }
     collect(now);
     for (auto& s : slots_) {
         auto state = s.state.load(std::memory_order_acquire);
         if (state == SC_DIAGNOSTIC_UNKNOWN || !key(s.request, r) || !same_scope(s.request.expected, r.expected) ||
-            !same_backup(s, backup) || (backup && s.request.deadline_ms != r.deadline_ms)) continue;
+            !same_backup(s, backup) || !same_points(s, points) ||
+            ((backup || points) && s.request.deadline_ms != r.deadline_ms)) continue;
         if (cancel && (state == SC_DIAGNOSTIC_QUEUED || state == SC_DIAGNOSTIC_CLAIMED)) {
             s.cancel.store(true, std::memory_order_release);
             if (s.backup) s.backup->cancel();
@@ -157,6 +166,22 @@ sc_diagnostic_result Diagnostics::retrieve(const sc_diagnostic_request& r, bool 
         out.retrieved = 1; out.retrieved_at_ms = now; return out;
     }
     auto out = initial(r); out.reason = SC_NATIVE_NOT_FOUND; out.retrieved = 1; out.retrieved_at_ms = now; return out;
+}
+sc_weapon_points_result Diagnostics::points_result(const sc_weapon_points_request& r, bool cancel, uint64_t now, bool release) {
+    auto out = weapon_points::initial(r);
+    const auto execution = retrieve(r.execution, cancel, now, nullptr, nullptr, &r);
+    if (execution.state >= SC_DIAGNOSTIC_EXECUTED) {
+        for (auto& s : slots_) {
+            // Native facts belong exclusively to the callback until terminal release.
+            if (s.state.load(std::memory_order_acquire) >= SC_DIAGNOSTIC_EXECUTED &&
+                same_points(s,&r) && key(s.request,r.execution) && same_scope(s.request.expected,r.execution.expected)) {
+                out = s.weapon_points_result;
+                if (release) s.state.store(SC_DIAGNOSTIC_UNKNOWN, std::memory_order_release);
+                break;
+            }
+        }
+    }
+    out.execution = execution; return out;
 }
 Diagnostics::Slot* Diagnostics::claim(uint64_t now) {
     collect(now);

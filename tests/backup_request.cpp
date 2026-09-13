@@ -93,7 +93,7 @@ void run_backup_request_contracts() {
         CHECK(decode_request(wire, encode_backup_request(wire, save_backup_submit_operation, bad)) == WireResult::malformed);
     }
     Snapshot host{}; host.pid = 7; host.process_created = 13; host.instance[0] = 1;
-    host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.6.0"); std::memset(host.core.build_id, 'a', 64);
+    host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.7.0"); std::memset(host.core.build_id, 'a', 64);
     WireResult code{}; Snapshot restored{}; sc_save_backup_snapshot value{};
     for (const auto& record : {before, pending, failed}) {
         const auto length = encode_backup_response(wire, WireResult::ok, save_backup_result_operation, host, record);

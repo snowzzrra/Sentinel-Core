@@ -159,7 +159,7 @@ void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int
 void write_codec() {
     static_assert(sizeof(sc_save_write_snapshot) == 160 && sizeof(sc_save_snapshot) == 368 && sizeof(sc_save_admission_snapshot) == 160);
     Snapshot original{}, decoded{}; original.core.abi_version = SC_ABI_VERSION;
-    strcpy_s(original.core.version, "0.6.0"); strcpy_s(original.core.build_id, "synthetic-write");
+    strcpy_s(original.core.version, "0.7.0"); strcpy_s(original.core.build_id, "synthetic-write");
     sc_save_write_snapshot value{}, received{}; value.size = sizeof(value); value.abi_version = SC_SAVE_WRITE_ABI_VERSION;
     Message data{}; WireResult code{};
     const auto check = [&](bool valid) {
@@ -223,7 +223,7 @@ void write_codec() {
 void admission_codec() {
     Snapshot original{}, decoded{};
     original.core.abi_version = SC_ABI_VERSION;
-    strcpy_s(original.core.version, "0.6.0"); strcpy_s(original.core.build_id, "synthetic-admission");
+    strcpy_s(original.core.version, "0.7.0"); strcpy_s(original.core.build_id, "synthetic-admission");
     sc_save_admission_snapshot value{}, received{};
     value.size = sizeof(value); value.abi_version = SC_SAVE_ADMISSION_ABI_VERSION; value.required_routes = 63;
     Message data{}; WireResult code{};
@@ -378,7 +378,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(initial.snapshot.core.abi_version == SC_ABI_VERSION && initial.snapshot.core.capabilities == 3);
     CHECK(initial.snapshot.core.state == SC_READY && initial.snapshot.service == ServiceState::listening);
     CHECK(initial.snapshot.core.initialization_count == 1 && std::strlen(initial.snapshot.core.build_id) == 64);
-    CHECK(std::strcmp(initial.snapshot.core.version, "0.6.0") == 0);
+    CHECK(std::strcmp(initial.snapshot.core.version, "0.7.0") == 0);
     uint64_t created = 0; CHECK(process_time(first.child.process.value, created));
     CHECK(initial.snapshot.process_created == created);
     const auto other = query(second.child.pid, 2000);
@@ -444,7 +444,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(context.context.fields[SC_CONTEXT_LOAD_SERIAL].reason == SC_CONTEXT_UNSUPPORTED);
     const auto context_json = probe(probe_path, args + L" --context --json", 0);
     CHECK(context_json.find("\"operation\":\"context\"") != std::string::npos);
-    CHECK(context_json.find("\"core_version\":\"0.6.0\"") != std::string::npos);
+    CHECK(context_json.find("\"core_version\":\"0.7.0\"") != std::string::npos);
     CHECK(context_json.find("\"current_map\":{\"validity\":\"unknown\",\"reason\":\"profile_unrecognized\",\"value\":null") != std::string::npos);
     CHECK(probe(probe_path, args + L" --context", 0).find("not a load serial") != std::string::npos);
     const auto context_watch = probe(probe_path, args + L" --context --watch-count 2 --interval-ms 100 --json", 0);

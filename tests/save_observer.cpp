@@ -133,7 +133,7 @@ int main() {
     CHECK(save::freshness(s, 1100).fields[SC_SAVE_PROVIDER].validity == SC_OBSERVATION_OBSERVED);
 
     Snapshot host{}; host.pid = 42; host.process_created = 123; host.instance[0] = 9;
-    host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.6.0"); strcpy_s(host.core.build_id, "fixture");
+    host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.7.0"); strcpy_s(host.core.build_id, "fixture");
     Message wire{}; Snapshot decoded{}; sc_save_snapshot output{}; WireResult result{};
     auto size = encode_save_response(wire, WireResult::ok, host, s);
     CHECK(size < max_message && decode_save_response(wire, size, result, decoded, output));

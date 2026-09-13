@@ -478,7 +478,7 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
             CHECK(record.state == SC_BACKUP_COMPLETE && record.operation_id == owner->native_writes.snapshot().operation_id);
             CHECK(record.files == 1 && record.bytes == m.bytes.size() && record.basename[0]);
             Snapshot host{}; host.pid = request.execution.expected.pid; host.process_created = 123456; host.instance[0] = 1;
-            host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.6.0"); std::memset(host.core.build_id, 'a', 64);
+            host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.7.0"); std::memset(host.core.build_id, 'a', 64);
             Message wire{}; WireResult code{}; Snapshot decoded_host{}; sc_save_backup_snapshot decoded{};
             const auto length = encode_backup_response(wire, WireResult::ok, save_backup_result_operation, host, record);
             CHECK(length && decode_backup_response(wire, length, code, save_backup_result_operation, decoded_host, decoded));

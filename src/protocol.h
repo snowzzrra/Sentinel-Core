@@ -8,7 +8,11 @@ size_t encode_request(Message& out, uint64_t required, uint16_t version = wire_v
                       uint16_t operation = inspect_operation);
 WireResult decode_request(const Message& in, size_t size, uint16_t* operation = nullptr,
                           sc_diagnostic_request* diagnostic = nullptr, uint64_t* after_event = nullptr,
-                          uint64_t* write_id = nullptr, sc_save_backup_request* backup = nullptr);
+                          uint64_t* write_id = nullptr, sc_save_backup_request* backup = nullptr,
+                          sc_weapon_points_request* points = nullptr);
+size_t encode_weapon_points_request(Message&, uint16_t, const sc_weapon_points_request&);
+size_t encode_weapon_points_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_weapon_points_result&);
+bool decode_weapon_points_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_weapon_points_result&);
 size_t encode_backup_request(Message&, uint16_t operation, const sc_save_backup_request&);
 size_t encode_backup_response(Message&, WireResult, uint16_t operation, const Snapshot&, const sc_save_backup_snapshot&);
 bool decode_backup_response(const Message&, size_t, WireResult&, uint16_t operation, Snapshot&, sc_save_backup_snapshot&);

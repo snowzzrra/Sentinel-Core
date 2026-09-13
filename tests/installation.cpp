@@ -84,7 +84,7 @@ void contract() {
  CHECK(startup.inspect().startup_observation==2 && startup.inspect().primary_failure.stage==SC_INSTALL_STARTUP);
  save::Session owner; CHECK(owner.state()==save::SessionState::disabled && !owner.native_io());
  owner.install(1,2,save::required_routes); CHECK(!owner.native_io()); // Record/readiness never admits.
- Snapshot identity{}; identity.core.abi_version=1; strcpy_s(identity.core.version,"0.6.0"); strcpy_s(identity.core.build_id,"fixture");
+ Snapshot identity{}; identity.core.abi_version=1; strcpy_s(identity.core.version,"0.7.0"); strcpy_s(identity.core.build_id,"fixture");
  identity.pid=123; identity.process_created=456; identity.instance[0]=1;
  Message wire{}; const auto size=encode_installation_response(wire,WireResult::ok,identity,retained);
  Snapshot decoded; sc_save_installation_snapshot result{}; WireResult status;

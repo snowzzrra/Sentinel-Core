@@ -288,7 +288,7 @@ class RetestWorkflowTests(unittest.TestCase):
         (self.game / "DOOMEternalx64vk.exe").write_bytes(b"fixture game identity; never executed")
         steam_exe = self.root / "Steam fixture" / "steam.exe"
         steam_exe.write_bytes(b"fixture launcher; never executed")
-        self.manifest = {"status": "MILESTONE_A_READY_FOR_GUARDED_SMOKE", "product_version": "0.6.0",
+        self.manifest = {"status": "MILESTONE_A_READY_FOR_GUARDED_SMOKE", "product_version": "0.7.0",
                          "build_id": "a" * 64, "supported_game_sha256": retest.sha(self.game / "DOOMEternalx64vk.exe"),
                          "required_routes": 63,
                          "files": [{"name": p.name, "sha256": retest.sha(p)} for p in self.candidate.iterdir()]}

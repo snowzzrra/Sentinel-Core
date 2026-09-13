@@ -380,7 +380,10 @@ int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool en
     }
     return 0;
 }
+int weapon_points_command(int argc, wchar_t** argv);
 int wmain(int argc, wchar_t** argv) {
+    const int points_result = weapon_points_command(argc, argv);
+    if (points_result >= 0) return points_result;
     const int storage_result = save_storage_command(argc, argv);
     if (storage_result >= 0) return storage_result;
     const int backup_result = native_backup_command(argc, argv);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(SentinelCore VERSION 0.6.0 LANGUAGES C CXX)
+project(SentinelCore VERSION 0.7.0 LANGUAGES C CXX)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Sentinel Core currently requires Windows x64 and MSVC.")
 endif()
@@ -43,6 +43,8 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   include/sentinel_engine.h src/engine_observer.h src/engine_observer.cpp
   include/sentinel_context.h src/context_observer.h src/context_observer.cpp
   include/sentinel_native.h src/native_model.h src/native_model.cpp
+  include/sentinel_weapon_points.h src/weapon_points.h src/weapon_points.cpp src/weapon_points_native.cpp
+  tools/weapon_points_probe.cpp
   src/native_target.h src/native_target.cpp src/native_runtime.h src/native_runtime.cpp
   include/sentinel_save.h src/save_observer.h src/save_observer.cpp
   src/save_storage.h src/save_storage.cpp src/prelaunch.h src/prelaunch.cpp src/startup_log.h src/startup_log.cpp tools/save_probe.h tools/save_probe.cpp
@@ -86,7 +88,7 @@ target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
 add_library(sentinel_save_storage STATIC src/save_storage.cpp src/prelaunch.cpp)
 target_include_directories(sentinel_save_storage PUBLIC src)
 target_link_libraries(sentinel_save_storage PUBLIC bcrypt)
-add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp)
+add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp)
 target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client sentinel_save_storage bcrypt)
 add_library(sentinel_observer STATIC src/engine_observer.cpp src/context_observer.cpp src/save_observer.cpp)
 target_include_directories(sentinel_observer PUBLIC include src)
@@ -98,7 +100,7 @@ target_include_directories(sentinel_minhook PUBLIC third_party/minhook/include t
 # Pinned upstream uses intentional byte casts/anonymous unions; HDE initializes
 # its prefix byte in the loop. Keep upstream unchanged and Core warnings strict.
 target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
-add_library(sentinel_native_model STATIC src/native_model.cpp)
+add_library(sentinel_native_model STATIC src/native_model.cpp src/weapon_points.cpp)
 target_include_directories(sentinel_native_model PUBLIC include src)
 add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp src/save_campaign.cpp)
 target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
@@ -204,5 +206,12 @@ add_test(NAME missing_dll COMMAND sentinel_harness --missing "${CMAKE_BINARY_DIR
 add_test(NAME missing_core_dependency COMMAND "${CMAKE_COMMAND}"
   "-DPROXY=$<TARGET_FILE:sentinel_bootstrap>" "-DHARNESS=$<TARGET_FILE:sentinel_harness>"
   "-DSTAGE=${CMAKE_BINARY_DIR}/missing-core" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/missing_dependency.cmake")
+foreach(target sentinel_native sentinel_campaign_tests sentinel_native_host)
+  target_sources(${target} PRIVATE src/weapon_points_native.cpp)
+endforeach()
+add_executable(sentinel_weapon_points_tests tests/weapon_points.cpp)
+target_link_libraries(sentinel_weapon_points_tests PRIVATE sentinel_native_model sentinel_protocol)
+target_compile_options(sentinel_weapon_points_tests PRIVATE /UNDEBUG)
+add_test(NAME weapon_points_contract COMMAND sentinel_weapon_points_tests)
 set_tests_properties(core_lifecycle proxy_forwarding_lifecycle proxy_normal_exit proxy_second_process static_import_drawing missing_dll missing_core_dependency
   PROPERTIES TIMEOUT 15)

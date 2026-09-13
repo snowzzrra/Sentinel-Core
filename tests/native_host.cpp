@@ -10,6 +10,7 @@
 #include <thread>
 #include <algorithm>
 #include <cwchar>
+#include <iostream>
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL native host line %d: %s (win32=%lu)\n", __LINE__, #x, GetLastError()); std::exit(1); } } while (0)
 using namespace sentinel;
@@ -243,6 +244,46 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(native::inspect().availability == SC_NATIVE_ENABLED && native::inspect().installed_hooks == 7);
     CHECK(native::inspect().lifecycle == SC_LIFETIME_UNOBSERVED && !native::inspect().context_generation);
     transition(1); ready();
+    if (std::wcscmp(argv[2], L"weapon-points-service") == 0) {
+        struct Currency { uint32_t current = 0, gained = 0, purchases = 0, other = 41, encounters = 0; } currency;
+        weapon_points::Calls calls{
+            &currency, [](void*) -> uintptr_t { return 42; },
+            [](void* p, uintptr_t, uint32_t& b, uint32_t& g) {
+                auto& c = *static_cast<Currency*>(p); b=c.current; g=c.gained; return true;
+            },
+            [](void* p, uintptr_t, uint32_t amount) -> uint32_t {
+                CHECK(GetCurrentThreadId() == owner.load());
+                auto& c = *static_cast<Currency*>(p); c.current+=amount; c.gained+=amount; return 0;
+            },
+            [](void*, uintptr_t) { CHECK(GetCurrentThreadId() == owner.load()); return true; }
+        };
+        const std::string namespace_id(64,'a');
+        weapon_points::use_fixture(calls,namespace_id.c_str());
+        resume(); std::printf("{\"ready\":true,\"pid\":%u}\n",GetCurrentProcessId()); std::fflush(stdout);
+        std::string action;
+        while (std::cin >> action && action != "quit") {
+            park();
+            if (action == "encounter") {
+                ++currency.encounters;
+                if (!weapon_points::suppress(true,weapon_points::direct_source(0xb97fc5),0,1,false)) {
+                    ++currency.current; ++currency.gained;
+                }
+            } else if (action == "purchase") {
+                CHECK(currency.current >= 3);
+                CHECK(!weapon_points::suppress(true,weapon_points::Source::unknown,0,-3,false));
+                currency.current-=3; ++currency.purchases;
+            } else if (action == "restore") {
+                std::cin >> currency.current >> currency.gained >> currency.purchases;
+            } else if (action == "namespace") {
+                std::string id; std::cin >> id; CHECK(id.size() == 64);
+                weapon_points::use_fixture(calls,id.c_str());
+            } else CHECK(action == "snapshot");
+            std::printf("{\"balance\":%u,\"gained\":%u,\"purchases\":%u,\"other\":%u,\"encounters\":%u}\n",
+                currency.current,currency.gained,currency.purchases,currency.other,currency.encounters);
+            std::fflush(stdout); resume();
+        }
+        finish_thread.store(true); resume(); callback.join(); sc_shutdown(); return 0;
+    }
     CHECK(last_return.load() == change_return && changes.load() == 1 && frees.load() == 1);
     CHECK(native::inspect().scope.lifecycle_generation == 1 && native::inspect().checkpoint_flag);
     Child normal(probe, L"--diagnostic --deadline-ms 1500");

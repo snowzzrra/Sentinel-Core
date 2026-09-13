@@ -273,6 +273,8 @@ void post_frame() {
             Diagnostics::await_backup(*slot, result, detail, submitted);
             return;
         }
+        if (slot->is_weapon_points)
+            weapon_points::execute_native(slot->weapon_points_request, slot->weapon_points_result);
     } else {
         result.state = why == SC_NATIVE_CANCELLED ? SC_DIAGNOSTIC_CANCELLED :
             (why == SC_NATIVE_DEADLINE ? SC_DIAGNOSTIC_EXPIRED : SC_DIAGNOSTIC_REJECTED);
@@ -446,6 +448,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             if (mh == MH_OK) installation.hook(SC_INSTALL_UNINITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Uninitialize(); });
         }
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
+        if (!why && !stopping.load(std::memory_order_acquire)) weapon_points::install(binding, stop_event);
         AcquireSRWLockExclusive(&lock);
         status.installed_hooks = initial.installed_hooks; status.retained_module = pinned.load();
         status.reason = why; status.coverage = why ? 0 : 7;
@@ -511,6 +514,23 @@ sc_diagnostic_result submit(const sc_diagnostic_request& request, sc_diagnostic_
 sc_diagnostic_result result(const sc_diagnostic_request& request, bool cancel, sc_diagnostic_detail* detail) {
     AcquireSRWLockExclusive(&lock);
     auto out = diagnostics.retrieve(request, cancel, GetTickCount64(), detail);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_weapon_points_result submit_weapon_points(const sc_weapon_points_request& request) {
+    AcquireSRWLockExclusive(&lock);
+    const auto now = GetTickCount64(); auto why = prerequisite(now);
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
+    if (!why && !weapon_points::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
+    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, &request);
+    auto out = weapon_points::initial(request);
+    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
+    else out = diagnostics.points_result(request, false, now);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_weapon_points_result weapon_points_result(const sc_weapon_points_request& request, bool cancel, bool release) {
+    AcquireSRWLockExclusive(&lock);
+    auto out = diagnostics.points_result(request, cancel, GetTickCount64(), release);
     ReleaseSRWLockExclusive(&lock); return out;
 }
 sc_save_backup_snapshot submit_backup(const sc_save_backup_request& request) {
