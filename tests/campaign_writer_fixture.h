@@ -9,6 +9,7 @@ struct Model {
     bool failure=false,pending=false,queued=false,foreign=false,read_failure=false; unsigned creates=0,reads=0,writer_polls=0; uint64_t operation=0;
     SaveFuture* future=nullptr; SaveReference source_ref{};
     std::vector<unsigned char> sdk_file; std::vector<std::string> sdk_bytes;
+    std::function<void()> after_first_payload;
 };
 Model* model=nullptr;
 engine::LocalMemory memory;
@@ -161,6 +162,7 @@ SaveResult* poll_write(SaveFuture*,SaveResult* out,void*) {
         const auto handle=m.operation*64+i;
         writes.submitted(sequence,i,handle); writes.callback(handle,m.failure,m.failure?0:1);
         if (!m.failure) m.remote.files[file.name.data()]=m.sdk_bytes[i];
+        if (!i && m.after_first_payload) m.after_first_payload();
     }
     writes.result(sequence,{0,m.failure?1u:0u,1,0});
     writes.released(prepared_file);

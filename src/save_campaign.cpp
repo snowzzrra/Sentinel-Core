@@ -306,6 +306,23 @@ void Campaign::write_observed(uint64_t operation,bool terminal,bool successful,e
     }
     persist_checkpoint(manifest,memory);
 }
+ProfilePublication Campaign::finish_profile_write(Session& owner,const ProfileWrite& write,engine::Memory& memory) {
+    // Serialize the publication decision with write_started and checkpoint
+    // completion. Native PROFILE and gameplay futures may finish independently;
+    // the first gameplay payload can exist before game.details is written.
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (state_.enabled && owner_==&owner && owner.accepts_requests() &&
+        state_.phase=="native_save_pending" && write.campaign==0 &&
+        write.choice.index==0 && steam_name_equal(write.choice.name.data(),state_.slot)) {
+        // The exact admitted campaign operation already owns durable selection
+        // publication in persist_checkpoint, after native success AND readback.
+        // PROFILE's native completion is valid now; it is not a checkpoint receipt.
+        owner.btrace.record(BStage::profile_publish,BStatus::pending,"selection_deferred_to_native_checkpoint",write.sequence,
+            {{"checkpoint_operation",state_.operation},{"checkpoint",state_.checkpoint},{"campaign",write.campaign}});
+        return ProfilePublication::checkpoint_owned;
+    }
+    return owner.persist_profile_write(write,memory)?ProfilePublication::persisted:ProfilePublication::refused;
+}
 void Campaign::persist_checkpoint(const SdkWriteObservation& manifest,engine::Memory& memory) {
     diagnostic_stage_=BStage::continuity;
     ProfileChoice choice{}; ProfileWrite selection{};

@@ -638,7 +638,10 @@ void exercise_campaign_profile(Session& owner, const std::function<void(const st
         write_scoped(owner, later.memory, provider, &future, 0xabcd, &later.data_ref, calls);
         REQUIRE(future && !later.data_ref.control);
         SaveResult result{}; future->vtable->poll(future, &result, nullptr); REQUIRE(result.state == -1);
-        future->vtable->poll(future, &result, nullptr); REQUIRE(!result.state && !result.outcome && result.value == 1);
+        future->vtable->poll(future, &result, nullptr);
+        if (result.state || result.outcome || result.value!=1)
+            std::fprintf(stderr,"PROFILE completion first refusal: %s\n",owner.btrace.snapshot().first_failure.predicate);
+        REQUIRE(!result.state && !result.outcome && result.value == 1);
         future->vtable->destroy(future, 1);
         REQUIRE(later.data_control.strong==1 && later.data_control.weak==1);
         REQUIRE(owner.native_io());

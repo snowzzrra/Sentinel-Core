@@ -8,6 +8,8 @@
 
 namespace sentinel::save {
 class Session;
+struct ProfileWrite;
+enum class ProfilePublication { refused, persisted, checkpoint_owned };
 // Facts captured by the native lifecycle owner, never by diagnostic publication.
 struct CampaignTransition {
     uint64_t event_id=0, generation_before=0, generation_after=0, native_return=0, at_ms=0;
@@ -47,6 +49,7 @@ public:
     bool allow_access(uintptr_t data, const std::string& directory, bool write, bool erase);
     bool write_started(uint64_t operation, const std::string& directory, bool native_factory_matched);
     void write_observed(uint64_t operation, bool terminal, bool successful, engine::Memory&);
+    ProfilePublication finish_profile_write(Session&, const ProfileWrite&, engine::Memory&);
     bool verify_source(engine::Memory&, uintptr_t data, uintptr_t image);
     bool parser_enter(uintptr_t data, bool metadata_only = false);
     void observe_parser(ParserObservation, bool metadata_only = false);

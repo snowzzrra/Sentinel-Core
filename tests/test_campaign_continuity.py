@@ -31,6 +31,18 @@ class CampaignContinuity(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='sentinel-startup-parser-') as root:
             self.stage('create', root, 3, 'startup_parser')
 
+    def test_profile_completion_between_native_campaign_payloads(self):
+        # Stable native boundary: PROFILE can complete after duration and before
+        # details. Exercise the real provider futures, then travel and reopen.
+        with tempfile.TemporaryDirectory(prefix='sentinel-profile-overlap-') as root:
+            created = self.stage('create', root, 3, 'cross_map_profile_overlap')
+            self.assertIn('map=game/sp/e1m2_battle/e1m2_battle generation=4 checkpoint=5 WUP=9', created)
+            resumed = self.stage('resume', root, 3, 'cross_map_profile_overlap')
+            self.assertIn('checkpoint=8 WUP=6 session=admitted', resumed)
+        with tempfile.TemporaryDirectory(prefix='sentinel-profile-overlap-failure-') as root:
+            self.assertIn('deferred PROFILE cannot certify failed gameplay save',
+                          self.stage('create', root, 3, 'cross_map_profile_overlap_failed_save'))
+
     def stage(self, mode, root, difficulty, defect=None):
         command = [str(EXE), mode, str(root), str(difficulty)]
         if defect: command.append(defect)

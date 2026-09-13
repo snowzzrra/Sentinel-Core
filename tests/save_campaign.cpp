@@ -229,6 +229,7 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring defect=argc==5?argv[4]:L"";
     const bool profile_lifecycle=defect==L"profile_lifecycle";
     const bool native_read=defect.rfind(L"native_read",0)==0;
+    const bool profile_overlap=defect.rfind(L"cross_map_profile_overlap",0)==0;
     const bool recovery_case=defect.rfind(L"native_read_c",0)==0;
     const auto retail_marker=std::filesystem::path(argv[2])/"retail-pair.fixture";
     const bool retail_pair=defect==L"native_read_c_retail_pair" || std::filesystem::exists(retail_marker);
@@ -312,7 +313,7 @@ int wmain(int argc,wchar_t** argv) {
     std::array<std::string,3> extra_payloads{"encoded duration checkpoint","older details checkpoint","older duration checkpoint"};
     std::array<std::array<unsigned char,0x190>,3> extra_files{};
     std::array<uintptr_t,4> all_files{files};
-    if (native_read) {
+    if (native_read || profile_overlap) {
         for (size_t i=0;i<extra_files.size();++i) {
             extra_files[i]=file; store(extra_files[i],8,text(extra_names[i]));
             store(extra_files[i],0x150,uint64_t(extra_payloads[i].size())); store(extra_files[i],0x158,uint64_t(extra_payloads[i].size()));
@@ -320,7 +321,8 @@ int wmain(int argc,wchar_t** argv) {
             all_files[i+1]=reinterpret_cast<uintptr_t>(extra_files[i].data());
             if (resume && !recovery_case) remote.files[directory+"/"+extra_names[i]]=extra_payloads[i];
         }
-        const int32_t file_count=retail_pair?2:4;
+        const int32_t file_count=retail_pair || profile_overlap?2:4;
+        if (profile_overlap) std::swap(all_files[0],all_files[1]); // Native duration precedes details.
         store(data,0x1c0,reinterpret_cast<uintptr_t>(all_files.data())); store(data,0x1c8,file_count); store(data,0x1cc,file_count);
         if (resume && !recovery_case) remote.files[directory+"/game.details"]=payload;
     }
@@ -347,11 +349,26 @@ int wmain(int argc,wchar_t** argv) {
             CHECK(owner.campaign_run.parser_enter(source)); owner.campaign_run.parser_leave(0);
             CHECK(owner.campaign_run.allow_difficulty(difficulty));
         } else navigation_fixture::create(difficulty,L"");
-        return travel_fixture::run(difficulty,defect,[&] {
-            write_profile();
+        const auto save_with_profile=[&] {
+            if (!profile_overlap) write_profile();
             writer_fixture::Model next{remote,source,files,payload,directory};
+            if (profile_overlap) next.after_first_payload=[&] {
+                CHECK(owner.campaign_run.snapshot().phase=="native_save_pending");
+                write_profile();
+                CHECK(!owner.campaign_run.snapshot().continuity_persisted);
+                CHECK(std::strcmp(owner.btrace.snapshot().stages[static_cast<size_t>(BStage::profile_publish)].predicate,
+                    "selection_deferred_to_native_checkpoint")==0);
+                if (defect==L"cross_map_profile_overlap_failed_save") next.failure=true;
+            };
             writer_fixture::save(next,L"queued_checkpoint");
-        });
+        };
+        if (defect==L"cross_map_profile_overlap_failed_save") {
+            native_transition(difficulty,L"",save_with_profile);
+            CHECK(!owner.accepts_requests() && !owner.campaign_run.snapshot().continuity_persisted);
+            CHECK(owner.campaign_run.snapshot().checkpoint==0);
+            std::puts("PASS deferred PROFILE cannot certify failed gameplay save"); return 0;
+        }
+        return travel_fixture::run(difficulty,defect,save_with_profile);
     }
     if (resume) {
         CHECK(owner.campaign_run.snapshot().source_checkpoint==(profile_lifecycle?2u:1u));

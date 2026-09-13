@@ -72,11 +72,12 @@ SaveResult* poll_access(SaveFuture* base, SaveResult* out, void* task) {
         future.owner.fail(future.failure); result = {0, 1, 1, 0};
     } else if (future.selection.sequence) {
         engine::LocalMemory memory;
-        if (!future.owner.persist_profile_write(future.selection, memory)) {
+        const auto publication=future.owner.campaign_run.finish_profile_write(future.owner,future.selection,memory);
+        if (publication==ProfilePublication::refused) {
             future.owner.btrace.record(BStage::profile_publish, BStatus::refused, "profile_selection_persist_failed", future.operation,
                 {{"selection_sequence", future.selection.sequence}});
             future.owner.fail_profile(); result = {0, 1, 1, 0};
-        } else future.owner.btrace.record(BStage::profile_publish, BStatus::succeeded, "profile_selection_persisted", future.operation,
+        } else if (publication==ProfilePublication::persisted) future.owner.btrace.record(BStage::profile_publish, BStatus::succeeded, "profile_selection_persisted", future.operation,
             {{"selection_sequence", future.selection.sequence}});
     }
     *out = result; return out;
