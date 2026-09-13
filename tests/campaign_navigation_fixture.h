@@ -50,6 +50,32 @@ void vanilla() {
     test_campaign_pump(reinterpret_cast<uintptr_t>(screen.data()));
     CHECK(pumped==1 && !selected); // Vanilla retains native slot-picker state.
 }
+uintptr_t continue_flags=0;
+void continue_files() {
+    auto* allocation=static_cast<unsigned char*>(VirtualAlloc(nullptr,0x4600000,MEM_RESERVE,PAGE_NOACCESS)); CHECK(allocation);
+    CHECK(VirtualAlloc(allocation+0x45f7000,0x1000,MEM_COMMIT,PAGE_READWRITE));
+    const auto base=reinterpret_cast<uintptr_t>(allocation);
+    std::array<unsigned char,0x1970> game{};
+    std::array<unsigned char,0xc0> root{};
+    std::array<unsigned char,0x110> screen{};
+    store(screen,0x108,uint32_t{2}); store(root,0x44,uint32_t{SC_GAME_MAIN_MENU});
+    *reinterpret_cast<uintptr_t*>(base+0x45f7370)=reinterpret_cast<uintptr_t>(game.data());
+    continue_flags=reinterpret_cast<uintptr_t>(game.data()+0x1968);
+    CampaignNativeTestCalls calls{};
+    calls.action=[](uintptr_t,uintptr_t)->uint64_t {
+        auto& flags=*reinterpret_cast<uint8_t*>(continue_flags);
+        CHECK(flags&0x10); flags|=0x40; return 77;
+    };
+    test_campaign_calls(calls); test_campaign_binding(base,reinterpret_cast<uintptr_t>(root.data()));
+    std::array<uint64_t,3> argument{5,1,0}, request{1,reinterpret_cast<uintptr_t>(argument.data()),1};
+    for(uint8_t prior:{uint8_t{0},uint8_t{0x10}}) {
+        game[0x1968]=prior;
+        CHECK(test_campaign_action(reinterpret_cast<uintptr_t>(screen.data()),reinterpret_cast<uintptr_t>(request.data()))==77);
+        CHECK(game[0x1968]==(prior|0x40));
+    }
+    CHECK(VirtualFree(allocation,0,MEM_RELEASE));
+    std::puts("PASS warm Continue uses files and restores cache flag without losing unrelated native changes");
+}
 void create(uint32_t difficulty,const std::wstring& defect) {
     wanted=difficulty;
     auto* allocation=static_cast<unsigned char*>(VirtualAlloc(nullptr,0x4600000,MEM_RESERVE,PAGE_NOACCESS)); CHECK(allocation);

@@ -56,6 +56,7 @@ struct NativeWriteOperation {
     bool vector_retiring = false;
     uintptr_t readback_data = 0;
     uint32_t readback_capacity = 0;
+    std::vector<SdkFileWrite> readback_baseline;
     bool readback_required = false, readback_hashes = false, readback_terminal = false, readback_failed = false;
     std::shared_ptr<BackupJob> backup;
     int64_t provider_state = 0, provider_outcome = 0;
@@ -94,7 +95,7 @@ public:
     bool lost() const;
     bool inspect(uint64_t sequence, SdkWriteObservation&) const;
     void poll_released(uintptr_t utilities, bool (*completed)(uintptr_t, uint64_t, bool*));
-    bool attach_readback(uint64_t operation, uintptr_t private_data, int32_t capacity);
+    bool attach_readback(uint64_t operation, uintptr_t private_data, int32_t capacity, std::vector<SdkFileWrite> baseline = {});
     uint64_t readback_operation(uintptr_t private_data) const;
     bool readback_manifest(uint64_t operation, SdkWriteObservation&) const;
     void readback_hashes(uint64_t operation);

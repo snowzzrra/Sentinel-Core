@@ -2,6 +2,7 @@
 #include "save_session.h"
 #include "save_native_hooks.h"
 #include "save_campaign_native.h"
+#include "campaign_menu_native.h"
 #include "MinHook.h"
 #include "protocol.h"
 #include <windows.h>
@@ -98,7 +99,8 @@ void contract() {
 }
 int wmain(int argc,wchar_t** argv) {
  if(argc==1) {contract();return 0;}
- CHECK(argc==2);
+ const bool menu_only=argc==3 && !std::wcscmp(argv[2],L"--menu-only");
+ CHECK(argc==2 || menu_only);
  HANDLE file=CreateFileW(argv[1],GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr); CHECK(file!=INVALID_HANDLE_VALUE);
  // Image data only: no loader, imports, entry point, hooks, game process, or save I/O.
  HANDLE mapping=CreateFileMappingW(file,nullptr,PAGE_READONLY|SEC_IMAGE_NO_EXECUTE,0,0,nullptr); CHECK(mapping);
@@ -110,6 +112,54 @@ int wmain(int argc,wchar_t** argv) {
  auto entries=reinterpret_cast<RUNTIME_FUNCTION*>(bytes+directory.VirtualAddress);
  CHECK(RtlAddFunctionTable(entries,directory.Size/sizeof(RUNTIME_FUNCTION),image.base));
  HANDLE stop=CreateEventW(nullptr,TRUE,FALSE,nullptr); CHECK(stop);
+ if(menu_only) {
+  const auto targets=campaign_menu::native_targets(image.base);
+  auto old_prefix=targets[8]; old_prefix.signature_offset=0;
+  save::Installation baseline;
+  CHECK(native::validate_recorded(baseline,memory,image,old_prefix,stop,GetTickCount64()+3000,6,8)==SC_NATIVE_TARGET_NOT_UNIQUE);
+  std::puts("REPRODUCED menu target8: correct callee with shared prologue refused by production validator");
+  Snapshot identity{}, decoded{}; identity.core.abi_version=SC_ABI_VERSION;
+  strcpy_s(identity.core.version,"0.8.0"); strcpy_s(identity.core.build_id,"phase6-diagnostics");
+  identity.pid=123; identity.process_created=456; identity.instance[0]=1;
+  Message wire{}; WireResult status{}; sc_save_installation_snapshot installation{};
+  auto size=encode_installation_response(wire,WireResult::ok,identity,baseline.inspect());
+  CHECK(decode_installation_response(wire,size,status,decoded,installation));
+  CHECK(installation.primary_failure.target_group==6 && installation.primary_failure.target_index==8);
+  sc_save_admission_snapshot admission{}, roundtrip{};
+  admission.abi_version=SC_SAVE_ADMISSION_ABI_VERSION; admission.state=SC_SAVE_SESSION_REJECTED;
+  admission.fault=17; admission.required_routes=63; admission.prepared_routes=63;
+  size=encode_save_admission_response(wire,WireResult::ok,identity,admission);
+  CHECK(decode_save_admission_response(wire,size,status,decoded,roundtrip) && roundtrip.fault==17);
+  admission.fault=18; size=encode_save_admission_response(wire,WireResult::ok,identity,admission);
+  CHECK(!decode_save_admission_response(wire,size,status,decoded,roundtrip));
+  std::puts("PASS Phase6 installation group6 and campaign fault17 diagnostics decode");
+  save::Installation menu;
+  CHECK(campaign_menu::validate_native_targets(menu,memory,image,stop,targets));
+  CHECK(!menu.inspect().primary_failure.sequence && !menu.inspect().created && !menu.inspect().enabled);
+  auto wrong=targets; wrong[8].address=image.base+0x143c070;
+  save::Installation wrong_call;
+  CHECK(!campaign_menu::validate_native_targets(wrong_call,memory,image,stop,wrong));
+  CHECK(wrong_call.inspect().primary_failure.rva==0x10d2d99);
+  auto changed=targets[8]; changed.signature[0]^=1;
+  CHECK(native::validate_target(memory,image,changed,stop,GetTickCount64()+3000)==SC_NATIVE_TARGET_BYTES);
+  for(auto rva:{0x10d2d99u,0x43c070u,0x43c0a0u}) {
+   memory.fail=image.base+rva; save::Installation unreadable;
+   CHECK(!campaign_menu::validate_native_targets(unreadable,memory,image,stop,targets));
+   CHECK(unreadable.inspect().primary_failure.read_reason==77);
+   CHECK(!unreadable.inspect().created && !unreadable.inspect().enabled);
+  }
+  std::puts("PASS all15 production menu bindings, shared-prologue correction, wrong callee/signature/read refusals; PE data only, no game execution");
+  memory.fail=0;
+  save::Installation campaign;
+  for(const auto& target:save::campaign_targets(image.base)) {
+   const auto reason=native::validate_recorded(campaign,memory,image,target,stop,GetTickCount64()+3000,4,campaign.inspect().validated);
+   if(reason) { const auto e=campaign.inspect().primary_failure; std::fprintf(stderr,"CAMPAIGN target=%u reason=%u rva=%x collision=%x\n",e.target_index,reason,e.rva,e.collision_rva); }
+   CHECK(reason==SC_NATIVE_NONE);
+  }
+  std::printf("PASS all%u campaign bindings including persisted mission reader/serializer; PE data only\n",campaign.inspect().validated);
+  CHECK(RtlDeleteFunctionTable(entries)); CloseHandle(stop); UnmapViewOfFile(bytes); CloseHandle(mapping); CloseHandle(file);
+  return 0;
+ }
  save::Installation record;
  auto baseline_target=native::save_target(image.base,3); baseline_target.signature_offset=0;
  save::Installation baseline;

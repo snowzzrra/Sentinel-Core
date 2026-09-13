@@ -396,7 +396,7 @@ bool decode_save_admission_response(const Message& in, size_t size, WireResult& 
     for (auto& c : v.native_root) c = static_cast<char>(r.number(1));
     if (!r.valid || r.pos != size || s.core.abi_version != SC_ABI_VERSION ||
         v.abi_version != SC_SAVE_ADMISSION_ABI_VERSION || v.state > SC_SAVE_SESSION_BINDING ||
-        v.fault > 16 || v.required_routes != 63 || (v.prepared_routes & ~63u) || (v.flags & ~7u)) return false;
+        v.fault > 17 || v.required_routes != 63 || (v.prepared_routes & ~63u) || (v.flags & ~7u)) return false;
     const bool has_id = v.namespace_id[0] != 0;
     if (has_id) {
         for (size_t i = 0; i < 64; ++i)
@@ -459,7 +459,7 @@ bool decode_installation_response(const Message& in, size_t size, WireResult& re
     if (!r.valid || r.pos != size || s.core.abi_version != SC_ABI_VERSION || v.abi_version != 1 ||
         v.attempt > 1 || v.phase > 3 || v.startup_observation > 3 || v.last_completed_stage > SC_INSTALL_UPSTREAM) return false;
     for (const auto e : {&v.active, &v.primary_failure, &v.cleanup_failure})
-        if (e->sequence > v.sequence || e->stage > SC_INSTALL_UPSTREAM || e->target_group > 3 || e->byte_count > 32 || e->result > 2) return false;
+        if (e->sequence > v.sequence || e->stage > SC_INSTALL_UPSTREAM || e->target_group > 6 || e->byte_count > 32 || e->result > 2) return false;
     return true;
 }
 size_t encode_save_write_response(Message& out, WireResult result, const Snapshot& s,

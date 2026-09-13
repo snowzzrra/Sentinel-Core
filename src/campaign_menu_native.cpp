@@ -1,6 +1,7 @@
 #include "campaign_menu_native.h"
 #include "campaign_menu.h"
 #include "native_target.h"
+#include "native_runtime.h"
 #include "save_collector.h"
 #include "save_session.h"
 #include "MinHook.h"
@@ -217,6 +218,9 @@ void load(uintptr_t screen,int index) {
     if (!save::session().accepts_requests() || screen!=shown_screen || index<0 ||
         static_cast<uint32_t>(index)>=shown.count || !(shown.rows[index].flags&SC_CAMPAIGN_UNLOCKED)) return;
     // Permission/save/checkpoint/loading remain in LoadMission/LaunchMission.
+    uintptr_t pending=0;
+    if (!read(screen,0x870,pending) || pending ||
+        !save::session().campaign_run.prepare_menu_save(native::checkpoint_transition())) return;
     menu().selected(shown.rows[index].id); original_load(screen,index);
 }
 bool is_available(uintptr_t screen) {
@@ -250,6 +254,70 @@ void update(uintptr_t screen) {
 }
 }
 bool available() { return ready.load(std::memory_order_acquire); }
+bool request_map(uintptr_t request,const std::string& map) {
+    if (!available() || map.empty() || map.size()>=192) return false;
+    string_assign(request+0x30,map.c_str());
+    save::NativeString value{};
+    char bytes[192]{};
+    return read(request,0x30,value) && value.length==static_cast<int32_t>(map.size()) &&
+        !memory.copy(reinterpret_cast<uintptr_t>(value.data),bytes,map.size()+1).reason &&
+        !std::strcmp(bytes,map.c_str());
+}
+bool mission_request(uintptr_t request,std::string& destination) {
+    int32_t subtype=0;
+    if (!read(request,0x98,subtype)) return false;
+    if (subtype!=2) return true; // Ordinary Continue keeps its saved destination.
+    uintptr_t entry=0;
+    save::NativeString name{};
+    char map[192]{};
+    if (!read(request,0xa8,entry) || !read(request,0x30,name) || name.length<1 || name.length>=192 ||
+        memory.copy(reinterpret_cast<uintptr_t>(name.data),map,size_t(name.length)+1).reason || map[name.length]) return false;
+    const auto selected=menu().focus_id();
+    for (uint32_t i=0;i<shown.count;++i) {
+        if (entry==reinterpret_cast<uintptr_t>(&entries[i]) && shown.rows[i].id==selected &&
+            (shown.rows[i].flags&SC_CAMPAIGN_UNLOCKED) && !std::strcmp(map,shown.rows[i].map)) {
+            destination=map; return true;
+        }
+    }
+    return false;
+}
+void present_campaign_actions(uintptr_t screen,bool entered) {
+    if (!available() || !active() || !save::session().accepts_requests()) return;
+    int32_t state=-1;
+    if (!read(screen,0x108,state) || state!=2) return;
+    const auto snapshot=save::session().campaign_run.snapshot();
+    if (!snapshot.checkpoint) return;
+    const auto list=list_for(screen);
+    uintptr_t resume=0,choose=0,children=0,table=0,select=0;
+    int32_t count=0,index=-1,choose_state=0;
+    if (!read(screen,0x118,resume) || !resume || !read(screen,0x120,choose) || !choose ||
+        !read(list,0xa0,children) || !read(list,0xa8,count) || !read(list,0x150,index)) return;
+    bool contains_choose=false;
+    uintptr_t focused=0;
+    for (int32_t i=0;i<count;++i) {
+        uintptr_t child=0; if (!read(children,size_t(i)*8,child)) return;
+        contains_choose|=child==choose;
+        if (i==index) focused=child;
+    }
+    if (!contains_choose) return; // Retain native action membership and permissions.
+    const bool hub=snapshot.map=="game/hub/hub";
+    const auto label=[&](uintptr_t widget,const char* wanted) {
+        save::NativeString current{}; char text[96]{};
+        if (read(widget,0x188,current) && current.length>=0 && current.length<96 && current.data &&
+            !memory.copy(reinterpret_cast<uintptr_t>(current.data),text,size_t(current.length)+1).reason &&
+            !std::strcmp(text,wanted)) return;
+        string_assign(widget+0x188,wanted);
+    };
+    label(resume,hub?"RETURN TO FORTRESS":"RESUME CHECKPOINT");
+    label(choose,"CHOOSE MISSION");
+    const bool projected=menu().projection().count!=0;
+    if (!read(choose,0x154,choose_state)) return;
+    const bool became_available=projected && choose_state==5;
+    if (became_available) widget_state(choose,focused==choose?3:1);
+    if (projected && hub && (entered || (became_available && focused==resume)) &&
+        read(list,0,table) && read(table,0x70,select) && select)
+        reinterpret_cast<void(*)(uintptr_t,uintptr_t)>(select)(list,choose);
+}
 #ifdef SC_NATIVE_TESTING
 void test_calls(const NativeCalls& c) {
     original_populate=c.populate; original_focus=c.focus; original_load=c.load; original_available=c.available;
@@ -267,10 +335,9 @@ void test_update(uintptr_t screen) { update(screen); }
 void test_root_navigation(uintptr_t screen,uint8_t reset) { root_navigation(screen,reset); }
 void test_root_campaign(uintptr_t screen,uintptr_t declaration) { root_campaign(screen,declaration); }
 #endif
-bool install(const engine::Binding& binding,HANDLE stop) {
-    if (!save::session().campaign_run.enabled()) return true;
+std::array<native::Target,15> native_targets(uintptr_t base) {
     constexpr uint32_t rvas[]={0x10d2c00,0x10d42f0,0x10d27b0,0x10d1c50,0x10d3140,
-        0x3fa8e0,0x3faff0,0x10d1cf0,0x143c070,0x1116c50,0x159c280,
+        0x3fa8e0,0x3faff0,0x10d1cf0,0x43c070,0x1116c50,0x159c280,
         0x10e08f0,0x10dc420,0x18071d0,0x1857110};
     constexpr const char* bytes[]={
         "4053565741554881ec98000000488b05c4bd0d034833c4488944247033db488d",
@@ -281,7 +348,7 @@ bool install(const engine::Binding& binding,HANDLE stop) {
         "488d0591cb6602c7411414000080488901488d411848894108c7411000000000",
         "48895c2410488974241848897c242041564883ec304c8bf2488bd94885d20f85",
         "48895c2418488974242057b890400000e89ba07901482be0488b05c9cc0d0348",
-        "48895c240848896c2410488974241848897c242041564883ec2033f64c8bf248",
+        "48895c2408574883ec20488bfa488bd9483bca747e8b410c39420c74370fb641",
         "405557488d6c24c84881ec38010000488b05727d09034833c448894520488bf9",
         "488b01448bc28b91540100004489815401000048ffa0c0000000cccccccccccc",
         "48895c2418554883ec200fb6ea488bd984d2751081b9bc010000bf0300000f84",
@@ -291,21 +358,57 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     std::array<native::Target,15> targets{};
     const auto digit=[](char c) { return c<='9' ? c-'0' : c-'a'+10; };
     for (unsigned i=0;i<targets.size();++i) {
-        targets[i].address=binding.image.base+rvas[i];
+        targets[i].address=base+rvas[i];
         for (size_t n=0;n<32;++n) targets[i].bytes[n]=static_cast<uint8_t>(digit(bytes[i][2*n])*16+digit(bytes[i][2*n+1]));
+    }
+    // idList template instances share this prologue. Use the existing secondary
+    // signature contract: unique bytes inside the same exact unwind owner.
+    constexpr char list_copy_signature[]="d27413488b0dee5ae30341b810000000488b01ff503848c70300000000c7430c";
+    targets[8].signature_offset=48;
+    for (size_t n=0;n<32;++n) targets[8].signature[n]=static_cast<uint8_t>(digit(list_copy_signature[2*n])*16+digit(list_copy_signature[2*n+1]));
+    return targets;
+}
+bool validate_native_targets(save::Installation& record,engine::Memory& source_memory,
+                             const engine::Image& image,HANDLE stop,const std::array<native::Target,15>& targets) {
+    // Populate's actual CALL owns this list-copy contract. Record failures here
+    // as well as in the target validator so startup refusal remains actionable.
+    auto call_event=record.begin(SC_INSTALL_SAVE_TARGET,6,8,0x10d2d99);
+    native::ValidationDetail detail;
+    if (!native::function_window(source_memory,image,image.base+0x10d2c00,image.base+0x10d2d99,5,&detail)) {
+        if (detail.read_attempted) save::attach_read(call_event,detail.read);
+        record.finish(call_event,SC_NATIVE_TARGET_BOUNDARY); return false;
+    }
+    std::array<uint8_t,5> call{};
+    const auto read_result=source_memory.copy(image.base+0x10d2d99,call.data(),call.size());
+    save::attach_read(call_event,read_result); call_event.byte_count=5;
+    call_event.expected_bytes[0]=0xe8;
+    const auto expected_displacement=static_cast<int32_t>(targets[8].address-(image.base+0x10d2d9e));
+    std::memcpy(call_event.expected_bytes+1,&expected_displacement,sizeof(expected_displacement));
+    std::memcpy(call_event.actual_bytes,call.data(),call.size());
+    const bool call_matches=!read_result.reason && !std::memcmp(call_event.expected_bytes,call.data(),call.size());
+    record.finish(call_event,call_matches ? SC_NATIVE_NONE : SC_NATIVE_TARGET_BYTES);
+    if (!call_matches) return false;
+    for (unsigned i=0;i<targets.size();++i) {
+        const auto rva=static_cast<uint32_t>(targets[i].address-image.base);
         if (i==5 || i==10) {
             // These two leaf callees have no unwind entry and are not detoured.
             std::array<uint8_t,32> actual{};
-            if (!binding.image.contains(rvas[i],actual.size(),IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ,0) ||
-                memory.copy(targets[i].address,actual.data(),actual.size()).reason || actual!=targets[i].bytes) return false;
-        } else if (native::validate_recorded(save::session().installation,memory,binding.image,targets[i],stop,GetTickCount64()+3000,6,i)) return false;
+            if (!image.contains(rva,actual.size(),IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ,0) ||
+                source_memory.copy(targets[i].address,actual.data(),actual.size()).reason || actual!=targets[i].bytes) return false;
+        } else if (native::validate_recorded(record,source_memory,image,targets[i],stop,GetTickCount64()+3000,6,i)) return false;
     }
+    return true;
+}
+bool install(const engine::Binding& binding,HANDLE stop) {
+    if (!save::session().campaign_run.enabled()) return true;
+    const auto targets=native_targets(binding.image.base);
+    if (!validate_native_targets(save::session().installation,memory,binding.image,stop,targets)) return false;
     void* detours[]={reinterpret_cast<void*>(populate),reinterpret_cast<void*>(focus),reinterpret_cast<void*>(load),
         reinterpret_cast<void*>(is_available),reinterpret_cast<void*>(update),
         reinterpret_cast<void*>(root_navigation),reinterpret_cast<void*>(root_campaign)};
     constexpr unsigned hooked[]={0,1,2,3,4,11,12};
     void* originals[7]{};
-    for (unsigned i=0;i<7;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],rvas[hooked[i]],[&] {
+    for (unsigned i=0;i<7;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
         return MH_CreateHook(reinterpret_cast<void*>(targets[hooked[i]].address),detours[i],&originals[i]); })!=MH_OK) return false;
     original_populate=reinterpret_cast<Populate>(originals[0]); original_focus=reinterpret_cast<Update>(originals[1]);
     original_load=reinterpret_cast<Load>(originals[2]); original_available=reinterpret_cast<Available>(originals[3]);
@@ -318,7 +421,7 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     native_completed=reinterpret_cast<Completed>(targets[7].address); list_assign=reinterpret_cast<ListAssign>(targets[8].address);
     details_update=reinterpret_cast<Update>(targets[9].address);
     widget_state=reinterpret_cast<WidgetState>(targets[10].address);
-    for (unsigned i=0;i<7;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],rvas[hooked[i]],[&] {
+    for (unsigned i=0;i<7;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
         return MH_EnableHook(reinterpret_cast<void*>(targets[hooked[i]].address)); })!=MH_OK) return false;
     ready.store(true,std::memory_order_release); return true;
 }

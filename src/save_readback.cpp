@@ -171,7 +171,7 @@ SaveFuture* create_write_readback(Session& owner, uint64_t id, uintptr_t provide
     std::memcpy(static_cast<char*>(object) + 0x27d, &enabled, 1);
     int32_t capacity = 0;
     std::memcpy(&capacity, static_cast<char*>(object) + 0x1cc, 4);
-    if (!owner.native_writes.attach_readback(id, control->object, capacity)) return nullptr;
+    if (!owner.native_writes.attach_readback(id, control->object, capacity, owner.campaign_run.readback_baseline(id))) return nullptr;
     owner.btrace.record(BStage::readback_create, BStatus::entered, "readback_native_retain", id, {}, control->object);
     SaveReference argument{}; calls.native.catalog.retain(&argument, &future->data);
     owner.btrace.record(BStage::readback_create, BStatus::entered, "readback_native_factory", id, {}, control->object);

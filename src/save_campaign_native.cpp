@@ -1,6 +1,7 @@
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #include "save_campaign_native.h"
 #include "campaign_menu.h"
+#include "campaign_menu_native.h"
 #include "save_session.h"
 #include "save_provider.h"
 #include "save_catalog.h"
@@ -35,6 +36,11 @@ CampaignDevMenu original_devmenu=nullptr;
 SelectedSlot selected_slot=nullptr; SelectSlot select_slot=nullptr; Menu main_menu=nullptr;
 SetInteger set_integer=nullptr;
 thread_local bool navigation_owned=false;
+using SpawnRead=bool(*)(uintptr_t,uintptr_t,uintptr_t,uint32_t);
+using SpawnSerialize=void(*)(uintptr_t,uintptr_t);
+SpawnRead spawn_read=nullptr;
+SpawnSerialize spawn_serialize=nullptr;
+bool (*assign_request_map)(uintptr_t,const std::string&)=campaign_menu::request_map;
 engine::LocalMemory memory;
 template<class T> bool read(uintptr_t p,size_t offset,T& out) {
     uintptr_t at=0; return engine::add(p,offset,sizeof(out),at) && !memory.copy(at,&out,sizeof(out)).reason;
@@ -135,11 +141,28 @@ void invoke_navigation(uintptr_t screen) {
     __try { create_from_action(screen); }
     __finally { navigation_owned=false; }
 }
+uint64_t continue_from_files(uintptr_t screen,uintptr_t action,uintptr_t flags,uint8_t previous) {
+    // ContinueGame 14174d810 otherwise uses its cached campaignSpawnInfo only.
+    // Its native cold path retains the permission future and ordinary reader.
+    auto* value=reinterpret_cast<uint8_t*>(flags);
+    *value=static_cast<uint8_t>(*value|0x10);
+    uint64_t result=1;
+    __try { result=original_action(screen,action); }
+    __finally { *value=static_cast<uint8_t>((*value&~0x10)|(previous&0x10)); }
+    return result;
+}
 uint64_t campaign_action(uintptr_t screen,uintptr_t action) {
     if (!session().campaign_run.enabled()) return original_action(screen,action);
     uint32_t kind=0,count=0,tag=0,value=0; uintptr_t arguments=0;
     uint32_t screen_state=0;
     read(screen,0x108,screen_state);
+    if (screen_state==2 && read(action,0,kind) && kind==1 && read(action,0x10,count) && count &&
+        read(action,8,arguments) && read(arguments,0,tag) && tag==5 && read(arguments,8,value) && value==1) {
+        uint32_t game_state=UINT32_MAX; uintptr_t game=0; uint8_t flags=0;
+        if (!session().accepts_requests() || !read(root,0x44,game_state) || game_state!=SC_GAME_MAIN_MENU ||
+            !read(image+0x45f7370,0,game) || (game && !read(game,0x1968,flags))) return 1;
+        return game?continue_from_files(screen,action,game+0x1968,flags):original_action(screen,action);
+    }
     // Native state2 Back returns to slots; state1 Back exits to the parent.
     if (read(action,0,kind) && kind==0xf && screen_state==2 && session().accepts_requests()) {
         *reinterpret_cast<uint32_t*>(screen+0x108)=1;
@@ -167,7 +190,8 @@ void select_campaign_slot(uintptr_t menu) {
     __finally { navigation_owned=false; }
 }
 void campaign_pump(uintptr_t screen) {
-    uint32_t next=0;
+    uint32_t next=0,before=0;
+    read(screen,0x108,before);
     if (session().campaign_run.enabled() && session().accepts_requests() &&
         read(screen,0x10c,next) && next==1) {
         // Native state1 follows catalog readiness. State2 owns the ordinary
@@ -179,6 +203,7 @@ void campaign_pump(uintptr_t screen) {
         session().btrace.record(BStage::creation,BStatus::succeeded,"single_campaign_actions_requested",0,{{"slot",0}},screen);
     }
     original_pump(screen);
+    campaign_menu::present_campaign_actions(screen,before!=2 || next==1);
 }
 void invoke_bootstrap_devmenu(uintptr_t arguments,uintptr_t previous) {
     auto* option=reinterpret_cast<const char**>(arguments+0x10);
@@ -250,7 +275,11 @@ void load_game(uintptr_t self,uintptr_t request) {
         session().campaign_run.refuse("base_campaign_required",BStage::resume); return;
     }
     if (self!=root) session().btrace.record(BStage::resume,BStatus::refused,"native_load_root_mismatch",0,{{"root_equal",false}},request);
-    if (self!=root || !session().campaign_run.begin_resume()) return;
+    std::string destination;
+    if (!campaign_menu::mission_request(request,destination)) {
+        session().campaign_run.refuse("native_mission_request_not_selected",BStage::resume); return;
+    }
+    if (self!=root || !session().campaign_run.begin_resume(destination)) return;
     set_difficulty();
     session().btrace.record(BStage::resume,BStatus::entered,"native_load_game_call",0,{{"root_equal",true}},request);
     original_load(self,request);
@@ -268,6 +297,31 @@ uint64_t set_cvar(uintptr_t self,const char* value,uint8_t force) {
     return original_cvar(self,value,force);
 }
 ReleaseSaveReference parser_release=nullptr;
+struct SpawnFunctor { const uintptr_t* table; uintptr_t prepared; SpawnSerialize serialize; };
+void invoke_spawn(SpawnFunctor* self,uintptr_t archive) { self->serialize(self->prepared,archive); }
+bool valid_spawn(SpawnFunctor* self) { return self->prepared && self->serialize; }
+bool restore_mission_spawn(uintptr_t prepared,uintptr_t request) {
+    const auto checkpoint=session().campaign_run.snapshot();
+    uintptr_t map=0,table=0,serializer=0;
+    if (!prepared || !spawn_read || !spawn_serialize || !read(root,0x50,map) ||
+        !read(map,0,table) || table!=image+0x2ab30c8 || !read(map,0xae5e0,serializer) || !serializer) return false;
+    const std::string key_text="missionSelectSpawnInfo_"+checkpoint.map;
+    NativeString key{};
+    if (!read(request,0,key.vtable)) return false;
+    key.data=const_cast<char*>(key_text.c_str()); key.length=static_cast<int32_t>(key_text.size());
+    key.capacity_flags=0x40000000u|static_cast<uint32_t>(key_text.size()+1);
+    const uintptr_t callbacks[]={0,reinterpret_cast<uintptr_t>(invoke_spawn),reinterpret_cast<uintptr_t>(valid_spawn)};
+    SpawnFunctor functor{callbacks,prepared,spawn_serialize};
+    const bool restored=spawn_read(serializer,reinterpret_cast<uintptr_t>(&functor),reinterpret_cast<uintptr_t>(&key),2);
+    std::string restored_map,checkpoint_name;
+    const bool same=restored && name(prepared,0x10,restored_map) && restored_map==checkpoint.map;
+    name(prepared,0x10d0,checkpoint_name);
+    session().btrace.record(BStage::parser,same?BStatus::succeeded:BStatus::refused,"native_mission_checkpoint_restore",0,
+        {{"restored",restored},{"map_equal",same},{"subtype",checkpoint.native_subtype},{"checkpoint_name_bytes",checkpoint_name.size()}});
+    if (!same) return false;
+    *reinterpret_cast<uint32_t*>(prepared+0x19c0)=2;
+    return true;
+}
 uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uintptr_t prepared,uintptr_t request) {
     uintptr_t object=0; const bool reference_valid=data && read(data->control,8,object);
     ParserObservation observation; observation.caller=caller; observation.data=object;
@@ -297,7 +351,19 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
     }
     session().btrace.record(BStage::parser,BStatus::entered,"native_parser_call",0,
         {{"reference_valid",reference_valid},{"files_present",files!=0},{"prepared_present",prepared!=0},{"request_present",request!=0}},object);
-    const auto result=original_parse(data,files,prepared,request);
+    const bool mission_checkpoint=session().campaign_run.restoring_mission_checkpoint();
+    if (mission_checkpoint && !assign_request_map(request,session().campaign_run.snapshot().map)) {
+        parser_release(data); session().campaign_run.refuse("native_resume_request_map_failed",BStage::parser); return 0x10;
+    }
+    // Subtype2 prepares the correct map/resource path and clears requested layers.
+    // It deliberately skips campaignSpawnInfo; restore the persisted mission
+    // descriptor below, after the parser's fresh-entry checkpoint initialization.
+    // Merely changing subtype would restart the mission and lose its checkpoint.
+    if (mission_checkpoint) *reinterpret_cast<uint32_t*>(request+0x98)=2;
+    auto result=original_parse(data,files,prepared,request);
+    if (!result && mission_checkpoint && !metadata_only && !restore_mission_spawn(prepared,request)) {
+        session().campaign_run.refuse("native_mission_checkpoint_missing",BStage::parser); result=0x10;
+    }
     session().campaign_run.parser_leave(static_cast<uint32_t>(result),metadata_only); return result;
 }
 uint64_t parse_game(SaveReference* data,uintptr_t files,uintptr_t prepared,uintptr_t request) {
@@ -342,7 +408,11 @@ bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransitio
     if (!campaign.resumed && campaign.phase=="native_start_queued" && map!="game/hub/hub") {
         session().campaign_run.refuse("native_bootstrap_source_unexpected",BStage::transition); return false;
     }
-    transition.campaign=session().campaign_run.map_begin(std::move(map),transition.generation_before,transition.event_id);
+    uint32_t subtype=0;
+    if (!read(descriptor,0x19c0,subtype) || (subtype!=1 && subtype!=2)) {
+        session().campaign_run.refuse("native_checkpoint_subtype_unsupported",BStage::transition); return false;
+    }
+    transition.campaign=session().campaign_run.map_begin(std::move(map),transition.generation_before,transition.event_id,subtype);
     if (transition.campaign) session().btrace.record(BStage::transition,BStatus::entered,"native_gameplay_transition_call",0,
         {{"event_id",transition.event_id},{"generation_before",transition.generation_before},{"flags",flags}},descriptor);
     return transition.campaign;
@@ -405,8 +475,8 @@ SaveFuture** campaign_write_provider(uintptr_t caller, engine::Memory& source_me
          {"session_state",session().state()},{"session_fault",session().fault()}},reinterpret_cast<uintptr_t>(data));
     return result;
 }
-std::array<native::Target,12> campaign_targets(uintptr_t base) {
-    constexpr uint32_t rvas[]={0x17538a0,0x1753b80,0x66cec0,0x14940b0,0x376020,0x10a6110,0x376250,0x10a5bb0,0x17515c0,0x174ef70,0x10a6fa0,0x1756a20};
+std::array<native::Target,14> campaign_targets(uintptr_t base) {
+    constexpr uint32_t rvas[]={0x17538a0,0x1753b80,0x66cec0,0x14940b0,0x376020,0x10a6110,0x376250,0x10a5bb0,0x17515c0,0x174ef70,0x10a6fa0,0x1756a20,0x55b8d0,0x17df430};
     constexpr const char* bytes[]={
         "48895c2408488974241048897c24184c8974242055488dac2460feffff4881ec",
         "4055535741554156488dac2460c0ffffb8a0400000e806821101482be0488b05",
@@ -419,8 +489,10 @@ std::array<native::Target,12> campaign_targets(uintptr_t base) {
         "4055564156488d6c24a04881ec60010000488b0500d4a5024833c4488945308b",
         "4883ec28488b05c5f1f5024885c0752d8d5053b9800d0000e8b382c0fe4885c0",
         "40555357488dac24e0bfffffb820410000e8ea4d7c01482be0488b05187a1003",
-        "40554157488dac2468bfffffb898410000e86a531101482be0488b05987fa502"};
-    std::array<native::Target,12> targets{};
+        "40554157488dac2468bfffffb898410000e86a531101482be0488b05987fa502",
+        "40555356574156488d6c24c04881ec40010000488b05ee30c5034833c4488945",
+        "4055535741564157488dac2450c0ffffb8b0400000e856c90801482be0488b05"};
+    std::array<native::Target,14> targets{};
     for (unsigned i=0;i<targets.size();++i) {
         targets[i].address=base+rvas[i];
         if (std::strlen(bytes[i])!=64) return {};
@@ -453,11 +525,18 @@ bool install_campaign_hooks(const engine::Binding& binding,HANDLE stop) {
     parser_release=reinterpret_cast<ReleaseSaveReference>(image+0x367770);
     set_integer=reinterpret_cast<SetInteger>(targets[6].address); selected_slot=reinterpret_cast<SelectedSlot>(targets[7].address);
     select_slot=reinterpret_cast<SelectSlot>(targets[8].address); main_menu=reinterpret_cast<Menu>(targets[9].address);
+    spawn_read=reinterpret_cast<SpawnRead>(targets[12].address); spawn_serialize=reinterpret_cast<SpawnSerialize>(targets[13].address);
     for (unsigned i=0;i<8;++i) if (session().installation.hook(SC_INSTALL_SAVE_ENABLE,4,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-image),[&]{
         return MH_EnableHook(reinterpret_cast<void*>(targets[hooked[i]].address));})!=MH_OK) return false;
     return true;
 }
 #ifdef SC_NATIVE_TESTING
+void test_campaign_spawn(SpawnRead reader,SpawnSerialize serializer,bool(*assign)(uintptr_t,const std::string&)) {
+    spawn_read=reader; spawn_serialize=serializer; assign_request_map=assign;
+}
+uint64_t test_campaign_parse_prepared(uintptr_t caller,SaveReference* data,uintptr_t prepared,uintptr_t request) {
+    return parse_game_at(caller,data,0,prepared,request);
+}
 void test_campaign_binding(uintptr_t base, uintptr_t object) { image=base; root=object; prior_campaign=false; }
 void test_campaign_calls(const CampaignNativeTestCalls& calls) {
     original_new=calls.new_game; original_internal=calls.internal; original_action=calls.action;

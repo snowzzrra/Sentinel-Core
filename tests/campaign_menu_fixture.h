@@ -161,6 +161,18 @@ void exercise() {
     CHECK(hidden==before_hidden+1 && !loads && focuses==1 && statistics==1);
     test_load(screen,1); CHECK(loads==1);
     const auto retained=at<uintptr_t>(screen,0x870);
+    std::array<unsigned char,0xc0> mission{};
+    auto mission_address=reinterpret_cast<uintptr_t>(mission.data());
+    at<int>(mission_address,0x98)=2;
+    at<uintptr_t>(mission_address,0xa8)=retained;
+    std::string target="game/dlc2/e5m1_spear/e5m1_spear",destination;
+    at<NativeString>(mission_address,0x30)=text(target);
+    CHECK(mission_request(mission_address,destination) && destination==target);
+    at<uintptr_t>(mission_address,0xa8)=retained+0x50;
+    CHECK(!mission_request(mission_address,destination));
+    at<uintptr_t>(mission_address,0xa8)=retained;
+    target="game/hub/hub"; at<NativeString>(mission_address,0x30)=text(target);
+    CHECK(!mission_request(mission_address,destination));
     CHECK(at<int>(retained,0x38)==1);
     CHECK(at<uintptr_t>(retained,0x30)==reinterpret_cast<uintptr_t>(&source_layer));
     const std::string retained_map=at<NativeString>(retained,0).data;
@@ -175,5 +187,38 @@ void exercise() {
     CHECK(exchange(campaign_inspect_operation).rendered_revision==2);
     request.revision=1; CHECK(exchange(campaign_commit_operation).reason==SC_CAMPAIGN_REVISION);
     std::puts("PASS typed native campaign projection/privacy/focus/pending-load entry ownership");
+}
+void actions() {
+    using namespace campaign_menu;
+    std::array<unsigned char,0x140> screen_bytes{};
+    std::array<unsigned char,0x160> list_bytes{};
+    std::array<std::array<unsigned char,0x2a0>,2> buttons{};
+    std::array<uintptr_t,2> children{reinterpret_cast<uintptr_t>(buttons[0].data()),reinterpret_cast<uintptr_t>(buttons[1].data())};
+    std::array<uintptr_t,64> screen_table{},list_table{};
+    auto owner=reinterpret_cast<uintptr_t>(screen_bytes.data());
+    list=reinterpret_cast<uintptr_t>(list_bytes.data());
+    at<uintptr_t>(owner,0)=reinterpret_cast<uintptr_t>(screen_table.data());
+    at<int>(owner,0x108)=2;
+    at<uintptr_t>(owner,0x118)=children[0]; at<uintptr_t>(owner,0x120)=children[1];
+    at<uintptr_t>(list,0)=reinterpret_cast<uintptr_t>(list_table.data());
+    at<uintptr_t>(list,0xa0)=reinterpret_cast<uintptr_t>(children.data()); at<int>(list,0xa8)=2;
+    screen_table[0x1e8/8]=reinterpret_cast<uintptr_t>(+[](uintptr_t)->uintptr_t { return list; });
+    list_table[0x70/8]=reinterpret_cast<uintptr_t>(+[](uintptr_t owner_list,uintptr_t child) {
+        auto child_array=at<uintptr_t>(owner_list,0xa0); at<int>(owner_list,0x150)=child==at<uintptr_t>(child_array,0)?0:1;
+    });
+    NativeCalls calls{}; calls.string_assign=assign;
+    calls.widget_state=[](uintptr_t widget,int state) { at<int>(widget,0x154)=state; };
+    test_calls(calls);
+    at<int>(children[1],0x154)=5;
+    present_campaign_actions(owner,false); // Projection arrived after a disabled native button.
+    CHECK(strings[children[0]+0x188]=="RETURN TO FORTRESS");
+    CHECK(strings[children[1]+0x188]=="CHOOSE MISSION");
+    CHECK(at<int>(children[1],0x154)==1 && at<int>(list,0x150)==1);
+    at<int>(list,0x150)=0;
+    present_campaign_actions(owner,false);
+    CHECK(at<int>(list,0x150)==0); // Do not steal a subsequent manual focus change.
+    present_campaign_actions(owner,true);
+    CHECK(at<int>(list,0x150)==1);
+    std::puts("PASS Hub action labels, late availability, entry focus and manual focus retention");
 }
 }

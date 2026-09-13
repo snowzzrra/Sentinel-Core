@@ -5,7 +5,7 @@
 #include "native_target.h"
 namespace sentinel::save {
 bool install_campaign_hooks(const engine::Binding&, HANDLE);
-std::array<native::Target,12> campaign_targets(uintptr_t image);
+std::array<native::Target,14> campaign_targets(uintptr_t image);
 bool campaign_change_begin(uintptr_t root, uintptr_t descriptor, CampaignTransition&);
 void campaign_change_end(CampaignTransition&);
 void campaign_checkpoint_boundary(CampaignTransition);
@@ -36,5 +36,8 @@ void test_campaign_new(uintptr_t menu,uint32_t difficulty,uint8_t extra);
 uint64_t test_campaign_cvar(uintptr_t object,const char* value,uint8_t force);
 void test_campaign_parser(uint64_t(*)(SaveReference*,uintptr_t,uintptr_t,uintptr_t),ReleaseSaveReference);
 uint64_t test_campaign_parse(uintptr_t caller,SaveReference*,uintptr_t request);
+uint64_t test_campaign_parse_prepared(uintptr_t caller,SaveReference*,uintptr_t prepared,uintptr_t request);
+void test_campaign_spawn(bool(*)(uintptr_t,uintptr_t,uintptr_t,uint32_t),void(*)(uintptr_t,uintptr_t),
+                         bool(*)(uintptr_t,const std::string&));
 #endif
 }

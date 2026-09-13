@@ -84,6 +84,10 @@ bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,st
     return true;
 }
 bool Campaign::enabled() const { std::lock_guard<std::recursive_mutex> lock(mutex_); return state_.enabled; }
+bool Campaign::restoring_mission_checkpoint() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return state_.enabled && state_.native_subtype==2 && mission_destination_.empty();
+}
 CampaignSnapshot Campaign::snapshot() const { std::lock_guard<std::recursive_mutex> lock(mutex_); return state_; }
 bool Campaign::reject(const char* reason,std::initializer_list<BFact> facts) {
     const auto prior=owner_->btrace.snapshot().stages[static_cast<size_t>(diagnostic_stage_)];
@@ -122,22 +126,46 @@ bool Campaign::begin_create(bool clean,const std::string& slot,int32_t index,boo
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"create_contract_reserved",0,{{"outcome",result.outcome},{"win32",result.win32_error},{"difficulty",options_.difficulty}});
     return true;
 }
-bool Campaign::begin_resume() {
+bool Campaign::prepare_menu_save(const CampaignTransition& boundary) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!state_.enabled) return true;
+    // Called only after the native menu accepted a visible, unlocked selection.
+    // Initial catalog metadata or an owned persisted shell checkpoint supplies
+    // the source; selecting a mission never fabricates a gameplay transition.
+    const bool catalog=state_.resumed && !initiated_ && metadata_verified_;
+    const bool persisted=menu_active_ && state_.continuity_persisted;
+    if (!owner_->accepts_requests() || (!catalog && !persisted) || !checkpoint_exists_ || expected_.empty() ||
+        map_pending_ || state_.phase=="native_save_pending" || !boundary.observed || boundary.observation_reason ||
+        boundary.depth || !boundary.generation_after) return false;
+    initiated_=true; menu_active_=true; menu_save_pending_=true;
+    menu_save_generation_=boundary.generation_after;
+    owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"native_mission_presave_reserved",state_.operation,
+        {{"generation",menu_save_generation_},{"checkpoint",state_.checkpoint},{"catalog",catalog}});
+    return true;
+}
+bool Campaign::begin_resume(const std::string& mission_destination) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled) return true;
     diagnostic_stage_=BStage::resume;
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_selection_validate",0,
         {{"accepting",owner_->accepts_requests()},{"resumed",state_.resumed},{"initiated",initiated_},
          {"checkpoint_exists",checkpoint_exists_},{"expected_files",expected_.size()}});
-    if (!owner_->accepts_requests() || !state_.resumed || initiated_ || !checkpoint_exists_ || expected_.empty())
+    const bool first_resume=state_.resumed && !initiated_;
+    const bool menu_resume=menu_active_ && state_.continuity_persisted && !map_pending_;
+    if (!owner_->accepts_requests() || (!first_resume && !menu_resume) || !checkpoint_exists_ || expected_.empty())
         return reject("explicit_resume_source_required",{{"accepting",owner_->accepts_requests()},{"resumed",state_.resumed},
             {"initiated",initiated_},{"checkpoint_exists",checkpoint_exists_},{"expected_files",expected_.size()}});
     ProfileChoice choice{};
     const bool choice_valid=owner_->profile_choice(choice);
     if (!choice_valid || choice.name.data()!=state_.slot) return reject("resume_selection_mismatch",
         {{"choice_valid",choice_valid},{"slot_equal",choice.name.data()==state_.slot},{"index",choice.index}});
-    initiated_=true; state_.phase="resume_requested";
+    initiated_=true; menu_active_=false; state_.resumed=true; state_.phase="resume_requested";
+    menu_save_pending_=false;
+    state_.source_checkpoint=state_.checkpoint;
+    load_data_=0; state_.source_verified=false; state_.parser_completed=false;
     metadata_data_=0; metadata_verified_=false;
+    mission_destination_=mission_destination;
+    if (!mission_destination.empty()) state_.native_subtype=2;
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"resume_requested",0,{{"source_checkpoint",state_.source_checkpoint},{"expected_files",expected_.size()}});
     return true;
 }
@@ -177,10 +205,13 @@ bool Campaign::allow_access(uintptr_t data,const std::string& directory,bool wri
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"campaign_access",state_.operation,
         {{"write",write},{"erase",erase},{"directory_equal",directory==directory_},{"accepting",owner_->accepts_requests()},
          {"initiated",initiated_},{"resumed",state_.resumed},{"phase",phase_id(state_.phase)},{"source_equal",load_data_==data}},data);
-    // Native catalog hydration is read-only and precedes PROFILE admission.
+    // Native catalog hydration is read-only, both at startup and after returning
+    // to the shell. A previously completed gameplay load is not its owner.
     // It never associates a gameplay load; gameplay parser entry requires the
     // explicit later LoadGameSlot operation and its exact SaveData identity.
-    if (!write && !erase && state_.resumed && !initiated_ && state_.phase=="armed" &&
+    const bool catalog_read=(state_.resumed && !initiated_ && state_.phase=="armed") ||
+        (menu_active_ && state_.continuity_persisted && !map_pending_);
+    if (!write && !erase && catalog_read &&
         owner_->native_io() && directory==directory_) {
         metadata_data_=data; metadata_verified_=false; return true;
     }
@@ -220,19 +251,28 @@ bool Campaign::write_started(uint64_t operation,const std::string& directory,boo
     // its files. Interrupted/failed saves cannot reuse an older success receipt.
     if (!save_record(contract_+"state=native_save_pending\n",!checkpoint_exists_)) return false;
     state_.operation=operation; state_.native_factory_matched=true; state_.native_saved=false; state_.readback_verified=false;
+    menu_save_pending_=false;
     state_.continuity_persisted=false; state_.phase="native_save_pending";
     owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"checkpoint_write_associated",operation,
         {{"native_factory_matched",native_factory_matched},{"generation",state_.generation_after},{"checkpoint",state_.checkpoint}}); return true;
 }
+std::vector<SdkFileWrite> Campaign::readback_baseline(uint64_t operation) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!state_.enabled || operation!=state_.operation || state_.phase!="native_save_pending") return {};
+    // Native saves can write only dirty streams. Previously verified files still
+    // belong to the slot; re-read them too before publishing its next checkpoint.
+    return expected_;
+}
 std::string Campaign::checkpoint_text(const SdkWriteObservation& observation) const {
-    std::string value=contract_+"checkpoint="+std::to_string(state_.checkpoint)+"\nmap="+state_.map+"\nfiles="+std::to_string(observation.payloads.size())+"\n";
+    std::string value=contract_+"checkpoint="+std::to_string(state_.checkpoint)+"\nmap="+state_.map+
+        "\nsubtype="+std::to_string(state_.native_subtype)+"\nfiles="+std::to_string(observation.payloads.size())+"\n";
     for (const auto& f:observation.payloads) value+="file="+std::string(f.name.data())+","+std::to_string(f.size)+","+hex(f.sha256)+"\n";
     return value+"state=native_saved_readback_verified\n";
 }
 bool Campaign::backup_continuity(const SdkWriteObservation& observation, storage::TransportMetadata& out) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled || observation.operation != state_.operation || observation.directory != directory_ ||
-        state_.phase != "native_save_pending" || !state_.map_active || !state_.native_saved || state_.checkpoint == UINT64_MAX)
+        state_.phase != "native_save_pending" || (!state_.map_active && !state_.save_ready) || !state_.native_saved || state_.checkpoint == UINT64_MAX)
         return false;
     out.contract = contract_;
     out.checkpoint = checkpoint_text(observation);
@@ -252,6 +292,11 @@ bool Campaign::parse_checkpoint(std::string_view value) {
     if (part.empty() || part.size()>191) return reject("checkpoint_map_length_invalid",{{"map_bytes",part.size()}});
     if (part.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.")!=part.npos) return reject("checkpoint_map_characters_invalid");
     state_.map=part;
+    state_.native_subtype=1; // Legacy records describe the campaign snapshot.
+    if (value.substr(0,8)=="subtype=") {
+        if (!take(value,"subtype=",part) || !number(part,state_.native_subtype) ||
+            (state_.native_subtype!=1 && state_.native_subtype!=2)) return reject("checkpoint_subtype_invalid");
+    }
     if (!take(value,"files=",part)) return reject("checkpoint_file_count_missing");
     if (!number(part,count) || !count || count>64) return reject("checkpoint_file_count_invalid",{{"count",count},{"field_bytes",part.size()},{"limit",64}});
     std::vector<SdkFileWrite> files;
@@ -337,7 +382,8 @@ void Campaign::persist_checkpoint(const SdkWriteObservation& manifest,engine::Me
         {{"choice_valid",choice_valid},{"captured",captured},{"persisted",false},{"index",choice.index}}); return; }
     ++state_.checkpoint;
     if (!save_record(checkpoint_text(manifest),false)) return;
-    expected_=manifest.payloads; state_.continuity_persisted=true; state_.phase="checkpoint_saved";
+    expected_=manifest.payloads; checkpoint_exists_=true; state_.continuity_persisted=true; state_.phase="checkpoint_saved";
+    if (menu_active_) state_.save_ready=false;
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"checkpoint_continuity_persisted",state_.operation,
         {{"checkpoint",state_.checkpoint},{"file_count",expected_.size()},{"native_saved",state_.native_saved},
          {"readback_verified",state_.readback_verified},{"continuity_persisted",state_.continuity_persisted}});
@@ -345,7 +391,7 @@ void Campaign::persist_checkpoint(const SdkWriteObservation& manifest,engine::Me
 bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t image) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled || (data!=load_data_ && data!=metadata_data_)) return true;
-    const bool metadata_only=data==metadata_data_ && !initiated_;
+    const bool metadata_only=data==metadata_data_;
     diagnostic_stage_=BStage::resume;
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_source_validate",state_.operation,
         {{"expected_files",expected_.size()},{"source_checkpoint",state_.source_checkpoint},{"metadata_only",metadata_only}},data);
@@ -415,7 +461,7 @@ void Campaign::observe_parser(ParserObservation observation,bool metadata_only) 
         observation.directory==directory_ && !directory_.empty() ? "owned_campaign" : "foreign_or_unowned_campaign";
     observation.disposition=(owner_->state()==SessionState::rejected || owner_->state()==SessionState::faulted) ?
         "downstream_of_terminal_session" : observation.exact_resume ? "exact_resume" :
-        metadata_only && metadata_verified_ && metadata_data_==observation.data && !initiated_ ?
+        metadata_only && metadata_verified_ && metadata_data_==observation.data ?
         "verified_metadata_read" : "uncorrelated_campaign_import";
     state_.parser_observation=std::move(observation);
 }
@@ -431,8 +477,7 @@ bool Campaign::parser_enter(uintptr_t data,bool metadata_only) {
             {{"session_state",owner_->state()},{"session_fault",owner_->fault()},{"source_equal",load_data_==data}},data); return false;
     }
     if (metadata_only) {
-        const bool valid=owner_->native_io() && state_.resumed && !initiated_ && state_.phase=="armed" &&
-            metadata_data_==data && metadata_verified_;
+        const bool valid=owner_->native_io() && metadata_data_==data && metadata_verified_;
         metadata_data_=0; metadata_verified_=false;
         return valid || reject("metadata_parser_source_not_correlated",{{"metadata_only",true},{"initiated",initiated_}});
     }
@@ -466,13 +511,14 @@ bool Campaign::menu_begin() {
     if (!initiated_ || map_pending_) return reject("menu_before_campaign_transition_complete");
     // Keep the last gameplay checkpoint/map; a native menu is not a new AP map.
     // An already-owned SDK operation can finish, but no new save may start here.
-    state_.map_active=false; state_.save_ready=false;
+    state_.map_active=false; state_.save_ready=false; menu_active_=true;
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"native_menu_admitted",state_.operation,
         {{"map_active",state_.map_active},{"save_ready",state_.save_ready},{"continuity_persisted",state_.continuity_persisted},{"checkpoint",state_.checkpoint}});
     return true;
 }
-bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id) {
+bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,uint32_t native_subtype) {
     std::lock_guard<std::recursive_mutex> lock(mutex_); if (!state_.enabled) return true;
+    menu_active_=false;
     diagnostic_stage_=BStage::transition;
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"native_map_begin",state_.operation,
         {{"accepting",owner_->accepts_requests()},{"initiated",initiated_},{"map_pending",map_pending_},{"resumed",state_.resumed},
@@ -494,17 +540,19 @@ bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id) 
     if (!continuing && state_.resumed) {
         if (!state_.parser_completed) return reject("lifecycle_resume_parser_incomplete");
         if (state_.loaded_difficulty!=options_.difficulty) return reject("lifecycle_resume_difficulty_mismatch");
-        if (map!=state_.map) return reject("lifecycle_resume_map_mismatch");
+        if (map!=(mission_destination_.empty()?state_.map:mission_destination_)) return reject("lifecycle_resume_map_mismatch");
     }
     if (map.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.")!=std::string::npos)
         return reject("unsupported_native_map_name");
-    if (continuing) {
+    if (continuing || !mission_destination_.empty()) {
         // The durable outgoing checkpoint remains valid on disk. Its receipt
         // cannot certify the destination's balance/payload before its own save.
         state_.native_saved=false; state_.readback_verified=false; state_.continuity_persisted=false;
         state_.native_factory_matched=false;
     }
     state_.map=std::move(map); state_.generation_before=generation; map_pending_=true;
+    state_.native_subtype=native_subtype;
+    mission_destination_.clear();
     state_.transition.event_id=event_id; state_.transition.generation_before=generation;
     state_.transition.generation_after=generation+1; state_.map_active=false; state_.save_ready=false;
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"native_map_admitted",state_.operation,
@@ -580,6 +628,15 @@ bool Campaign::checkpoint_ready(const CampaignTransition& result) {
     if (!owner_->accepts_requests()) {
         owner_->btrace.record(diagnostic_stage_,BStatus::blocked,"checkpoint_after_terminal_session",state_.operation,
             {{"session_state",owner_->state()},{"session_fault",owner_->fault()}}); return false;
+    }
+    if (menu_save_pending_) {
+        if (!menu_active_ || !initiated_ || !result.observed || result.observation_reason || result.depth ||
+            result.generation_after!=menu_save_generation_ || !result.state_read || result.game!=SC_GAME_MAIN_MENU)
+            return reject("native_mission_presave_boundary_mismatch");
+        state_.save_ready=true;
+        owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"native_mission_presave_ready",state_.operation,
+            {{"generation",result.generation_after},{"checkpoint",state_.checkpoint}});
+        return true;
     }
     if (!initiated_ || !result.observed || result.observation_reason || result.depth>1 ||
         result.generation_after!=state_.transition.generation_after) return reject("native_checkpoint_transition_unassociated");

@@ -239,7 +239,7 @@ void NativeWrites::invalidate_source(uintptr_t data) {
         }
     }
 }
-bool NativeWrites::attach_readback(uint64_t id, uintptr_t data, int32_t capacity) {
+bool NativeWrites::attach_readback(uint64_t id, uintptr_t data, int32_t capacity, std::vector<SdkFileWrite> baseline) {
     std::lock_guard<std::mutex> guard(mutex_);
     BIoTrace trace{diagnostics_, BStage::readback_create, id, data};
     auto* value = operation(id);
@@ -250,6 +250,7 @@ bool NativeWrites::attach_readback(uint64_t id, uintptr_t data, int32_t capacity
     for (const auto& other : operations_) if (!trace.check(other.readback_data != data, "readback_data_already_owned",
         {{"other_operation", other.id}})) return false;
     value->readback_data = data; value->readback_capacity = static_cast<uint32_t>(capacity);
+    value->readback_baseline = std::move(baseline);
     value->readback_required = true; return true;
 }
 uint64_t NativeWrites::readback_operation(uintptr_t data) const {
@@ -280,7 +281,14 @@ bool NativeWrites::readback_manifest(uint64_t id, SdkWriteObservation& out) cons
                     "readback_file_sdk_proof_missing", {{"file_index", index}, {"prepared", file.prepared}, {"captured", file.captured},
                     {"handle", file.handle}, {"completed", file.completed}, {"callback", file.callback}, {"failed", file.failed}, {"sdk_result", file.sdk_result}})) return false;
             }
-            out = write; return true;
+            out = write;
+            for (const auto& previous : value.readback_baseline) {
+                if (std::none_of(out.payloads.begin(),out.payloads.end(),[&](const auto& changed) {
+                    return steam_name_equal(changed.name.data(),previous.name.data());
+                })) out.payloads.push_back(previous);
+            }
+            return trace.check(out.payloads.size()<=value.readback_capacity,"complete_readback_exceeds_capacity",
+                {{"count",out.payloads.size()},{"capacity",value.readback_capacity}});
         }
         return trace.check(false, "readback_sdk_observation_missing");
     }

@@ -20,7 +20,7 @@ class CampaignContinuity(unittest.TestCase):
         # lifecycle, PROFILE, writer, SDK and readback adapters in one Session.
         with tempfile.TemporaryDirectory(prefix='sentinel-cross-map-') as root:
             created = self.stage('create', root, 3, 'cross_map')
-            self.assertIn('map=game/hub/hub generation=3 checkpoint=3 WUP=6', created)
+            self.assertIn('map=game/sp/e1m1_intro/e1m1_intro generation=3 checkpoint=3 WUP=6', created)
             self.assertIn('map=game/sp/e1m2_battle/e1m2_battle generation=4 checkpoint=5 WUP=9', created)
             resumed = self.stage('resume', root, 3, 'cross_map')
             self.assertIn('map=game/sp/e1m3_cult/e1m3_cult generation=3 checkpoint=8 WUP=6', resumed)
@@ -110,6 +110,67 @@ class CampaignContinuity(unittest.TestCase):
                 result = self.stage('resume', root, 3, selected)
                 self.assertIn('menu/read/parser/Continue/save checkpoint=2 files=4', result)
                 self.assertIn('checkpoint=2\n', checkpoint.read_text())
+
+    def test_saved_session_rehydrates_menu_then_continues_again(self):
+        for defect in ('native_read_menu_cycle', 'native_read_menu_cycle_hash'):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory(prefix='sentinel-menu-cycle-') as root:
+                self.stage('create', root, 3, 'native_read')
+                result = self.stage('resume', root, 3, defect)
+                self.assertIn('repeated Continue rejects changed payload' if defect.endswith('_hash')
+                              else 'shell/catalog/Continue/save/catalog checkpoint=3', result)
+
+    def test_native_mission_select_keeps_source_verification_and_exact_destination(self):
+        for defect in ('native_read_mission', 'native_read_mission_wrong_map'):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory(prefix='sentinel-menu-mission-') as root:
+                self.stage('create', root, 3, 'native_read')
+                result = self.stage('resume', root, 3, defect)
+                self.assertIn('rejects a different destination' if defect.endswith('wrong_map')
+                              else 'menu/read/parser/Continue/save checkpoint=2', result)
+
+    def test_native_hub_action_presentation(self):
+        with tempfile.TemporaryDirectory(prefix='sentinel-hub-actions-') as root:
+            result = self.stage('create', root, 2)
+            self.assertIn('Hub action labels, late availability, entry focus and manual focus retention', result)
+
+    def test_native_continue_restores_persisted_mission_snapshot(self):
+        for suffix in ('', '_missing', '_wrong', '_assign'):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory(prefix='sentinel-mission-checkpoint-') as root:
+                self.stage('create', root, 2, 'native_read_checkpoint')
+                checkpoint, = Path(root).rglob('campaign.checkpoint')
+                # Explicit fixture migration; no inference from arbitrary map names.
+                original = checkpoint.read_text()
+                original = original.replace('map=game/hub/hub\n', 'map=game/sp/e2m2_base/e2m2_base\n')
+                original = original.replace('subtype=1\n', 'subtype=2\n')
+                checkpoint.write_text(original, newline='\n')
+                result = self.stage('resume', root, 2, 'native_read_checkpoint' + suffix)
+                if suffix:
+                    self.assertIn('persisted mission checkpoint refusal', result)
+                    self.assertEqual(checkpoint.read_text(), original)
+                else:
+                    self.assertIn('dual Hub/ARC snapshot checkpoint preserved', result)
+                    self.assertIn('map=game/sp/e2m2_base/e2m2_base\nsubtype=2\n', checkpoint.read_text())
+                    self.stage('resume', root, 2, 'native_read_checkpoint_resume')
+
+    def test_native_partial_save_preserves_complete_inventory(self):
+        for suffix in ('', '_backup', '_hash'):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory(prefix='sentinel-partial-save-') as root:
+                self.stage('create', root, 2, 'native_read_c_retail_pair')
+                result = self.stage('resume', root, 2, 'native_read_delta' + suffix)
+                if suffix == '_hash':
+                    self.assertIn('retained-file tampering refused', result)
+                else:
+                    self.assertIn('complete inventory/readback/catalog/Continue/backup', result)
+                    checkpoint, = Path(root).rglob('campaign.checkpoint')
+                    self.assertIn('files=2', checkpoint.read_text())
+                    resumed = self.stage('resume', root, 2, 'native_read_delta_resume')
+                    self.assertIn('separate-process partial-save catalog/parser/resume', resumed)
+
+    def test_native_mission_select_shell_presave(self):
+        for suffix in ('', '_unarmed', '_generation', '_foreign', '_failure'):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory(prefix='sentinel-menu-presave-') as root:
+                self.stage('create', root, 2, 'native_read')
+                result = self.stage('resume', root, 2, 'native_read_shell' + suffix)
+                self.assertIn('owned Mission Select shell save/readback/load and boundary refusals', result)
 
     def test_native_menu_and_continue_refuse_missing_duplicate_mixed_failed_or_uncorrelated_reads(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-native-read-refusal-') as root:

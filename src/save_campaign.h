@@ -34,6 +34,7 @@ struct CampaignSnapshot {
     CampaignTransition transition, checkpoint_boundary;
     uint64_t failure_at_ms=0;
     bool save_ready=false;
+    uint32_t native_subtype=1;
 };
 // One deliberate native UI operation in one fresh process. No inspection API
 // initiates gameplay. Durable ownership/options and payload hashes survive PID
@@ -43,18 +44,21 @@ public:
     bool configure(Session&, const storage::Descriptor&, storage::Namespace&);
     bool enabled() const;
     bool begin_create(bool clean_native_history, const std::string& slot, int32_t index, bool prospective);
-    bool begin_resume();
+    bool begin_resume(const std::string& mission_destination = {});
+    bool prepare_menu_save(const CampaignTransition&);
+    bool restoring_mission_checkpoint() const;
     bool start_internal(uint32_t difficulty, bool extra_life);
     bool allow_difficulty(uint32_t difficulty);
     bool allow_access(uintptr_t data, const std::string& directory, bool write, bool erase);
     bool write_started(uint64_t operation, const std::string& directory, bool native_factory_matched);
+    std::vector<SdkFileWrite> readback_baseline(uint64_t operation) const;
     void write_observed(uint64_t operation, bool terminal, bool successful, engine::Memory&);
     ProfilePublication finish_profile_write(Session&, const ProfileWrite&, engine::Memory&);
     bool verify_source(engine::Memory&, uintptr_t data, uintptr_t image);
     bool parser_enter(uintptr_t data, bool metadata_only = false);
     void observe_parser(ParserObservation, bool metadata_only = false);
     void parser_leave(uint32_t result, bool metadata_only = false);
-    bool map_begin(std::string map, uint64_t generation, uint64_t event_id=0);
+    bool map_begin(std::string map, uint64_t generation, uint64_t event_id=0, uint32_t native_subtype=1);
     bool menu_begin();
     void map_end(const CampaignTransition&);
     bool checkpoint_ready(const CampaignTransition&);
@@ -73,11 +77,14 @@ private:
     storage::CampaignOptions options_;
     CampaignSnapshot state_;
     BStage diagnostic_stage_=BStage::creation;
-    std::string contract_, directory_;
+    std::string contract_, directory_, mission_destination_;
     std::vector<SdkFileWrite> expected_;
     uintptr_t load_data_ = 0;
     uintptr_t metadata_data_ = 0;
     bool metadata_verified_ = false;
+    bool menu_active_ = false;
+    bool menu_save_pending_ = false;
+    uint64_t menu_save_generation_ = 0;
     bool contract_created_ = false, checkpoint_exists_ = false, initiated_ = false, map_pending_ = false;
     std::optional<SdkWriteObservation> checkpoint_awaiting_transition_;
 };

@@ -79,7 +79,44 @@ SaveFuture** read(uintptr_t,SaveFuture** out,uintptr_t identity,SaveReference* s
     CHECK(identity==0x7788); ++model->reads; auto* f=new Future; f->vtable=&read_table; f->data=*source; source->control=0; *out=f; return out;
 }
 unsigned parser_calls=0;
-uint64_t parsed(SaveReference* source,uintptr_t,uintptr_t,uintptr_t) {
+unsigned spawn_reads=0;
+std::wstring spawn_defect;
+std::string saved_map,saved_checkpoint="cp_02_elevator_fall",prepared_map,prepared_checkpoint,prepared_path,request_map;
+uintptr_t saved_layer=0xa2c;
+bool assign_map(uintptr_t request,const std::string& map) {
+    if(spawn_defect==L"native_read_checkpoint_assign") return false;
+    request_map=map; field<NativeString>(request,0x30)=text(request_map); return true;
+}
+void deserialize_spawn(uintptr_t prepared,uintptr_t archive) {
+    CHECK(archive==0xa2c && field<int32_t>(prepared,0x1950)==0);
+    prepared_map=spawn_defect==L"native_read_checkpoint_wrong"?"game/hub/hub":saved_map;
+    prepared_checkpoint=saved_checkpoint;
+    field<NativeString>(prepared,0x10)=text(prepared_map);
+    field<NativeString>(prepared,0x10d0)=text(prepared_checkpoint);
+    field<uintptr_t>(prepared,0x1948)=reinterpret_cast<uintptr_t>(&saved_layer);
+    field<int32_t>(prepared,0x1950)=1;
+}
+bool read_spawn(uintptr_t serializer,uintptr_t functor,uintptr_t key,uint32_t mode) {
+    ++spawn_reads; CHECK(serializer==0xa2c && mode==2);
+    CHECK(std::string(field<NativeString>(key,0).data)=="missionSelectSpawnInfo_"+saved_map);
+    if(spawn_defect==L"native_read_checkpoint_missing") return false;
+    const auto table=field<uintptr_t>(functor,0);
+    CHECK(reinterpret_cast<bool(*)(uintptr_t)>(field<uintptr_t>(table,0x10))(functor));
+    reinterpret_cast<void(*)(uintptr_t,uintptr_t)>(field<uintptr_t>(table,8))(functor,0xa2c);
+    return true;
+}
+uint64_t parsed(SaveReference* source,uintptr_t,uintptr_t prepared,uintptr_t request) {
+    // Model the native distinction the old success-only parser missed: ordinary
+    // Continue restores Hub; subtype2 initializes an empty checkpoint for ARC.
+    const bool mission=field<uint32_t>(request,0x98)==2;
+    prepared_map=mission?field<NativeString>(request,0x30).data:"game/hub/hub";
+    prepared_checkpoint=mission?"":"hub_visit_1";
+    prepared_path=prepared_map+(mission?"/missionSelect":"/campaign");
+    field<NativeString>(prepared,0x10)=text(prepared_map);
+    field<NativeString>(prepared,0x10d0)=text(prepared_checkpoint);
+    field<NativeString>(prepared,0x1500)=text(prepared_path);
+    field<uint32_t>(prepared,0x19c0)=mission?2:1;
+    field<int32_t>(prepared,0x1950)=mission?0:1;
     ++parser_calls; release(source); return 0;
 }
 bool load(Model& m,bool metadata_only,const std::wstring& defect) {
@@ -104,24 +141,44 @@ bool load(Model& m,bool metadata_only,const std::wstring& defect) {
     SaveResult result{}; std::array<unsigned char,32> task{};
     future->vtable->poll(future,&result,task.data()); CHECK(result.state==-1);
     const auto pending=session().campaign_run.snapshot();
-    CHECK(pending.operation==before.operation && pending.checkpoint==before.checkpoint && !pending.native_saved);
+    CHECK(pending.operation==before.operation && pending.checkpoint==before.checkpoint && pending.native_saved==before.native_saved);
     future->vtable->poll(future,&result,task.data()); future->vtable->destroy(future,1);
     CHECK(m.remote.files==remote_before);
     if (result.outcome || result.state) { release(&parser_ref); return false; }
-    CHECK(session().campaign_run.snapshot().operation==0 && session().native_writes.snapshot(0).flags==0);
+    CHECK(session().campaign_run.snapshot().operation==before.operation);
     const auto decoded=session().campaign_run.snapshot();
-    CHECK(decoded.source_verified==!metadata_only && !decoded.parser_completed);
+    CHECK(decoded.source_verified==(metadata_only?before.source_verified:true));
+    CHECK(decoded.parser_completed==(metadata_only?before.parser_completed:false));
     std::array<unsigned char,0xc0> request{}; request[0xb8]=metadata_only?1:0;
     if (defect==L"native_read_wrong_mode") request[0xb8]=0;
-    test_campaign_binding(image,0x1000); test_campaign_parser(parsed,release);
+    std::array<unsigned char,0xc0> root_bytes{};
+    std::array<unsigned char,0x1a00> prepared{};
+    std::vector<unsigned char> map_bytes(0xae5e8);
+    store(root_bytes,0x50,reinterpret_cast<uintptr_t>(map_bytes.data()));
+    field<uintptr_t>(reinterpret_cast<uintptr_t>(map_bytes.data()),0)=image+0x2ab30c8;
+    field<uintptr_t>(reinterpret_cast<uintptr_t>(map_bytes.data()),0xae5e0)=0xa2c;
+    const bool restoring=session().campaign_run.restoring_mission_checkpoint();
+    saved_map=session().campaign_run.snapshot().map; spawn_defect=defect;
+    test_campaign_binding(image,reinterpret_cast<uintptr_t>(root_bytes.data())); test_campaign_parser(parsed,release);
+    test_campaign_spawn(read_spawn,deserialize_spawn,assign_map);
     const auto count_before=parser_calls;
-    const auto value=test_campaign_parse(image+(defect==L"native_read_wrong_caller"?0x148c1c2:0x148c1c1),&parser_ref,
-        reinterpret_cast<uintptr_t>(request.data()));
-    CHECK(!parser_ref.control && parser_calls==count_before+(value==0?1u:0u));
+    const auto reads_before=spawn_reads;
+    const auto value=test_campaign_parse_prepared(image+(defect==L"native_read_wrong_caller"?0x148c1c2:0x148c1c1),&parser_ref,
+        reinterpret_cast<uintptr_t>(prepared.data()),reinterpret_cast<uintptr_t>(request.data()));
+    CHECK(!parser_ref.control);
+    CHECK(parser_calls==count_before+(value==0 || (restoring && !metadata_only &&
+        (defect==L"native_read_checkpoint_missing" || defect==L"native_read_checkpoint_wrong"))?1u:0u));
     if (value) return false;
+    if(restoring) {
+        CHECK(prepared_path==saved_map+"/missionSelect");
+        CHECK(spawn_reads==reads_before+(metadata_only?0:1));
+        if(!metadata_only) CHECK(prepared_map==saved_map && prepared_checkpoint==saved_checkpoint &&
+            field<uint32_t>(reinterpret_cast<uintptr_t>(prepared.data()),0x19c0)==2);
+    } else CHECK(spawn_reads==reads_before);
     const auto completed=session().campaign_run.snapshot();
     if (metadata_only) {
-        CHECK(completed.phase=="armed" && !completed.source_verified && !completed.parser_completed && !completed.map_active);
+        CHECK(completed.phase==before.phase && completed.source_verified==before.source_verified &&
+              completed.parser_completed==before.parser_completed && !completed.map_active);
         CHECK(completed.parser_observation.disposition=="verified_metadata_read");
     }
     else CHECK(completed.phase=="parser_succeeded" && completed.source_verified && completed.parser_completed && !completed.map_active);
@@ -183,8 +240,9 @@ SaveReference* factory(uintptr_t,SaveReference* out,uint32_t,uintptr_t) {
 }
 void save(Model& m,const std::wstring& defect,const std::shared_ptr<BackupJob>& backup = {}) {
     const auto before=session().campaign_run.snapshot();
-    model=&m; m.failure=defect==L"save_failure"; m.pending=defect==L"pending_save";
-    m.foreign=defect==L"queued_foreign"; m.queued=defect==L"queued_checkpoint" || m.foreign || defect==L"menu_pending_save";
+    model=&m; m.failure=defect==L"save_failure" || defect==L"queued_save_failure"; m.pending=defect==L"pending_save";
+    m.foreign=defect==L"queued_foreign"; m.queued=defect==L"queued_checkpoint" || m.foreign || defect==L"menu_pending_save" || defect==L"queued_save_failure";
+    if (defect==L"delta_retained_hash") m.queued=true;
     auto* control=static_cast<Control*>(allocate(sizeof(Control))); *control={1,1,m.source,nullptr}; m.source_ref.control=reinterpret_cast<uintptr_t>(control);
     SaveReference task{};
     if (m.queued) {
@@ -211,7 +269,12 @@ void save(Model& m,const std::wstring& defect,const std::shared_ptr<BackupJob>& 
             menu_transition();
             CHECK(session().native_io() && !session().campaign_run.snapshot().map_active);
         }
-        m.future->vtable->poll(m.future,&result,native_task.data()); CHECK(!result.state && !result.outcome && result.value==1);
+        m.future->vtable->poll(m.future,&result,native_task.data());
+        if (defect==L"delta_retained_hash") {
+            CHECK(!result.state && result.outcome && !session().campaign_run.snapshot().readback_verified);
+            m.future->vtable->destroy(m.future,1); m.future=nullptr; return;
+        }
+        CHECK(!result.state && !result.outcome && result.value==1);
         const auto completed=session().campaign_run.snapshot();
         CHECK(completed.operation==m.operation && completed.readback_verified);
         CHECK(completed.checkpoint==before.checkpoint+(completed.continuity_persisted?1u:0u));

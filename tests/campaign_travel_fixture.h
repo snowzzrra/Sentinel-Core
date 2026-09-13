@@ -16,7 +16,7 @@ sc_context_snapshot facts() {
 int run(uint32_t difficulty,const std::wstring& defect,const std::function<void()>& save) {
     auto& campaign=session().campaign_run;
     std::array<unsigned char,0xc0> root_bytes{};
-    std::array<unsigned char,0x1970> descriptor{};
+    std::array<unsigned char,0x1a00> descriptor{};
     std::vector<unsigned char> map_bytes(0xafd00);
     std::array<unsigned char,16> setting_bytes{};
     root=reinterpret_cast<uintptr_t>(root_bytes.data());
@@ -57,15 +57,17 @@ int run(uint32_t difficulty,const std::wstring& defect,const std::function<void(
         native::weapon_points_result(r,false,true);
     };
     const auto initial=campaign.snapshot();
-    std::vector<std::string> maps{initial.resumed?initial.map:"game/sp/e1m1_intro/e1m1_intro"};
+    std::vector<std::string> maps{initial.resumed?initial.map:"game/hub/hub"};
     if(initial.resumed) maps.push_back("game/sp/e1m3_cult/e1m3_cult");
-    else { maps.push_back("game/hub/hub"); maps.push_back("game/sp/e1m2_battle/e1m2_battle"); }
+    else { maps.push_back("game/sp/e1m1_intro/e1m1_intro"); maps.push_back("game/sp/e1m2_battle/e1m2_battle"); }
     transition_defect=L"travel";
     for(size_t i=0;i<maps.size();++i) {
         // Outgoing checkpoint completes BEFORE ExecuteMapChange, as in retail.
         if(i) save();
         const auto previous=native::inspect().scope;
         store(descriptor,0x10,text(maps[i]));
+        const uint32_t subtype=i%2?2:1;
+        store(descriptor,0x19c0,subtype);
         if(i==1 && defect==L"cross_map_gap") native::test_generation_gap();
         CHECK(observed_change(root,reinterpret_cast<uintptr_t>(descriptor.data()))==1);
         const auto observed=campaign.snapshot();
@@ -74,6 +76,7 @@ int run(uint32_t difficulty,const std::wstring& defect,const std::function<void(
             std::puts("PASS unobserved generation gap refused"); return 0;
         }
         CHECK(session().accepts_requests() && observed.map_active && observed.map==maps[i]);
+        CHECK(observed.native_subtype==subtype);
         CHECK(observed.generation_after==previous.lifecycle_generation+1); // Nested primary free is not a second generation.
         points();
         if(i) {
