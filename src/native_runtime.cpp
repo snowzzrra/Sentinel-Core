@@ -2,6 +2,8 @@
 #include "native_target.h"
 #include "save_native_hooks.h"
 #include "save_campaign_native.h"
+#include "campaign_menu.h"
+#include "campaign_menu_native.h"
 #include "save_session.h"
 #include "context_observer.h"
 #include "MinHook.h"
@@ -449,6 +451,10 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         }
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) weapon_points::install(binding, stop_event);
+        if (!why && !stopping.load(std::memory_order_acquire) && !campaign_menu::install(binding,stop_event)) {
+            save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
+            why=SC_NATIVE_EXCEPTION;
+        }
         AcquireSRWLockExclusive(&lock);
         status.installed_hooks = initial.installed_hooks; status.retained_module = pinned.load();
         status.reason = why; status.coverage = why ? 0 : 7;
@@ -515,6 +521,15 @@ sc_diagnostic_result result(const sc_diagnostic_request& request, bool cancel, s
     AcquireSRWLockExclusive(&lock);
     auto out = diagnostics.retrieve(request, cancel, GetTickCount64(), detail);
     ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_campaign_result campaign_request(uint16_t operation,const sc_campaign_request& request) {
+    AcquireSRWLockShared(&lock);
+    auto scope=status.scope; scope.lifecycle_generation=lifetime.generation;
+    const bool admitted=campaign_menu::available() && same_scope(scope,request.execution.expected) &&
+        save::session().state()==save::SessionState::admitted && save::session().accepts_requests() &&
+        save::session().namespace_id()==request.namespace_id;
+    const auto out=campaign_menu::menu().request(operation,request,admitted);
+    ReleaseSRWLockShared(&lock); return out;
 }
 sc_weapon_points_result submit_weapon_points(const sc_weapon_points_request& request) {
     AcquireSRWLockExclusive(&lock);

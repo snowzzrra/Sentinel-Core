@@ -19,7 +19,7 @@ ProbeResult classify(DWORD error) {
 static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t required, uint16_t operation,
                                    const sc_diagnostic_request* request = nullptr, uint64_t after_event = 0,
                                    uint64_t write_id = 0, const sc_save_backup_request* backup = nullptr,
-                                   const sc_weapon_points_request* points = nullptr) {
+                                   const sc_weapon_points_request* points = nullptr, const sc_campaign_request* campaign=nullptr) {
     Inspection result;
     Handle process;
     auto fail = [&](DWORD error) {
@@ -75,7 +75,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(points ? encode_weapon_points_request(data, operation, *points) :
+    const DWORD size = static_cast<DWORD>(campaign ? encode_campaign_request(data,operation,*campaign) : points ? encode_weapon_points_request(data, operation, *points) :
         backup ? encode_backup_request(data, operation, *backup) :
         operation == save_write_operation ? encode_save_write_request(data, write_id) :
         operation >= native_operation && operation <= diagnostic_detail_cancel_operation ?
@@ -92,7 +92,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     WireResult code{};
     result.failure_stage = "decode_response";
     // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
-    bool decoded = points ? decode_weapon_points_response(data, count, code, operation, result.snapshot, result.weapon_points) :
+    bool decoded = campaign ? decode_campaign_response(data,count,code,operation,result.snapshot,result.campaign) : points ? decode_weapon_points_response(data, count, code, operation, result.snapshot, result.weapon_points) :
         backup ? decode_backup_response(data, count, code, operation, result.snapshot, result.backup) :
         operation == save_installation_operation ? decode_installation_response(data, count, code, result.snapshot, result.installation) :
         operation == save_write_operation ? decode_save_write_response(data, count, code, result.snapshot, result.write) :
@@ -119,7 +119,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     const auto& execution = points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic);
-    if (request && (execution.request_id != request->request_id ||
+    if (request && !campaign && (execution.request_id != request->request_id ||
         std::memcmp(execution.nonce, request->nonce, sizeof(request->nonce)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
@@ -137,12 +137,24 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         std::memcmp(result.weapon_points.namespace_id, points->namespace_id, sizeof(points->namespace_id)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
+    if (campaign && (result.campaign.scope.lifecycle_generation!=campaign->execution.expected.lifecycle_generation ||
+        result.campaign.request_id!=campaign->execution.request_id ||
+        std::memcmp(result.campaign.nonce,campaign->execution.nonce,16) ||
+        std::memcmp(result.campaign.namespace_id,campaign->namespace_id,65))) {
+        result.result=ProbeResult::invalid_response; return result;
+    }
     result.result = ProbeResult::ok;
     result.failure_stage = "none"; result.target_state = "live";
     return result;
 }
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required) {
     return query_operation(pid, timeout_ms, required, inspect_operation);
+}
+Inspection query_campaign(uint32_t pid,uint32_t timeout_ms,uint16_t operation,const sc_campaign_request& r) {
+    if (operation<campaign_row_operation || operation>campaign_inspect_operation) {
+        Inspection out; out.result=ProbeResult::usage; return out;
+    }
+    return query_operation(pid,timeout_ms,campaign_menu_capability,operation,&r.execution,0,0,nullptr,nullptr,&r);
 }
 Inspection query_engine(uint32_t pid, uint32_t timeout_ms) {
     return query_operation(pid, timeout_ms, engine_capability, engine_operation);

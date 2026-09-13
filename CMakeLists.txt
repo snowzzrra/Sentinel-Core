@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(SentinelCore VERSION 0.7.0 LANGUAGES C CXX)
+project(SentinelCore VERSION 0.8.0 LANGUAGES C CXX)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Sentinel Core currently requires Windows x64 and MSVC.")
 endif()
@@ -45,6 +45,8 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   include/sentinel_native.h src/native_model.h src/native_model.cpp
   include/sentinel_weapon_points.h src/weapon_points.h src/weapon_points.cpp src/weapon_points_native.cpp
   tools/weapon_points_probe.cpp
+  include/sentinel_campaign_menu.h src/campaign_menu.h src/campaign_menu.cpp tools/campaign_menu_probe.cpp
+  src/campaign_menu_native.h src/campaign_menu_native.cpp
   src/native_target.h src/native_target.cpp src/native_runtime.h src/native_runtime.cpp
   include/sentinel_save.h src/save_observer.h src/save_observer.cpp
   src/save_storage.h src/save_storage.cpp src/prelaunch.h src/prelaunch.cpp src/startup_log.h src/startup_log.cpp tools/save_probe.h tools/save_probe.cpp
@@ -88,7 +90,7 @@ target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
 add_library(sentinel_save_storage STATIC src/save_storage.cpp src/prelaunch.cpp)
 target_include_directories(sentinel_save_storage PUBLIC src)
 target_link_libraries(sentinel_save_storage PUBLIC bcrypt)
-add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp)
+add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp tools/campaign_menu_probe.cpp)
 target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client sentinel_save_storage bcrypt)
 add_library(sentinel_observer STATIC src/engine_observer.cpp src/context_observer.cpp src/save_observer.cpp)
 target_include_directories(sentinel_observer PUBLIC include src)
@@ -100,17 +102,17 @@ target_include_directories(sentinel_minhook PUBLIC third_party/minhook/include t
 # Pinned upstream uses intentional byte casts/anonymous unions; HDE initializes
 # its prefix byte in the loop. Keep upstream unchanged and Core warnings strict.
 target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
-add_library(sentinel_native_model STATIC src/native_model.cpp src/weapon_points.cpp)
+add_library(sentinel_native_model STATIC src/native_model.cpp src/weapon_points.cpp src/campaign_menu.cpp)
 target_include_directories(sentinel_native_model PUBLIC include src)
 add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp src/save_campaign.cpp)
 target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
 target_sources(sentinel_save_session PRIVATE src/save_recovery.cpp)
-add_executable(sentinel_campaign_tests tests/save_campaign.cpp tests/save_profile.cpp src/native_runtime.cpp src/native_target.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp)
+add_executable(sentinel_campaign_tests tests/save_campaign.cpp tests/save_profile.cpp src/native_runtime.cpp src/native_target.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp src/campaign_menu_native.cpp)
 target_include_directories(sentinel_campaign_tests PRIVATE tests)
 target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)
-target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_native_model sentinel_minhook sentinel_save_session)
+target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_native_model sentinel_minhook sentinel_save_session sentinel_protocol)
 target_link_libraries(sentinel_native_model PUBLIC sentinel_save_session)
-add_library(sentinel_native STATIC src/native_target.cpp src/native_runtime.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp)
+add_library(sentinel_native STATIC src/native_target.cpp src/native_runtime.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp src/campaign_menu_native.cpp)
 target_link_libraries(sentinel_native PUBLIC sentinel_native_model sentinel_observer sentinel_minhook sentinel_save_session)
 add_library(sentinel_core SHARED src/core.cpp src/inspection_server.cpp src/startup_log.cpp)
 target_link_libraries(sentinel_core PRIVATE sentinel_protocol sentinel_native advapi32 bcrypt)
@@ -170,7 +172,7 @@ set_tests_properties(native_lifecycle_dispatch_model PROPERTIES TIMEOUT 10)
 # Separate test executable with explicit fixture adapters. The production Core
 # never compiles SC_NATIVE_TESTING or accepts an address/callback through IPC.
 add_executable(sentinel_native_host tests/native_host.cpp src/core.cpp src/inspection_server.cpp src/startup_log.cpp
-  src/native_runtime.cpp src/native_target.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp)
+  src/native_runtime.cpp src/native_target.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp src/campaign_menu_native.cpp)
 target_include_directories(sentinel_native_host PRIVATE tests)
 target_link_libraries(sentinel_native_host PRIVATE sentinel_native_model sentinel_observer sentinel_minhook
   sentinel_inspection_client sentinel_save_session advapi32 bcrypt)

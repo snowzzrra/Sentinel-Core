@@ -19,6 +19,9 @@ std::atomic<uint32_t> owner{0}, game{SC_GAME_IN_GAME}, command{0};
 std::atomic<uintptr_t> caller{0}, map{42};
 std::atomic<uint64_t> originals{0}, changes{0}, frees{0}, last_return{0};
 std::atomic<bool> pause_frames{false}, finish_thread{false}, pending{false}, recurse{false};
+std::atomic<unsigned> campaign_map{0};
+constexpr const char* campaign_maps[]={"fixture/same-name-and-address", "game/sp/e2m2_base/e2m2_base",
+    "game/hub/hub", "game/dlc/e4m1_rig/e4m1_rig", "game/dlc2/e5m2_earth/e5m2_earth"};
 std::atomic<unsigned> gate_stage{0};
 std::atomic<unsigned> observation_case{0};
 HANDLE parked = nullptr, wake = nullptr, gate_entered = nullptr, gate_release = nullptr, changed = nullptr;
@@ -52,7 +55,7 @@ sc_context_snapshot facts() {
     c.fields[SC_CONTEXT_GAME_STATE] = {SC_OBSERVATION_OBSERVED, SC_REASON_NONE, game.load(), 0};
     if (game.load() == SC_GAME_IN_GAME && map.load()) {
         c.current_map.validity = SC_OBSERVATION_OBSERVED;
-        strcpy_s(c.current_map.bytes, "fixture/same-name-and-address");
+        strcpy_s(c.current_map.bytes, campaign_maps[campaign_map.load()]);
         c.current_map.length = static_cast<uint32_t>(std::strlen(c.current_map.bytes));
     }
     return c;
@@ -66,11 +69,12 @@ sc_context_snapshot observe(context::Evidence& measured) {
         explicit Memory(unsigned value) : mode(value) {}
         engine::ReadResult copy(uintptr_t address, void* out, size_t size) override {
             constexpr uintptr_t root = 0x1445ea6f0ULL, object = 0x200000000ULL, data = 0x300000000ULL;
-            const char name[] = "fixture/same-name-and-address";
+            const char* name = campaign_maps[campaign_map.load()];
+            const auto name_size = std::strlen(name)+1;
             const uintptr_t root_table = 0x142aaa730ULL, map_table = 0x142ab30c8ULL;
             uint32_t state[2]{SC_GAME_IN_GAME, 12};
             struct String { uintptr_t table, data; int32_t length; uint32_t allocation; };
-            const String text{0x142a67478ULL, data, static_cast<int32_t>(sizeof(name) - 1), 4096};
+            const String text{0x142a67478ULL, data, static_cast<int32_t>(name_size - 1), 4096};
             const void* source = nullptr; size_t width = 0;
             if (address == root) { source = &root_table; width = sizeof(root_table); }
             if (address == root + 0x44) {
@@ -82,7 +86,7 @@ sc_context_snapshot observe(context::Evidence& measured) {
             if (address == object + 0x9a060) { source = &text; width = sizeof(text); }
             if (address == data) {
                 if (mode == 5) return {SC_REASON_PARTIAL_READ, ERROR_PARTIAL_COPY};
-                source = name; width = sizeof(name);
+                source = name; width = name_size;
             }
             if (!source || size != width) return {SC_REASON_READ_FAILED, ERROR_NOACCESS};
             std::memcpy(out, source, size); return {};
@@ -125,7 +129,11 @@ template<class Predicate> void until_at(int line, const char* stage, Predicate p
 }
 #define until(...) until_at(__LINE__, #__VA_ARGS__, __VA_ARGS__)
 void park() { pause_frames.store(true); CHECK(WaitForSingleObject(parked, 4000) == WAIT_OBJECT_0); }
-void resume() { pause_frames.store(false); SetEvent(wake); }
+void resume() {
+    // Consume the parked acknowledgement before a fast next stdin command can
+    // mistake it for acknowledgement of a new pause request.
+    ResetEvent(parked); pause_frames.store(false); SetEvent(wake);
+}
 void transition(uint32_t action) {
     ResetEvent(changed); command.store(action); resume();
     // inspect() owns the native history lock. Polling it while this fixture
@@ -272,6 +280,9 @@ int wmain(int argc, wchar_t** argv) {
                 CHECK(currency.current >= 3);
                 CHECK(!weapon_points::suppress(true,weapon_points::Source::unknown,0,-3,false));
                 currency.current-=3; ++currency.purchases;
+            } else if (action == "map") {
+                unsigned selected=0; std::cin >> selected; CHECK(selected>=1 && selected<=4);
+                campaign_map.store(selected); transition(4); ready(); park();
             } else if (action == "restore") {
                 std::cin >> currency.current >> currency.gained >> currency.purchases;
             } else if (action == "namespace") {

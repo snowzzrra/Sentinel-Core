@@ -55,8 +55,8 @@ bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,st
     state_.difficulty=options_.difficulty; state_.resumed=options_.intent==storage::CampaignIntent::resume;
     // Exact native suffix, never an index inferred from directory enumeration.
     state_.slot="AUTOSAVE0"; directory_=owner.native_root()+"/GAME-"+state_.slot;
-    contract_="sentinel-campaign-v1\nnamespace="+owner.namespace_id()+"\ngeneration="+
-        descriptor.identity.generation_fingerprint+"\nprovenance=synthetic-fixture\ncampaign=base\nstarting_stage=base_start\ndifficulty="+
+    contract_="sentinel-campaign-v2\nnamespace="+owner.namespace_id()+"\ngeneration="+
+        descriptor.identity.generation_fingerprint+"\nprovenance=synthetic-fixture\ncampaign=unified\nstarting_stage=hub\ndifficulty="+
         std::to_string(options_.difficulty)+"\nslot="+state_.slot+"\n";
     diagnostic_stage_=state_.resumed?BStage::resume:BStage::creation;
     owner.btrace.record(diagnostic_stage_,BStatus::entered,"campaign_contract_read");

@@ -490,8 +490,10 @@ Result parse_descriptor(std::string_view text, Descriptor& descriptor) {
         value != "synthetic-fixture" || !line(text, "root=", value) || !utf8(value, parsed.root))
         return {Outcome::invalid_descriptor};
     if (campaign) {
-        if (!line(text, "campaign=", value) || value != "base" ||
-            !line(text, "starting_stage=", value) || value != "base_start" ||
+        if (!line(text, "campaign=", value) || (value != "base" && value != "unified"))
+            return {Outcome::invalid_descriptor};
+        const bool unified = value == "unified";
+        if (!line(text, "starting_stage=", value) || value != (unified ? "hub" : "base_start") ||
             !line(text, "difficulty=", value) || value.size() != 1 || value[0] < '0' || value[0] > '3')
             return {Outcome::invalid_descriptor};
         parsed.campaign.difficulty = static_cast<uint32_t>(value[0] - '0');

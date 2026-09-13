@@ -10,6 +10,9 @@
 #include "save_campaign_native.h"
 #include "native_test_adapter.h"
 #include "native_runtime.h"
+#include "campaign_menu.h"
+#include "campaign_menu_native.h"
+#include "protocol.h"
 #include <windows.h>
 #include <array>
 #include <cstdio>
@@ -126,9 +129,10 @@ uint64_t native_load(uintptr_t self,uintptr_t descriptor,uintptr_t files) {
     if (transition_defect==L"abnormal") RaiseException(0xe0420042,0,0,nullptr);
     if (transition_defect==L"travel") {
         native::test_free(self,[](uintptr_t,uintptr_t) {});
-        const auto map=*reinterpret_cast<uintptr_t*>(self+0x50);
-        std::memcpy(reinterpret_cast<void*>(map+0x9a060),reinterpret_cast<void*>(descriptor+0x10),sizeof(NativeString));
     }
+    // Native loader consumes the request selected by the production adapter.
+    const auto map=*reinterpret_cast<uintptr_t*>(self+0x50);
+    std::memcpy(reinterpret_cast<void*>(map+0x9a060),reinterpret_cast<void*>(descriptor+0x10),sizeof(NativeString));
     if (transition_defect==L"nested" && !nested_change) {
         nested_change=true;
         native::test_free(self,[](uintptr_t,uintptr_t) {});
@@ -148,7 +152,8 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
     std::array<unsigned char,0x1970> request{};
     std::vector<unsigned char> map(0xafd00);
     std::array<unsigned char,16> cvar{};
-    std::string map_name="game/sp/initial";
+    const bool bootstrap=session().campaign_run.snapshot().phase=="native_start_queued";
+    std::string map_name=bootstrap?"game/hub/hub":session().campaign_run.snapshot().map;
     const auto native_name=text(map_name);
     const uintptr_t map_address=reinterpret_cast<uintptr_t>(map.data());
     const uintptr_t setting=reinterpret_cast<uintptr_t>(cvar.data());
@@ -188,6 +193,7 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
     if (checkpoint && defect!=L"initial_save" && defect!=L"initial_save_return_failed" && defect!=L"save_failure" && defect!=L"partial_save") checkpoint();
     if (after_ready) after_ready();
     const auto result=session().campaign_run.snapshot();
+    if (bootstrap && result.map_active) CHECK(result.map=="game/hub/hub");
     if (defect==L"pending_transition") {
         CHECK(result.transition.game==SC_GAME_LOADING && result.checkpoint_boundary.game==SC_GAME_IN_GAME);
         CHECK(result.transition.at_ms<=result.checkpoint_boundary.at_ms && result.map_active);
@@ -218,6 +224,7 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
     return 0;
 }
 #include "campaign_navigation_fixture.h"
+#include "campaign_menu_fixture.h"
 #include "campaign_writer_fixture.h"
 #include "campaign_travel_fixture.h"
 }
@@ -480,6 +487,7 @@ int wmain(int argc,wchar_t** argv) {
         CHECK(!owner.campaign_run.snapshot().map_active); std::puts("PASS dirty-process refusal before reservation"); return 0;
     }
     navigation_fixture::create(difficulty,defect);
+    if (defect.empty()) menu_fixture::exercise();
     if (defect==L"extra_life" || defect==L"ultra") return 0;
     if (profile_lifecycle) {
         CHECK(!owner.campaign_run.snapshot().map_active && owner.campaign_run.snapshot().phase=="native_start_queued");

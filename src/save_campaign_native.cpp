@@ -1,5 +1,6 @@
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #include "save_campaign_native.h"
+#include "campaign_menu.h"
 #include "save_session.h"
 #include "save_provider.h"
 #include "save_catalog.h"
@@ -21,12 +22,16 @@ using ParseGame=uint64_t(*)(SaveReference*,uintptr_t,uintptr_t,uintptr_t);
 using SetCvar=uint64_t(*)(uintptr_t,const char*,uint8_t);
 using SetInteger=void(*)(uintptr_t,uint32_t,uint8_t);
 using CampaignAction=uint64_t(*)(uintptr_t,uintptr_t);
+using CampaignPump=void(*)(uintptr_t);
+using CampaignDevMenu=void(*)(uintptr_t);
 using SelectedSlot=uint32_t(*)(uintptr_t);
 using SelectSlot=void(*)(uintptr_t,uint32_t);
 using Menu=uintptr_t(*)();
 NewGame original_new=nullptr; NewInternal original_internal=nullptr;
 LoadGame original_load=nullptr; ParseGame original_parse=nullptr; SetCvar original_cvar=nullptr;
 CampaignAction original_action=nullptr;
+CampaignPump original_pump=nullptr;
+CampaignDevMenu original_devmenu=nullptr;
 SelectedSlot selected_slot=nullptr; SelectSlot select_slot=nullptr; Menu main_menu=nullptr;
 SetInteger set_integer=nullptr;
 thread_local bool navigation_owned=false;
@@ -108,7 +113,8 @@ void create_from_action(uintptr_t screen) {
     // before entering NewGame. NewGame retains its permission/task/ref ownership;
     // the skipped screen only supplies the ordinary difficulty argument.
     session().btrace.record(BStage::creation,BStatus::entered,"native_selected_slot_call",0,{},screen);
-    const auto slot=selected_slot(screen);
+    uint32_t state=0;
+    const auto slot=read(screen,0x108,state) && state==2 ? 0u : selected_slot(screen);
     if (slot!=0) {
         session().btrace.record(BStage::creation,BStatus::refused,"ap_new_game_slot_not_prospective",0,{{"actual_slot",slot},{"expected_slot",0}},screen);
         session().campaign_run.refuse("ap_new_game_slot_not_prospective"); return;
@@ -132,11 +138,19 @@ void invoke_navigation(uintptr_t screen) {
 uint64_t campaign_action(uintptr_t screen,uintptr_t action) {
     if (!session().campaign_run.enabled()) return original_action(screen,action);
     uint32_t kind=0,count=0,tag=0,value=0; uintptr_t arguments=0;
-    // The empty-slot widget installs an integer ScriptVar (tag5,value3).
+    uint32_t screen_state=0;
+    read(screen,0x108,screen_state);
+    // Native state2 Back returns to slots; state1 Back exits to the parent.
+    if (read(action,0,kind) && kind==0xf && screen_state==2 && session().accepts_requests()) {
+        *reinterpret_cast<uint32_t*>(screen+0x108)=1;
+        return original_action(screen,action);
+    }
+    // Empty-slot NewGame is value3; ordinary fresh-campaign NewGame is value0.
     // Preserve every unrelated native action and vanilla screen path.
     if (!read(action,0,kind) || kind!=1 || !read(action,0x10,count) || !count ||
         !read(action,8,arguments) || !read(arguments,0,tag) || tag!=5 ||
-        !read(arguments,8,value) || value!=3) return original_action(screen,action);
+        !read(arguments,8,value) || (value!=3 && !(value==0 && screen_state==2 &&
+            !session().campaign_run.snapshot().resumed))) return original_action(screen,action);
     session().btrace.record(BStage::creation,BStatus::entered,"new_game_action_observed",0,
         {{"kind",kind},{"count",count},{"tag",tag},{"value",value},{"accepting",session().accepts_requests()},
          {"navigation_owned",navigation_owned},{"armed",session().campaign_run.snapshot().phase=="armed"}},screen);
@@ -146,6 +160,52 @@ uint64_t campaign_action(uintptr_t screen,uintptr_t action) {
     }
     invoke_navigation(screen);
     return 1; // Consume this explicit New Game action before navigation to Difficulty.
+}
+void select_campaign_slot(uintptr_t menu) {
+    navigation_owned=true;
+    __try { select_slot(menu,0); }
+    __finally { navigation_owned=false; }
+}
+void campaign_pump(uintptr_t screen) {
+    uint32_t next=0;
+    if (session().campaign_run.enabled() && session().accepts_requests() &&
+        read(screen,0x10c,next) && next==1) {
+        // Native state1 follows catalog readiness. State2 owns the ordinary
+        // Continue/NewGame/Mission Select widgets and their native focus states.
+        const auto menu=main_menu();
+        if (!menu) { session().campaign_run.refuse("native_menu_unavailable"); return; }
+        select_campaign_slot(menu);
+        *reinterpret_cast<uint32_t*>(screen+0x10c)=2;
+        session().btrace.record(BStage::creation,BStatus::succeeded,"single_campaign_actions_requested",0,{{"slot",0}},screen);
+    }
+    original_pump(screen);
+}
+void invoke_bootstrap_devmenu(uintptr_t arguments,uintptr_t previous) {
+    auto* option=reinterpret_cast<const char**>(arguments+0x10);
+    *option="devmenuoption/ap_unified_campaign";
+    __try { original_devmenu(arguments); }
+    __finally { *option=reinterpret_cast<const char*>(previous); }
+}
+void devmenu_command(uintptr_t arguments) {
+    const auto campaign=session().campaign_run.snapshot();
+    if (!campaign.enabled || campaign.resumed || campaign.phase!="native_start_queued") {
+        original_devmenu(arguments); return;
+    }
+    constexpr char expected[]="devmenuoption/new_campaign", mode[]="newCampaign";
+    char actual[sizeof(expected)]{}, actual_mode[sizeof(mode)]{};
+    uint32_t count=0; uintptr_t option=0, trailing=0;
+    if (!session().accepts_requests() || !read(arguments,0,count) || count!=5 ||
+        !read(arguments,0x10,option) || !read(arguments,0x28,trailing) ||
+        memory.copy(option,actual,sizeof(actual)).reason || memory.copy(trailing,actual_mode,sizeof(actual_mode)).reason ||
+        std::memcmp(actual,expected,sizeof(expected)) || std::memcmp(actual_mode,mode,sizeof(mode))) {
+        session().campaign_run.refuse("native_bootstrap_devmenu_mismatch",BStage::creation); return;
+    }
+    session().btrace.record(BStage::bootstrap,BStatus::entered,"fortress_devmenu_enter",0,{{"argc",count}},arguments);
+    // Preserve the native command's launch mode/newCampaign initialization.
+    // Its room-authored DevMenu entry supplies Fortress layers and DevInv before
+    // the loader constructs its map request; no late destination-only rewrite.
+    invoke_bootstrap_devmenu(arguments,option);
+    session().btrace.record(BStage::bootstrap,BStatus::succeeded,"fortress_devmenu_returned",0,{{"argc",count}},arguments);
 }
 void new_internal(uintptr_t menu,uint32_t difficulty,uint8_t extra_life,uint32_t policy) {
     std::string prefix;
@@ -158,9 +218,24 @@ void new_internal(uintptr_t menu,uint32_t difficulty,uint8_t extra_life,uint32_t
         session().campaign_run.refuse("base_campaign_required",BStage::creation); return;
     }
     if (!session().campaign_run.start_internal(difficulty,extra_life!=0)) return;
+    // Native StartNewGameInternal can return normally without queuing a map.
+    // Retain its input separately from repeated menu actions in the capture.
+    uintptr_t profile=0,manager=0; std::string slot; uint32_t slot_index=UINT32_MAX;
+    const bool profile_read=read(image+0x47ddb68,0,profile) && read(profile,0x18,profile) &&
+        read(profile,8,profile) && read(profile,8,profile) && read(profile,8,profile) && profile;
+    const bool slot_read=profile_read && name(profile,0x12350,slot) && read(profile,0x1234c,slot_index);
+    const bool manager_read=read(image+0x45f4228,0,manager) && manager;
+    const auto trace_start=[&](BStatus status,const char* predicate) {
+        session().btrace.record(BStage::native_start,status,predicate,0,
+            {{"profile_read",profile_read},{"slot_read",slot_read},{"slot_length",slot.size()},
+             {"slot_is_autosave0",slot=="AUTOSAVE0"},{"slot_index",slot_index},{"manager_read",manager_read},
+             {"difficulty",difficulty},{"entry_index",policy}},menu);
+    };
+    trace_start(BStatus::entered,"native_start_internal_enter");
     session().btrace.record(BStage::creation,BStatus::entered,"native_new_internal_call",0,
         {{"difficulty",difficulty},{"extra_life",extra_life},{"policy",policy}},menu);
     original_internal(menu,difficulty,extra_life,policy);
+    trace_start(BStatus::succeeded,"native_start_internal_returned");
     session().btrace.record(BStage::creation,BStatus::succeeded,"native_new_internal_returned",0,
         {{"session_state",session().state()},{"session_fault",session().fault()}},menu);
 }
@@ -263,6 +338,10 @@ bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransitio
             {{"event_id",transition.event_id},{"generation_before",transition.generation_before},{"flags",flags}},descriptor);
         return accepted;
     }
+    const auto campaign=session().campaign_run.snapshot();
+    if (!campaign.resumed && campaign.phase=="native_start_queued" && map!="game/hub/hub") {
+        session().campaign_run.refuse("native_bootstrap_source_unexpected",BStage::transition); return false;
+    }
     transition.campaign=session().campaign_run.map_begin(std::move(map),transition.generation_before,transition.event_id);
     if (transition.campaign) session().btrace.record(BStage::transition,BStatus::entered,"native_gameplay_transition_call",0,
         {{"event_id",transition.event_id},{"generation_before",transition.generation_before},{"flags",flags}},descriptor);
@@ -289,6 +368,8 @@ void campaign_change_end(CampaignTransition& transition) {
     }
     prior_campaign=true; map_facts(transition);
     session().campaign_run.map_end(transition);
+    const auto observed=session().campaign_run.snapshot();
+    if (observed.map_active) campaign_menu::menu().loaded(observed.map.c_str());
 }
 void campaign_checkpoint_boundary(CampaignTransition transition) {
     if (!session().campaign_run.enabled()) return;
@@ -324,8 +405,8 @@ SaveFuture** campaign_write_provider(uintptr_t caller, engine::Memory& source_me
          {"session_state",session().state()},{"session_fault",session().fault()}},reinterpret_cast<uintptr_t>(data));
     return result;
 }
-std::array<native::Target,10> campaign_targets(uintptr_t base) {
-    constexpr uint32_t rvas[]={0x17538a0,0x1753b80,0x66cec0,0x14940b0,0x376020,0x10a6110,0x376250,0x10a5bb0,0x17515c0,0x174ef70};
+std::array<native::Target,12> campaign_targets(uintptr_t base) {
+    constexpr uint32_t rvas[]={0x17538a0,0x1753b80,0x66cec0,0x14940b0,0x376020,0x10a6110,0x376250,0x10a5bb0,0x17515c0,0x174ef70,0x10a6fa0,0x1756a20};
     constexpr const char* bytes[]={
         "48895c2408488974241048897c24184c8974242055488dac2460feffff4881ec",
         "4055535741554156488dac2460c0ffffb8a0400000e806821101482be0488b05",
@@ -336,8 +417,10 @@ std::array<native::Target,10> campaign_targets(uintptr_t base) {
         "48895c2418574883ec60488b057787e3034833c44889442450488bf9410fb6d8",
         "48895c2408574883ec20488b01488bf9bbffffffffff90e00100004885c07434",
         "4055564156488d6c24a04881ec60010000488b0500d4a5024833c4488945308b",
-        "4883ec28488b05c5f1f5024885c0752d8d5053b9800d0000e8b382c0fe4885c0"};
-    std::array<native::Target,10> targets{};
+        "4883ec28488b05c5f1f5024885c0752d8d5053b9800d0000e8b382c0fe4885c0",
+        "40555357488dac24e0bfffffb820410000e8ea4d7c01482be0488b05187a1003",
+        "40554157488dac2468bfffffb898410000e86a531101482be0488b05987fa502"};
+    std::array<native::Target,12> targets{};
     for (unsigned i=0;i<targets.size();++i) {
         targets[i].address=base+rvas[i];
         if (std::strlen(bytes[i])!=64) return {};
@@ -357,18 +440,21 @@ bool install_campaign_hooks(const engine::Binding& binding,HANDLE stop) {
     const auto targets=campaign_targets(image);
     for (unsigned i=0;i<targets.size();++i)
         if (native::validate_recorded(session().installation,memory,binding.image,targets[i],stop,GetTickCount64()+3000,4,i)) return false;
-    void* detours[]={reinterpret_cast<void*>(new_game),reinterpret_cast<void*>(new_internal),reinterpret_cast<void*>(load_game),reinterpret_cast<void*>(parse_game),reinterpret_cast<void*>(set_cvar),reinterpret_cast<void*>(campaign_action)};
-    void* originals[6]{};
-    for (unsigned i=0;i<6;++i) if (session().installation.hook(SC_INSTALL_SAVE_CREATE,4,i,static_cast<uint32_t>(targets[i].address-image),[&]{
-        return MH_CreateHook(reinterpret_cast<void*>(targets[i].address),detours[i],&originals[i]);})!=MH_OK) return false;
+    void* detours[]={reinterpret_cast<void*>(new_game),reinterpret_cast<void*>(new_internal),reinterpret_cast<void*>(load_game),reinterpret_cast<void*>(parse_game),reinterpret_cast<void*>(set_cvar),reinterpret_cast<void*>(campaign_action),reinterpret_cast<void*>(campaign_pump),reinterpret_cast<void*>(devmenu_command)};
+    constexpr unsigned hooked[]={0,1,2,3,4,5,10,11};
+    void* originals[8]{};
+    for (unsigned i=0;i<8;++i) if (session().installation.hook(SC_INSTALL_SAVE_CREATE,4,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-image),[&]{
+        return MH_CreateHook(reinterpret_cast<void*>(targets[hooked[i]].address),detours[i],&originals[i]);})!=MH_OK) return false;
     original_new=reinterpret_cast<NewGame>(originals[0]); original_internal=reinterpret_cast<NewInternal>(originals[1]);
     original_load=reinterpret_cast<LoadGame>(originals[2]); original_parse=reinterpret_cast<ParseGame>(originals[3]); original_cvar=reinterpret_cast<SetCvar>(originals[4]);
     original_action=reinterpret_cast<CampaignAction>(originals[5]);
+    original_pump=reinterpret_cast<CampaignPump>(originals[6]);
+    original_devmenu=reinterpret_cast<CampaignDevMenu>(originals[7]);
     parser_release=reinterpret_cast<ReleaseSaveReference>(image+0x367770);
     set_integer=reinterpret_cast<SetInteger>(targets[6].address); selected_slot=reinterpret_cast<SelectedSlot>(targets[7].address);
     select_slot=reinterpret_cast<SelectSlot>(targets[8].address); main_menu=reinterpret_cast<Menu>(targets[9].address);
-    for (unsigned i=0;i<6;++i) if (session().installation.hook(SC_INSTALL_SAVE_ENABLE,4,i,static_cast<uint32_t>(targets[i].address-image),[&]{
-        return MH_EnableHook(reinterpret_cast<void*>(targets[i].address));})!=MH_OK) return false;
+    for (unsigned i=0;i<8;++i) if (session().installation.hook(SC_INSTALL_SAVE_ENABLE,4,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-image),[&]{
+        return MH_EnableHook(reinterpret_cast<void*>(targets[hooked[i]].address));})!=MH_OK) return false;
     return true;
 }
 #ifdef SC_NATIVE_TESTING
@@ -376,7 +462,11 @@ void test_campaign_binding(uintptr_t base, uintptr_t object) { image=base; root=
 void test_campaign_calls(const CampaignNativeTestCalls& calls) {
     original_new=calls.new_game; original_internal=calls.internal; original_action=calls.action;
     selected_slot=calls.slot; select_slot=calls.select; main_menu=calls.menu; set_integer=calls.integer; original_cvar=calls.cvar;
+    original_pump=calls.pump;
+    original_devmenu=calls.devmenu;
 }
+void test_campaign_devmenu(uintptr_t arguments) { devmenu_command(arguments); }
+void test_campaign_pump(uintptr_t screen) { campaign_pump(screen); }
 uint64_t test_campaign_action(uintptr_t screen,uintptr_t action) { return campaign_action(screen,action); }
 void test_campaign_internal(uintptr_t menu,uint32_t difficulty,uint8_t extra,uint32_t policy) { new_internal(menu,difficulty,extra,policy); }
 void test_campaign_new(uintptr_t menu,uint32_t difficulty,uint8_t extra) { new_game(menu,difficulty,extra); }

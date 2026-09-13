@@ -381,8 +381,11 @@ int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool en
     return 0;
 }
 int weapon_points_command(int argc, wchar_t** argv);
+int campaign_menu_command(int argc,wchar_t** argv);
 int wmain(int argc, wchar_t** argv) {
     const int points_result = weapon_points_command(argc, argv);
+    const int campaign_result=campaign_menu_command(argc,argv);
+    if (campaign_result>=0) return campaign_result;
     if (points_result >= 0) return points_result;
     const int storage_result = save_storage_command(argc, argv);
     if (storage_result >= 0) return storage_result;

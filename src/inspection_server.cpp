@@ -72,9 +72,13 @@ DWORD serve(void*) {
             sc_diagnostic_request diagnostic{}; uint64_t after_event = 0, write_id = 0;
             sc_save_backup_request backup{};
             sc_weapon_points_request points{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points);
+            sc_campaign_request campaign{};
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign);
+            sc_campaign_result campaign_result{};
+            if (result==WireResult::ok && operation>=campaign_row_operation)
+                campaign_result=native::campaign_request(operation,campaign);
             sc_weapon_points_result points_result{};
-            if (result == WireResult::ok && operation >= weapon_points_submit_operation) {
+            if (result == WireResult::ok && operation >= weapon_points_submit_operation && operation<=weapon_points_release_operation) {
                 points_result = operation == weapon_points_submit_operation ? native::submit_weapon_points(points) :
                     native::weapon_points_result(points, operation == weapon_points_cancel_operation,
                         operation == weapon_points_release_operation);
@@ -91,7 +95,8 @@ DWORD serve(void*) {
                     native::submit(diagnostic, &detail) : native::result(diagnostic,
                         operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
-            const DWORD size = static_cast<DWORD>(operation >= weapon_points_submit_operation ?
+            const DWORD size = static_cast<DWORD>(operation>=campaign_row_operation ?
+                encode_campaign_response(data,result,operation,current_snapshot(),campaign_result) : operation >= weapon_points_submit_operation ?
                 encode_weapon_points_response(data, result, operation, current_snapshot(), points_result) :
                 operation == save_installation_operation ?
                 encode_installation_response(data, result, current_snapshot(), save::session().installation.inspect()) : operation >= save_backup_submit_operation ?

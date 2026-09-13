@@ -59,16 +59,56 @@ size_t encode_save_write_request(Message& out, uint64_t operation_id) {
 }
 WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
                           sc_diagnostic_request* diagnostic, uint64_t* after_event, uint64_t* write_id,
-                          sc_save_backup_request* backup, sc_weapon_points_request* points) {
+                          sc_save_backup_request* backup, sc_weapon_points_request* points, sc_campaign_request* campaign) {
     if (operation) *operation = inspect_operation;
     if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && op >= engine_operation && op <= weapon_points_release_operation) *operation = static_cast<uint16_t>(op);
+    if (operation && op >= engine_operation && op <= campaign_inspect_operation) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op < inspect_operation || op > weapon_points_release_operation) return WireResult::unsupported_operation;
+    if (op < inspect_operation || op > campaign_inspect_operation) return WireResult::unsupported_operation;
+    if (op>=campaign_row_operation) {
+        if (length!=453) return WireResult::malformed;
+        if (r.number(8)!=campaign_menu_capability) return WireResult::capability_unavailable;
+        sc_campaign_request value{};
+        auto& e=value.execution;
+        r.u32(e.expected.pid); r.u64(e.expected.process_created);
+        bool instance=false,nonce=false;
+        for (auto& b:e.expected.instance_id) { r.byte(b); instance|=b!=0; }
+        r.u64(e.expected.lifecycle_generation); r.u64(e.request_id);
+        for (auto& b:e.nonce) { r.byte(b); nonce|=b!=0; }
+        r.u32(e.deadline_ms);
+        // Menus may precede the first observed map generation. Scope zero is
+        // meaningful here; gameplay diagnostic/WUP operations still reject it.
+        if (!e.expected.pid || !e.expected.process_created || !e.request_id || !instance || !nonce ||
+            !e.deadline_ms || e.deadline_ms>SC_DIAGNOSTIC_MAX_DEADLINE_MS) return WireResult::malformed;
+        for (auto& c:value.namespace_id) c=static_cast<char>(r.number(1));
+        r.u64(value.revision); r.u32(value.index); r.u32(value.count);
+        r.u32(value.row.id); r.u32(value.row.flags); r.u32(value.row.native_index);
+        for (auto& c:value.row.map) c=static_cast<char>(r.number(1));
+        for (auto& c:value.row.title) c=static_cast<char>(r.number(1));
+        if (value.namespace_id[64] || value.row.map[191] || value.row.title[95]) return WireResult::malformed;
+        for (size_t i=0;i<64;++i) {
+            const auto c=value.namespace_id[i];
+            if (!(c>='0' && c<='9') && !(c>='a' && c<='f')) return WireResult::malformed;
+        }
+        if (op==campaign_row_operation) {
+            const auto flags=value.row.flags;
+            if (!value.row.id || !value.row.title[0] || (flags&~63u) ||
+                ((flags&SC_CAMPAIGN_UNLOCKED) && (!(flags&SC_CAMPAIGN_REVEALED) || !value.row.map[0])) ||
+                ((flags&SC_CAMPAIGN_COMPLETED) && !(flags&SC_CAMPAIGN_UNLOCKED)) ||
+                ((flags&SC_CAMPAIGN_DETAILS) && !(flags&SC_CAMPAIGN_UNLOCKED)) ||
+                (!(flags&SC_CAMPAIGN_REVEALED) && (value.row.map[0] || std::strcmp(value.row.title,"???"))))
+                return WireResult::malformed;
+            for (auto c:value.row.map)
+                if (c && !((c>='a' && c<='z') || (c>='0' && c<='9') || c=='_' || c=='/')) return WireResult::malformed;
+            for (auto c:value.row.title) if (c && (c<32 || c>126)) return WireResult::malformed;
+        }
+        if (campaign) *campaign=value;
+        return r.valid && r.pos==size ? WireResult::ok : WireResult::malformed;
+    }
     if (op >= weapon_points_submit_operation) {
         if (length != 149) return WireResult::malformed;
         if (r.number(8) != weapon_points_capability) return WireResult::capability_unavailable;
@@ -820,6 +860,55 @@ bool decode_weapon_points_response(const Message& in, size_t size, WireResult& r
     return s.core.abi_version == SC_ABI_VERSION && points_values(r,v) && r.valid && r.pos == size &&
         v.execution.scope.pid == s.pid && v.execution.scope.process_created == s.process_created &&
         !std::memcmp(v.execution.scope.instance_id,s.instance.data(),16);
+}
+namespace {
+template<class C> bool campaign_values(C& c,sc_campaign_result& v) {
+    c.u32(v.abi_version); scope_values(c,v.scope); c.u64(v.request_id);
+    for (auto& b:v.nonce) c.byte(b);
+    for (auto& ch:v.namespace_id) { auto b=static_cast<uint8_t>(ch); c.byte(b); ch=static_cast<char>(b); }
+    c.u32(v.status); c.u32(v.reason); c.u64(v.committed_revision); c.u64(v.rendered_revision);
+    c.u32(v.selected_id); c.u32(v.loaded_id);
+    return v.abi_version==SC_CAMPAIGN_MENU_ABI_VERSION && !v.namespace_id[64] &&
+        v.status<=SC_CAMPAIGN_REFUSED && v.reason<=SC_CAMPAIGN_NATIVE &&
+        (v.status==SC_CAMPAIGN_ACCEPTED)==(v.reason==SC_CAMPAIGN_OK) &&
+        v.rendered_revision<=v.committed_revision;
+}
+}
+size_t encode_campaign_request(Message& out,uint16_t op,const sc_campaign_request& request) {
+    if (op<campaign_row_operation || op>campaign_inspect_operation) return 0;
+    const auto end=encode_native_request(out,diagnostic_submit_operation,request.execution);
+    Writer h{out}; header(h,wire_version,op,453,WireResult::ok); h.number(campaign_menu_capability,8);
+    Writer w{out,end};
+    for (auto ch:request.namespace_id) w.number(static_cast<uint8_t>(ch),1);
+    w.number(request.revision,8); w.number(request.index,4); w.number(request.count,4);
+    w.number(request.row.id,4); w.number(request.row.flags,4); w.number(request.row.native_index,4);
+    for (auto ch:request.row.map) w.number(static_cast<uint8_t>(ch),1);
+    for (auto ch:request.row.title) w.number(static_cast<uint8_t>(ch),1);
+    return w.valid ? w.pos : 0;
+}
+size_t encode_campaign_response(Message& out,WireResult result,uint16_t op,const Snapshot& s,const sc_campaign_result& value) {
+    Writer w{out}; header(w,wire_version,op,0,result);
+    if (result==WireResult::ok) {
+        w.number(campaign_menu_capability,8); w.number(s.pid,4); w.number(s.process_created,8);
+        for (auto b:s.instance) w.number(b,1);
+        w.number(s.core.abi_version,4); w.text(s.core.version); w.text(s.core.build_id);
+        auto v=value; if (!campaign_values(w,v)) return 0;
+    }
+    Writer length{out,8}; length.number(w.pos-header_size,4); return w.valid ? w.pos : 0;
+}
+bool decode_campaign_response(const Message& in,size_t size,WireResult& result,uint16_t op,Snapshot& s,sc_campaign_result& v) {
+    if (size<header_size || size>max_message || op<campaign_row_operation || op>campaign_inspect_operation) return false;
+    Reader r{in,size};
+    if (r.number(4)!=magic || r.number(2)!=wire_version || r.number(2)!=op || r.number(4)!=size-header_size) return false;
+    const auto code=r.number(4); if (code>static_cast<uint32_t>(WireResult::malformed)) return false;
+    result=static_cast<WireResult>(code); if (result!=WireResult::ok) return size==header_size;
+    if (r.number(8)!=campaign_menu_capability) return false;
+    s={}; v={}; s.core.size=sizeof(s.core); v.size=sizeof(v);
+    r.u32(s.pid); r.u64(s.process_created); for (auto& b:s.instance) r.byte(b);
+    r.u32(s.core.abi_version); r.text(s.core.version); r.text(s.core.build_id);
+    return s.core.abi_version==SC_ABI_VERSION && campaign_values(r,v) && r.valid && r.pos==size &&
+        v.scope.pid==s.pid && v.scope.process_created==s.process_created &&
+        !std::memcmp(v.scope.instance_id,s.instance.data(),16);
 }
 size_t encode_backup_request(Message& out, uint16_t op, const sc_save_backup_request& request) {
     if (op < save_backup_submit_operation || op > save_backup_cancel_operation) return 0;

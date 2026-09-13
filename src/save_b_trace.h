@@ -10,11 +10,11 @@ namespace sentinel::save {
 enum class BStage : size_t { session, profile_read, profile_output, profile_choice, profile_capture,
     profile_prepare, profile_publish, catalog, creation, difficulty, transition, checkpoint_factory,
     provider, sdk_prepare, sdk_submit, sdk_callback, sdk_result, readback_create, readback_prepare,
-    readback_verify, continuity, resume, parser, startup_gate, count };
+    readback_verify, continuity, resume, parser, startup_gate, native_start, bootstrap, root_layout, count };
 inline constexpr const char* b_stage_names[]{"session", "profile_read", "profile_output", "profile_choice", "profile_capture",
     "profile_prepare", "profile_publish", "catalog", "creation", "difficulty", "transition", "checkpoint_factory",
     "provider", "sdk_prepare", "sdk_submit", "sdk_callback", "sdk_result", "readback_create", "readback_prepare",
-    "readback_verify", "continuity", "resume", "parser", "startup_gate"};
+    "readback_verify", "continuity", "resume", "parser", "startup_gate", "native_start", "bootstrap", "root_layout"};
 static_assert(std::size(b_stage_names)==static_cast<size_t>(BStage::count));
 enum class BStatus : uint32_t { entered=1, pending=2, succeeded=3, refused=4, blocked=5 };
 struct BFact {
