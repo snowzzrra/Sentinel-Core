@@ -4,7 +4,7 @@ namespace menu_fixture {
 uintptr_t screen=0,list=0,details=0,campaign=0;
 uintptr_t source_list=0;
 uintptr_t combat_meter=0;
-unsigned unrelated_meter_updates=0;
+unsigned unrelated_meter_allocates=0,unrelated_meter_ticks=0;
 bool details_fault=false;
 uintptr_t combat_sprite=0;
 bool missing_meter_sprite=false;
@@ -35,8 +35,8 @@ void exercise() {
     std::array<unsigned char,0x160> list_bytes{};
     std::array<unsigned char,0x700> details_bytes{};
     std::array<unsigned char,0x700> other_details_bytes{};
-    std::array<unsigned char,0x180> combat_bytes{},other_combat_bytes{};
-    std::array<unsigned char,0x60> combat_sprite_bytes{},other_sprite_bytes{};
+    std::array<unsigned char,0x200> combat_bytes{},other_combat_bytes{};
+    std::array<unsigned char,0x60> combat_sprite_bytes{},other_sprite_bytes{},details_sprite_bytes{},other_details_sprite_bytes{};
     std::array<unsigned char,0x1b0> campaign_bytes{};
     std::array<unsigned char,0xa0> source_bytes{};
     std::array<unsigned char,3*0x50> source_entries{};
@@ -46,12 +46,27 @@ void exercise() {
     details=reinterpret_cast<uintptr_t>(details_bytes.data()); campaign=reinterpret_cast<uintptr_t>(campaign_bytes.data());
     combat_meter=reinterpret_cast<uintptr_t>(combat_bytes.data());
     combat_sprite=reinterpret_cast<uintptr_t>(combat_sprite_bytes.data());
+    const auto details_sprite=reinterpret_cast<uintptr_t>(details_sprite_bytes.data());
     const auto other_details=reinterpret_cast<uintptr_t>(other_details_bytes.data());
+    const auto other_details_sprite=reinterpret_cast<uintptr_t>(other_details_sprite_bytes.data());
     const auto other_combat=reinterpret_cast<uintptr_t>(other_combat_bytes.data());
+    const auto other_combat_sprite=reinterpret_cast<uintptr_t>(other_sprite_bytes.data());
+    std::array<unsigned char,0x200> cultist_decl{},sentinel_decl{},other_decl{};
+    const auto cultist_decl_ptr=reinterpret_cast<uintptr_t>(cultist_decl.data());
+    const auto sentinel_decl_ptr=reinterpret_cast<uintptr_t>(sentinel_decl.data());
+    const auto other_decl_ptr=reinterpret_cast<uintptr_t>(other_decl.data());
+    at<uintptr_t>(cultist_decl_ptr,0x1b0)=0x1000;
+    at<uintptr_t>(sentinel_decl_ptr,0x1b0)=0;
+    at<uintptr_t>(other_decl_ptr,0x1b0)=0x2000;
     at<uintptr_t>(combat_meter,0x168)=0x123456;
+    at<uintptr_t>(combat_meter,0x18)=combat_sprite;
     at<uintptr_t>(other_combat,0x168)=0x654321;
-    at<uintptr_t>(other_combat,0x18)=reinterpret_cast<uintptr_t>(other_sprite_bytes.data());
+    at<uintptr_t>(other_combat,0x18)=other_combat_sprite;
+    at<uintptr_t>(details,0x18)=details_sprite;
+    at<uintptr_t>(details,0x88)=cultist_decl_ptr;
     at<uintptr_t>(details,0x6f8)=combat_meter;
+    at<uintptr_t>(other_details,0x18)=other_details_sprite;
+    at<uintptr_t>(other_details,0x88)=other_decl_ptr;
     at<uintptr_t>(other_details,0x6f8)=other_combat;
     screen_table[0x1e8/8]=reinterpret_cast<uintptr_t>(+[](uintptr_t)->uintptr_t { return list; });
     list_table[0x68/8]=reinterpret_cast<uintptr_t>(+[](uintptr_t owner,int index,int) {
@@ -87,26 +102,37 @@ void exercise() {
     calls.details_update=[](uintptr_t address) {
         ++details_render_calls;
         if (details_fault) { details_fault=false; RaiseException(0xe0420066,0,0,nullptr); }
-        if (!at<NativeString>(address,0x180).length) {
-            CHECK(!at<uintptr_t>(address,0x1b0)); ++hidden; return;
+        if (!at<NativeString>(address,0x180).length || at<int>(address,0x190)<1) {
+            CHECK(!at<uintptr_t>(address,0x1b0)); ++hidden;
+            const auto d_sprite=at<uintptr_t>(address,0x18);
+            if (d_sprite) test_sprite_visibility(d_sprite,0,1);
+            return;
         }
-        // Real native details rebuilds the meter, then forces its sprite visible.
         const auto meter=at<uintptr_t>(address,0x6f8);
-        // Both native render paths call IsBound: unbound meter returns before
-        // touching its SWF. The AP boundary must suspend it before either path.
-        if (at<uintptr_t>(meter,0x168)) {
-            CHECK(meter!=combat_meter); ++unrelated_meter_updates;
+        const auto decl=at<uintptr_t>(address,0x88);
+        const auto encounters=decl ? at<uintptr_t>(decl,0x1b0) : 0;
+        if (encounters) {
+            test_meter_allocate(meter,encounters,decl);
+            const auto meter_sprite=meter ? at<uintptr_t>(meter,0x18) : 0;
+            test_sprite_visibility(meter_sprite,1,1);
         }
-        // Retail 220120: even with drawing skipped, native visibility still
-        // dereferences sprite+51. Fresh widgets begin with sprite==nullptr.
-        const auto sprite=at<uintptr_t>(meter,0x18);
-        CHECK(sprite); at<uint8_t>(sprite,0x51)=1;
-        at<int>(meter,0x154)=1;
+        const auto d_sprite=at<uintptr_t>(address,0x18);
+        test_sprite_visibility(d_sprite,1,1);
     };
-    calls.widget_bound=[](uintptr_t meter)->bool {
-        CHECK(meter==combat_meter && at<uintptr_t>(meter,0x168)==0x123456);
-        at<uintptr_t>(meter,0x18)=missing_meter_sprite ? 0 : combat_sprite;
-        return !missing_meter_sprite;
+    calls.meter_allocate=[](uintptr_t meter,uintptr_t,uintptr_t) {
+        if (at<uintptr_t>(meter,0x168)) {
+            CHECK(meter!=combat_meter); ++unrelated_meter_allocates;
+        }
+        at<uintptr_t>(meter,0x198)=0xbeef;
+    };
+    calls.meter_update=[](uintptr_t meter) {
+        if (at<uintptr_t>(meter,0x168)) {
+            CHECK(meter!=combat_meter); ++unrelated_meter_ticks;
+        }
+        at<int>(meter,0x15c)=1;
+    };
+    calls.sprite_visibility=[](uintptr_t sprite,uint32_t visible,uint32_t) {
+        if (sprite) at<uint8_t>(sprite,0x51)=static_cast<uint8_t>(visible);
     };
     calls.completed=[](uintptr_t,uintptr_t entry)->bool {
         CHECK(at<NativeString>(entry,0).length>0); ++statistics; return false;
@@ -203,26 +229,47 @@ void exercise() {
     CHECK(populations==1 && at<uintptr_t>(campaign,0x1a8)==source_list);
     CHECK(strings[widget_addresses[2]+0x188]=="??? / LOCKED" && at<int>(widget_addresses[2],0x154)==5);
     CHECK(at<int>(list,0x150)==1 && focuses==1 && statistics==1);
-    CHECK(at<int>(combat_meter,0x154)==0 && unrelated_meter_updates==0);
+    CHECK(at<uintptr_t>(combat_meter,0x198)==0 && unrelated_meter_allocates==0);
+    test_meter_update(combat_meter);
+    CHECK(at<int>(combat_meter,0x15c)==0 && unrelated_meter_ticks==0);
     CHECK(strings[details+0x180]=="native mission details");
+    CHECK(at<uint8_t>(details_sprite,0x51)==1);
+    CHECK(at<uint8_t>(combat_sprite,0x51)==0);
     CHECK(at<uintptr_t>(combat_meter,0x168)==0x123456);
+    at<uintptr_t>(details,0x88)=sentinel_decl_ptr;
+    test_details_update(details);
+    CHECK(at<uintptr_t>(combat_meter,0x198)==0 && unrelated_meter_allocates==0);
+    CHECK(at<uint8_t>(details_sprite,0x51)==1);
+    CHECK(at<uint8_t>(combat_sprite,0x51)==0);
+    at<uintptr_t>(details,0x88)=cultist_decl_ptr;
     assign(other_details+0x180,"unrelated native details");
     test_details_update(other_details);
-    CHECK(unrelated_meter_updates==1 && at<int>(other_combat,0x154)==1);
+    CHECK(unrelated_meter_allocates==1 && at<uintptr_t>(other_combat,0x198)==0xbeef);
+    test_meter_update(other_combat);
+    CHECK(unrelated_meter_ticks==1 && at<int>(other_combat,0x15c)==1);
+    CHECK(at<uint8_t>(other_details_sprite,0x51)==1);
+    CHECK(at<uint8_t>(other_combat_sprite,0x51)==1);
     CHECK(at<uintptr_t>(other_combat,0x168)==0x654321);
     details_fault=true; verify_details_exception();
     missing_meter_sprite=true;
+    at<uintptr_t>(combat_meter,0x18)=0;
     const auto rendered_before=details_render_calls;
     test_details_update(details);
-    CHECK(details_render_calls==rendered_before && at<int>(details,0x154)==0);
-    CHECK(at<uintptr_t>(combat_meter,0x168)==0x123456);
+    CHECK(details_render_calls==rendered_before+1);
+    CHECK(at<uint8_t>(details_sprite,0x51)==1);
+    CHECK(at<uintptr_t>(combat_meter,0x198)==0);
     missing_meter_sprite=false;
+    at<uintptr_t>(combat_meter,0x18)=combat_sprite;
     test_details_update(details);
-    CHECK(at<uintptr_t>(combat_meter,0x18)==combat_sprite);
-    CHECK(at<uintptr_t>(combat_meter,0x168)==0x123456 && at<int>(combat_meter,0x154)==0);
+    CHECK(at<uint8_t>(details_sprite,0x51)==1);
+    CHECK(at<uint8_t>(combat_sprite,0x51)==0);
+    CHECK(at<uintptr_t>(combat_meter,0x198)==0);
     const auto before_hidden=hidden;
     at<int>(list,0x150)=2; test_focus(screen); test_load(screen,2);
     CHECK(hidden==before_hidden+1 && !loads && focuses==1 && statistics==1);
+    CHECK(at<uint8_t>(details_sprite,0x51)==0);
+    test_meter_update(combat_meter);
+    CHECK(unrelated_meter_ticks==1 && at<int>(combat_meter,0x15c)==0);
     test_load(screen,1); CHECK(loads==1);
     const auto retained=at<uintptr_t>(screen,0x870);
     std::array<unsigned char,0xc0> mission{};
@@ -248,8 +295,15 @@ void exercise() {
     CHECK(exchange(campaign_inspect_operation).loaded_id==0); // Selection is not a completed load.
     at<uintptr_t>(screen,0x870)=0; test_update(screen);
     CHECK(populations==2 && at<int>(list,0x150)==2);
-    CHECK(exchange(campaign_inspect_operation).rendered_revision==2);
-    CHECK(at<int>(combat_meter,0x154)==0 && unrelated_meter_updates==1);
+    CHECK(at<uintptr_t>(combat_meter,0x198)==0 && at<int>(combat_meter,0x15c)==0);
+    test_meter_update(combat_meter);
+    CHECK(unrelated_meter_ticks==1 && at<int>(combat_meter,0x15c)==0);
+    test_root_navigation(root_screen,0);
+    test_meter_update(other_combat);
+    CHECK(unrelated_meter_allocates==1 && unrelated_meter_ticks==2);
+    const auto diag=meter_diagnostics();
+    CHECK(diag.update_ticks==5 && diag.update_suppressed==3 && diag.update_delegated==2);
+    CHECK(diag.published_ptr==0 && diag.retire_count>=1);
     request.revision=1; CHECK(exchange(campaign_commit_operation).reason==SC_CAMPAIGN_REVISION);
     std::puts("PASS typed native campaign projection/privacy/focus/pending-load entry ownership");
     std::puts("PASS AP mission details bypass crashing legacy combat meter; unrelated HUD/details forwarded");

@@ -5,6 +5,7 @@
 #include "save_collector.h"
 #include "save_session.h"
 #include "MinHook.h"
+#include <intrin.h>
 #include <atomic>
 #include <cstring>
 #include <cmath>
@@ -23,11 +24,17 @@ using ListAssign=void(*)(uintptr_t,uintptr_t);
 using WidgetState=void(*)(uintptr_t,int);
 using RootNavigation=void(*)(uintptr_t,uint8_t);
 using CampaignDefinitions=uintptr_t(*)();
+using MeterAllocate=void(*)(uintptr_t,uintptr_t,uintptr_t);
+using SpriteVisibility=void(*)(uintptr_t,uint32_t,uint32_t);
 RootNavigation original_root_navigation=nullptr;
 Populate original_root_campaign=nullptr;
 CampaignDefinitions campaign_definitions=nullptr;
 Populate original_populate=nullptr;
 Update original_focus=nullptr,original_update=nullptr,details_update=nullptr;
+MeterAllocate original_meter_allocate=nullptr;
+SpriteVisibility original_sprite_visibility=nullptr;
+using MeterUpdate = void (*)(uintptr_t);
+MeterUpdate original_meter_update=nullptr;
 Load original_load=nullptr;
 Available original_available=nullptr;
 Completed native_completed=nullptr;
@@ -36,7 +43,18 @@ StringAssign string_assign=nullptr;
 ListAssign list_assign=nullptr;
 WidgetState widget_state=nullptr;
 Update sprite_changed=nullptr;
-Available widget_bound=nullptr;
+uintptr_t meter_visibility_return=0;
+thread_local uintptr_t current_ap_details=0;
+std::atomic<uintptr_t> ap_meter_published{0};
+std::atomic<uint64_t> meter_update_ticks{0};
+std::atomic<uint64_t> meter_update_suppressed{0};
+std::atomic<uint64_t> meter_update_delegated{0};
+std::atomic<uint64_t> ap_meter_retire_count{0};
+void retire_ap_meter() {
+    if (ap_meter_published.exchange(0,std::memory_order_acq_rel)!=0) {
+        ap_meter_retire_count.fetch_add(1,std::memory_order_relaxed);
+    }
+}
 engine::LocalMemory memory;
 std::atomic<bool> ready{false};
 struct List { uintptr_t data=0; int32_t count=0,capacity=0; uint32_t flags=0x50000,padding=0; };
@@ -94,6 +112,8 @@ void compact_root(uintptr_t screen) {
     save::session().btrace.record(save::BStage::root_layout,save::BStatus::succeeded,"root_layout_compacted",0,{{"visible_rows",7}},screen);
 }
 void root_navigation(uintptr_t screen,uint8_t reset) {
+    retire_ap_meter();
+    shown_screen=0;
     if (active()) {
         // State 0 is the native hidden state. Root navigation skips it when
         // restoring focus; native widgets and their ownership remain intact.
@@ -107,6 +127,8 @@ void root_navigation(uintptr_t screen,uint8_t reset) {
     if (active()) compact_root(screen);
 }
 void root_campaign(uintptr_t screen,uintptr_t declaration) {
+    retire_ap_meter();
+    shown_screen=0;
     if (active()) {
         const auto definitions=campaign_definitions();
         if (!definitions || !read(definitions,0x148,declaration) || !declaration) {
@@ -128,26 +150,59 @@ bool ap_details(uintptr_t details) {
     uintptr_t owner=0;
     return active() && shown_screen && read(shown_screen,0x118,owner) && owner==details;
 }
+bool is_ap_meter(uintptr_t meter) {
+    if (!meter) return false;
+    if (current_ap_details) return true;
+    return meter == ap_meter_published.load(std::memory_order_acquire);
+}
+void meter_allocate_detour(uintptr_t meter,uintptr_t encounters,uintptr_t decl) {
+    if (is_ap_meter(meter)) return;
+    if (original_meter_allocate) original_meter_allocate(meter,encounters,decl);
+}
+void meter_update_detour(uintptr_t meter) {
+    meter_update_ticks.fetch_add(1,std::memory_order_relaxed);
+    if (is_ap_meter(meter)) {
+        meter_update_suppressed.fetch_add(1,std::memory_order_relaxed);
+        return;
+    }
+    meter_update_delegated.fetch_add(1,std::memory_order_relaxed);
+    if (original_meter_update) original_meter_update(meter);
+}
+void sprite_visibility_detour(uintptr_t sprite,uint32_t visible,uint32_t flag) {
+    if (!sprite) return;
+    if (current_ap_details) {
+        uintptr_t meter=0, meter_sprite=0;
+        read(current_ap_details,0x6f8,meter);
+        if (meter) read(meter,0x18,meter_sprite);
+        const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
+        const bool is_meter=(caller==meter_visibility_return) || (meter_sprite && sprite==meter_sprite);
+        if (is_meter) {
+            if (original_sprite_visibility) original_sprite_visibility(sprite,0,flag);
+            return;
+        }
+    }
+    if (original_sprite_visibility) original_sprite_visibility(sprite,visible,flag);
+}
 void render_details(uintptr_t details) {
-    // Retail crash 20260913-213804: native Focus -> details -> combat meter ->
-    // SWF frame rebuild -> invalid child transform at RVA1857245. Full AP
-    // statistics remain deferred. Native meter rebuild AND point updates first
-    // require a SWF binding (RVA1599920); suspend only this panel's binding.
-    uintptr_t meter=0,binding=0; int32_t map_length=0;
-    if (!ap_details(details) || !read(details,0x6f8,meter) || !meter ||
-        !read(meter,0x168,binding)) { details_update(details); return; }
-    // Empty-map privacy takes the native early exit, before touching the meter.
-    if (read(details,0x190,map_length) && map_length==0) { details_update(details); return; }
-    // Native details unconditionally toggles meter->sprite visibility after the
-    // skipped rebuild (RVA1116e07). IsBound also RESOLVES sprite+18: preserve that
-    // prerequisite before suspending its binding, including first menu entry.
-    if (!widget_bound(meter)) { widget_state(details,0); return; }
-    *reinterpret_cast<uintptr_t*>(meter+0x168)=0;
+    if (!ap_details(details)) {
+        retire_ap_meter();
+        details_update(details); return;
+    }
+    uintptr_t meter=0;
+    if (read(details,0x6f8,meter) && meter) {
+        ap_meter_published.store(meter,std::memory_order_release);
+    }
+    int32_t map_length=0;
+    if (read(details,0x190,map_length) && map_length==0) {
+        details_update(details); return;
+    }
+    current_ap_details=details;
     __try { details_update(details); }
-    __finally { *reinterpret_cast<uintptr_t*>(meter+0x168)=binding; }
-    // Native details can force the meter visible after attempting its update.
-    // Retain native title/image/completion fields; hide only the legacy meter.
-    widget_state(meter,0);
+    __finally { current_ap_details=0; }
+    uintptr_t sprite=0;
+    if (meter && read(meter,0x18,sprite) && sprite) {
+        if (original_sprite_visibility) original_sprite_visibility(sprite,0,1);
+    }
 }
 void hide_details(uintptr_t screen) {
     uintptr_t details=0;
@@ -220,6 +275,10 @@ void populate(uintptr_t screen,uintptr_t list) {
     map_list.entries.count=static_cast<int32_t>(projection.count);
     map_list.entries.capacity=static_cast<int32_t>(entries.size());
     shown=projection; shown_screen=screen;
+    uintptr_t details=0,meter=0;
+    if (read(screen,0x118,details) && details && read(details,0x6f8,meter) && meter) {
+        ap_meter_published.store(meter,std::memory_order_release);
+    }
     populate_owned(screen,list,campaign,previous);
     uintptr_t widgets=0; int32_t count=0;
     if (!read(list,0xa0,widgets) || !read(list,0xa8,count) || count!=static_cast<int32_t>(shown.count)) {
@@ -280,6 +339,15 @@ void update(uintptr_t screen) {
 }
 }
 bool available() { return ready.load(std::memory_order_acquire); }
+MeterDiagnostics meter_diagnostics() {
+    MeterDiagnostics d{};
+    d.update_ticks=meter_update_ticks.load(std::memory_order_relaxed);
+    d.update_suppressed=meter_update_suppressed.load(std::memory_order_relaxed);
+    d.update_delegated=meter_update_delegated.load(std::memory_order_relaxed);
+    d.published_ptr=ap_meter_published.load(std::memory_order_acquire);
+    d.retire_count=ap_meter_retire_count.load(std::memory_order_relaxed);
+    return d;
+}
 bool request_map(uintptr_t request,const std::string& map) {
     if (!available() || map.empty() || map.size()>=192) return false;
     string_assign(request+0x30,map.c_str());
@@ -352,7 +420,9 @@ void test_calls(const NativeCalls& c) {
     original_root_navigation=c.root_navigation; original_root_campaign=c.root_campaign;
     campaign_definitions=c.campaign_definitions;
     sprite_changed=c.sprite_changed; root_layout={};
-    widget_bound=c.widget_bound;
+    original_meter_allocate=c.meter_allocate;
+    original_sprite_visibility=c.sprite_visibility;
+    original_meter_update=c.meter_update;
     ready.store(true,std::memory_order_release);
 }
 void test_populate(uintptr_t screen,uintptr_t list) { populate(screen,list); }
@@ -362,11 +432,17 @@ void test_load(uintptr_t screen,int index) { load(screen,index); }
 void test_update(uintptr_t screen) { update(screen); }
 void test_root_navigation(uintptr_t screen,uint8_t reset) { root_navigation(screen,reset); }
 void test_root_campaign(uintptr_t screen,uintptr_t declaration) { root_campaign(screen,declaration); }
+void test_meter_allocate(uintptr_t meter,uintptr_t encounters,uintptr_t decl) { meter_allocate_detour(meter,encounters,decl); }
+void test_sprite_visibility(uintptr_t sprite,uint32_t visible,uint32_t flag) {
+    sprite_visibility_detour(sprite,visible,flag);
+}
+void test_meter_update(uintptr_t meter) { meter_update_detour(meter); }
 #endif
-std::array<native::Target,16> native_targets(uintptr_t base) {
+std::array<native::Target,18> native_targets(uintptr_t base) {
     constexpr uint32_t rvas[]={0x10d2c00,0x10d42f0,0x10d27b0,0x10d1c50,0x10d3140,
         0x3fa8e0,0x3faff0,0x10d1cf0,0x43c070,0x1116c50,0x159c280,
-        0x10e08f0,0x10dc420,0x18071d0,0x1857110,0x1599920};
+        0x10e08f0,0x10dc420,0x18071d0,0x1857110,0x0f9bd70,0x1864430,
+        0x0f9c000};
     constexpr const char* bytes[]={
         "4053565741554881ec98000000488b05c4bd0d034833c4488944247033db488d",
         "40574883ec60488b05dba60d034833c44889442450488bf9488d4c2420e8ce65",
@@ -383,8 +459,10 @@ std::array<native::Target,16> native_targets(uintptr_t base) {
         "405541564157488dac24e0fdffff4881ec20030000488b059c250d034833c448",
         "40534883ec20488b05c308ec024885c07570e879b6b5fe83f803742285c0741e",
         "4c8bdc574883ec70488b05b97895024833c448894424584863410c488bf983f8",
-        "40534883ec20488bd9488b89680100004885c9750832c04883c4205bc38b9398"};
-    std::array<native::Target,16> targets{};
+        "48895c24184889742420574883ec20488b829801000033db488bfa488981c001",
+        "440fb6d23851517457807952007551488b41104c6349088851514d03c9488b10",
+        "405553488dac2408c0ffffb8f8400000e88bfd8c01482be0488b05b929210348"};
+    std::array<native::Target,18> targets{};
     const auto digit=[](char c) { return c<='9' ? c-'0' : c-'a'+10; };
     for (unsigned i=0;i<targets.size();++i) {
         targets[i].address=base+rvas[i];
@@ -398,7 +476,7 @@ std::array<native::Target,16> native_targets(uintptr_t base) {
     return targets;
 }
 bool validate_native_targets(save::Installation& record,engine::Memory& source_memory,
-                             const engine::Image& image,HANDLE stop,const std::array<native::Target,16>& targets) {
+                             const engine::Image& image,HANDLE stop,const std::array<native::Target,18>& targets) {
     // Populate's actual CALL owns this list-copy contract. Record failures here
     // as well as in the target validator so startup refusal remains actionable.
     auto call_event=record.begin(SC_INSTALL_SAVE_TARGET,6,8,0x10d2d99);
@@ -419,8 +497,8 @@ bool validate_native_targets(save::Installation& record,engine::Memory& source_m
     if (!call_matches) return false;
     for (unsigned i=0;i<targets.size();++i) {
         const auto rva=static_cast<uint32_t>(targets[i].address-image.base);
-        if (i==5 || i==10) {
-            // These two leaf callees have no unwind entry and are not detoured.
+        if (i==5 || i==10 || i==16) {
+            // These leaf callees have no unwind entry and are not detoured.
             std::array<uint8_t,32> actual{};
             if (!image.contains(rva,actual.size(),IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ,0) ||
                 source_memory.copy(targets[i].address,actual.data(),actual.size()).reason || actual!=targets[i].bytes) return false;
@@ -432,13 +510,17 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     if (!save::session().campaign_run.enabled()) return true;
     const auto targets=native_targets(binding.image.base);
     if (!validate_native_targets(save::session().installation,memory,binding.image,stop,targets)) return false;
+    meter_visibility_return=binding.image.base+0x1116e07;
     void* detours[]={reinterpret_cast<void*>(populate),reinterpret_cast<void*>(focus),reinterpret_cast<void*>(load),
         reinterpret_cast<void*>(is_available),reinterpret_cast<void*>(update),
         reinterpret_cast<void*>(root_navigation),reinterpret_cast<void*>(root_campaign),
-        reinterpret_cast<void*>(render_details)};
-    constexpr unsigned hooked[]={0,1,2,3,4,11,12,9};
-    void* originals[8]{};
-    for (unsigned i=0;i<8;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
+        reinterpret_cast<void*>(render_details),
+        reinterpret_cast<void*>(meter_allocate_detour),
+        reinterpret_cast<void*>(sprite_visibility_detour),
+        reinterpret_cast<void*>(meter_update_detour)};
+    constexpr unsigned hooked[]={0,1,2,3,4,11,12,9,15,16,17};
+    void* originals[11]{};
+    for (unsigned i=0;i<11;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
         return MH_CreateHook(reinterpret_cast<void*>(targets[hooked[i]].address),detours[i],&originals[i]); })!=MH_OK) return false;
     original_populate=reinterpret_cast<Populate>(originals[0]); original_focus=reinterpret_cast<Update>(originals[1]);
     original_load=reinterpret_cast<Load>(originals[2]); original_available=reinterpret_cast<Available>(originals[3]);
@@ -451,8 +533,10 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     native_completed=reinterpret_cast<Completed>(targets[7].address); list_assign=reinterpret_cast<ListAssign>(targets[8].address);
     details_update=reinterpret_cast<Update>(originals[7]);
     widget_state=reinterpret_cast<WidgetState>(targets[10].address);
-    widget_bound=reinterpret_cast<Available>(targets[15].address);
-    for (unsigned i=0;i<8;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
+    original_meter_allocate=reinterpret_cast<MeterAllocate>(originals[8]);
+    original_sprite_visibility=reinterpret_cast<SpriteVisibility>(originals[9]);
+    original_meter_update=reinterpret_cast<MeterUpdate>(originals[10]);
+    for (unsigned i=0;i<11;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
         return MH_EnableHook(reinterpret_cast<void*>(targets[hooked[i]].address)); })!=MH_OK) return false;
     ready.store(true,std::memory_order_release); return true;
 }
