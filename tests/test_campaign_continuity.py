@@ -132,6 +132,11 @@ class CampaignContinuity(unittest.TestCase):
             result = self.stage('create', root, 2)
             self.assertIn('Hub action labels, late availability, entry focus and manual focus retention', result)
 
+    def test_native_details_isolates_legacy_combat_meter(self):
+        with tempfile.TemporaryDirectory(prefix='sentinel-details-meter-') as root:
+            result = self.stage('create', root, 2)
+            self.assertIn('AP mission details bypass crashing legacy combat meter; unrelated HUD/details forwarded', result)
+
     def test_native_continue_restores_persisted_mission_snapshot(self):
         for suffix in ('', '_missing', '_wrong', '_assign'):
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory(prefix='sentinel-mission-checkpoint-') as root:

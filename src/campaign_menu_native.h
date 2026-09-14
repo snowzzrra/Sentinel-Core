@@ -5,9 +5,9 @@
 
 namespace sentinel::campaign_menu {
 bool install(const engine::Binding&,HANDLE stop);
-std::array<native::Target,15> native_targets(uintptr_t base);
+std::array<native::Target,16> native_targets(uintptr_t base);
 bool validate_native_targets(save::Installation&,engine::Memory&,const engine::Image&,
-                             HANDLE,const std::array<native::Target,15>&);
+                             HANDLE,const std::array<native::Target,16>&);
 bool available();
 void present_campaign_actions(uintptr_t screen, bool entered);
 bool mission_request(uintptr_t request, std::string& destination);
@@ -29,10 +29,12 @@ struct NativeCalls {
     void (*root_campaign)(uintptr_t,uintptr_t);
     uintptr_t (*campaign_definitions)();
     void (*sprite_changed)(uintptr_t);
+    bool (*widget_bound)(uintptr_t);
 };
 void test_calls(const NativeCalls&);
 void test_populate(uintptr_t,uintptr_t);
 void test_focus(uintptr_t);
+void test_details_update(uintptr_t);
 void test_load(uintptr_t,int);
 void test_update(uintptr_t);
 void test_root_navigation(uintptr_t,uint8_t);
