@@ -74,7 +74,14 @@ DWORD serve(void*) {
             sc_weapon_points_request points{};
             sc_campaign_request campaign{};
             sc_inventory_request inventory{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory);
+            sc_arsenal_request arsenal{};
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal);
+            sc_arsenal_result arsenal_result{};
+            if (result == WireResult::ok && operation >= arsenal_submit_operation && operation <= arsenal_release_operation) {
+                arsenal_result = operation == arsenal_submit_operation ? native::submit_arsenal(arsenal) :
+                    native::arsenal_result(arsenal, operation == arsenal_cancel_operation,
+                        operation == arsenal_release_operation);
+            }
             sc_inventory_result inventory_result{};
             if (result == WireResult::ok && operation >= inventory_submit_operation && operation <= inventory_release_operation) {
                 inventory_result = operation == inventory_submit_operation ? native::submit_inventory(inventory) :
@@ -103,6 +110,8 @@ DWORD serve(void*) {
                         operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
             const DWORD size = static_cast<DWORD>(
+                operation >= arsenal_submit_operation ?
+                    encode_arsenal_response(data, result, operation, current_snapshot(), arsenal_result) :
                 operation >= inventory_submit_operation ?
                     encode_inventory_response(data, result, operation, current_snapshot(), inventory_result) :
                 operation >= campaign_row_operation ?

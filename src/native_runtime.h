@@ -18,6 +18,8 @@ sc_campaign_result campaign_request(uint16_t,const sc_campaign_request&);
 sc_weapon_points_result weapon_points_result(const sc_weapon_points_request&, bool cancel, bool release = false);
 sc_inventory_result submit_inventory(const sc_inventory_request&);
 sc_inventory_result inventory_result(const sc_inventory_request&, bool cancel, bool release = false);
+sc_arsenal_result submit_arsenal(const sc_arsenal_request&);
+sc_arsenal_result arsenal_result(const sc_arsenal_request&, bool cancel, bool release = false);
 // False means no native hook was ever enabled/pinned and normal unload remains
 // possible. True permanently requires retaining this Core instance to exit.
 bool stop();

@@ -1,5 +1,6 @@
 #include "native_runtime.h"
 #include "inventory.h"
+#include "arsenal.h"
 #include "native_target.h"
 #include "save_native_hooks.h"
 #include "save_campaign_native.h"
@@ -168,7 +169,10 @@ void end_event(bool change, bool success, bool abnormal, save::CampaignTransitio
 static void bind_player_safely(uintptr_t fn, uintptr_t active_map) {
     __try {
         const auto p = reinterpret_cast<uintptr_t(*)(uintptr_t, uint32_t)>(fn)(active_map, 0);
-        if (p) inventory::bind_run_state_if_needed(p);
+        if (p) {
+            inventory::bind_run_state_if_needed(p);
+            arsenal::bind_run_state_if_needed(p);
+        }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 void post_frame() {
@@ -290,6 +294,8 @@ void post_frame() {
             weapon_points::execute_native(slot->weapon_points_request, slot->weapon_points_result);
         if (slot->is_inventory)
             inventory::execute_native(slot->inventory_request, slot->inventory_result);
+        if (slot->is_arsenal)
+            arsenal::execute_native(slot->arsenal_request, slot->arsenal_result);
     } else {
         result.state = why == SC_NATIVE_CANCELLED ? SC_DIAGNOSTIC_CANCELLED :
             (why == SC_NATIVE_DEADLINE ? SC_DIAGNOSTIC_EXPIRED : SC_DIAGNOSTIC_REJECTED);
@@ -465,6 +471,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) weapon_points::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) inventory::install(binding, stop_event);
+        if (!why && !stopping.load(std::memory_order_acquire)) arsenal::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire) && !campaign_menu::install(binding,stop_event)) {
             save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
             why=SC_NATIVE_EXCEPTION;
@@ -577,6 +584,23 @@ sc_inventory_result submit_inventory(const sc_inventory_request& request) {
 sc_inventory_result inventory_result(const sc_inventory_request& request, bool cancel, bool release) {
     AcquireSRWLockExclusive(&lock);
     auto out = diagnostics.inventory_result(request, cancel, GetTickCount64(), release);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_arsenal_result submit_arsenal(const sc_arsenal_request& request) {
+    AcquireSRWLockExclusive(&lock);
+    const auto now = GetTickCount64(); auto why = prerequisite(now);
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
+    if (!why && !arsenal::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
+    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr, nullptr, &request);
+    sc_arsenal_result out{}; arsenal::initial(request, out);
+    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
+    else out = diagnostics.arsenal_result(request, false, now);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_arsenal_result arsenal_result(const sc_arsenal_request& request, bool cancel, bool release) {
+    AcquireSRWLockExclusive(&lock);
+    auto out = diagnostics.arsenal_result(request, cancel, GetTickCount64(), release);
     ReleaseSRWLockExclusive(&lock); return out;
 }
 sc_save_backup_snapshot submit_backup(const sc_save_backup_request& request) {

@@ -383,7 +383,10 @@ int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool en
 int weapon_points_command(int argc, wchar_t** argv);
 int campaign_menu_command(int argc,wchar_t** argv);
 int inventory_command(int argc, wchar_t** argv);
+int arsenal_command(int argc, wchar_t** argv);
 int wmain(int argc, wchar_t** argv) {
+    const int arsenal_result = arsenal_command(argc, argv);
+    if (arsenal_result >= 0) return arsenal_result;
     const int points_result = weapon_points_command(argc, argv);
     const int campaign_result=campaign_menu_command(argc,argv);
     if (campaign_result>=0) return campaign_result;

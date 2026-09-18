@@ -20,7 +20,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
                                    const sc_diagnostic_request* request = nullptr, uint64_t after_event = 0,
                                    uint64_t write_id = 0, const sc_save_backup_request* backup = nullptr,
                                    const sc_weapon_points_request* points = nullptr, const sc_campaign_request* campaign=nullptr,
-                                   const sc_inventory_request* inventory = nullptr) {
+                                   const sc_inventory_request* inventory = nullptr,
+                                   const sc_arsenal_request* arsenal = nullptr) {
     Inspection result;
     Handle process;
     auto fail = [&](DWORD error) {
@@ -76,7 +77,10 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(inventory ? encode_inventory_request(data, operation, *inventory) : campaign ? encode_campaign_request(data,operation,*campaign) : points ? encode_weapon_points_request(data, operation, *points) :
+    const DWORD size = static_cast<DWORD>(arsenal ? encode_arsenal_request(data, operation, *arsenal) :
+        inventory ? encode_inventory_request(data, operation, *inventory) :
+        campaign ? encode_campaign_request(data,operation,*campaign) :
+        points ? encode_weapon_points_request(data, operation, *points) :
         backup ? encode_backup_request(data, operation, *backup) :
         operation == save_write_operation ? encode_save_write_request(data, write_id) :
         operation >= native_operation && operation <= diagnostic_detail_cancel_operation ?
@@ -93,7 +97,10 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     WireResult code{};
     result.failure_stage = "decode_response";
     // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
-    bool decoded = inventory ? decode_inventory_response(data, count, code, operation, result.snapshot, result.inventory) : campaign ? decode_campaign_response(data,count,code,operation,result.snapshot,result.campaign) : points ? decode_weapon_points_response(data, count, code, operation, result.snapshot, result.weapon_points) :
+    bool decoded = arsenal ? decode_arsenal_response(data, count, code, operation, result.snapshot, result.arsenal) :
+        inventory ? decode_inventory_response(data, count, code, operation, result.snapshot, result.inventory) :
+        campaign ? decode_campaign_response(data,count,code,operation,result.snapshot,result.campaign) :
+        points ? decode_weapon_points_response(data, count, code, operation, result.snapshot, result.weapon_points) :
         backup ? decode_backup_response(data, count, code, operation, result.snapshot, result.backup) :
         operation == save_installation_operation ? decode_installation_response(data, count, code, result.snapshot, result.installation) :
         operation == save_write_operation ? decode_save_write_response(data, count, code, result.snapshot, result.write) :
@@ -119,7 +126,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         WaitForSingleObject(process.value, 0) != WAIT_TIMEOUT) {
         result.result = ProbeResult::process_mismatch; return result;
     }
-    const auto& execution = inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic));
+    const auto& execution = arsenal ? result.arsenal.execution : (inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic)));
     if (request && !campaign && (execution.request_id != request->request_id ||
         std::memcmp(execution.nonce, request->nonce, sizeof(request->nonce)))) {
         result.result = ProbeResult::invalid_response; return result;
@@ -147,6 +154,11 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     if (inventory && (execution.scope.lifecycle_generation != inventory->execution.expected.lifecycle_generation ||
         result.inventory.kind != inventory->kind ||
         std::memcmp(result.inventory.namespace_id, inventory->namespace_id, sizeof(inventory->namespace_id)))) {
+        result.result = ProbeResult::invalid_response; return result;
+    }
+    if (arsenal && (execution.scope.lifecycle_generation != arsenal->execution.expected.lifecycle_generation ||
+        result.arsenal.kind != arsenal->kind ||
+        std::memcmp(result.arsenal.namespace_id, arsenal->namespace_id, sizeof(arsenal->namespace_id)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
     result.result = ProbeResult::ok;
@@ -194,6 +206,12 @@ Inspection query_weapon_points(uint32_t pid, uint32_t timeout_ms, uint16_t opera
         Inspection out; out.result = ProbeResult::usage; return out;
     }
     return query_operation(pid,timeout_ms,weapon_points_capability,operation,&r.execution,0,0,nullptr,&r);
+}
+Inspection query_arsenal(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_arsenal_request& r) {
+    if (operation < arsenal_submit_operation || operation > arsenal_release_operation) {
+        Inspection out; out.result = ProbeResult::usage; return out;
+    }
+    return query_operation(pid, timeout_ms, arsenal_capability, operation, &r.execution, 0, 0, nullptr, nullptr, nullptr, nullptr, &r);
 }
 Inspection query_inventory(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_inventory_request& r) {
     if (operation < inventory_submit_operation || operation > inventory_release_operation) {

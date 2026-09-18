@@ -10,6 +10,7 @@
 #include "sentinel_weapon_points.h"
 #include "sentinel_campaign_menu.h"
 #include "sentinel_inventory.h"
+#include "sentinel_arsenal.h"
 #include <array>
 #include <cstddef>
 #include <string>
@@ -50,6 +51,9 @@ constexpr uint64_t campaign_menu_capability=4096;
 constexpr uint16_t inventory_submit_operation = 25, inventory_result_operation = 26,
     inventory_cancel_operation = 27, inventory_release_operation = 28;
 constexpr uint64_t inventory_capability = 8192;
+constexpr uint16_t arsenal_submit_operation = 29, arsenal_result_operation = 30,
+    arsenal_cancel_operation = 31, arsenal_release_operation = 32;
+constexpr uint64_t arsenal_capability = 16384;
 constexpr size_t max_request = 512, max_message = 1024;
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
 enum class WireResult : uint32_t { ok, incompatible_protocol, capability_unavailable,
@@ -90,6 +94,7 @@ struct Inspection {
     sc_weapon_points_result weapon_points{};
     sc_campaign_result campaign{};
     sc_inventory_result inventory{};
+    sc_arsenal_result arsenal{};
 };
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required = inspect_capability);
 Inspection query_engine(uint32_t pid, uint32_t timeout_ms);
@@ -102,6 +107,7 @@ Inspection query_save_backup(uint32_t pid, uint32_t timeout_ms, uint16_t operati
 Inspection query_weapon_points(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_weapon_points_request&);
 Inspection query_campaign(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_campaign_request&);
 Inspection query_inventory(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_inventory_request&);
+Inspection query_arsenal(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_arsenal_request&);
 const char* backup_state_name(uint32_t);
 const char* save_write_state_name(uint32_t state);
 const char* save_session_state_name(uint32_t state);
