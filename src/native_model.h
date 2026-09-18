@@ -1,5 +1,6 @@
 #pragma once
 #include "weapon_points.h"
+#include "inventory.h"
 #include "sentinel_native.h"
 #include "sentinel_save_request.h"
 #include "save_backup.h"
@@ -35,8 +36,11 @@ public:
         uint64_t admitted_lock_misses = 0;
         bool is_backup = false;
         bool is_weapon_points = false;
+        bool is_inventory = false;
         sc_weapon_points_request weapon_points_request{};
         sc_weapon_points_result weapon_points_result{};
+        sc_inventory_request inventory_request{};
+        sc_inventory_result inventory_result{};
         sc_save_backup_request backup_request{};
         std::shared_ptr<save::BackupJob> backup;
         save::SubmissionResult submission;
@@ -48,12 +52,15 @@ public:
     sc_diagnostic_result submit(const sc_diagnostic_request& request,
                                 uint32_t reject, uint64_t now, sc_diagnostic_detail* detail = nullptr,
                                 const sc_save_backup_request* backup = nullptr,
-                                const sc_weapon_points_request* points = nullptr);
+                                const sc_weapon_points_request* points = nullptr,
+                                const sc_inventory_request* inventory = nullptr);
     sc_diagnostic_result retrieve(const sc_diagnostic_request& request, bool cancel, uint64_t now,
                                   sc_diagnostic_detail* detail = nullptr,
                                   const sc_save_backup_request* backup = nullptr,
-                                  const sc_weapon_points_request* points = nullptr);
+                                  const sc_weapon_points_request* points = nullptr,
+                                  const sc_inventory_request* inventory = nullptr);
     sc_weapon_points_result points_result(const sc_weapon_points_request&, bool cancel, uint64_t now, bool release = false);
+    sc_inventory_result inventory_result(const sc_inventory_request&, bool cancel, uint64_t now, bool release = false);
     sc_save_backup_snapshot backup_result(const sc_save_backup_request&, bool cancel, uint64_t now);
     static void await_backup(Slot&, sc_diagnostic_result, sc_diagnostic_detail, save::SubmissionResult);
     void note_claim_contention() { claim_lock_misses_.fetch_add(1, std::memory_order_relaxed); }

@@ -9,10 +9,14 @@ size_t encode_request(Message& out, uint64_t required, uint16_t version = wire_v
 WireResult decode_request(const Message& in, size_t size, uint16_t* operation = nullptr,
                           sc_diagnostic_request* diagnostic = nullptr, uint64_t* after_event = nullptr,
                           uint64_t* write_id = nullptr, sc_save_backup_request* backup = nullptr,
-                          sc_weapon_points_request* points = nullptr, sc_campaign_request* campaign = nullptr);
+                          sc_weapon_points_request* points = nullptr, sc_campaign_request* campaign = nullptr,
+                          sc_inventory_request* inventory = nullptr);
 size_t encode_campaign_request(Message&, uint16_t, const sc_campaign_request&);
 size_t encode_campaign_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_campaign_result&);
 bool decode_campaign_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_campaign_result&);
+size_t encode_inventory_request(Message&, uint16_t, const sc_inventory_request&);
+size_t encode_inventory_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_inventory_result&);
+bool decode_inventory_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_inventory_result&);
 size_t encode_weapon_points_request(Message&, uint16_t, const sc_weapon_points_request&);
 size_t encode_weapon_points_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_weapon_points_result&);
 bool decode_weapon_points_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_weapon_points_result&);

@@ -1,4 +1,5 @@
 #include "native_runtime.h"
+#include "inventory.h"
 #include "native_target.h"
 #include "save_native_hooks.h"
 #include "save_campaign_native.h"
@@ -164,9 +165,19 @@ void end_event(bool change, bool success, bool abnormal, save::CampaignTransitio
     }
     if (!--event_depth) event_thread.store(0, std::memory_order_release);
 }
+static void bind_player_safely(uintptr_t fn, uintptr_t active_map) {
+    __try {
+        const auto p = reinterpret_cast<uintptr_t(*)(uintptr_t, uint32_t)>(fn)(active_map, 0);
+        if (p) inventory::bind_run_state_if_needed(p);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
 void post_frame() {
     if (!accepting.load(std::memory_order_acquire) || fault.load(std::memory_order_acquire)) return;
     if (owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); return; }
+    const auto active_map = map_address();
+    if (active_map) {
+        bind_player_safely(binding.image.base + 0x69af70, active_map);
+    }
     // Missing this diagnostic opportunity is harmless; unlike a lifecycle event,
     // it need not be fabricated or become a gap when IPC briefly holds the lock.
     if (!TryAcquireSRWLockExclusive(&lock)) { diagnostics.note_claim_contention(); return; }
@@ -277,6 +288,8 @@ void post_frame() {
         }
         if (slot->is_weapon_points)
             weapon_points::execute_native(slot->weapon_points_request, slot->weapon_points_result);
+        if (slot->is_inventory)
+            inventory::execute_native(slot->inventory_request, slot->inventory_result);
     } else {
         result.state = why == SC_NATIVE_CANCELLED ? SC_DIAGNOSTIC_CANCELLED :
             (why == SC_NATIVE_DEADLINE ? SC_DIAGNOSTIC_EXPIRED : SC_DIAGNOSTIC_REJECTED);
@@ -451,6 +464,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         }
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) weapon_points::install(binding, stop_event);
+        if (!why && !stopping.load(std::memory_order_acquire)) inventory::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire) && !campaign_menu::install(binding,stop_event)) {
             save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
             why=SC_NATIVE_EXCEPTION;
@@ -546,6 +560,23 @@ sc_weapon_points_result submit_weapon_points(const sc_weapon_points_request& req
 sc_weapon_points_result weapon_points_result(const sc_weapon_points_request& request, bool cancel, bool release) {
     AcquireSRWLockExclusive(&lock);
     auto out = diagnostics.points_result(request, cancel, GetTickCount64(), release);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_inventory_result submit_inventory(const sc_inventory_request& request) {
+    AcquireSRWLockExclusive(&lock);
+    const auto now = GetTickCount64(); auto why = prerequisite(now);
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
+    if (!why && !inventory::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
+    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr, &request);
+    auto out = inventory::initial(request);
+    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
+    else out = diagnostics.inventory_result(request, false, now);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_inventory_result inventory_result(const sc_inventory_request& request, bool cancel, bool release) {
+    AcquireSRWLockExclusive(&lock);
+    auto out = diagnostics.inventory_result(request, cancel, GetTickCount64(), release);
     ReleaseSRWLockExclusive(&lock); return out;
 }
 sc_save_backup_snapshot submit_backup(const sc_save_backup_request& request) {

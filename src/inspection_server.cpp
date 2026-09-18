@@ -73,9 +73,16 @@ DWORD serve(void*) {
             sc_save_backup_request backup{};
             sc_weapon_points_request points{};
             sc_campaign_request campaign{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign);
+            sc_inventory_request inventory{};
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory);
+            sc_inventory_result inventory_result{};
+            if (result == WireResult::ok && operation >= inventory_submit_operation && operation <= inventory_release_operation) {
+                inventory_result = operation == inventory_submit_operation ? native::submit_inventory(inventory) :
+                    native::inventory_result(inventory, operation == inventory_cancel_operation,
+                        operation == inventory_release_operation);
+            }
             sc_campaign_result campaign_result{};
-            if (result==WireResult::ok && operation>=campaign_row_operation)
+            if (result==WireResult::ok && operation>=campaign_row_operation && operation<=campaign_inspect_operation)
                 campaign_result=native::campaign_request(operation,campaign);
             sc_weapon_points_result points_result{};
             if (result == WireResult::ok && operation >= weapon_points_submit_operation && operation<=weapon_points_release_operation) {
@@ -95,21 +102,30 @@ DWORD serve(void*) {
                     native::submit(diagnostic, &detail) : native::result(diagnostic,
                         operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
-            const DWORD size = static_cast<DWORD>(operation>=campaign_row_operation ?
-                encode_campaign_response(data,result,operation,current_snapshot(),campaign_result) : operation >= weapon_points_submit_operation ?
-                encode_weapon_points_response(data, result, operation, current_snapshot(), points_result) :
+            const DWORD size = static_cast<DWORD>(
+                operation >= inventory_submit_operation ?
+                    encode_inventory_response(data, result, operation, current_snapshot(), inventory_result) :
+                operation >= campaign_row_operation ?
+                    encode_campaign_response(data, result, operation, current_snapshot(), campaign_result) :
+                operation >= weapon_points_submit_operation ?
+                    encode_weapon_points_response(data, result, operation, current_snapshot(), points_result) :
                 operation == save_installation_operation ?
-                encode_installation_response(data, result, current_snapshot(), save::session().installation.inspect()) : operation >= save_backup_submit_operation ?
-                encode_backup_response(data, result, operation, current_snapshot(), backup_result) : operation == save_write_operation ?
-                encode_save_write_response(data, result, current_snapshot(), save::session().native_writes.snapshot(write_id)) :
+                    encode_installation_response(data, result, current_snapshot(), save::session().installation.inspect()) :
+                operation >= save_backup_submit_operation ?
+                    encode_backup_response(data, result, operation, current_snapshot(), backup_result) :
+                operation == save_write_operation ?
+                    encode_save_write_response(data, result, current_snapshot(), save::session().native_writes.snapshot(write_id)) :
                 operation == save_admission_operation ?
-                encode_save_admission_response(data, result, current_snapshot(), save::session().inspect()) : (operation == save_operation ?
-                encode_save_response(data, result, current_snapshot(), current_save_snapshot()) : (operation >= native_operation ?
-                encode_native_response(data, result, operation, current_snapshot(), native::inspect(after_event), diagnostic_result, detail) :
-                (operation == context_operation ?
-                encode_context_response(data, result, current_snapshot(), current_context_snapshot()) : (operation == engine_operation ?
-                encode_engine_response(data, result, current_snapshot(), current_engine_snapshot()) :
-                encode_response(data, result, current_snapshot()))))));
+                    encode_save_admission_response(data, result, current_snapshot(), save::session().inspect()) :
+                operation == save_operation ?
+                    encode_save_response(data, result, current_snapshot(), current_save_snapshot()) :
+                operation >= native_operation ?
+                    encode_native_response(data, result, operation, current_snapshot(), native::inspect(after_event), diagnostic_result, detail) :
+                operation == context_operation ?
+                    encode_context_response(data, result, current_snapshot(), current_context_snapshot()) :
+                operation == engine_operation ?
+                    encode_engine_response(data, result, current_snapshot(), current_engine_snapshot()) :
+                    encode_response(data, result, current_snapshot()));
             if (transfer(pipe, true, data.data(), size, count, stop, remaining(deadline)) == ERROR_SUCCESS) {
                 // Wait for client close (or reject extra input), so DisconnectNamedPipe
                 // cannot discard the reply before it is read. Never FlushFileBuffers.

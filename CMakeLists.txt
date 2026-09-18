@@ -47,6 +47,8 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   tools/weapon_points_probe.cpp
   include/sentinel_campaign_menu.h src/campaign_menu.h src/campaign_menu.cpp tools/campaign_menu_probe.cpp
   src/campaign_menu_native.h src/campaign_menu_native.cpp
+  include/sentinel_inventory.h src/inventory.h src/inventory.cpp src/inventory_native.cpp
+  tools/inventory_probe.cpp
   src/native_target.h src/native_target.cpp src/native_runtime.h src/native_runtime.cpp
   include/sentinel_save.h src/save_observer.h src/save_observer.cpp
   src/save_storage.h src/save_storage.cpp src/prelaunch.h src/prelaunch.cpp src/startup_log.h src/startup_log.cpp tools/save_probe.h tools/save_probe.cpp
@@ -90,7 +92,7 @@ target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
 add_library(sentinel_save_storage STATIC src/save_storage.cpp src/prelaunch.cpp)
 target_include_directories(sentinel_save_storage PUBLIC src)
 target_link_libraries(sentinel_save_storage PUBLIC bcrypt)
-add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp tools/campaign_menu_probe.cpp)
+add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp tools/campaign_menu_probe.cpp tools/inventory_probe.cpp)
 target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client sentinel_save_storage bcrypt)
 add_library(sentinel_observer STATIC src/engine_observer.cpp src/context_observer.cpp src/save_observer.cpp)
 target_include_directories(sentinel_observer PUBLIC include src)
@@ -102,7 +104,7 @@ target_include_directories(sentinel_minhook PUBLIC third_party/minhook/include t
 # Pinned upstream uses intentional byte casts/anonymous unions; HDE initializes
 # its prefix byte in the loop. Keep upstream unchanged and Core warnings strict.
 target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
-add_library(sentinel_native_model STATIC src/native_model.cpp src/weapon_points.cpp src/campaign_menu.cpp)
+add_library(sentinel_native_model STATIC src/native_model.cpp src/weapon_points.cpp src/campaign_menu.cpp src/inventory.cpp)
 target_include_directories(sentinel_native_model PUBLIC include src)
 add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp src/save_campaign.cpp)
 target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
@@ -209,7 +211,7 @@ add_test(NAME missing_core_dependency COMMAND "${CMAKE_COMMAND}"
   "-DPROXY=$<TARGET_FILE:sentinel_bootstrap>" "-DHARNESS=$<TARGET_FILE:sentinel_harness>"
   "-DSTAGE=${CMAKE_BINARY_DIR}/missing-core" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/missing_dependency.cmake")
 foreach(target sentinel_native sentinel_campaign_tests sentinel_native_host)
-  target_sources(${target} PRIVATE src/weapon_points_native.cpp)
+  target_sources(${target} PRIVATE src/weapon_points_native.cpp src/inventory_native.cpp)
 endforeach()
 add_executable(sentinel_weapon_points_tests tests/weapon_points.cpp)
 target_link_libraries(sentinel_weapon_points_tests PRIVATE sentinel_native_model sentinel_protocol)
