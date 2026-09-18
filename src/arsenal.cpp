@@ -70,6 +70,26 @@ uint32_t mod_for_upgrade(uint32_t upgrade_mask) {
     return 0;
 }
 
+uint32_t mod_for_selection(uint8_t w_idx, uint8_t m_idx) {
+    if (m_idx == 0) return 0;
+    switch (w_idx) {
+        case SC_ARSENAL_WINDEX_SHOTGUN:
+            return (m_idx == 1) ? SC_ARSENAL_MOD_SHOTGUN_FULL_AUTO : SC_ARSENAL_MOD_SHOTGUN_STICKY_BOMBS;
+        case SC_ARSENAL_WINDEX_HEAVY:
+            return (m_idx == 1) ? SC_ARSENAL_MOD_HEAVY_PRECISION_BOLT : SC_ARSENAL_MOD_HEAVY_MICRO_MISSILES;
+        case SC_ARSENAL_WINDEX_CHAINGUN:
+            return (m_idx == 1) ? SC_ARSENAL_MOD_CHAINGUN_SHIELD : SC_ARSENAL_MOD_CHAINGUN_TURRET;
+        case SC_ARSENAL_WINDEX_PLASMA:
+            return (m_idx == 1) ? SC_ARSENAL_MOD_PLASMA_HEAT_BLAST : SC_ARSENAL_MOD_PLASMA_MICROWAVE;
+        case SC_ARSENAL_WINDEX_BALLISTA:
+            return (m_idx == 1) ? SC_ARSENAL_MOD_BALLISTA_ARBALEST : SC_ARSENAL_MOD_BALLISTA_DESTROYER;
+        case SC_ARSENAL_WINDEX_ROCKET:
+            return (m_idx == 1) ? SC_ARSENAL_MOD_ROCKET_REMOTE_DET : SC_ARSENAL_MOD_ROCKET_LOCK_ON;
+        default:
+            return 0;
+    }
+}
+
 uint16_t compute_effective_masteries(uint32_t weapons, uint32_t mods,
                                      uint16_t ap_masteries, uint16_t challenges_completed) {
     uint16_t effective = 0;
@@ -93,6 +113,7 @@ bool valid(const sc_arsenal_request& request) {
     if (request.masteries & ~SC_ARSENAL_ALL_MASTERIES) return false;
     if (request.kind == SC_ARSENAL_SELECT_MOD) {
         if (request.select_weapon >= SC_ARSENAL_WINDEX_COUNT) return false;
+        if (request.select_weapon == SC_ARSENAL_WINDEX_SSG) return false;
         if (request.select_mod > 2) return false;
     }
     if (request.kind == SC_ARSENAL_UPDATE_CHALLENGE) {
@@ -210,6 +231,14 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
     case SC_ARSENAL_SELECT_MOD: {
         const uint8_t w_idx = request.select_weapon;
         const uint8_t m_idx = request.select_mod;
+        if (m_idx != 0) {
+            const uint32_t target_mod = mod_for_selection(w_idx, m_idx);
+            if (!target_mod || !(after.mods & target_mod)) {
+                out.outcome = SC_ARSENAL_OUTCOME_REJECTED;
+                ReleaseSRWLockExclusive(&state_lock);
+                return;
+            }
+        }
         if (before.selected_mods[w_idx] == m_idx) {
             out.outcome = SC_ARSENAL_OUTCOME_NOOP;
             break;

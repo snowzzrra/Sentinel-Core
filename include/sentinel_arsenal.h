@@ -43,13 +43,14 @@ enum {
     SC_ARSENAL_MOD_PLASMA_MICROWAVE      = 1u << 5,  /* 7770064 Microwave Beam */
     SC_ARSENAL_MOD_ROCKET_REMOTE_DET     = 1u << 6,  /* 7770071 Remote Detonate */
     SC_ARSENAL_MOD_ROCKET_LOCK_ON        = 1u << 7,  /* 7770073 Lock-on Burst */
-    SC_ARSENAL_MOD_SSG_MEAT_HOOK         = 1u << 8,  /* SSG Meat Hook (implicit in Phase 7 model) */
+    SC_ARSENAL_MOD_SSG_MEAT_HOOK         = 1u << 8,  /* 7770083 Meat Hook */
     SC_ARSENAL_MOD_BALLISTA_ARBALEST     = 1u << 9,  /* 7770075 Arbalest */
     SC_ARSENAL_MOD_BALLISTA_DESTROYER    = 1u << 10, /* 7770077 Destroyer Blade */
     SC_ARSENAL_MOD_CHAINGUN_TURRET       = 1u << 11, /* 7770081 Mobile Turret */
     SC_ARSENAL_MOD_CHAINGUN_SHIELD       = 1u << 12  /* 7770079 Energy Shield */
 };
 #define SC_ARSENAL_ALL_MODS 0x1FFFu
+#define SC_ARSENAL_ATTACHMENT_MEAT_HOOK SC_ARSENAL_MOD_SSG_MEAT_HOOK
 
 /* 28 Authored Normal Mod Upgrades across 13 families */
 enum {
@@ -84,7 +85,7 @@ enum {
 };
 #define SC_ARSENAL_ALL_NORMAL_UPGRADES 0x0FFFFFFFu
 
-/* 13 Weapon Mod Masteries + SSG Meat Hook Mastery (14 masteries) */
+/* 12 Weapon Mod Masteries + SSG Meat Hook Mastery (13 masteries total) */
 enum {
     SC_ARSENAL_MASTERY_SHOTGUN_STICKY     = 1u << 0,  /* 7770070 Five-Cluster */
     SC_ARSENAL_MASTERY_SHOTGUN_AUTO       = 1u << 1,  /* 7770069 Salvo Extender */
