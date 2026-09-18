@@ -384,7 +384,10 @@ int weapon_points_command(int argc, wchar_t** argv);
 int campaign_menu_command(int argc,wchar_t** argv);
 int inventory_command(int argc, wchar_t** argv);
 int arsenal_command(int argc, wchar_t** argv);
+int runes_command(int argc, wchar_t** argv);
 int wmain(int argc, wchar_t** argv) {
+    const int runes_res = runes_command(argc, argv);
+    if (runes_res >= 0) return runes_res;
     const int arsenal_result = arsenal_command(argc, argv);
     if (arsenal_result >= 0) return arsenal_result;
     const int points_result = weapon_points_command(argc, argv);

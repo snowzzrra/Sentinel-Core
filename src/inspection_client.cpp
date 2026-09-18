@@ -21,7 +21,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
                                    uint64_t write_id = 0, const sc_save_backup_request* backup = nullptr,
                                    const sc_weapon_points_request* points = nullptr, const sc_campaign_request* campaign=nullptr,
                                    const sc_inventory_request* inventory = nullptr,
-                                   const sc_arsenal_request* arsenal = nullptr) {
+                                   const sc_arsenal_request* arsenal = nullptr,
+                                   const sc_runes_request* runes = nullptr) {
     Inspection result;
     Handle process;
     auto fail = [&](DWORD error) {
@@ -77,7 +78,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(arsenal ? encode_arsenal_request(data, operation, *arsenal) :
+    const DWORD size = static_cast<DWORD>(runes ? encode_runes_request(data, operation, *runes) :
+        arsenal ? encode_arsenal_request(data, operation, *arsenal) :
         inventory ? encode_inventory_request(data, operation, *inventory) :
         campaign ? encode_campaign_request(data,operation,*campaign) :
         points ? encode_weapon_points_request(data, operation, *points) :
@@ -97,7 +99,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     WireResult code{};
     result.failure_stage = "decode_response";
     // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
-    bool decoded = arsenal ? decode_arsenal_response(data, count, code, operation, result.snapshot, result.arsenal) :
+    bool decoded = runes ? decode_runes_response(data, count, code, operation, result.snapshot, result.runes) :
+        arsenal ? decode_arsenal_response(data, count, code, operation, result.snapshot, result.arsenal) :
         inventory ? decode_inventory_response(data, count, code, operation, result.snapshot, result.inventory) :
         campaign ? decode_campaign_response(data,count,code,operation,result.snapshot,result.campaign) :
         points ? decode_weapon_points_response(data, count, code, operation, result.snapshot, result.weapon_points) :
@@ -126,7 +129,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         WaitForSingleObject(process.value, 0) != WAIT_TIMEOUT) {
         result.result = ProbeResult::process_mismatch; return result;
     }
-    const auto& execution = arsenal ? result.arsenal.execution : (inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic)));
+    const auto& execution = runes ? result.runes.execution : (arsenal ? result.arsenal.execution : (inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic))));
     if (request && !campaign && (execution.request_id != request->request_id ||
         std::memcmp(execution.nonce, request->nonce, sizeof(request->nonce)))) {
         result.result = ProbeResult::invalid_response; return result;
@@ -212,6 +215,12 @@ Inspection query_arsenal(uint32_t pid, uint32_t timeout_ms, uint16_t operation, 
         Inspection out; out.result = ProbeResult::usage; return out;
     }
     return query_operation(pid, timeout_ms, arsenal_capability, operation, &r.execution, 0, 0, nullptr, nullptr, nullptr, nullptr, &r);
+}
+Inspection query_runes(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_runes_request& r) {
+    if (operation < runes_submit_operation || operation > runes_release_operation) {
+        Inspection out; out.result = ProbeResult::usage; return out;
+    }
+    return query_operation(pid, timeout_ms, runes_capability, operation, &r.execution, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, &r);
 }
 Inspection query_inventory(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_inventory_request& r) {
     if (operation < inventory_submit_operation || operation > inventory_release_operation) {

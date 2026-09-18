@@ -10,7 +10,11 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation = 
                           sc_diagnostic_request* diagnostic = nullptr, uint64_t* after_event = nullptr,
                           uint64_t* write_id = nullptr, sc_save_backup_request* backup = nullptr,
                           sc_weapon_points_request* points = nullptr, sc_campaign_request* campaign = nullptr,
-                          sc_inventory_request* inventory = nullptr, sc_arsenal_request* arsenal = nullptr);
+                          sc_inventory_request* inventory = nullptr, sc_arsenal_request* arsenal = nullptr,
+                          sc_runes_request* runes = nullptr);
+size_t encode_runes_request(Message&, uint16_t, const sc_runes_request&);
+size_t encode_runes_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_runes_result&);
+bool decode_runes_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_runes_result&);
 size_t encode_campaign_request(Message&, uint16_t, const sc_campaign_request&);
 size_t encode_campaign_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_campaign_result&);
 bool decode_campaign_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_campaign_result&);

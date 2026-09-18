@@ -1,6 +1,7 @@
 #include "native_runtime.h"
 #include "inventory.h"
 #include "arsenal.h"
+#include "runes.h"
 #include "native_target.h"
 #include "save_native_hooks.h"
 #include "save_campaign_native.h"
@@ -172,6 +173,7 @@ static void bind_player_safely(uintptr_t fn, uintptr_t active_map) {
         if (p) {
             inventory::bind_run_state_if_needed(p);
             arsenal::bind_run_state_if_needed(p);
+            runes::bind_run_state_if_needed(p);
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -296,6 +298,8 @@ void post_frame() {
             inventory::execute_native(slot->inventory_request, slot->inventory_result);
         if (slot->is_arsenal)
             arsenal::execute_native(slot->arsenal_request, slot->arsenal_result);
+        if (slot->is_runes)
+            runes::execute_native(slot->runes_request, slot->runes_result);
     } else {
         result.state = why == SC_NATIVE_CANCELLED ? SC_DIAGNOSTIC_CANCELLED :
             (why == SC_NATIVE_DEADLINE ? SC_DIAGNOSTIC_EXPIRED : SC_DIAGNOSTIC_REJECTED);
@@ -472,6 +476,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         if (!why && !stopping.load(std::memory_order_acquire)) weapon_points::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) inventory::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) arsenal::install(binding, stop_event);
+        if (!why && !stopping.load(std::memory_order_acquire)) runes::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire) && !campaign_menu::install(binding,stop_event)) {
             save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
             why=SC_NATIVE_EXCEPTION;
@@ -601,6 +606,23 @@ sc_arsenal_result submit_arsenal(const sc_arsenal_request& request) {
 sc_arsenal_result arsenal_result(const sc_arsenal_request& request, bool cancel, bool release) {
     AcquireSRWLockExclusive(&lock);
     auto out = diagnostics.arsenal_result(request, cancel, GetTickCount64(), release);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_runes_result submit_runes(const sc_runes_request& request) {
+    AcquireSRWLockExclusive(&lock);
+    const auto now = GetTickCount64(); auto why = prerequisite(now);
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
+    if (!why && !runes::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
+    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr, nullptr, nullptr, &request);
+    sc_runes_result out = runes::initial(request);
+    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
+    else out = diagnostics.runes_result(request, false, now);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_runes_result runes_result(const sc_runes_request& request, bool cancel, bool release) {
+    AcquireSRWLockExclusive(&lock);
+    auto out = diagnostics.runes_result(request, cancel, GetTickCount64(), release);
     ReleaseSRWLockExclusive(&lock); return out;
 }
 sc_save_backup_snapshot submit_backup(const sc_save_backup_request& request) {

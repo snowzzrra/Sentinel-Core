@@ -75,7 +75,14 @@ DWORD serve(void*) {
             sc_campaign_request campaign{};
             sc_inventory_request inventory{};
             sc_arsenal_request arsenal{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal);
+            sc_runes_request runes{};
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes);
+            sc_runes_result runes_result{};
+            if (result == WireResult::ok && operation >= runes_submit_operation && operation <= runes_release_operation) {
+                runes_result = operation == runes_submit_operation ? native::submit_runes(runes) :
+                    native::runes_result(runes, operation == runes_cancel_operation,
+                        operation == runes_release_operation);
+            }
             sc_arsenal_result arsenal_result{};
             if (result == WireResult::ok && operation >= arsenal_submit_operation && operation <= arsenal_release_operation) {
                 arsenal_result = operation == arsenal_submit_operation ? native::submit_arsenal(arsenal) :
@@ -110,6 +117,8 @@ DWORD serve(void*) {
                         operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
             const DWORD size = static_cast<DWORD>(
+                operation >= runes_submit_operation ?
+                    encode_runes_response(data, result, operation, current_snapshot(), runes_result) :
                 operation >= arsenal_submit_operation ?
                     encode_arsenal_response(data, result, operation, current_snapshot(), arsenal_result) :
                 operation >= inventory_submit_operation ?

@@ -62,16 +62,42 @@ size_t encode_save_write_request(Message& out, uint64_t operation_id) {
 WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
                           sc_diagnostic_request* diagnostic, uint64_t* after_event, uint64_t* write_id,
                           sc_save_backup_request* backup, sc_weapon_points_request* points, sc_campaign_request* campaign,
-                          sc_inventory_request* inventory, sc_arsenal_request* arsenal) {
+                          sc_inventory_request* inventory, sc_arsenal_request* arsenal,
+                          sc_runes_request* runes) {
     if (operation) *operation = inspect_operation;
     if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && op >= engine_operation && op <= arsenal_release_operation) *operation = static_cast<uint16_t>(op);
+    if (operation && op >= engine_operation && op <= runes_release_operation) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op < inspect_operation || op > arsenal_release_operation) return WireResult::unsupported_operation;
+    if (op < inspect_operation || op > runes_release_operation) return WireResult::unsupported_operation;
+    if (op >= runes_submit_operation) {
+        if (length != 153) return WireResult::malformed;
+        if (r.number(8) != runes_capability) return WireResult::capability_unavailable;
+        Message identity = in;
+        Writer fixed{identity, 6}; fixed.number(diagnostic_submit_operation, 2); fixed.number(72, 4);
+        Writer capability{identity, header_size}; capability.number(diagnostic_capability, 8);
+        sc_runes_request value{};
+        const auto decoded = decode_request(identity, 88, nullptr, &value.execution);
+        if (decoded != WireResult::ok) return decoded;
+        r.pos = 88;
+        for (auto& c : value.namespace_id) c = static_cast<char>(r.number(1));
+        r.u32(value.kind);
+        r.u32(value.normal_runes);
+        r.u32(value.support_runes);
+        r.byte(value.select_slot);
+        uint8_t sr = 0; r.byte(sr); value.select_rune = static_cast<int8_t>(sr);
+        for (auto& b : value.reserved) r.byte(b);
+        if (value.namespace_id[64]) return WireResult::malformed;
+        for (size_t i = 0; i < 64; ++i) {
+            const auto c = value.namespace_id[i];
+            if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return WireResult::malformed;
+        }
+        if (runes) *runes = value;
+        return r.valid && r.pos == size ? WireResult::ok : WireResult::malformed;
+    }
     if (op >= arsenal_submit_operation) {
         if (length != 165) return WireResult::malformed;
         if (r.number(8) != arsenal_capability) return WireResult::capability_unavailable;
@@ -920,6 +946,66 @@ bool decode_weapon_points_response(const Message& in, size_t size, WireResult& r
     return s.core.abi_version == SC_ABI_VERSION && points_values(r,v) && r.valid && r.pos == size &&
         v.execution.scope.pid == s.pid && v.execution.scope.process_created == s.process_created &&
         !std::memcmp(v.execution.scope.instance_id,s.instance.data(),16);
+}
+namespace {
+template<class Codec> bool runes_values(Codec& c, sc_runes_result& v) {
+    c.u32(v.abi_version);
+    if (!diagnostic_values(c, v.execution, true)) return false;
+    for (auto& ch : v.namespace_id) { auto b = static_cast<uint8_t>(ch); c.byte(b); ch = static_cast<char>(b); }
+    c.u32(v.kind);
+    c.u32(v.outcome); c.u32(v.flags); c.u32(v.native_exception);
+    c.u32(v.owned_normal_before); c.u32(v.owned_normal_after);
+    c.u32(v.owned_support_before); c.u32(v.owned_support_after);
+    for (auto& b : v.selected_slots_before) { uint8_t u = static_cast<uint8_t>(b); c.byte(u); b = static_cast<int8_t>(u); }
+    for (auto& b : v.selected_slots_after) { uint8_t u = static_cast<uint8_t>(b); c.byte(u); b = static_cast<int8_t>(u); }
+    { uint8_t u = static_cast<uint8_t>(v.selected_support_before); c.byte(u); v.selected_support_before = static_cast<int8_t>(u); }
+    { uint8_t u = static_cast<uint8_t>(v.selected_support_after); c.byte(u); v.selected_support_after = static_cast<int8_t>(u); }
+    c.byte(v.unlocked_slots_before); c.byte(v.unlocked_slots_after);
+    c.byte(v.derived_pairs_before); c.byte(v.derived_pairs_after);
+    c.byte(v.reserved_before); c.byte(v.reserved_after);
+    c.u64(v.operations_applied);
+    if (v.abi_version != SC_RUNES_ABI_VERSION || v.namespace_id[64] ||
+        v.outcome > SC_RUNES_OUTCOME_REFRESH_FAILED || (v.flags & ~31u)) return false;
+    return true;
+}
+}
+size_t encode_runes_request(Message& out, uint16_t op, const sc_runes_request& request) {
+    if (op < runes_submit_operation || op > runes_release_operation) return 0;
+    const auto end = encode_native_request(out, diagnostic_submit_operation, request.execution);
+    Writer h{out}; header(h, wire_version, op, 153, WireResult::ok); h.number(runes_capability, 8);
+    Writer w{out, end};
+    for (auto b : request.namespace_id) w.number(static_cast<uint8_t>(b), 1);
+    w.number(request.kind, 4);
+    w.number(request.normal_runes, 4);
+    w.number(request.support_runes, 4);
+    w.number(request.select_slot, 1);
+    w.number(static_cast<uint8_t>(request.select_rune), 1);
+    for (auto b : request.reserved) w.number(b, 1);
+    return w.valid ? w.pos : 0;
+}
+size_t encode_runes_response(Message& out, WireResult result, uint16_t op, const Snapshot& s, const sc_runes_result& value) {
+    Writer w{out}; header(w, wire_version, op, 0, result);
+    if (result == WireResult::ok) {
+        w.number(runes_capability, 8); w.number(s.pid, 4); w.number(s.process_created, 8);
+        for (auto b : s.instance) w.number(b, 1);
+        w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id);
+        auto v = value; if (!runes_values(w, v)) return 0;
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.valid ? w.pos : 0;
+}
+bool decode_runes_response(const Message& in, size_t size, WireResult& result, uint16_t op, Snapshot& s, sc_runes_result& v) {
+    if (size < header_size || size > max_message || op < runes_submit_operation || op > runes_release_operation) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != op || r.number(4) != size - header_size) return false;
+    const auto code = r.number(4); if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code); if (result != WireResult::ok) return size == header_size;
+    if (r.number(8) != runes_capability) return false;
+    s = {}; v = {}; s.core.size = sizeof(s.core); v.size = sizeof(v);
+    r.u32(s.pid); r.u64(s.process_created); for (auto& b : s.instance) r.byte(b);
+    r.u32(s.core.abi_version); r.text(s.core.version); r.text(s.core.build_id);
+    return s.core.abi_version == SC_ABI_VERSION && runes_values(r, v) && r.valid && r.pos == size &&
+        v.execution.scope.pid == s.pid && v.execution.scope.process_created == s.process_created &&
+        !std::memcmp(v.execution.scope.instance_id, s.instance.data(), 16);
 }
 namespace {
 template<class Codec> bool arsenal_values(Codec& c, sc_arsenal_result& v) {

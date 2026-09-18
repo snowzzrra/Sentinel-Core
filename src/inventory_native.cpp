@@ -1,4 +1,5 @@
 #include "inventory.h"
+#include "runes.h"
 #include "native_target.h"
 #include "save_session.h"
 #include <atomic>
@@ -49,6 +50,10 @@ uint32_t set_capacity(void*, uintptr_t p, uint8_t health, uint8_t armor, uint8_t
             native_facts.armor_tier = std::max(native_facts.armor_tier, armor);
         if (ammo <= SC_INVENTORY_MAX_CAPACITY_TIER)
             native_facts.ammo_tier = std::max(native_facts.ammo_tier, ammo);
+        const auto pairs = runes::compute_derived_crystal_pairs(native_facts.health_tier, native_facts.armor_tier, native_facts.ammo_tier);
+        if (runes::calls.sync_crystal_pairs) {
+            runes::calls.sync_crystal_pairs(nullptr, p, pairs);
+        }
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
     return error;
 }
@@ -75,6 +80,10 @@ void bind_run_state(void*, uintptr_t p) {
         ensure_items(nullptr, p, native_facts.weapons, native_facts.equipment,
                      native_facts.special_weapons, native_facts.persistent_upgrades);
         set_capacity(nullptr, p, native_facts.health_tier, native_facts.armor_tier, native_facts.ammo_tier);
+        const auto pairs = runes::compute_derived_crystal_pairs(native_facts.health_tier, native_facts.armor_tier, native_facts.ammo_tier);
+        if (runes::calls.sync_crystal_pairs) {
+            runes::calls.sync_crystal_pairs(nullptr, p, pairs);
+        }
         refresh(nullptr, p);
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
