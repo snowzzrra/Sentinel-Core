@@ -26,6 +26,7 @@ uint16_t compute_effective_masteries(uint32_t weapons, uint32_t mods,
 uint32_t mod_for_upgrade(uint32_t upgrade_mask);
 uint32_t weapon_for_mod(uint32_t mod_mask);
 uint32_t mod_for_selection(uint8_t weapon_idx, uint8_t mod_idx);
+uint32_t shared_mods();
 
 struct Calls {
     void* context = nullptr;

@@ -90,6 +90,13 @@ uint32_t mod_for_selection(uint8_t w_idx, uint8_t m_idx) {
     }
 }
 
+uint32_t shared_mods() {
+    AcquireSRWLockShared(&state_lock);
+    const uint32_t m = shared_state.mods;
+    ReleaseSRWLockShared(&state_lock);
+    return m;
+}
+
 uint16_t compute_effective_masteries(uint32_t weapons, uint32_t mods,
                                      uint16_t ap_masteries, uint16_t challenges_completed) {
     uint16_t effective = 0;
