@@ -59,7 +59,7 @@ uintptr_t find_perk(uintptr_t p, const char* target_name) {
         if (!perk_list || perk_count <= 0 || perk_count > 4000) return 0;
         for (int i = 0; i < perk_count; ++i) {
             const auto perk = perk_list[i];
-            if (!perk) continue;
+            if (!perk) return 2;
             const auto name = *reinterpret_cast<const char**>(perk + 8);
             if (name && std::strcmp(name, target_name) == 0) {
                 return perk;
@@ -73,15 +73,18 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
     if (!p) return false;
     __try {
         const uintptr_t rm = p + 0x19168;
-        facts = native_facts;
+        facts = {};
+        // Pair projection is not a native capacity observation (A01/D05).
+        facts.derived_pairs = native_facts.derived_pairs;
 
         // 1. Registered normal runes
         const auto reg_list = *reinterpret_cast<const uintptr_t**>(rm + 0x50);
         const auto reg_count = *reinterpret_cast<const int*>(rm + 0x58);
+        if (reg_count < 0 || reg_count > 64 || (reg_count && !reg_list)) return false;
         if (reg_list && reg_count > 0 && reg_count <= 64) {
             for (int i = 0; i < reg_count; ++i) {
                 const auto perk = reg_list[i];
-                if (!perk) continue;
+                if (!perk) return false;
                 const auto name = *reinterpret_cast<const char**>(perk + 8);
                 if (!name) continue;
                 for (int r = 0; r < 9; ++r) {
@@ -96,10 +99,11 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         // 2. Registered support runes
         const auto supp_list = *reinterpret_cast<const uintptr_t**>(rm + 0x68);
         const auto supp_count = *reinterpret_cast<const int*>(rm + 0x70);
+        if (supp_count < 0 || supp_count > 16 || (supp_count && !supp_list)) return false;
         if (supp_list && supp_count > 0 && supp_count <= 16) {
             for (int i = 0; i < supp_count; ++i) {
                 const auto perk = supp_list[i];
-                if (!perk) continue;
+                if (!perk) return false;
                 const auto name = *reinterpret_cast<const char**>(perk + 8);
                 if (!name) continue;
                 for (int s = 0; s < 3; ++s) {
@@ -151,7 +155,6 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         if (reg_count >= req2) facts.unlocked_slots |= (1u << 2);
 
         // 6. Derived crystal pairs
-        facts.derived_pairs = compute_derived_crystal_pairs(facts.health_tier, facts.armor_tier, facts.ammo_tier);
         native_facts = facts;
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
@@ -163,17 +166,19 @@ uint32_t ensure_normal_runes(void*, uintptr_t p, uint32_t normal_mask) {
     __try {
         const uintptr_t rm = p + 0x19168;
         const auto unlock_perk = reinterpret_cast<void(*)(uintptr_t, uintptr_t, char, char, uintptr_t, char)>(image_base + 0xfe2500);
-        const auto assure_size = reinterpret_cast<char(*)(uintptr_t, uint32_t)>(image_base + 0x357040);
+        const auto assure_size = reinterpret_cast<char(*)(uintptr_t)>(image_base + 0x357040);
         const auto level_event = reinterpret_cast<void(*)(uintptr_t, uint64_t)>(image_base + 0x13ef6a0);
 
         for (int r = 0; r < 9; ++r) {
             if (!(normal_mask & (1u << r))) continue;
             const auto perk = find_perk(p, NORMAL_RUNE_PATHS[r]);
-            if (!perk) continue;
+            if (!perk) return 2;
 
             auto reg_list = *reinterpret_cast<uintptr_t**>(rm + 0x50);
             auto reg_count = *reinterpret_cast<int*>(rm + 0x58);
             const auto reg_cap = *reinterpret_cast<int*>(rm + 0x5c);
+            if (reg_count < 0 || reg_count > 64 || reg_cap < reg_count ||
+                (reg_count && !reg_list)) return 3;
             bool found = false;
             if (reg_list && reg_count > 0) {
                 for (int i = 0; i < reg_count; ++i) {
@@ -181,17 +186,19 @@ uint32_t ensure_normal_runes(void*, uintptr_t p, uint32_t normal_mask) {
                 }
             }
             if (!found) {
+                if (reg_count >= 64) return 3;
                 if (reg_count >= reg_cap && assure_size) {
-                    assure_size(rm + 0x50, reg_count + 1);
+                    if (!assure_size(rm + 0x50)) return 4;
                     reg_list = *reinterpret_cast<uintptr_t**>(rm + 0x50);
                 }
-                if (reg_list) {
-                    reg_list[reg_count] = perk;
-                    *reinterpret_cast<int*>(rm + 0x58) = reg_count + 1;
-                }
+                const auto capacity = *reinterpret_cast<int*>(rm + 0x5c);
+                if (!reg_list || *reinterpret_cast<int*>(rm + 0x58) != reg_count ||
+                    capacity <= reg_count) return 4;
+                reg_list[reg_count] = perk;
+                *reinterpret_cast<int*>(rm + 0x58) = reg_count + 1;
             }
             if (unlock_perk) unlock_perk(p + 0x3b40, perk, 0, 0, 0, 0);
-            if (level_event) level_event(p, 0x457);
+            if (!found && level_event) level_event(p, 0x457);
             native_facts.owned_normal |= (1u << r);
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
@@ -204,17 +211,19 @@ uint32_t ensure_support_runes(void*, uintptr_t p, uint32_t support_mask) {
     __try {
         const uintptr_t rm = p + 0x19168;
         const auto unlock_perk = reinterpret_cast<void(*)(uintptr_t, uintptr_t, char, char, uintptr_t, char)>(image_base + 0xfe2500);
-        const auto assure_size = reinterpret_cast<char(*)(uintptr_t, uint32_t)>(image_base + 0x357040);
+        const auto assure_size = reinterpret_cast<char(*)(uintptr_t)>(image_base + 0x357040);
         const auto level_event = reinterpret_cast<void(*)(uintptr_t, uint64_t)>(image_base + 0x13ef6a0);
 
         for (int s = 0; s < 3; ++s) {
             if (!(support_mask & (1u << s))) continue;
             const auto perk = find_perk(p, SUPPORT_RUNE_PATHS[s]);
-            if (!perk) continue;
+            if (!perk) return 2;
 
             auto supp_list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
             auto supp_count = *reinterpret_cast<int*>(rm + 0x70);
             const auto supp_cap = *reinterpret_cast<int*>(rm + 0x74);
+            if (supp_count < 0 || supp_count > 16 || supp_cap < supp_count ||
+                (supp_count && !supp_list)) return 3;
             bool found = false;
             if (supp_list && supp_count > 0) {
                 for (int i = 0; i < supp_count; ++i) {
@@ -222,17 +231,19 @@ uint32_t ensure_support_runes(void*, uintptr_t p, uint32_t support_mask) {
                 }
             }
             if (!found) {
+                if (supp_count >= 16) return 3;
                 if (supp_count >= supp_cap && assure_size) {
-                    assure_size(rm + 0x68, supp_count + 1);
+                    if (!assure_size(rm + 0x68)) return 4;
                     supp_list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
                 }
-                if (supp_list) {
-                    supp_list[supp_count] = perk;
-                    *reinterpret_cast<int*>(rm + 0x70) = supp_count + 1;
-                }
+                const auto capacity = *reinterpret_cast<int*>(rm + 0x74);
+                if (!supp_list || *reinterpret_cast<int*>(rm + 0x70) != supp_count ||
+                    capacity <= supp_count) return 4;
+                supp_list[supp_count] = perk;
+                *reinterpret_cast<int*>(rm + 0x70) = supp_count + 1;
             }
             if (unlock_perk) unlock_perk(p + 0x3b40, perk, 0, 0, 0, 0);
-            if (level_event) level_event(p, 0x457);
+            if (!found && level_event) level_event(p, 0x457);
             native_facts.owned_support |= (1u << s);
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
@@ -252,7 +263,8 @@ uint32_t select_normal_rune(void*, uintptr_t p, uint8_t slot_idx, int8_t rune_id
             native_facts.selected_slots[slot_idx] = -1;
         } else if (rune_idx < 9) {
             const auto perk = find_perk(p, NORMAL_RUNE_PATHS[rune_idx]);
-            if (perk && equip_rune) {
+            if (!perk) return 2;
+            if (equip_rune) {
                 uint32_t slot = slot_idx;
                 equip_rune(rm, perk, &slot, 0, 0);
                 native_facts.selected_slots[slot_idx] = rune_idx;
@@ -275,7 +287,8 @@ uint32_t select_support_rune(void*, uintptr_t p, int8_t support_idx) {
             native_facts.selected_support = -1;
         } else if (support_idx < 3) {
             const auto perk = find_perk(p, SUPPORT_RUNE_PATHS[support_idx]);
-            if (perk && equip_support) {
+            if (!perk) return 2;
+            if (equip_support) {
                 equip_support(rm, perk, 0);
                 native_facts.selected_support = support_idx;
             }
@@ -294,7 +307,7 @@ uint32_t sync_crystal_pairs(void*, uintptr_t p, uint8_t pair_mask) {
 
         for (int i = 0; i < 6; ++i) {
             const auto perk = find_perk(p, CRYSTAL_PAIR_PATHS[i]);
-            if (!perk) continue;
+            if (!perk) return 2;
             if (pair_mask & (1u << i)) {
                 if (unlock_perk) unlock_perk(p + 0x3b40, perk, 0, 0, 0, 0);
                 if (activate_perk) activate_perk(p + 0x3b40, perk, 1, 0, 0, 0, 1);
@@ -376,6 +389,29 @@ void install(const engine::Binding& binding, HANDLE stop) {
     image_base = binding.image.base;
     image_size = binding.image.size;
     engine_root = binding.root;
+    // Supported image, exact entry bytes and executable section are required
+    // for every direct mutation target, before exposing any Rune capability.
+    engine::LocalMemory memory;
+    struct Site { uint32_t rva; const char* bytes; };
+    const Site sites[] = {
+        {0x357040, "803d1903f203004c8bc9740f448b410c41ffc0418bd0e9650000000fbf491041"},
+        {0xfe2500, "4885d20f84c903000044884c2420448844241848894c24085356415441564883"},
+        {0xfe19b0, "44884c24204488442418488954241048894c2408555357415541564157488d6c"},
+        {0xfe2c20, "4885d20f84e1060000555741554157488bec4883ec588b41304c8bfa488d5134"},
+        {0x1279be0, "48895c241048896c2418565741564883ec60488d99300100004c8bf28b03488d"},
+        {0x127aa30, "85d20f88f501000048896c2418574883ec404863fa410fb6e848895c24504889"},
+        {0x1279eb0, "48895c2410574883ec60488bfa488bd9488b91980000004885d2740f450fb6c8"},
+        {0x13ef6a0, "40534883ec204533c98bda458d4101e8bcebfdff488b05256d26038378080074"},
+        {0x69af70, "488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc"},
+    };
+    for (const auto& site : sites) {
+        std::array<uint8_t, 32> actual{}, expected{};
+        const auto digit = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
+        for (size_t i = 0; i < expected.size(); ++i)
+            expected[i] = static_cast<uint8_t>(digit(site.bytes[i * 2]) * 16 + digit(site.bytes[i * 2 + 1]));
+        if (!binding.image.contains(site.rva, actual.size(), IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0) ||
+            memory.copy(image_base + site.rva, actual.data(), actual.size()).reason || actual != expected) return;
+    }
     ready.store(true, std::memory_order_release);
 }
 

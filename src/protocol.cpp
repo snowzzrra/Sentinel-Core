@@ -64,16 +64,39 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
                           sc_save_backup_request* backup, sc_weapon_points_request* points, sc_campaign_request* campaign,
                           sc_inventory_request* inventory, sc_arsenal_request* arsenal,
                           sc_runes_request* runes, sc_special_request* special,
-                          sc_deathlink_request* deathlink) {
+                          sc_deathlink_request* deathlink, sc_automap_request* automap) {
     if (operation) *operation = inspect_operation;
     if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && op >= engine_operation && op <= deathlink_release_operation) *operation = static_cast<uint16_t>(op);
+    if (operation && op >= engine_operation && op <= automap_operation) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op < inspect_operation || op > deathlink_release_operation) return WireResult::unsupported_operation;
+    if (op < inspect_operation || op > automap_operation) return WireResult::unsupported_operation;
+    if (op == automap_operation) {
+        if (length != 217) return WireResult::malformed;
+        if (r.number(8) != automap_capability) return WireResult::capability_unavailable;
+        Message identity = in;
+        Writer fixed{identity, 6}; fixed.number(diagnostic_submit_operation, 2); fixed.number(72, 4);
+        Writer capability{identity, header_size}; capability.number(diagnostic_capability, 8);
+        sc_automap_request value{};
+        const auto decoded = decode_request(identity, 88, nullptr, &value.execution);
+        if (decoded != WireResult::ok) return decoded;
+        r.pos = 88;
+        for (auto& c : value.namespace_id) c = static_cast<char>(r.number(1));
+        r.u32(value.kind);
+        r.u32(value.known); r.u64(value.revision);
+        for (auto& bits:value.checked_locations) r.u64(bits);
+        if (value.known>1 || value.kind<SC_AUTOMAP_PUBLISH || value.kind>SC_AUTOMAP_OBSERVE) return WireResult::malformed;
+        if (value.namespace_id[64]) return WireResult::malformed;
+        for (size_t i = 0; i < 64; ++i) {
+            const auto c = value.namespace_id[i];
+            if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return WireResult::malformed;
+        }
+        if (automap) *automap = value;
+        return r.valid && r.pos == size ? WireResult::ok : WireResult::malformed;
+    }
     if (op >= deathlink_submit_operation) {
         if (length != 189) return WireResult::malformed;
         if (r.number(8) != deathlink_capability) return WireResult::capability_unavailable;
@@ -1419,7 +1442,7 @@ template<class Codec> bool special_values(Codec& c, sc_special_result& v) {
     c.u32(v.reserved0);
     c.u64(v.operations_applied);
     if (v.abi_version != SC_SPECIAL_ABI_VERSION || v.namespace_id[64] ||
-        v.outcome > SC_SPECIAL_OUTCOME_CRASH_PROTECTED || (v.flags & ~2047u)) return false;
+        v.outcome > SC_SPECIAL_OUTCOME_CRASH_PROTECTED || (v.flags & ~4095u)) return false;
     if (v.owns_crucible > 1 || v.owns_hammer > 1 || v.hammer_tier > SC_SPECIAL_HAMMER_TIER_UPGRADED ||
         v.selected > SC_SPECIAL_WEAPON_HAMMER || v.native_crucible > 1 || v.native_hammer > 1 ||
         v.native_hammer_perks > 2 || v.native_selected > SC_SPECIAL_WEAPON_HAMMER ||
@@ -1488,7 +1511,7 @@ template<class Codec> bool deathlink_values(Codec& c, sc_deathlink_result& v) {
     c.u32(v.reserved0);
     c.u64(v.operations_applied);
     if (v.abi_version != SC_DEATHLINK_ABI_VERSION || v.namespace_id[64] ||
-        v.outcome > SC_DEATHLINK_OUTCOME_DISABLED || (v.flags & ~4095u)) return false;
+        v.outcome > SC_DEATHLINK_OUTCOME_DISABLED || (v.flags & ~8191u)) return false;
     if (v.enabled > 1 || v.mode > SC_DEATHLINK_MODE_HARDCORE ||
         v.remote_state > SC_DEATHLINK_REMOTE_CANCELLED ||
         v.remote_protection > SC_DEATHLINK_PROTECTION_OTHER ||
@@ -1539,5 +1562,51 @@ bool decode_deathlink_response(const Message& in, size_t size, WireResult& resul
     return s.core.abi_version == SC_ABI_VERSION && deathlink_values(r, v) && r.valid && r.pos == size &&
         v.execution.scope.pid == s.pid && v.execution.scope.process_created == s.process_created &&
         !std::memcmp(v.execution.scope.instance_id, s.instance.data(), 16);
+}
+}
+
+namespace sentinel {
+namespace {
+template<class Codec> bool automap_values(Codec& c,sc_automap_result& v) {
+    c.u32(v.abi_version); scope_values(c,v.scope); c.u64(v.request_id);
+    for (auto& b:v.nonce) c.byte(b);
+    for (auto& ch:v.namespace_id) { auto b=static_cast<uint8_t>(ch); c.byte(b); ch=static_cast<char>(b); }
+    c.u32(v.kind); c.u32(v.outcome); c.u32(v.known); c.u32(v.native_fault);
+    c.u64(v.revision); c.u64(v.scanned); c.u64(v.removed); c.u64(v.completed_passes);
+    return v.abi_version==SC_AUTOMAP_ABI_VERSION && !v.namespace_id[64] && v.known<=1 &&
+        v.kind>=SC_AUTOMAP_PUBLISH && v.kind<=SC_AUTOMAP_OBSERVE && v.outcome<=SC_AUTOMAP_REGRESSION;
+}
+}
+size_t encode_automap_request(Message& out,const sc_automap_request& request) {
+    const auto end=encode_native_request(out,diagnostic_submit_operation,request.execution);
+    Writer h{out}; header(h,wire_version,automap_operation,217,WireResult::ok); h.number(automap_capability,8);
+    Writer w{out,end}; for (auto ch:request.namespace_id) w.number(static_cast<uint8_t>(ch),1);
+    w.number(request.kind,4); w.number(request.known,4); w.number(request.revision,8);
+    for (auto bits:request.checked_locations) w.number(bits,8);
+    return w.valid?w.pos:0;
+}
+size_t encode_automap_response(Message& out, WireResult result, const Snapshot& s, const sc_automap_result& value) {
+    Writer w{out}; header(w, wire_version, automap_operation, 0, result);
+    if (result == WireResult::ok) {
+        w.number(automap_capability, 8); w.number(s.pid, 4); w.number(s.process_created, 8);
+        for (auto b : s.instance) w.number(b, 1);
+        w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id);
+        auto v = value; if (!automap_values(w, v)) return 0;
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.valid ? w.pos : 0;
+}
+bool decode_automap_response(const Message& in, size_t size, WireResult& result, Snapshot& s, sc_automap_result& v) {
+    if (size < header_size || size > max_message) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != automap_operation || r.number(4) != size - header_size) return false;
+    const auto code = r.number(4); if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code); if (result != WireResult::ok) return size == header_size;
+    if (r.number(8) != automap_capability) return false;
+    s = {}; v = {}; s.core.size = sizeof(s.core); v.size = sizeof(v);
+    r.u32(s.pid); r.u64(s.process_created); for (auto& b : s.instance) r.byte(b);
+    r.u32(s.core.abi_version); r.text(s.core.version); r.text(s.core.build_id);
+    return s.core.abi_version == SC_ABI_VERSION && automap_values(r, v) && r.valid && r.pos == size &&
+        v.scope.pid == s.pid && v.scope.process_created == s.process_created &&
+        !std::memcmp(v.scope.instance_id, s.instance.data(), 16);
 }
 }

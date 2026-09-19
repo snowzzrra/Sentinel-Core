@@ -24,7 +24,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
                                    const sc_arsenal_request* arsenal = nullptr,
                                    const sc_runes_request* runes = nullptr,
                                    const sc_special_request* special = nullptr,
-                                   const sc_deathlink_request* deathlink = nullptr) {
+                                   const sc_deathlink_request* deathlink = nullptr,
+                                   const sc_automap_request* automap = nullptr) {
     Inspection result;
     Handle process;
     auto fail = [&](DWORD error) {
@@ -80,7 +81,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(deathlink ? encode_deathlink_request(data, operation, *deathlink) :
+    const DWORD size = static_cast<DWORD>(automap ? encode_automap_request(data, *automap) :
+        deathlink ? encode_deathlink_request(data, operation, *deathlink) :
         special ? encode_special_request(data, operation, *special) :
         runes ? encode_runes_request(data, operation, *runes) :
         arsenal ? encode_arsenal_request(data, operation, *arsenal) :
@@ -103,7 +105,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     WireResult code{};
     result.failure_stage = "decode_response";
     // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
-    bool decoded = deathlink ? decode_deathlink_response(data, count, code, operation, result.snapshot, result.deathlink) :
+    bool decoded = automap ? decode_automap_response(data, count, code, result.snapshot, result.automap) :
+        deathlink ? decode_deathlink_response(data, count, code, operation, result.snapshot, result.deathlink) :
         special ? decode_special_response(data, count, code, operation, result.snapshot, result.special) :
         runes ? decode_runes_response(data, count, code, operation, result.snapshot, result.runes) :
         arsenal ? decode_arsenal_response(data, count, code, operation, result.snapshot, result.arsenal) :
@@ -135,8 +138,16 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         WaitForSingleObject(process.value, 0) != WAIT_TIMEOUT) {
         result.result = ProbeResult::process_mismatch; return result;
     }
+    if (automap && (result.automap.scope.lifecycle_generation != automap->execution.expected.lifecycle_generation ||
+        result.automap.request_id != automap->execution.request_id || result.automap.kind != automap->kind ||
+        std::memcmp(result.automap.nonce, automap->execution.nonce, sizeof(automap->execution.nonce)) ||
+        std::memcmp(result.automap.namespace_id, automap->namespace_id, sizeof(automap->namespace_id)) ||
+        (automap->kind == SC_AUTOMAP_PUBLISH && result.automap.outcome == SC_AUTOMAP_ACCEPTED &&
+         (result.automap.revision != automap->revision || result.automap.known != automap->known)))) {
+        result.result = ProbeResult::invalid_response; return result;
+    }
     const auto& execution = deathlink ? result.deathlink.execution : (special ? result.special.execution : (runes ? result.runes.execution : (arsenal ? result.arsenal.execution : (inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic))))));
-    if (request && !campaign && (execution.request_id != request->request_id ||
+    if (request && !campaign && !automap && (execution.request_id != request->request_id ||
         std::memcmp(execution.nonce, request->nonce, sizeof(request->nonce)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
@@ -168,6 +179,11 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     if (arsenal && (execution.scope.lifecycle_generation != arsenal->execution.expected.lifecycle_generation ||
         result.arsenal.kind != arsenal->kind ||
         std::memcmp(result.arsenal.namespace_id, arsenal->namespace_id, sizeof(arsenal->namespace_id)))) {
+        result.result = ProbeResult::invalid_response; return result;
+    }
+    if (runes && (execution.scope.lifecycle_generation != runes->execution.expected.lifecycle_generation ||
+        result.runes.kind != runes->kind ||
+        std::memcmp(result.runes.namespace_id, runes->namespace_id, sizeof(runes->namespace_id)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
     if (special && (execution.scope.lifecycle_generation != special->execution.expected.lifecycle_generation ||
@@ -243,6 +259,10 @@ Inspection query_special(uint32_t pid, uint32_t timeout_ms, uint16_t operation, 
         Inspection out; out.result = ProbeResult::usage; return out;
     }
     return query_operation(pid, timeout_ms, special_capability, operation, &r.execution, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &r);
+}
+Inspection query_automap(uint32_t pid,uint32_t timeout_ms,const sc_automap_request& r) {
+    return query_operation(pid,timeout_ms,automap_capability,automap_operation,&r.execution,0,0,
+        nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&r);
 }
 Inspection query_deathlink(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_deathlink_request& r) {
     if (operation < deathlink_submit_operation || operation > deathlink_release_operation) {

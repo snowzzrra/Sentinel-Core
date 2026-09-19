@@ -1,4 +1,7 @@
 #include "sentinel_inspection.h"
+#include "protocol.h"
+#include <io.h>
+#include <fcntl.h>
 #include "installation_probe.h"
 #include "save_probe.h"
 #include "pipe_io.h"
@@ -386,8 +389,32 @@ int inventory_command(int argc, wchar_t** argv);
 int arsenal_command(int argc, wchar_t** argv);
 int runes_command(int argc, wchar_t** argv);
 int special_command(int argc, wchar_t** argv);
+static int automap_command(int argc,wchar_t** argv) {
+    if (argc<2 || std::wcscmp(argv[1],L"--automap")) return -1;
+    if (argc!=2) { std::puts("--automap reads a typed SCIP Location snapshot/observation request on binary stdin."); return 2; }
+    _setmode(_fileno(stdin),_O_BINARY);
+    sentinel::Message message{};
+    const auto count=std::fread(message.data(),1,message.size(),stdin);
+    sc_automap_request request{}; uint16_t op=0;
+    if (sentinel::decode_request(message,count,&op,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,
+        nullptr,nullptr,nullptr,nullptr,nullptr,&request)!=sentinel::WireResult::ok || op!=sentinel::automap_operation) {
+        std::puts("{\"result\":\"malformed_request\"}"); return 2;
+    }
+    const auto result=sentinel::query_automap(request.execution.expected.pid,1000,request);
+    if (result.result!=sentinel::ProbeResult::ok) {
+        std::printf("{\"result\":\"%s\"}\n",sentinel::result_name(result.result)); return 1;
+    }
+    const auto& a=result.automap;
+    std::printf("{\"result\":\"ok\",\"outcome\":%u,\"known\":%u,\"revision\":%llu,\"native_fault\":%u,"
+        "\"scanned\":%llu,\"removed\":%llu,\"completed_passes\":%llu}\n",a.outcome,a.known,
+        static_cast<unsigned long long>(a.revision),a.native_fault,static_cast<unsigned long long>(a.scanned),
+        static_cast<unsigned long long>(a.removed),static_cast<unsigned long long>(a.completed_passes));
+    return a.outcome==SC_AUTOMAP_ACCEPTED?0:1;
+}
 int deathlink_command(int argc, wchar_t** argv);
 int wmain(int argc, wchar_t** argv) {
+    const int automap_res=automap_command(argc,argv);
+    if (automap_res!=-1) return automap_res;
     const int deathlink_res = deathlink_command(argc, argv);
     if (deathlink_res >= 0) return deathlink_res;
     const int special_res = special_command(argc, argv);

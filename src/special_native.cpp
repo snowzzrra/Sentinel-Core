@@ -83,13 +83,6 @@ uintptr_t find_decl(const char* path) {
     return reinterpret_cast<FindDecl>(image_base + rva_find_decl)(typeinfo, path, 1);
 }
 
-uintptr_t find_perk_decl(const char* path) {
-    if (!path) return 0;
-    const auto typeinfo = reinterpret_cast<uintptr_t(*)()>(image_base + rva_perk_typeinfo)();
-    if (!typeinfo) return 0;
-    return reinterpret_cast<FindDecl>(image_base + rva_find_decl)(typeinfo, path, 1);
-}
-
 uintptr_t find_item(uintptr_t inventory, uintptr_t decl) {
     if (!inventory || !decl) return 0;
     return reinterpret_cast<FindItem>(image_base + rva_find_item)(inventory, decl);
@@ -97,32 +90,10 @@ uintptr_t find_item(uintptr_t inventory, uintptr_t decl) {
 
 uintptr_t give_item(uintptr_t inventory, uintptr_t p, uintptr_t decl, int count, uint8_t count_is_amount) {
     if (!inventory || !p || !decl || count < 1) return 0;
-    // Receipt grants are silent acquisition only: no forced equip, no ammo,
-    // and no resource initialization beyond what the engine performs on a
-    // first legitimate acquisition.
+    // Native acquisition has intrinsic effects. Flags alone do not establish
+    // ammo/selection preservation; callers must independently verify them.
     return reinterpret_cast<GiveItem>(image_base + rva_give_item)(
         inventory, p, decl, count, count_is_amount, 0, 1, 0);
-}
-
-uintptr_t find_perk(uintptr_t p, const char* target_name) {
-    if (!p || !target_name) return 0;
-    __try {
-        const auto perk_list = *reinterpret_cast<const uintptr_t**>(p + 0x3b90);
-        const auto perk_count = *reinterpret_cast<const int*>(p + 0x3b98);
-        if (!perk_list || perk_count <= 0 || perk_count > 4000) return 0;
-        for (int i = 0; i < perk_count; ++i) {
-            const auto perk = perk_list[i];
-            if (!perk) continue;
-            const auto name = *reinterpret_cast<const char**>(perk + 8);
-            if (name && std::strcmp(name, target_name) == 0) return perk;
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    return 0;
-}
-
-void unlock_perk(uintptr_t p, uintptr_t perk) {
-    if (!p || !perk) return;
-    reinterpret_cast<UnlockPerk>(image_base + rva_unlock_perk)(p + 0x3b40, perk, 0, 0, 0, 0);
 }
 
 bool valid_code_pointer(uintptr_t address) {
@@ -194,7 +165,7 @@ bool ensure_item(uintptr_t inv, uintptr_t p, const char* path, uintptr_t& decl_o
         item_out = give_item(inv, p, decl_out, 1, 0);
         if (item_out) mutated = true;
     }
-    return true;
+    return item_out != 0;
 }
 } // namespace
 
@@ -217,16 +188,11 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
             facts.known |= SC_SPECIAL_KNOWN_HAMMER;
             facts.native_hammer = find_item(inv, hammer_decl) ? 1 : 0;
         }
-        if (hammer_decl) {
-            uint8_t perks = 0;
-            for (const auto* path : HAMMER_PERK_PATHS)
-                if (find_perk(p, path)) ++perks;
-            facts.known |= SC_SPECIAL_KNOWN_HAMMER_PERKS;
-            facts.native_hammer_perks = perks;
-        }
+        // Catalog membership does not prove Hammer perk ownership/activation.
 
         const auto active_decl = current_weapon_decl(p);
-        if (active_decl) {
+        if (active_decl && ((crucible_decl && active_decl == crucible_decl) ||
+                            (hammer_decl && active_decl == hammer_decl))) {
             uint8_t selected = SC_SPECIAL_WEAPON_NONE;
             if (crucible_decl && active_decl == crucible_decl) selected = SC_SPECIAL_WEAPON_CRUCIBLE;
             else if (hammer_decl && active_decl == hammer_decl) selected = SC_SPECIAL_WEAPON_HAMMER;
@@ -253,6 +219,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
 
 uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, uint32_t hammer_tier) {
     if (!p) return 1;
+    if (own_hammer && hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED) return 5;
     uint32_t error = 0;
     __try {
         const auto inv = inventory_of(p);
@@ -263,29 +230,20 @@ uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, 
 
         uintptr_t decl = 0, item = 0;
         bool mutated = false;
-        if (own_crucible) ensure_item(inv, p, CRUCIBLE_PATH, decl, item, mutated);
-        if (own_hammer) ensure_item(inv, p, HAMMER_PATH, decl, item, mutated);
+        if (own_crucible && !ensure_item(inv, p, CRUCIBLE_PATH, decl, item, mutated)) return 3;
+        if (own_hammer && !ensure_item(inv, p, HAMMER_PATH, decl, item, mutated)) return 4;
 
-        if (own_hammer && hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED) {
-            for (const auto* path : HAMMER_PERK_PATHS) {
-                if (find_perk(p, path)) continue;
-                const auto perk_decl = find_perk_decl(path);
-                if (!perk_decl) continue;
-                unlock_perk(p, perk_decl);
-                mutated = true;
-            }
-        }
 
         // An acquisition may intrinsically switch the active weapon. Restore the
         // player's prior valid selection instead of inheriting the acquisition.
         if (mutated && before.selected != SC_SPECIAL_WEAPON_NONE) {
             const auto after = selection_snapshot(p, inv, crucible_decl, hammer_decl);
-            if (after.selected != before.selected && before.item)
-                equip_item(p, before.item);
+            if (after.selected != before.selected &&
+                (!before.item || !equip_item(p, before.item))) return 6;
         }
 
         SnapshotFacts facts{};
-        read(nullptr, p, facts);
+        if (!read(nullptr, p, facts)) return 7;
         native_facts = facts;
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
     return error;
@@ -318,11 +276,14 @@ uint32_t refill(void*, uintptr_t p) {
         const auto count_fn = reinterpret_cast<ItemCount>(image_base + rva_item_count);
         const auto at_fn = reinterpret_cast<ItemAt>(image_base + rva_item_at);
 
+        uint32_t attempted = 0, confirmed = 0;
+        const auto inventory_count = count_fn(inv);
+        if (inventory_count > 4096) return 3;
         // Same ordinary-ammo contract as the established "give ammo" action:
         // every owned weapon's ammo pools are topped up, except the special
         // weapons whose spendable resources are explicitly excluded. Ammo items
-        // clamp to the player's native capacity; no weapon is granted here.
-        for (int i = 0; i < static_cast<int>(count_fn(inv)); ++i) {
+        // use the native item writer; capacity clamping still requires retail proof.
+        for (int i = 0; i < static_cast<int>(inventory_count); ++i) {
             const auto item = at_fn(inv, i);
             if (!item) continue;
             const auto decl = *reinterpret_cast<uintptr_t*>(item + 0x38);
@@ -341,30 +302,44 @@ uint32_t refill(void*, uintptr_t p) {
                     if (!ammo_decl) continue;
                     const auto ammo_path = decl_path(ammo_decl);
                     if (ammo_path && std::strstr(ammo_path, "crucible")) continue;
-                    give_item(inv, p, ammo_decl, 999, 1);
+                    ++attempted;
+                    const auto before_item = find_item(inv, ammo_decl);
+                    const auto before_count = before_item ? item_count(before_item) : 0;
+                    const auto granted = give_item(inv, p, ammo_decl, 999, 1);
+                    const auto after_item = find_item(inv, ammo_decl);
+                    if (granted && after_item && item_count(after_item) >= before_count && item_count(after_item) > 0)
+                        ++confirmed;
                 }
             };
             give_list(decl);
             const auto nested = *reinterpret_cast<uintptr_t*>(decl + 0x7f0);
             if (nested) give_list(nested);
         }
+        if (!attempted || confirmed != attempted) return 4;
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
     return error;
 }
+
+std::atomic<int> configured_key{VK_F9};
 
 bool present(void*, uintptr_t, uint32_t balance, uint32_t flags, uint32_t used) {
     const auto element = hud_element.load(std::memory_order_acquire);
     const auto expected_vtable = hud_element_vtable.load(std::memory_order_acquire);
     if (!element || !expected_vtable) return false;
-    char reward[64]{};
+    char reward[96]{}, key[32]{};
+    const int vk = configured_key.load(std::memory_order_relaxed);
+    if (!vk) std::snprintf(key, sizeof(key), "UNBOUND");
+    else if (vk >= VK_F1 && vk <= VK_F12) std::snprintf(key, sizeof(key), "F%d", vk - VK_F1 + 1);
+    else if (!GetKeyNameTextA(static_cast<LONG>(MapVirtualKeyA(vk, MAPVK_VK_TO_VSC) << 16), key, sizeof(key)))
+        std::snprintf(key, sizeof(key), "VK %u", static_cast<unsigned>(vk));
     if (!(flags & SC_SPECIAL_REFILL_AUTHORITATIVE) || !(flags & SC_SPECIAL_REFILL_CONNECTED)) {
         std::snprintf(reward, sizeof(reward), "UNAVAILABLE");
     } else if (!(flags & SC_SPECIAL_REFILL_BALANCE_KNOWN)) {
-        std::snprintf(reward, sizeof(reward), "-- CHARGES [F9]");
+        std::snprintf(reward, sizeof(reward), "-- CHARGES [%s]", key);
     } else if (used) {
-        std::snprintf(reward, sizeof(reward), "%u LEFT [F9]", balance);
+        std::snprintf(reward, sizeof(reward), "USED; BALANCE PENDING");
     } else {
-        std::snprintf(reward, sizeof(reward), "%u CHARGE%s [F9]", balance, balance == 1 ? "" : "S");
+        std::snprintf(reward, sizeof(reward), "%u CHARGE%s [%s]", balance, balance == 1 ? "" : "S", key);
     }
     __try {
         // The captured element must still be the same live class; a destroyed and
@@ -395,7 +370,7 @@ Calls calls{nullptr, player, read, ensure, select, refill, present, bind_run_sta
 namespace {
 // Input seam. The configured local key state is written by the launcher at the
 // existing ammo-refill hotkey path; an absent file means the F9 default.
-std::atomic<int> configured_key{VK_F9};
+
 std::atomic<uint64_t> key_state_checked{0};
 bool key_was_down = false, key_latched = false;
 uint64_t key_release_at = 0;
@@ -411,7 +386,7 @@ int token_to_vk(const char* token) {
         upper[n] = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
     }
     upper[n] = 0;
-    if (n >= 2 && upper[0] == 'F') {
+    if (n >= 2 && n <= 3 && upper[0] == 'F') {
         int value = 0; bool digits = true;
         for (size_t i = 1; i < n; ++i) {
             if (upper[i] < '0' || upper[i] > '9') { digits = false; break; }
@@ -456,11 +431,18 @@ void refresh_configured_key(uint64_t now) {
 }
 } // namespace
 
+void refresh_input_config() { refresh_configured_key(GetTickCount64()); }
+
 void poll_input(uintptr_t p, bool safe_gameplay) {
     if (!ready.load(std::memory_order_acquire)) return;
     const auto now = GetTickCount64();
-    refresh_configured_key(now);
     const auto vk = configured_key.load(std::memory_order_relaxed);
+    DWORD foreground_pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &foreground_pid);
+    if (foreground_pid != GetCurrentProcessId()) {
+        key_latched = true; key_was_down = true; key_release_at = 0;
+        return;
+    }
     if (!vk) {
         key_was_down = false; key_latched = false; key_release_at = 0;
         return;

@@ -12,7 +12,7 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation = 
                           sc_weapon_points_request* points = nullptr, sc_campaign_request* campaign = nullptr,
                           sc_inventory_request* inventory = nullptr, sc_arsenal_request* arsenal = nullptr,
                           sc_runes_request* runes = nullptr, sc_special_request* special = nullptr,
-                          sc_deathlink_request* deathlink = nullptr);
+                          sc_deathlink_request* deathlink = nullptr, sc_automap_request* automap = nullptr);
 size_t encode_runes_request(Message&, uint16_t, const sc_runes_request&);
 size_t encode_runes_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_runes_result&);
 bool decode_runes_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_runes_result&);
@@ -67,4 +67,10 @@ size_t encode_save_write_response(Message&, WireResult, const Snapshot&, const s
 size_t encode_installation_response(Message&, WireResult, const Snapshot&, const sc_save_installation_snapshot&);
 bool decode_installation_response(const Message&, size_t, WireResult&, Snapshot&, sc_save_installation_snapshot&);
 bool decode_save_write_response(const Message&, size_t, WireResult&, Snapshot&, sc_save_write_snapshot&);
+}
+
+namespace sentinel {
+size_t encode_automap_request(Message&, const sc_automap_request&);
+size_t encode_automap_response(Message&, WireResult, const Snapshot&, const sc_automap_result&);
+bool decode_automap_response(const Message&, size_t, WireResult&, Snapshot&, sc_automap_result&);
 }

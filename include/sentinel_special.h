@@ -102,7 +102,8 @@ enum {
     SC_SPECIAL_FLAG_REFILL_AUTHORIZED    = 1u << 7,
     SC_SPECIAL_FLAG_REFILL_EXECUTED      = 1u << 8,
     SC_SPECIAL_FLAG_REFILL_EXPIRED       = 1u << 9,
-    SC_SPECIAL_FLAG_HUD_PRESENTED        = 1u << 10
+    SC_SPECIAL_FLAG_HUD_PRESENTED        = 1u << 10,
+    SC_SPECIAL_FLAG_REFILL_UNVERIFIED    = 1u << 11
 };
 
 typedef struct sc_special_result {

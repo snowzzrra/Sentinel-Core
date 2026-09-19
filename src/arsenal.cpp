@@ -97,15 +97,21 @@ uint32_t shared_mods() {
     return m;
 }
 
+void authorize_hook(uint32_t mods) {
+    AcquireSRWLockExclusive(&state_lock);
+    shared_state.mods |= mods & SC_ARSENAL_ATTACHMENT_MEAT_HOOK;
+    ReleaseSRWLockExclusive(&state_lock);
+}
+
 uint16_t compute_effective_masteries(uint32_t weapons, uint32_t mods,
-                                     uint16_t ap_masteries, uint16_t challenges_completed) {
+                                     uint16_t ap_masteries, uint16_t /*challenges_completed*/) {
     uint16_t effective = 0;
     for (unsigned i = 0; i < 13; ++i) {
         const uint32_t mod_bit = 1u << i;
         const uint32_t weapon_bit = weapon_for_mod(mod_bit);
         const bool weapon_owned = (weapons & weapon_bit) != 0;
         const bool mod_owned = (mods & mod_bit) != 0;
-        const bool mastery_granted = ((ap_masteries | challenges_completed) & (1u << i)) != 0;
+        const bool mastery_granted = (ap_masteries & (1u << i)) != 0;
         if (weapon_owned && mod_owned && mastery_granted) {
             effective |= static_cast<uint16_t>(1u << i);
         }
@@ -135,7 +141,8 @@ bool same(const sc_arsenal_request& a, const sc_arsenal_request& b) {
            a.select_weapon == b.select_weapon && a.select_mod == b.select_mod &&
            a.challenge_index == b.challenge_index &&
            a.challenge_progress == b.challenge_progress &&
-           a.challenge_completed == b.challenge_completed;
+           a.challenge_completed == b.challenge_completed &&
+           !std::memcmp(a.namespace_id, b.namespace_id, sizeof(a.namespace_id));
 }
 
 void initial(const sc_arsenal_request& request, sc_arsenal_result& out) {
@@ -182,22 +189,11 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
         out.flags |= SC_ARSENAL_FLAG_BEFORE_VALID;
     }
 
-    AcquireSRWLockExclusive(&state_lock);
-    // Incorporate persistent shared run state into before facts
-    before.weapons |= shared_state.weapons;
-    before.mods |= shared_state.mods;
-    before.normal_upgrades |= shared_state.normal_upgrades;
-    before.masteries_ap |= shared_state.masteries_ap;
-    before.mastery_challenges_completed |= shared_state.mastery_challenges_completed;
-    before.mission_challenges_completed |= shared_state.mission_challenges_completed;
-    for (unsigned i = 0; i < 8; ++i) {
-        if (!before.selected_mods[i] && shared_state.selected_mods[i]) {
-            before.selected_mods[i] = shared_state.selected_mods[i];
-        }
+    if (!(out.flags & SC_ARSENAL_FLAG_BEFORE_VALID)) {
+        out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE;
+        return;
     }
-    before.masteries_effective = compute_effective_masteries(
-        before.weapons, before.mods, before.masteries_ap, before.mastery_challenges_completed);
-
+    AcquireSRWLockExclusive(&state_lock);
     out.weapons_before = before.weapons;
     out.mods_before = before.mods;
     std::memcpy(out.selected_mods_before, before.selected_mods, sizeof(out.selected_mods_before));
@@ -228,7 +224,9 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
         shared_state.mods |= request.mods;
         after.mods |= request.mods;
         if (p && calls.ensure_mods) {
+            ReleaseSRWLockExclusive(&state_lock);
             const auto err = calls.ensure_mods(calls.context, p, missing);
+            AcquireSRWLockExclusive(&state_lock);
             if (err) { out.native_exception = err; out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED; }
         }
         mutated = true;
@@ -253,7 +251,9 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
         shared_state.selected_mods[w_idx] = m_idx;
         after.selected_mods[w_idx] = m_idx;
         if (p && calls.select_mod) {
+            ReleaseSRWLockExclusive(&state_lock);
             const auto err = calls.select_mod(calls.context, p, w_idx, m_idx);
+            AcquireSRWLockExclusive(&state_lock);
             if (err) { out.native_exception = err; out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED; }
         }
         mutated = true;
@@ -281,7 +281,9 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
         shared_state.normal_upgrades |= request.upgrades;
         after.normal_upgrades |= request.upgrades;
         if (p && calls.purchase_upgrade) {
+            ReleaseSRWLockExclusive(&state_lock);
             const auto err = calls.purchase_upgrade(calls.context, p, missing);
+            AcquireSRWLockExclusive(&state_lock);
             if (err) { out.native_exception = err; out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED; }
         }
         mutated = true;
@@ -299,7 +301,9 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
         shared_state.masteries_ap |= static_cast<uint16_t>(request.masteries);
         after.masteries_ap |= static_cast<uint16_t>(request.masteries);
         if (p && calls.project_mastery) {
+            ReleaseSRWLockExclusive(&state_lock);
             const auto err = calls.project_mastery(calls.context, p, missing);
+            AcquireSRWLockExclusive(&state_lock);
             if (err) { out.native_exception = err; out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED; }
         }
         mutated = true;
@@ -314,8 +318,10 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
         }
         after.mission_challenges_progress[c_idx] = request.challenge_progress;
         if (p && calls.update_challenge) {
+            ReleaseSRWLockExclusive(&state_lock);
             const auto err = calls.update_challenge(calls.context, p, c_idx,
                                                    request.challenge_progress, request.challenge_completed);
+            AcquireSRWLockExclusive(&state_lock);
             if (err) { out.native_exception = err; out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED; }
         }
         mutated = true;
@@ -323,16 +329,32 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
     }
     }
 
-    if (mutated) {
-        ++shared_state.operations_applied;
-        out.flags |= SC_ARSENAL_FLAG_MUTATED;
-        if (p && calls.refresh) {
-            calls.refresh(calls.context, p);
-        }
+    ReleaseSRWLockExclusive(&state_lock);
+    const SnapshotFacts expected = after;
+    SnapshotFacts actual{};
+    const bool read_ok = calls.read && calls.read(calls.context, p, actual);
+    after = actual;
+    bool postcondition = read_ok;
+    switch (request.kind) {
+    case SC_ARSENAL_ENSURE_MODS: postcondition = postcondition && (after.mods & request.mods) == request.mods; break;
+    case SC_ARSENAL_SELECT_MOD: postcondition = postcondition && after.selected_mods[request.select_weapon] == request.select_mod; break;
+    case SC_ARSENAL_PURCHASE_UPGRADE: postcondition = postcondition && (after.normal_upgrades & request.upgrades) == request.upgrades; break;
+    case SC_ARSENAL_PROJECT_MASTERY: postcondition = postcondition && (after.masteries_ap & request.masteries) == request.masteries; break;
+    case SC_ARSENAL_UPDATE_CHALLENGE:
+        postcondition = postcondition && after.mastery_challenges_completed == expected.mastery_challenges_completed &&
+            after.mission_challenges_completed == expected.mission_challenges_completed; break;
+    default: break;
     }
-
-    after.masteries_effective = compute_effective_masteries(
-        after.weapons, after.mods, after.masteries_ap, after.mastery_challenges_completed);
+    if (read_ok) out.flags |= SC_ARSENAL_FLAG_AFTER_VALID;
+    if (!postcondition || out.native_exception) {
+        out.outcome = out.native_exception ? SC_ARSENAL_OUTCOME_CRASH_PROTECTED : SC_ARSENAL_OUTCOME_UNAVAILABLE;
+        out.flags &= ~SC_ARSENAL_FLAG_SELECTION_PRESERVED;
+    } else if (mutated) {
+        out.flags |= SC_ARSENAL_FLAG_MUTATED;
+        if (p && calls.refresh) calls.refresh(calls.context, p);
+    }
+    AcquireSRWLockExclusive(&state_lock);
+    if (mutated && postcondition && !out.native_exception) ++shared_state.operations_applied;
 
     out.weapons_after = after.weapons;
     out.mods_after = after.mods;
@@ -346,7 +368,6 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
     out.mission_challenges_completed_after = after.mission_challenges_completed;
     out.operations_applied = shared_state.operations_applied;
 
-    out.flags |= SC_ARSENAL_FLAG_AFTER_VALID;
     ReleaseSRWLockExclusive(&state_lock);
 }
 

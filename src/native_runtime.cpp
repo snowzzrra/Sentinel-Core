@@ -9,6 +9,7 @@
 #include "save_campaign_native.h"
 #include "campaign_menu.h"
 #include "campaign_menu_native.h"
+#include "fast_travel.h"
 #include "save_session.h"
 #include "context_observer.h"
 #include "MinHook.h"
@@ -169,33 +170,205 @@ void end_event(bool change, bool success, bool abnormal, save::CampaignTransitio
     }
     if (!--event_depth) event_thread.store(0, std::memory_order_release);
 }
-static void bind_player_safely(uintptr_t fn, uintptr_t active_map) {
+static uintptr_t tick_player_safely(uintptr_t fn, uintptr_t active_map, uint64_t generation) {
+    uintptr_t player=0;
     __try {
-        const auto p = reinterpret_cast<uintptr_t(*)(uintptr_t, uint32_t)>(fn)(active_map, 0);
-        if (p) {
-            inventory::bind_run_state_if_needed(p);
-            arsenal::bind_run_state_if_needed(p);
-            runes::bind_run_state_if_needed(p);
-            special::bind_run_state_if_needed(p);
-            deathlink::bind_run_state_if_needed(p);
+        player = reinterpret_cast<uintptr_t(*)(uintptr_t, uint32_t)>(fn)(active_map, 0);
+        if (player) {
+            const auto& id = save::session().namespace_id();
+            if (runes::admitted(id.c_str())) runes::bind_run_state_if_needed(player, generation);
+            if (special::admitted(id.c_str())) {
+                special::bind_run_state_if_needed(player, generation);
+                special::poll_input(player, true);
+            }
         }
+        const auto& id = save::session().namespace_id();
+        if (deathlink::admitted(id.c_str())) deathlink::tick_native();
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return player;
 }
-static void poll_special_input() {
+bool gameplay_admitted_locked_scope() {
+    if (save::session().state() != save::SessionState::admitted ||
+        !save::session().accepts_requests()) return false;
+    AcquireSRWLockShared(&lock);
+    const bool allowed = prerequisite(GetTickCount64()) == 0;
+    ReleaseSRWLockShared(&lock);
+    return allowed;
+}
+
+using FastTravelFind=uintptr_t(*)(uintptr_t,const char*);
+using FastTravelActivate=void(*)(uintptr_t,uintptr_t);
+FastTravelFind fast_travel_find=nullptr;
+FastTravelActivate fast_travel_activate=nullptr;
+std::atomic<bool> fast_travel_ready{false};
+void install_fast_travel(const engine::Binding& b) {
+    engine::LocalMemory memory;
+    const struct { uint32_t rva; const char* hex; } sites[] = {
+        {0x6ca290,"48895c2408488974241048897c241841564883ec20488bf94c8bf2488b0dee70"},
+        {0xd68750,"48895c2418574883ec40488b05776244034833c44889442438488bf9488bda48"}
+    };
+    for (const auto& s:sites) {
+        std::array<uint8_t,32> actual{},expected{};
+        const auto digit=[](char c) { return static_cast<uint8_t>(c<='9'?c-'0':c-'a'+10); };
+        for (size_t i=0;i<32;++i) expected[i]=static_cast<uint8_t>(digit(s.hex[i*2])*16+digit(s.hex[i*2+1]));
+        if (!b.image.contains(s.rva,32,IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ,0) ||
+            memory.copy(b.image.base+s.rva,actual.data(),32).reason || actual!=expected) return;
+    }
+    fast_travel_find=reinterpret_cast<FastTravelFind>(b.image.base+0x6ca290);
+    fast_travel_activate=reinterpret_cast<FastTravelActivate>(b.image.base+0xd68750);
+    fast_travel_ready.store(true,std::memory_order_release);
+}
+void reconcile_fast_travel(uintptr_t map,const char* map_name,uint64_t generation,uintptr_t player) {
+    const auto& namespace_id=save::session().namespace_id();
+    const bool authorized=fast_travel_ready.load(std::memory_order_acquire) &&
+        fast_travel::entry_policy().authorized(namespace_id.c_str(),map_name,generation);
+    if (!authorized) { fast_travel::dispatch_policy().observe(false,generation,0,false,false); return; }
+    if (!player) return;
     __try {
-        const auto active_map = map_address();
-        if (!active_map) return;
-        const auto p = reinterpret_cast<uintptr_t(*)(uintptr_t, uint32_t)>(binding.image.base + 0x69af70)(active_map, 0);
-        if (p) special::poll_input(p, true);
+        const auto image=binding.image.base;
+        if (!map || *reinterpret_cast<uintptr_t*>(map)!=image+0x2ab30c8 ||
+            *reinterpret_cast<uintptr_t*>(image+0x45f7370)!=map) return;
+        constexpr char target_name[]="ap_fast_travel_unlock_native";
+        auto target=fast_travel_find(map,target_name);
+        if (target && *reinterpret_cast<uintptr_t*>(target)!=image+0x2c47aa8) target=0;
+        const bool target_unlocked=target && *reinterpret_cast<uint8_t*>(target+0xb90)!=0;
+        const bool world_unlocked=*reinterpret_cast<uint8_t*>(map+0x1ac380)!=0;
+        const auto decision=fast_travel::dispatch_policy().observe(true,generation,target,target_unlocked,world_unlocked);
+        if (decision!=fast_travel::DispatchDecision::invoke) return;
+        fast_travel::dispatch_policy().invoked(target,false);
+        fast_travel_activate(target,player);
+        const bool post=*reinterpret_cast<uint8_t*>(target+0xb90)!=0 &&
+            *reinterpret_cast<uint8_t*>(map+0x1ac380)!=0;
+        fast_travel::dispatch_policy().invoked(target,post);
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
+
+// Native Automap ownership and ABI provenance: phase8g-entry/reva-marker-erase-*.txt.
+// HUD idPOIManager is a different subsystem and MUST NOT be used on AP props.
+SRWLOCK automap_lock = SRWLOCK_INIT;
+sc_automap_request automap_snapshot{};
+uint64_t automap_checked_floor[8]{};
+uint64_t automap_scanned=0, automap_removed=0, automap_passes=0;
+std::atomic<bool> automap_ready{false};
+std::atomic<uint32_t> automap_fault{0};
+uint64_t automap_generation=0;
+uint32_t automap_cursor=0;
+uintptr_t automap_keys=0;
+using AutomapOwner=uintptr_t(*)(uintptr_t);
+using AutomapErase=void(*)(uintptr_t,uintptr_t);
+AutomapOwner automap_owner=nullptr;
+AutomapErase automap_erase=nullptr;
+#include "automap_catalog.h"
+
+void install_automap(const engine::Binding& b) {
+    engine::LocalMemory memory;
+    const struct { uint32_t rva; const char* hex; } sites[] = {
+        {0xa54660,"40534883ec20488d99b00000008b03488d53043b02751b3dfeffff01741c4883"},
+        {0xa56740,"48895c2410574883ec20448b4108488d05cbd301024c8bca4889442430488b11"}
+    };
+    for (const auto& s:sites) {
+        std::array<uint8_t,32> actual{}, expected{};
+        const auto digit=[](char c) { return static_cast<uint8_t>(c<='9'?c-'0':c-'a'+10); };
+        for (size_t i=0;i<32;++i) expected[i]=static_cast<uint8_t>(digit(s.hex[i*2])*16+digit(s.hex[i*2+1]));
+        if (!b.image.contains(s.rva,32,IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ,0) ||
+            memory.copy(b.image.base+s.rva,actual.data(),32).reason || actual!=expected) return;
+    }
+    automap_owner=reinterpret_cast<AutomapOwner>(b.image.base+0xa54660);
+    automap_erase=reinterpret_cast<AutomapErase>(b.image.base+0xa56740);
+    automap_ready.store(true,std::memory_order_release);
+}
+struct AutomapLists { uintptr_t keys,values; int32_t count,key_capacity,value_capacity; };
+bool automap_lists(uintptr_t owner,AutomapLists& out) {
+    out.keys=*reinterpret_cast<uintptr_t*>(owner);
+    out.count=*reinterpret_cast<int32_t*>(owner+8);
+    out.key_capacity=*reinterpret_cast<int32_t*>(owner+12);
+    out.values=*reinterpret_cast<uintptr_t*>(owner+24);
+    out.value_capacity=*reinterpret_cast<int32_t*>(owner+36);
+    return out.count>=0 && out.count<=16384 && out.count==*reinterpret_cast<int32_t*>(owner+32) &&
+        out.count<=out.key_capacity && out.count<=out.value_capacity &&
+        (!out.count || (out.keys && out.values));
+}
+bool automap_name(uintptr_t key,char (&name)[64]) {
+    const auto length=*reinterpret_cast<int32_t*>(key+16);
+    const auto data=*reinterpret_cast<const char**>(key+8);
+    if (!data || length<=0 || length>=64) return false;
+    std::memcpy(name,data,static_cast<size_t>(length)); name[length]=0;
+    return std::strlen(name)==static_cast<size_t>(length);
+}
+bool automap_checked(const sc_automap_request& snapshot,const char* map,const char* name) {
+    constexpr char prefix[]="ap_location_visual_";
+    if (std::strncmp(name,prefix,sizeof(prefix)-1)) return false;
+    const char* digits=name+sizeof(prefix)-1;
+    if (std::strlen(digits)!=7) return false;
+    uint32_t id=0;
+    for (unsigned i=0;i<7;++i) {
+        if (digits[i]<'0' || digits[i]>'9') return false;
+        id=id*10+static_cast<uint32_t>(digits[i]-'0');
+    }
+    for (const auto& marker:automap_markers) {
+        if (marker.location!=id || std::strcmp(marker.map,map)) continue;
+        const auto bit=id-SC_AUTOMAP_LOCATION_BASE;
+        return (snapshot.checked_locations[bit/64] & (uint64_t{1}<<(bit%64)))!=0;
+    }
+    return false;
+}
+// Called only by the already-admitted native frame, never by an IPC reader.
+// Every pass rereads native keys/weak owners, including same-epoch reconstruction.
+void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
+    if (!automap_ready.load(std::memory_order_acquire) || automap_fault.load()) return;
+    sc_automap_request snapshot{};
+    AcquireSRWLockShared(&automap_lock); snapshot=automap_snapshot; ReleaseSRWLockShared(&automap_lock);
+    if (!snapshot.known || save::session().state()!=save::SessionState::admitted || !save::session().accepts_requests()) return;
+    uint64_t scanned=0,removed=0,passes=0;
+    __try {
+        const auto image=binding.image.base;
+        if (!map || *reinterpret_cast<uintptr_t*>(map)!=image+0x2ab30c8 ||
+            *reinterpret_cast<uintptr_t*>(image+0x45f7370)!=map) return;
+        const auto owner=map+0x1a7380+0x340;
+        AutomapLists list{};
+        if (!automap_lists(owner,list)) { automap_fault.store(1); return; }
+        if (automap_generation!=generation || automap_keys!=list.keys) {
+            automap_generation=generation; automap_keys=list.keys; automap_cursor=0;
+        }
+        for (unsigned budget=0;budget<16 && removed<4;++budget) {
+            if (!automap_lists(owner,list)) { automap_fault.store(1); break; }
+            if (automap_cursor>=static_cast<uint32_t>(list.count)) {
+                automap_cursor=0; ++passes; break;
+            }
+            const auto key=list.keys+static_cast<uintptr_t>(automap_cursor)*0x30;
+            const auto object=list.values+static_cast<uintptr_t>(automap_cursor)*0x150;
+            char name[64]{}; ++scanned;
+            if (!automap_name(key,name) || !automap_checked(snapshot,map_name,name)) { ++automap_cursor; continue; }
+            const auto entity=automap_owner(object);
+            if (entity) {
+                const auto type=*reinterpret_cast<uintptr_t*>(entity);
+                char entity_name[64]{};
+                if ((type!=image+0x2c1f300 && type!=image+0x2bf12f0) ||
+                    !automap_name(entity+0x40,entity_name) || std::strcmp(name,entity_name)) {
+                    ++automap_cursor; continue;
+                }
+            }
+            // A stale weak owner is allowed only for this exact catalog-owned AP
+            // key on its exact map. No arbitrary entity or marker can be erased.
+            automap_erase(owner,key);
+            AutomapLists after{}; char next[64]{};
+            if (!automap_lists(owner,after) || after.count!=list.count-1 ||
+                (automap_cursor<static_cast<uint32_t>(after.count) &&
+                 (!automap_name(after.keys+static_cast<uintptr_t>(automap_cursor)*0x30,next) || !std::strcmp(name,next)))) {
+                automap_fault.store(2); break;
+            }
+            ++removed; // Compaction moved the next native key into this index.
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { automap_fault.store(GetExceptionCode()); }
+    AcquireSRWLockExclusive(&automap_lock);
+    automap_scanned+=scanned; automap_removed+=removed; automap_passes+=passes;
+    ReleaseSRWLockExclusive(&automap_lock);
+}
+
 void post_frame() {
     if (!accepting.load(std::memory_order_acquire) || fault.load(std::memory_order_acquire)) return;
     if (owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); return; }
-    const auto active_map = map_address();
-    if (active_map) {
-        bind_player_safely(binding.image.base + 0x69af70, active_map);
-    }
+    deathlink::expire_pending(GetTickCount64());
     // Missing this diagnostic opportunity is harmless; unlike a lifecycle event,
     // it need not be fabricated or become a gap when IPC briefly holds the lock.
     if (!TryAcquireSRWLockExclusive(&lock)) { diagnostics.note_claim_contention(); return; }
@@ -209,18 +382,16 @@ void post_frame() {
     const auto expected_map_address = bound_map_address;
     const auto expected_map_name = bound_map_name;
     ReleaseSRWLockExclusive(&lock);
-    if (!slot) return;
 #ifdef SC_NATIVE_TESTING
     if (fixture_active) fixture.gate(false);
 #endif
-    auto result = slot->result; // This callback now exclusively owns the result.
-    auto detail = slot->detail;
+    auto result = slot ? slot->result : sc_diagnostic_result{};
+    auto detail = slot ? slot->detail : sc_diagnostic_detail{};
     detail.stage = why ? SC_STAGE_CLAIM_CONTEXT : SC_STAGE_NONE;
     result.scope = scope; result.thread_id = GetCurrentThreadId();
-    if (slot->is_backup) result.scope = slot->request.expected;
+    if (slot && slot->is_backup) result.scope = slot->request.expected;
     result.site_revision = 1; result.phase = 1; result.lifecycle = life;
     auto reject = [&](uint32_t reason, uint32_t stage) { why = reason; detail.stage = stage; };
-    if (!same_scope(slot->request.expected, scope)) reject(SC_NATIVE_SCOPE_MISMATCH, SC_STAGE_SCOPE);
     uint8_t pending = 1, pending_after = 1;
     engine::LocalMemory memory;
     sc_context_snapshot facts{};
@@ -268,7 +439,6 @@ void post_frame() {
                 facts.fields[SC_CONTEXT_GAME_STATE].value == SC_GAME_IN_GAME;
         }
     }
-    if (!why && detail.observation_accepted) poll_special_input();
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
     if (!why && (map_address() != expected_map_address || !same_map(facts.current_map, expected_map_name))) {
@@ -276,6 +446,20 @@ void post_frame() {
     }
     if (!why && owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); reject(SC_NATIVE_WRONG_THREAD, SC_STAGE_NATIVE_FAULT); }
     if (!why && !accepting.load(std::memory_order_acquire)) reject(SC_NATIVE_STOPPED, SC_STAGE_NATIVE_FAULT);
+    // Autonomous work uses the same fresh native admission as IPC, even with
+    // zero diagnostic slots. A diagnostic query is never its actuator.
+    const auto player=!why ? tick_player_safely(binding.image.base + 0x69af70, expected_map_address, scope.lifecycle_generation) : 0;
+    // Player natives may call back into a lifecycle hook before returning.
+    if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
+        reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
+    if (!why) reconcile_fast_travel(expected_map_address,facts.current_map.bytes,scope.lifecycle_generation,player);
+    if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
+        reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
+    if (!why) reconcile_automap(expected_map_address, facts.current_map.bytes, scope.lifecycle_generation);
+    if (!slot) return;
+    if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
+        reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
+    if (!same_scope(slot->request.expected, scope)) reject(SC_NATIVE_SCOPE_MISMATCH, SC_STAGE_SCOPE);
     char backup_directory[64]{};
     if (!why && slot->is_backup) {
         const auto reason = backup_prerequisite(slot->backup_request);
@@ -496,6 +680,8 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         if (!why && !stopping.load(std::memory_order_acquire)) runes::install(binding, stop_event);
     if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
     if (!why && !stopping.load(std::memory_order_acquire)) deathlink::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire)) install_automap(binding);
+    if (!why && !stopping.load(std::memory_order_acquire)) install_fast_travel(binding);
         if (!why && !stopping.load(std::memory_order_acquire) && !campaign_menu::install(binding,stop_event)) {
             save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
             why=SC_NATIVE_EXCEPTION;
@@ -509,8 +695,10 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
     }
     ReleaseSRWLockExclusive(&startup);
 }
+bool gameplay_admitted() { return gameplay_admitted_locked_scope(); }
 uint64_t observation_stamp() { return epoch.load(std::memory_order_acquire); }
 void publish_context(const sc_context_snapshot& observed, uint64_t before) {
+    special::refresh_input_config(); // Observer thread: no game-thread file I/O.
 #ifdef SC_NATIVE_TESTING
     const auto& value = fixture_active ? fixture.context() : observed;
 #else
@@ -566,6 +754,39 @@ sc_diagnostic_result result(const sc_diagnostic_request& request, bool cancel, s
     AcquireSRWLockExclusive(&lock);
     auto out = diagnostics.retrieve(request, cancel, GetTickCount64(), detail);
     ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_automap_result automap_request(const sc_automap_request& request) {
+    sc_automap_result out{}; out.size=sizeof(out); out.abi_version=SC_AUTOMAP_ABI_VERSION;
+    out.kind=request.kind; out.request_id=request.execution.request_id;
+    std::memcpy(out.nonce,request.execution.nonce,sizeof(out.nonce));
+    std::memcpy(out.namespace_id,request.namespace_id,sizeof(out.namespace_id));
+    AcquireSRWLockShared(&lock);
+    out.scope=status.scope; out.scope.lifecycle_generation=lifetime.generation;
+    const bool admitted=same_scope(out.scope,request.execution.expected) && !request.namespace_id[64] &&
+        save::session().state()==save::SessionState::admitted && save::session().accepts_requests() &&
+        save::session().namespace_id()==request.namespace_id;
+    AcquireSRWLockExclusive(&automap_lock);
+    out.outcome=SC_AUTOMAP_REFUSED;
+    if (!automap_ready.load() || automap_fault.load()) out.outcome=SC_AUTOMAP_UNAVAILABLE;
+    else if (admitted && request.kind==SC_AUTOMAP_OBSERVE) out.outcome=SC_AUTOMAP_ACCEPTED;
+    else if (admitted && request.kind==SC_AUTOMAP_PUBLISH && request.known<=1 && request.revision) {
+        const bool duplicate=request.revision==automap_snapshot.revision && request.known==automap_snapshot.known &&
+            !std::memcmp(request.checked_locations,automap_snapshot.checked_locations,sizeof(request.checked_locations));
+        bool regression=false;
+        if (request.known) for (size_t i=0;i<8;++i)
+            regression|=(automap_checked_floor[i]&~request.checked_locations[i])!=0;
+        if (regression) out.outcome=SC_AUTOMAP_REGRESSION;
+        else if (duplicate || request.revision>automap_snapshot.revision) {
+            automap_snapshot=request;
+            if (request.known) std::memcpy(automap_checked_floor,request.checked_locations,sizeof(automap_checked_floor));
+            out.outcome=SC_AUTOMAP_ACCEPTED;
+        }
+    }
+    out.known=automap_snapshot.known; out.revision=automap_snapshot.revision;
+    out.native_fault=automap_fault.load(); out.scanned=automap_scanned;
+    out.removed=automap_removed; out.completed_passes=automap_passes;
+    ReleaseSRWLockExclusive(&automap_lock); ReleaseSRWLockShared(&lock);
+    return out;
 }
 sc_campaign_result campaign_request(uint16_t operation,const sc_campaign_request& request) {
     AcquireSRWLockShared(&lock);

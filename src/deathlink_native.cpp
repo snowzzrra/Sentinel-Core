@@ -51,6 +51,10 @@ uintptr_t player(void*) {
 }
 
 void player_death_detour(uintptr_t self) {
+    if (!ready.load(std::memory_order_acquire)) {
+        if (original_player_death) original_player_death(self);
+        return;
+    }
     const auto now = GetTickCount64();
     if (application_active.load(std::memory_order_acquire)) {
         application_deaths.fetch_add(1, std::memory_order_relaxed);
@@ -107,12 +111,13 @@ uint32_t apply_lethal(void*, uintptr_t p, ApplicationOutcome& outcome) {
 }
 
 bool protection_active(void*, uintptr_t p) {
-    if (!p) return false;
+    // Conservative containment: unreadable protection cannot permit a retry.
+    if (!p) return true;
     __try {
         const auto map = *reinterpret_cast<uintptr_t*>(engine_root + 0x50);
-        if (!map) return false;
+        if (!map) return true;
         return reinterpret_cast<Protection>(image_base + rva_protection)(map + 0x35867) != 0;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return true; }
 }
 
 native::Target target(uintptr_t base, uint32_t offset, const char* hex) {
@@ -142,6 +147,8 @@ bool admitted(const char* id) {
     return available() && save::session().state() == save::SessionState::admitted &&
         save::session().accepts_requests() && !std::memcmp(id, save::session().namespace_id().c_str(), 65);
 }
+
+void tick_native() { tick(calls); }
 
 void execute_native(const sc_deathlink_request& request, sc_deathlink_result& out) {
     if (!admitted(request.namespace_id)) { out.outcome = SC_DEATHLINK_OUTCOME_UNAVAILABLE; return; }

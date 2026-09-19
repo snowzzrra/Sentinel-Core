@@ -1,5 +1,6 @@
 #include "campaign_menu_native.h"
 #include "campaign_menu.h"
+#include "fast_travel.h"
 #include "native_target.h"
 #include "native_runtime.h"
 #include "save_collector.h"
@@ -304,8 +305,15 @@ void load(uintptr_t screen,int index) {
         static_cast<uint32_t>(index)>=shown.count || !(shown.rows[index].flags&SC_CAMPAIGN_UNLOCKED)) return;
     // Permission/save/checkpoint/loading remain in LoadMission/LaunchMission.
     uintptr_t pending=0;
+    const auto boundary=native::checkpoint_transition();
     if (!read(screen,0x870,pending) || pending ||
-        !save::session().campaign_run.prepare_menu_save(native::checkpoint_transition())) return;
+        !save::session().campaign_run.prepare_menu_save(boundary)) return;
+    bool completion_known=false,completed=false;
+    __try { completed=native_completed(screen,reinterpret_cast<uintptr_t>(&entries[index])); completion_known=true; }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+    const auto& namespace_id=save::session().namespace_id();
+    fast_travel::entry_policy().selected(namespace_id.c_str(),shown.rows[index].map,
+        boundary.generation_after,completion_known,completed);
     menu().selected(shown.rows[index].id); original_load(screen,index);
 }
 bool is_available(uintptr_t screen) {

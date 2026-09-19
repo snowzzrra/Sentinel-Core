@@ -38,8 +38,8 @@ enum {
     SC_DEATHLINK_REMOTE_CANCELLED = 10
 };
 
-/* What the native game did with the last application. Absent classification
-   is reported as OTHER, never as a speculative named protection. */
+/* Positive protection evidence for the last application. Survival alone is
+   a native failure, not proof of protection. OTHER remains reserved. */
 enum {
     SC_DEATHLINK_PROTECTION_NONE = 0,
     SC_DEATHLINK_PROTECTION_EXTRA_LIFE = 1,
@@ -99,7 +99,8 @@ enum {
     SC_DEATHLINK_FLAG_PROTECTED          = 1u << 8,
     SC_DEATHLINK_FLAG_SUPPRESSED         = 1u << 9,
     SC_DEATHLINK_FLAG_LOCAL_EVENT        = 1u << 10,
-    SC_DEATHLINK_FLAG_ADVANCED           = 1u << 11
+    SC_DEATHLINK_FLAG_ADVANCED           = 1u << 11,
+    SC_DEATHLINK_FLAG_LOCAL_LOSS         = 1u << 12
 };
 
 typedef struct sc_deathlink_result {

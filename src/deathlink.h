@@ -36,6 +36,9 @@ extern Calls calls;
 void record_native_death(uint32_t cause, uint32_t protection, uint64_t now_ms);
 
 void execute(const sc_deathlink_request&, sc_deathlink_result&, const Calls&);
+void tick(const Calls&);
+void tick_native();
+void expire_pending(uint64_t now);
 void install(const engine::Binding&, HANDLE stop);
 bool available();
 bool admitted(const char* namespace_id);

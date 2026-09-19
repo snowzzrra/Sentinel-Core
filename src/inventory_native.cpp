@@ -11,7 +11,7 @@ namespace {
 std::atomic<bool> ready{false};
 uintptr_t image_base = 0, engine_root = 0;
 uint32_t image_size = 0;
-SnapshotFacts native_facts{};
+
 
 uintptr_t player(void*) {
     __try {
@@ -20,43 +20,11 @@ uintptr_t player(void*) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-bool read(void*, uintptr_t p, SnapshotFacts& facts) {
-    if (!p) return false;
-    __try {
-        facts = native_facts;
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-
-uint32_t ensure_items(void*, uintptr_t p, uint32_t weapons, uint32_t equip, uint32_t special, uint32_t upgrades) {
-    if (!p) return 1;
-    uint32_t error = 0;
-    __try {
-        native_facts.weapons |= weapons;
-        native_facts.equipment |= equip;
-        native_facts.special_weapons |= special;
-        native_facts.persistent_upgrades |= upgrades;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
-    return error;
-}
-
-uint32_t set_capacity(void*, uintptr_t p, uint8_t health, uint8_t armor, uint8_t ammo) {
-    if (!p) return 1;
-    uint32_t error = 0;
-    __try {
-        if (health <= SC_INVENTORY_MAX_CAPACITY_TIER)
-            native_facts.health_tier = std::max(native_facts.health_tier, health);
-        if (armor <= SC_INVENTORY_MAX_CAPACITY_TIER)
-            native_facts.armor_tier = std::max(native_facts.armor_tier, armor);
-        if (ammo <= SC_INVENTORY_MAX_CAPACITY_TIER)
-            native_facts.ammo_tier = std::max(native_facts.ammo_tier, ammo);
-        const auto pairs = runes::compute_derived_crystal_pairs(native_facts.health_tier, native_facts.armor_tier, native_facts.ammo_tier);
-        if (runes::calls.sync_crystal_pairs) {
-            runes::calls.sync_crystal_pairs(nullptr, p, pairs);
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
-    return error;
-}
+// No native capacity/ownership adapter existed here: cached desired facts are
+// not a native reader, writer, or Crystal-node postcondition (Phase 8G A01).
+bool read(void*, uintptr_t, SnapshotFacts&) { return false; }
+uint32_t ensure_items(void*, uintptr_t, uint32_t, uint32_t, uint32_t, uint32_t) { return 1; }
+uint32_t set_capacity(void*, uintptr_t, uint8_t, uint8_t, uint8_t) { return 1; }
 
 bool refresh(void*, uintptr_t p) {
     if (!p) return false;
@@ -74,19 +42,7 @@ bool refresh(void*, uintptr_t p) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-void bind_run_state(void*, uintptr_t p) {
-    if (!p) return;
-    __try {
-        ensure_items(nullptr, p, native_facts.weapons, native_facts.equipment,
-                     native_facts.special_weapons, native_facts.persistent_upgrades);
-        set_capacity(nullptr, p, native_facts.health_tier, native_facts.armor_tier, native_facts.ammo_tier);
-        const auto pairs = runes::compute_derived_crystal_pairs(native_facts.health_tier, native_facts.armor_tier, native_facts.ammo_tier);
-        if (runes::calls.sync_crystal_pairs) {
-            runes::calls.sync_crystal_pairs(nullptr, p, pairs);
-        }
-        refresh(nullptr, p);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-}
+void bind_run_state(void*, uintptr_t) {}
 
 Calls calls{nullptr, player, read, ensure_items, set_capacity, refresh, bind_run_state};
 
@@ -124,6 +80,6 @@ void install(const engine::Binding& binding, HANDLE stop) {
     image_base = binding.image.base;
     image_size = binding.image.size;
     engine_root = binding.root;
-    ready.store(true, std::memory_order_release);
+    ready.store(false, std::memory_order_release);
 }
 }

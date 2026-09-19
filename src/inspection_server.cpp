@@ -78,7 +78,10 @@ DWORD serve(void*) {
             sc_runes_request runes{};
             sc_special_request special{};
             sc_deathlink_request deathlink{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink);
+            sc_automap_request automap{};
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink, &automap);
+            sc_automap_result automap_result{};
+            if (result == WireResult::ok && operation == automap_operation) automap_result = native::automap_request(automap);
             sc_deathlink_result deathlink_result{};
             if (result == WireResult::ok && operation >= deathlink_submit_operation && operation <= deathlink_release_operation) {
                 deathlink_result = operation == deathlink_submit_operation ? native::submit_deathlink(deathlink) :
@@ -131,6 +134,7 @@ DWORD serve(void*) {
                         operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
             const DWORD size = static_cast<DWORD>(
+                operation == automap_operation ? encode_automap_response(data, result, current_snapshot(), automap_result) :
                 operation >= deathlink_submit_operation ?
                     encode_deathlink_response(data, result, operation, current_snapshot(), deathlink_result) :
                 operation >= special_submit_operation ?

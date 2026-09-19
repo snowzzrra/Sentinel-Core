@@ -21,11 +21,13 @@ State shared_state{};
 uint64_t total_operations = 0;
 char bound_namespace[65]{};
 uintptr_t last_bound_player = 0;
+uint64_t last_bound_generation = 0, next_bind_at = 0;
 
 void reset_state_locked(const char* id) {
     shared_state = {};
     total_operations = 0;
     last_bound_player = 0;
+    last_bound_generation = 0; next_bind_at = 0;
     if (id) std::memcpy(bound_namespace, id, sizeof(bound_namespace));
     else std::memset(bound_namespace, 0, sizeof(bound_namespace));
 }
@@ -176,22 +178,29 @@ bool create_refill_request(uint64_t now_ms) {
     return true;
 }
 
-void bind_run_state_if_needed(uintptr_t player) {
+void bind_run_state_if_needed(uintptr_t player, uint64_t generation) {
     if (!player) return;
+    const auto now = GetTickCount64();
     AcquireSRWLockExclusive(&state_lock);
-    if (player == last_bound_player) {
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
+    if ((player == last_bound_player && generation == last_bound_generation) || now < next_bind_at) {
+        ReleaseSRWLockExclusive(&state_lock); return;
     }
-    last_bound_player = player;
-    const auto owned_crucible = shared_state.owns_crucible;
-    const auto owned_hammer = shared_state.owns_hammer;
-    const auto tier = shared_state.hammer_tier;
-    const auto selected = shared_state.selected;
-    const bool empty = !owned_crucible && !owned_hammer && !tier && !selected;
+    next_bind_at = now + 500;
+    const auto desired = shared_state;
     ReleaseSRWLockExclusive(&state_lock);
-    if (empty || !calls.bind_run_state) return;
-    calls.bind_run_state(calls.context, player, owned_crucible, owned_hammer, tier, selected);
+    // Selection/consumed resources belong to native save reconstruction.
+    if (!desired.owns_crucible && !desired.owns_hammer) return;
+    if (calls.ensure(calls.context, player, desired.owns_crucible, desired.owns_hammer, desired.hammer_tier)) return;
+    SnapshotFacts after{};
+    if (!calls.read(calls.context, player, after) ||
+        (desired.owns_crucible && (!(after.known & SC_SPECIAL_KNOWN_CRUCIBLE) || !after.native_crucible)) ||
+        (desired.owns_hammer && (!(after.known & SC_SPECIAL_KNOWN_HAMMER) || !after.native_hammer)) ||
+        (desired.hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED &&
+         (!(after.known & SC_SPECIAL_KNOWN_HAMMER_PERKS) || after.native_hammer_perks < 2))) return;
+    AcquireSRWLockExclusive(&state_lock);
+    last_bound_player = player;
+    last_bound_generation = generation;
+    ReleaseSRWLockExclusive(&state_lock);
 }
 
 void execute(const sc_special_request& r, sc_special_result& out, const Calls& c) {
@@ -207,7 +216,6 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
     AcquireSRWLockExclusive(&state_lock);
     check_namespace(r.namespace_id);
     adopt_native_locked(before);
-    last_bound_player = player;
 
     if (r.kind == SC_SPECIAL_OBSERVE) {
         fill_facts(before, shared_state, out);
@@ -226,10 +234,10 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
         shared_state.hammer_tier = desired_tier;
 
         const bool native_satisfied =
-            (before.known & SC_SPECIAL_KNOWN_CRUCIBLE) && (!desired_crucible || before.native_crucible) &&
-            (before.known & SC_SPECIAL_KNOWN_HAMMER) && (!desired_hammer || before.native_hammer) &&
-            (before.known & SC_SPECIAL_KNOWN_HAMMER_PERKS) &&
-            (!desired_hammer || tier_for(before.native_hammer, before.native_hammer_perks) >= desired_tier);
+            (!desired_crucible || ((before.known & SC_SPECIAL_KNOWN_CRUCIBLE) && before.native_crucible)) &&
+            (!desired_hammer || ((before.known & SC_SPECIAL_KNOWN_HAMMER) && before.native_hammer &&
+             (desired_tier < SC_SPECIAL_HAMMER_TIER_UPGRADED ||
+              ((before.known & SC_SPECIAL_KNOWN_HAMMER_PERKS) && before.native_hammer_perks >= 2))));
         if (native_satisfied) {
             fill_facts(before, shared_state, out);
             ReleaseSRWLockExclusive(&state_lock);
@@ -250,11 +258,20 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             adopt_native_locked(after);
             fill_facts(after, shared_state, out);
             ReleaseSRWLockExclusive(&state_lock);
-            if (after.native_selected == before.native_selected) out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
+            if ((before.known & after.known & SC_SPECIAL_KNOWN_SELECTION) &&
+                after.native_selected == before.native_selected) out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
         }
-        out.flags |= SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE | SC_SPECIAL_FLAG_RESOURCE_PRESERVED;
-        out.flags |= SC_SPECIAL_FLAG_MUTATED;
-        if (out.native_exception || !read_ok) { out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return; }
+        out.flags |= SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE;
+        if (read_ok && (after.native_crucible != before.native_crucible ||
+            after.native_hammer != before.native_hammer || after.native_hammer_perks != before.native_hammer_perks))
+            out.flags |= SC_SPECIAL_FLAG_MUTATED;
+        if (out.native_exception || !read_ok ||
+            (desired_crucible && (!(after.known & SC_SPECIAL_KNOWN_CRUCIBLE) || !after.native_crucible)) ||
+            (desired_hammer && (!(after.known & SC_SPECIAL_KNOWN_HAMMER) || !after.native_hammer)) ||
+            (desired_hammer && desired_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED &&
+             (!(after.known & SC_SPECIAL_KNOWN_HAMMER_PERKS) || after.native_hammer_perks < 2))) {
+            out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return;
+        }
         out.outcome = SC_SPECIAL_OUTCOME_OK;
 
         AcquireSRWLockExclusive(&state_lock);
@@ -289,8 +306,8 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             ReleaseSRWLockExclusive(&state_lock);
         }
         if (!already) out.flags |= SC_SPECIAL_FLAG_MUTATED;
-        out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
-        if (out.native_exception || !read_ok) { out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return; }
+        if (out.native_exception || !read_ok || !(after.known & SC_SPECIAL_KNOWN_SELECTION) ||
+            after.native_selected != r.selected) { out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return; }
         out.outcome = already ? SC_SPECIAL_OUTCOME_NOOP : SC_SPECIAL_OUTCOME_OK;
 
         AcquireSRWLockExclusive(&state_lock);
@@ -343,7 +360,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             fill_facts(before, shared_state, out);
             ReleaseSRWLockExclusive(&state_lock);
             out.flags |= SC_SPECIAL_FLAG_AFTER_VALID | SC_SPECIAL_FLAG_REFILL_EXECUTED |
-                SC_SPECIAL_FLAG_REFILL_AUTHORIZED | SC_SPECIAL_FLAG_RESOURCE_PRESERVED;
+                SC_SPECIAL_FLAG_REFILL_AUTHORIZED;
             out.outcome = SC_SPECIAL_OUTCOME_NOOP;
             return;
         }
@@ -369,6 +386,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
 
         out.flags |= SC_SPECIAL_FLAG_REFILL_AUTHORIZED;
         out.native_exception = c.refill(c.context, player);
+        out.flags |= SC_SPECIAL_FLAG_REFILL_UNVERIFIED; // No capacity readback; partial effects are possible.
 
         SnapshotFacts after{};
         const bool read_ok = c.read(c.context, player, after);
@@ -390,7 +408,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
         ReleaseSRWLockExclusive(&state_lock);
 
         if (out.native_exception || !read_ok) { out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return; }
-        out.flags |= SC_SPECIAL_FLAG_REFILL_EXECUTED | SC_SPECIAL_FLAG_RESOURCE_PRESERVED;
+        out.flags |= SC_SPECIAL_FLAG_REFILL_EXECUTED;
         if (c.present && c.present(c.context, player, balance, flags, 1))
             out.flags |= SC_SPECIAL_FLAG_HUD_PRESENTED;
         out.outcome = SC_SPECIAL_OUTCOME_OK;

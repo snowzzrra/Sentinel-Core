@@ -1,9 +1,11 @@
 #pragma once
 #include "native_model.h"
+#include "sentinel_automap.h"
 #include "engine_observer.h"
 #include "sentinel_inspection.h"
 
 namespace sentinel::native {
+sc_automap_result automap_request(const sc_automap_request&);
 void prepare(const Snapshot& identity);
 void start(const engine::Binding& binding, const Snapshot& identity, HANDLE stop);
 uint64_t observation_stamp();
@@ -30,5 +32,6 @@ sc_deathlink_result deathlink_result(const sc_deathlink_request&, bool cancel, b
 // possible. True permanently requires retaining this Core instance to exit.
 bool stop();
 bool retained();
+bool gameplay_admitted();
 save::CampaignTransition checkpoint_transition();
 }

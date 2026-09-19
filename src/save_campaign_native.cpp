@@ -1,5 +1,6 @@
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #include "save_campaign_native.h"
+#include "fast_travel.h"
 #include "campaign_menu.h"
 #include "campaign_menu_native.h"
 #include "save_session.h"
@@ -412,7 +413,9 @@ bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransitio
     if (!read(descriptor,0x19c0,subtype) || (subtype!=1 && subtype!=2)) {
         session().campaign_run.refuse("native_checkpoint_subtype_unsupported",BStage::transition); return false;
     }
-    transition.campaign=session().campaign_run.map_begin(std::move(map),transition.generation_before,transition.event_id,subtype);
+    transition.campaign=session().campaign_run.map_begin(map,transition.generation_before,transition.event_id,subtype);
+    const auto& namespace_id=session().namespace_id();
+    fast_travel::entry_policy().bind(namespace_id.c_str(),map.c_str(),transition.generation_before,transition.campaign);
     if (transition.campaign) session().btrace.record(BStage::transition,BStatus::entered,"native_gameplay_transition_call",0,
         {{"event_id",transition.event_id},{"generation_before",transition.generation_before},{"flags",flags}},descriptor);
     return transition.campaign;

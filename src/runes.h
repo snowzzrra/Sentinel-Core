@@ -44,7 +44,7 @@ void install(const engine::Binding& binding, HANDLE stop);
 bool available();
 bool admitted(const char* id);
 void execute_native(const sc_runes_request& request, sc_runes_result& out);
-void bind_run_state_if_needed(uintptr_t player_ptr);
+void bind_run_state_if_needed(uintptr_t player, uint64_t generation = 0);
 void reset_session(const char* namespace_id);
 
 #ifdef SC_NATIVE_TESTING

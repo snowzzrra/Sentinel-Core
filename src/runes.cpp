@@ -9,6 +9,7 @@ SnapshotFacts shared_state{};
 uint64_t total_operations = 0;
 char bound_namespace[65]{};
 uintptr_t last_bound_player = 0;
+uint64_t last_bound_generation = 0, next_bind_at = 0;
 
 void reset_state_locked(const char* id) {
     shared_state = {};
@@ -18,6 +19,7 @@ void reset_state_locked(const char* id) {
     shared_state.selected_support = -1;
     total_operations = 0;
     last_bound_player = 0;
+    last_bound_generation = 0; next_bind_at = 0;
     if (id) std::memcpy(bound_namespace, id, sizeof(bound_namespace));
     else std::memset(bound_namespace, 0, sizeof(bound_namespace));
 }
@@ -32,18 +34,18 @@ void record_observed_locked(const SnapshotFacts& facts) {
     shared_state.owned_normal |= (facts.owned_normal & SC_RUNES_ALL_NORMAL);
     shared_state.owned_support |= (facts.owned_support & SC_RUNES_ALL_SUPPORT);
     for (int i = 0; i < 3; ++i) {
-        if (facts.selected_slots[i] >= 0 && facts.selected_slots[i] < 9) {
+        if (facts.selected_slots[i] >= -1 && facts.selected_slots[i] < 9) {
             shared_state.selected_slots[i] = facts.selected_slots[i];
         }
     }
-    if (facts.selected_support >= 0 && facts.selected_support < 3) {
+    if (facts.selected_support >= -1 && facts.selected_support < 3) {
         shared_state.selected_support = facts.selected_support;
     }
     shared_state.unlocked_slots = facts.unlocked_slots;
     shared_state.health_tier = facts.health_tier;
     shared_state.armor_tier = facts.armor_tier;
     shared_state.ammo_tier = facts.ammo_tier;
-    shared_state.derived_pairs = compute_derived_crystal_pairs(facts.health_tier, facts.armor_tier, facts.ammo_tier);
+    shared_state.derived_pairs = facts.derived_pairs;
 }
 } // namespace
 
@@ -117,20 +119,28 @@ void reset_session(const char* namespace_id) {
     ReleaseSRWLockExclusive(&state_lock);
 }
 
-void bind_run_state_if_needed(uintptr_t player) {
+void bind_run_state_if_needed(uintptr_t player, uint64_t generation) {
     if (!player) return;
+    const auto now = GetTickCount64();
     AcquireSRWLockExclusive(&state_lock);
-    if (player == last_bound_player) {
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
+    if ((player == last_bound_player && generation == last_bound_generation) || now < next_bind_at) {
+        ReleaseSRWLockExclusive(&state_lock); return;
     }
-    const auto needed = shared_state;
-    last_bound_player = player;
+    next_bind_at = now + 500;
+    const auto desired = shared_state;
     ReleaseSRWLockExclusive(&state_lock);
-
-    if (calls.bind_run_state) {
-        calls.bind_run_state(calls.context, player);
-    }
+    SnapshotFacts before{}, after{};
+    if (!calls.read(calls.context, player, before)) return;
+    if (calls.ensure_normal_runes(calls.context, player, desired.owned_normal & ~before.owned_normal) ||
+        calls.ensure_support_runes(calls.context, player, desired.owned_support & ~before.owned_support) ||
+        !calls.read(calls.context, player, after) ||
+        (after.owned_normal & desired.owned_normal) != desired.owned_normal ||
+        (after.owned_support & desired.owned_support) != desired.owned_support) return;
+    // Native save owns selections. Never replay stale cached choices or pair(0).
+    AcquireSRWLockExclusive(&state_lock);
+    last_bound_player = player;
+    last_bound_generation = generation;
+    ReleaseSRWLockExclusive(&state_lock);
 }
 
 void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
@@ -152,7 +162,6 @@ void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
     AcquireSRWLockExclusive(&state_lock);
     check_namespace(r.namespace_id);
     record_observed_locked(before);
-    last_bound_player = player;
 
     if (r.kind == SC_RUNES_OBSERVE) {
         out.owned_normal_after = before.owned_normal;
@@ -207,7 +216,7 @@ void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
                 out.flags |= SC_RUNES_FLAG_SELECTION_PRESERVED;
             }
         }
-        if (out.native_exception || !read_ok) {
+        if (out.native_exception || !read_ok || (after.owned_normal & needed) != needed) {
             out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED; return;
         }
         if (c.refresh && !c.refresh(c.context, player)) {
@@ -260,7 +269,7 @@ void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
                 out.flags |= SC_RUNES_FLAG_SELECTION_PRESERVED;
             }
         }
-        if (out.native_exception || !read_ok) {
+        if (out.native_exception || !read_ok || (after.owned_support & needed) != needed) {
             out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED; return;
         }
         if (c.refresh && !c.refresh(c.context, player)) {
@@ -298,7 +307,7 @@ void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
             out.unlocked_slots_after = after.unlocked_slots;
             out.derived_pairs_after = after.derived_pairs;
         }
-        if (out.native_exception || !read_ok) {
+        if (out.native_exception || !read_ok || after.selected_slots[slot] != rune) {
             out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED; return;
         }
         if (c.refresh && !c.refresh(c.context, player)) {
@@ -333,7 +342,7 @@ void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
             out.unlocked_slots_after = after.unlocked_slots;
             out.derived_pairs_after = after.derived_pairs;
         }
-        if (out.native_exception || !read_ok) {
+        if (out.native_exception || !read_ok || after.selected_support != rune) {
             out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED; return;
         }
         if (c.refresh && !c.refresh(c.context, player)) {

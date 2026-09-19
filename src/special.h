@@ -45,7 +45,8 @@ void install(const engine::Binding&, HANDLE stop);
 bool available();
 bool admitted(const char* namespace_id);
 void execute_native(const sc_special_request&, sc_special_result&);
-void bind_run_state_if_needed(uintptr_t player);
+void bind_run_state_if_needed(uintptr_t player, uint64_t generation = 0);
+void refresh_input_config();
 void poll_input(uintptr_t player, bool safe_gameplay);
 void reset_session(const char* namespace_id);
 

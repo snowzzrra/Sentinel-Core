@@ -27,6 +27,7 @@ uint32_t mod_for_upgrade(uint32_t upgrade_mask);
 uint32_t weapon_for_mod(uint32_t mod_mask);
 uint32_t mod_for_selection(uint8_t weapon_idx, uint8_t mod_idx);
 uint32_t shared_mods();
+void authorize_hook(uint32_t mods);
 
 struct Calls {
     void* context = nullptr;

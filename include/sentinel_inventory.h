@@ -13,29 +13,30 @@ enum {
     SC_INV_SET_CAPACITY = 2
 };
 
-/* Weapons bitmask */
+/* Domain-local bitmask; never cast to the differently ordered Arsenal mask. */
 enum {
-    SC_INV_WEAPON_SHOTGUN         = 1u << 0,  /* 7770000 Combat Shotgun */
-    SC_INV_WEAPON_SUPER_SHOTGUN   = 1u << 1,  /* 7770001 Super Shotgun */
-    SC_INV_WEAPON_HEAVY_CANNON    = 1u << 2,  /* 7770002 Heavy Cannon */
-    SC_INV_WEAPON_CHAINGUN        = 1u << 3,  /* 7770003 Chaingun */
-    SC_INV_WEAPON_PLASMA_RIFLE    = 1u << 4,  /* 7770004 Plasma Rifle */
-    SC_INV_WEAPON_BALLISTA        = 1u << 5,  /* 7770005 Ballista */
-    SC_INV_WEAPON_ROCKET_LAUNCHER = 1u << 6,  /* 7770006 Rocket Launcher */
-    SC_INV_WEAPON_BFG             = 1u << 7,  /* 7770008 BFG 9000 */
+    SC_INV_WEAPON_SHOTGUN         = 1u << 0,  /* 7770900 Combat Shotgun */
+    SC_INV_WEAPON_SUPER_SHOTGUN   = 1u << 1,  /* 7770003 Super Shotgun */
+    SC_INV_WEAPON_HEAVY_CANNON    = 1u << 2,  /* 7770000 Heavy Cannon */
+    SC_INV_WEAPON_CHAINGUN        = 1u << 3,  /* 7770005 Chaingun */
+    SC_INV_WEAPON_PLASMA_RIFLE    = 1u << 4,  /* 7770001 Plasma Rifle */
+    SC_INV_WEAPON_BALLISTA        = 1u << 5,  /* 7770004 Ballista */
+    SC_INV_WEAPON_ROCKET_LAUNCHER = 1u << 6,  /* 7770002 Rocket Launcher */
+    SC_INV_WEAPON_BFG             = 1u << 7,  /* 7770006 BFG 9000 */
     SC_INV_WEAPON_CHAINSAW        = 1u << 8,  /* 7770010 Chainsaw */
-    SC_INV_WEAPON_UNMAYKR         = 1u << 9   /* 7770011 Unmaykr */
+    SC_INV_WEAPON_UNMAYKR         = 1u << 9   /* 7770008 Unmaykr */
 };
 #define SC_INV_ALL_WEAPONS 0x3FFu
 
 /* Equipment bitmask */
 enum {
-    SC_INV_EQUIP_LAUNCHER         = 1u << 0,  /* 7770012 Equipment Launcher */
-    SC_INV_EQUIP_FLAME_BELCH      = 1u << 1,  /* 7770013 Flame Belch */
+    SC_INV_EQUIP_LAUNCHER         = 1u << 0,  /* 7770011 Frag Grenade */
+    SC_INV_EQUIP_FLAME_BELCH      = 1u << 1,  /* 7770012 Flame Belch */
     SC_INV_EQUIP_BLOOD_PUNCH      = 1u << 2,  /* 7770014 Blood Punch */
-    SC_INV_EQUIP_DASH             = 1u << 3   /* 7770015 Dash */
+    SC_INV_EQUIP_DASH             = 1u << 3,  /* 7770015 Dash */
+    SC_INV_EQUIP_ICE_BOMB         = 1u << 4   /* 7770013 Ice Bomb */
 };
-#define SC_INV_ALL_EQUIPMENT 0xFu
+#define SC_INV_ALL_EQUIPMENT 0x1Fu
 
 /* Special weapons bitmask */
 enum {
@@ -46,17 +47,19 @@ enum {
 
 /* Persistent upgrades bitmask (Support Runes and Slayer Gate Keys) */
 enum {
-    SC_INV_UPGRADE_RUNE_PUNCH     = 1u << 0,  /* 7770145 Desperate Punch */
-    SC_INV_UPGRADE_RUNE_TAKEBACK  = 1u << 1,  /* 7770146 Take Back */
-    SC_INV_UPGRADE_RUNE_BLAST     = 1u << 2,  /* 7770147 Break Blast */
-    SC_INV_UPGRADE_KEY_EXULTIA    = 1u << 3,  /* 7770051 Slayer Key Exultia */
-    SC_INV_UPGRADE_KEY_CULTIST    = 1u << 4,  /* 7770052 Slayer Key Cultist Base */
-    SC_INV_UPGRADE_KEY_SGN        = 1u << 5,  /* 7770053 Slayer Key Super Gore Nest */
-    SC_INV_UPGRADE_KEY_ARC        = 1u << 6,  /* 7770054 Slayer Key ARC Complex */
-    SC_INV_UPGRADE_KEY_PHOBOS     = 1u << 7,  /* 7770055 Slayer Key Phobos / Mars Core */
-    SC_INV_UPGRADE_KEY_TARAS      = 1u << 8   /* 7770056 Slayer Key Taras Nabad */
+    SC_INV_UPGRADE_RUNE_PUNCH     = 1u << 0,  /* 7770146 Desperate Punch */
+    SC_INV_UPGRADE_RUNE_TAKEBACK  = 1u << 1,  /* 7770147 Take Back */
+    SC_INV_UPGRADE_RUNE_BLAST     = 1u << 2,  /* 7770145 Break Blast */
+    SC_INV_UPGRADE_KEY_EXULTIA    = 1u << 3,  /* 7770150 Slayer Key Exultia */
+    SC_INV_UPGRADE_KEY_CULTIST    = 1u << 4,  /* 7770151 Slayer Key Cultist Base */
+    SC_INV_UPGRADE_KEY_SGN        = 1u << 5,  /* 7770152 Slayer Key Super Gore Nest */
+    SC_INV_UPGRADE_KEY_ARC        = 1u << 6,  /* 7770153 Slayer Key ARC Complex */
+    SC_INV_UPGRADE_KEY_PHOBOS     = 1u << 7,  /* 7770154 Slayer Key Phobos / Mars Core */
+    SC_INV_UPGRADE_KEY_TARAS      = 1u << 8,  /* 7770155 Slayer Key Taras Nabad */
+    SC_INV_UPGRADE_KEY_ATLANTICA  = 1u << 9,  /* 7770148 Slayer Key UAC Atlantica */
+    SC_INV_UPGRADE_KEY_HOLT       = 1u << 10  /* 7770149 Slayer Key The Holt */
 };
-#define SC_INV_ALL_UPGRADES 0x1FFu
+#define SC_INV_ALL_UPGRADES 0x7FFu
 
 typedef struct sc_inventory_request {
     sc_diagnostic_request execution;
