@@ -13,6 +13,7 @@
 #include "sentinel_arsenal.h"
 #include "sentinel_runes.h"
 #include "sentinel_special.h"
+#include "sentinel_deathlink.h"
 #include <array>
 #include <cstddef>
 #include <string>
@@ -62,6 +63,9 @@ constexpr uint64_t runes_capability = 32768;
 constexpr uint16_t special_submit_operation = 37, special_result_operation = 38,
     special_cancel_operation = 39, special_release_operation = 40;
 constexpr uint64_t special_capability = 65536;
+constexpr uint16_t deathlink_submit_operation = 41, deathlink_result_operation = 42,
+    deathlink_cancel_operation = 43, deathlink_release_operation = 44;
+constexpr uint64_t deathlink_capability = 131072;
 constexpr size_t max_request = 512, max_message = 1024;
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
 enum class WireResult : uint32_t { ok, incompatible_protocol, capability_unavailable,
@@ -105,6 +109,7 @@ struct Inspection {
     sc_arsenal_result arsenal{};
     sc_runes_result runes{};
     sc_special_result special{};
+    sc_deathlink_result deathlink{};
 };
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required = inspect_capability);
 Inspection query_engine(uint32_t pid, uint32_t timeout_ms);
@@ -120,6 +125,7 @@ Inspection query_inventory(uint32_t pid, uint32_t timeout_ms, uint16_t operation
 Inspection query_arsenal(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_arsenal_request&);
 Inspection query_runes(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_runes_request&);
 Inspection query_special(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_special_request&);
+Inspection query_deathlink(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_deathlink_request&);
 const char* backup_state_name(uint32_t);
 const char* save_write_state_name(uint32_t state);
 const char* save_session_state_name(uint32_t state);

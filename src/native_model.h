@@ -4,6 +4,7 @@
 #include "arsenal.h"
 #include "runes.h"
 #include "special.h"
+#include "deathlink.h"
 #include "sentinel_native.h"
 #include "sentinel_save_request.h"
 #include "save_backup.h"
@@ -43,6 +44,7 @@ public:
         bool is_arsenal = false;
         bool is_runes = false;
         bool is_special = false;
+        bool is_deathlink = false;
         sc_weapon_points_request weapon_points_request{};
         sc_weapon_points_result weapon_points_result{};
         sc_inventory_request inventory_request{};
@@ -53,6 +55,8 @@ public:
         sc_runes_result runes_result{};
         sc_special_request special_request{};
         sc_special_result special_result{};
+        sc_deathlink_request deathlink_request{};
+        sc_deathlink_result deathlink_result{};
         sc_save_backup_request backup_request{};
         std::shared_ptr<save::BackupJob> backup;
         save::SubmissionResult submission;
@@ -68,7 +72,8 @@ public:
                                 const sc_inventory_request* inventory = nullptr,
                                 const sc_arsenal_request* arsenal = nullptr,
                                 const sc_runes_request* runes = nullptr,
-                                const sc_special_request* special = nullptr);
+                                const sc_special_request* special = nullptr,
+                                const sc_deathlink_request* deathlink = nullptr);
     sc_diagnostic_result retrieve(const sc_diagnostic_request& request, bool cancel, uint64_t now,
                                   sc_diagnostic_detail* detail = nullptr,
                                   const sc_save_backup_request* backup = nullptr,
@@ -76,12 +81,14 @@ public:
                                   const sc_inventory_request* inventory = nullptr,
                                   const sc_arsenal_request* arsenal = nullptr,
                                   const sc_runes_request* runes = nullptr,
-                                  const sc_special_request* special = nullptr);
+                                  const sc_special_request* special = nullptr,
+                                  const sc_deathlink_request* deathlink = nullptr);
     sc_weapon_points_result points_result(const sc_weapon_points_request&, bool cancel, uint64_t now, bool release = false);
     sc_inventory_result inventory_result(const sc_inventory_request&, bool cancel, uint64_t now, bool release = false);
     sc_arsenal_result arsenal_result(const sc_arsenal_request&, bool cancel, uint64_t now, bool release = false);
     sc_runes_result runes_result(const sc_runes_request&, bool cancel, uint64_t now, bool release = false);
     sc_special_result special_result(const sc_special_request&, bool cancel, uint64_t now, bool release = false);
+    sc_deathlink_result deathlink_result(const sc_deathlink_request&, bool cancel, uint64_t now, bool release = false);
     sc_save_backup_snapshot backup_result(const sc_save_backup_request&, bool cancel, uint64_t now);
     static void await_backup(Slot&, sc_diagnostic_result, sc_diagnostic_detail, save::SubmissionResult);
     void note_claim_contention() { claim_lock_misses_.fetch_add(1, std::memory_order_relaxed); }

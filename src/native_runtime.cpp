@@ -3,6 +3,7 @@
 #include "arsenal.h"
 #include "runes.h"
 #include "special.h"
+#include "deathlink.h"
 #include "native_target.h"
 #include "save_native_hooks.h"
 #include "save_campaign_native.h"
@@ -176,6 +177,7 @@ static void bind_player_safely(uintptr_t fn, uintptr_t active_map) {
             arsenal::bind_run_state_if_needed(p);
             runes::bind_run_state_if_needed(p);
             special::bind_run_state_if_needed(p);
+            deathlink::bind_run_state_if_needed(p);
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -313,6 +315,8 @@ void post_frame() {
             runes::execute_native(slot->runes_request, slot->runes_result);
         if (slot->is_special)
             special::execute_native(slot->special_request, slot->special_result);
+        if (slot->is_deathlink)
+            deathlink::execute_native(slot->deathlink_request, slot->deathlink_result);
     } else {
         result.state = why == SC_NATIVE_CANCELLED ? SC_DIAGNOSTIC_CANCELLED :
             (why == SC_NATIVE_DEADLINE ? SC_DIAGNOSTIC_EXPIRED : SC_DIAGNOSTIC_REJECTED);
@@ -491,6 +495,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         if (!why && !stopping.load(std::memory_order_acquire)) arsenal::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) runes::install(binding, stop_event);
     if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire)) deathlink::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire) && !campaign_menu::install(binding,stop_event)) {
             save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
             why=SC_NATIVE_EXCEPTION;
@@ -654,6 +659,23 @@ sc_special_result submit_special(const sc_special_request& request) {
 sc_special_result special_result(const sc_special_request& request, bool cancel, bool release) {
     AcquireSRWLockExclusive(&lock);
     auto out = diagnostics.special_result(request, cancel, GetTickCount64(), release);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_deathlink_result submit_deathlink(const sc_deathlink_request& request) {
+    AcquireSRWLockExclusive(&lock);
+    const auto now = GetTickCount64(); auto why = prerequisite(now);
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
+    if (!why && !deathlink::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
+    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &request);
+    sc_deathlink_result out = deathlink::initial(request);
+    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
+    else out = diagnostics.deathlink_result(request, false, now);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_deathlink_result deathlink_result(const sc_deathlink_request& request, bool cancel, bool release) {
+    AcquireSRWLockExclusive(&lock);
+    auto out = diagnostics.deathlink_result(request, cancel, GetTickCount64(), release);
     ReleaseSRWLockExclusive(&lock); return out;
 }
 sc_save_backup_snapshot submit_backup(const sc_save_backup_request& request) {

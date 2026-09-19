@@ -77,7 +77,14 @@ DWORD serve(void*) {
             sc_arsenal_request arsenal{};
             sc_runes_request runes{};
             sc_special_request special{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special);
+            sc_deathlink_request deathlink{};
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink);
+            sc_deathlink_result deathlink_result{};
+            if (result == WireResult::ok && operation >= deathlink_submit_operation && operation <= deathlink_release_operation) {
+                deathlink_result = operation == deathlink_submit_operation ? native::submit_deathlink(deathlink) :
+                    native::deathlink_result(deathlink, operation == deathlink_cancel_operation,
+                        operation == deathlink_release_operation);
+            }
             sc_special_result special_result{};
             if (result == WireResult::ok && operation >= special_submit_operation && operation <= special_release_operation) {
                 special_result = operation == special_submit_operation ? native::submit_special(special) :
@@ -124,6 +131,8 @@ DWORD serve(void*) {
                         operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
             const DWORD size = static_cast<DWORD>(
+                operation >= deathlink_submit_operation ?
+                    encode_deathlink_response(data, result, operation, current_snapshot(), deathlink_result) :
                 operation >= special_submit_operation ?
                     encode_special_response(data, result, operation, current_snapshot(), special_result) :
                 operation >= runes_submit_operation ?

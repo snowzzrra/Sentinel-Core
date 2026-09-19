@@ -24,6 +24,8 @@ sc_runes_result submit_runes(const sc_runes_request&);
 sc_runes_result runes_result(const sc_runes_request&, bool cancel, bool release = false);
 sc_special_result submit_special(const sc_special_request&);
 sc_special_result special_result(const sc_special_request&, bool cancel, bool release = false);
+sc_deathlink_result submit_deathlink(const sc_deathlink_request&);
+sc_deathlink_result deathlink_result(const sc_deathlink_request&, bool cancel, bool release = false);
 // False means no native hook was ever enabled/pinned and normal unload remains
 // possible. True permanently requires retaining this Core instance to exit.
 bool stop();

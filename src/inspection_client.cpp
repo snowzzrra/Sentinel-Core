@@ -23,7 +23,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
                                    const sc_inventory_request* inventory = nullptr,
                                    const sc_arsenal_request* arsenal = nullptr,
                                    const sc_runes_request* runes = nullptr,
-                                   const sc_special_request* special = nullptr) {
+                                   const sc_special_request* special = nullptr,
+                                   const sc_deathlink_request* deathlink = nullptr) {
     Inspection result;
     Handle process;
     auto fail = [&](DWORD error) {
@@ -79,7 +80,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(special ? encode_special_request(data, operation, *special) :
+    const DWORD size = static_cast<DWORD>(deathlink ? encode_deathlink_request(data, operation, *deathlink) :
+        special ? encode_special_request(data, operation, *special) :
         runes ? encode_runes_request(data, operation, *runes) :
         arsenal ? encode_arsenal_request(data, operation, *arsenal) :
         inventory ? encode_inventory_request(data, operation, *inventory) :
@@ -101,7 +103,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     WireResult code{};
     result.failure_stage = "decode_response";
     // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
-    bool decoded = special ? decode_special_response(data, count, code, operation, result.snapshot, result.special) :
+    bool decoded = deathlink ? decode_deathlink_response(data, count, code, operation, result.snapshot, result.deathlink) :
+        special ? decode_special_response(data, count, code, operation, result.snapshot, result.special) :
         runes ? decode_runes_response(data, count, code, operation, result.snapshot, result.runes) :
         arsenal ? decode_arsenal_response(data, count, code, operation, result.snapshot, result.arsenal) :
         inventory ? decode_inventory_response(data, count, code, operation, result.snapshot, result.inventory) :
@@ -132,7 +135,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         WaitForSingleObject(process.value, 0) != WAIT_TIMEOUT) {
         result.result = ProbeResult::process_mismatch; return result;
     }
-    const auto& execution = special ? result.special.execution : (runes ? result.runes.execution : (arsenal ? result.arsenal.execution : (inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic)))));
+    const auto& execution = deathlink ? result.deathlink.execution : (special ? result.special.execution : (runes ? result.runes.execution : (arsenal ? result.arsenal.execution : (inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic))))));
     if (request && !campaign && (execution.request_id != request->request_id ||
         std::memcmp(execution.nonce, request->nonce, sizeof(request->nonce)))) {
         result.result = ProbeResult::invalid_response; return result;
@@ -170,6 +173,11 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     if (special && (execution.scope.lifecycle_generation != special->execution.expected.lifecycle_generation ||
         result.special.kind != special->kind ||
         std::memcmp(result.special.namespace_id, special->namespace_id, sizeof(special->namespace_id)))) {
+        result.result = ProbeResult::invalid_response; return result;
+    }
+    if (deathlink && (execution.scope.lifecycle_generation != deathlink->execution.expected.lifecycle_generation ||
+        result.deathlink.kind != deathlink->kind ||
+        std::memcmp(result.deathlink.namespace_id, deathlink->namespace_id, sizeof(deathlink->namespace_id)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
     result.result = ProbeResult::ok;
@@ -235,6 +243,12 @@ Inspection query_special(uint32_t pid, uint32_t timeout_ms, uint16_t operation, 
         Inspection out; out.result = ProbeResult::usage; return out;
     }
     return query_operation(pid, timeout_ms, special_capability, operation, &r.execution, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &r);
+}
+Inspection query_deathlink(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_deathlink_request& r) {
+    if (operation < deathlink_submit_operation || operation > deathlink_release_operation) {
+        Inspection out; out.result = ProbeResult::usage; return out;
+    }
+    return query_operation(pid, timeout_ms, deathlink_capability, operation, &r.execution, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &r);
 }
 Inspection query_inventory(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_inventory_request& r) {
     if (operation < inventory_submit_operation || operation > inventory_release_operation) {

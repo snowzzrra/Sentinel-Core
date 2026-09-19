@@ -80,6 +80,9 @@ bool same_runes(const Diagnostics::Slot& s, const sc_runes_request* r) {
 bool same_special(const Diagnostics::Slot& s, const sc_special_request* r) {
     return s.is_special == (r != nullptr) && (!r || special::same(s.special_request, *r));
 }
+bool same_deathlink(const Diagnostics::Slot& s, const sc_deathlink_request* r) {
+    return s.is_deathlink == (r != nullptr) && (!r || deathlink::same(s.deathlink_request, *r));
+}
 }
 void Diagnostics::queue_detail(Slot& s) {
     s.detail.revision = SC_DIAGNOSTIC_DETAIL_REVISION;
@@ -115,17 +118,18 @@ void Diagnostics::collect(uint64_t now) {
 sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_t reject, uint64_t now,
         sc_diagnostic_detail* detail, const sc_save_backup_request* backup, const sc_weapon_points_request* points,
         const sc_inventory_request* inventory, const sc_arsenal_request* arsenal,
-        const sc_runes_request* runes, const sc_special_request* special) {
+        const sc_runes_request* runes, const sc_special_request* special,
+        const sc_deathlink_request* deathlink) {
     if (detail) { *detail = {}; detail->revision = SC_DIAGNOSTIC_DETAIL_REVISION; detail->stage = SC_STAGE_ADMISSION; }
     collect(now);
     auto out = initial(r);
     for (auto& s : slots_) if (s.state.load(std::memory_order_acquire) != SC_DIAGNOSTIC_UNKNOWN && key(s.request, r)) {
         if (!same_scope(s.request.expected, r.expected) || s.request.deadline_ms != r.deadline_ms ||
             !same_backup(s, backup) || !same_points(s, points) || !same_inventory(s, inventory) || !same_arsenal(s, arsenal) || !same_runes(s, runes) ||
-            !same_special(s, special)) {
+            !same_special(s, special) || !same_deathlink(s, deathlink)) {
             out.state = SC_DIAGNOSTIC_REJECTED; out.reason = SC_NATIVE_DUPLICATE_MISMATCH; return out;
         }
-        return retrieve(r, false, now, detail, backup, points, inventory, arsenal, runes, special);
+        return retrieve(r, false, now, detail, backup, points, inventory, arsenal, runes, special, deathlink);
     }
     if (!reject && backup && !backup_options(*backup)) reject = SC_NATIVE_SCOPE_MISMATCH;
     if (!reject && points && (backup || !weapon_points::valid(*points))) reject = SC_NATIVE_SCOPE_MISMATCH;
@@ -133,6 +137,7 @@ sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_
     if (!reject && arsenal && (backup || points || inventory || !arsenal::valid(*arsenal))) reject = SC_NATIVE_SCOPE_MISMATCH;
     if (!reject && runes && (backup || points || inventory || arsenal || !runes::valid(*runes))) reject = SC_NATIVE_SCOPE_MISMATCH;
     if (!reject && special && (backup || points || inventory || arsenal || runes || !special::valid(*special))) reject = SC_NATIVE_SCOPE_MISMATCH;
+    if (!reject && deathlink && (backup || points || inventory || arsenal || runes || special || !deathlink::valid(*deathlink))) reject = SC_NATIVE_SCOPE_MISMATCH;
     if (!reject && (r.deadline_ms == 0 || r.deadline_ms > SC_DIAGNOSTIC_MAX_DEADLINE_MS)) reject = SC_NATIVE_DEADLINE;
     if (reject) { out.state = SC_DIAGNOSTIC_REJECTED; out.reason = reject; return out; }
     for (auto& s : slots_) if (s.state.load(std::memory_order_acquire) == SC_DIAGNOSTIC_UNKNOWN) {
@@ -158,6 +163,9 @@ sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_
         s.is_special = special != nullptr;
         s.special_request = special ? *special : sc_special_request{};
         s.special_result = special ? special::initial(*special) : sc_special_result{};
+        s.is_deathlink = deathlink != nullptr;
+        s.deathlink_request = deathlink ? *deathlink : sc_deathlink_request{};
+        s.deathlink_result = deathlink ? deathlink::initial(*deathlink) : sc_deathlink_result{};
         s.backup = std::move(job); s.submission = {};
         s.awaiting_backup.store(false, std::memory_order_relaxed);
         s.request = r; s.cancel.store(false, std::memory_order_relaxed);
@@ -172,15 +180,16 @@ sc_diagnostic_result Diagnostics::submit(const sc_diagnostic_request& r, uint32_
 sc_diagnostic_result Diagnostics::retrieve(const sc_diagnostic_request& r, bool cancel, uint64_t now,
         sc_diagnostic_detail* detail, const sc_save_backup_request* backup, const sc_weapon_points_request* points,
         const sc_inventory_request* inventory, const sc_arsenal_request* arsenal,
-        const sc_runes_request* runes, const sc_special_request* special) {
+        const sc_runes_request* runes, const sc_special_request* special,
+        const sc_deathlink_request* deathlink) {
     if (detail) { *detail = {}; detail->revision = SC_DIAGNOSTIC_DETAIL_REVISION; }
     collect(now);
     for (auto& s : slots_) {
         auto state = s.state.load(std::memory_order_acquire);
         if (state == SC_DIAGNOSTIC_UNKNOWN || !key(s.request, r) || !same_scope(s.request.expected, r.expected) ||
             !same_backup(s, backup) || !same_points(s, points) || !same_inventory(s, inventory) || !same_arsenal(s, arsenal) || !same_runes(s, runes) ||
-            !same_special(s, special) ||
-            ((backup || points || inventory || arsenal || runes || special) && s.request.deadline_ms != r.deadline_ms)) continue;
+            !same_special(s, special) || !same_deathlink(s, deathlink) ||
+            ((backup || points || inventory || arsenal || runes || special || deathlink) && s.request.deadline_ms != r.deadline_ms)) continue;
         if (cancel && (state == SC_DIAGNOSTIC_QUEUED || state == SC_DIAGNOSTIC_CLAIMED)) {
             s.cancel.store(true, std::memory_order_release);
             if (s.backup) s.backup->cancel();
@@ -270,6 +279,21 @@ sc_special_result Diagnostics::special_result(const sc_special_request& r, bool 
             if (s.state.load(std::memory_order_acquire) >= SC_DIAGNOSTIC_EXECUTED &&
                 same_special(s, &r) && key(s.request, r.execution) && same_scope(s.request.expected, r.execution.expected)) {
                 out = s.special_result;
+                if (release) s.state.store(SC_DIAGNOSTIC_UNKNOWN, std::memory_order_release);
+                break;
+            }
+        }
+    }
+    out.execution = execution; return out;
+}
+sc_deathlink_result Diagnostics::deathlink_result(const sc_deathlink_request& r, bool cancel, uint64_t now, bool release) {
+    sc_deathlink_result out = deathlink::initial(r);
+    const auto execution = retrieve(r.execution, cancel, now, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &r);
+    if (execution.state >= SC_DIAGNOSTIC_EXECUTED) {
+        for (auto& s : slots_) {
+            if (s.state.load(std::memory_order_acquire) >= SC_DIAGNOSTIC_EXECUTED &&
+                same_deathlink(s, &r) && key(s.request, r.execution) && same_scope(s.request.expected, r.execution.expected)) {
+                out = s.deathlink_result;
                 if (release) s.state.store(SC_DIAGNOSTIC_UNKNOWN, std::memory_order_release);
                 break;
             }
