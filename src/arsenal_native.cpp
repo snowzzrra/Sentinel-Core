@@ -132,6 +132,7 @@ bool admitted(const char* id) {
 }
 
 void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
+    if (!valid(request)) { out.outcome = SC_ARSENAL_OUTCOME_REJECTED; return; }
     if (!admitted(request.namespace_id)) { out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE; return; }
     out.flags |= SC_ARSENAL_FLAG_SHARED_STATE_BOUND;
 #ifdef SC_NATIVE_TESTING

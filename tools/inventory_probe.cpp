@@ -27,7 +27,7 @@ int inventory_command(int argc, wchar_t** argv) {
     const auto& inv = r.inventory; const auto& e = inv.execution;
     std::printf("{\"result\":\"ok\",\"core_version\":\"%s\",\"build_id\":\"%s\","
         "\"namespace\":\"%s\",\"state\":%u,\"reason\":%u,\"request_id\":\"%llu\","
-        "\"kind\":%u,\"outcome\":%u,\"flags\":%u,\"native_exception\":%u,"
+        "\"inventory_abi\":%u,\"kind\":%u,\"outcome\":%u,\"flags\":%u,\"native_exception\":%u,"
         "\"weapons_before\":%u,\"weapons_after\":%u,"
         "\"equipment_before\":%u,\"equipment_after\":%u,"
         "\"special_before\":%u,\"special_after\":%u,"
@@ -37,7 +37,7 @@ int inventory_command(int argc, wchar_t** argv) {
         "\"ammo_tier_before\":%u,\"ammo_tier_after\":%u,"
         "\"operations_applied\":\"%llu\"}\n",
         r.snapshot.core.version, r.snapshot.core.build_id, inv.namespace_id, e.state, e.reason, e.request_id,
-        inv.kind, inv.outcome, inv.flags, inv.native_exception,
+        inv.abi_version, inv.kind, inv.outcome, inv.flags, inv.native_exception,
         inv.weapons_before, inv.weapons_after,
         inv.equipment_before, inv.equipment_after,
         inv.special_before, inv.special_after,

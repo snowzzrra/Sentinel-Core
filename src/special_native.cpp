@@ -1,5 +1,7 @@
 #include "special.h"
 #include "native_target.h"
+#include "native_runtime.h"
+#include "local_controls.h"
 #include "save_session.h"
 #include "MinHook.h"
 #include <atomic>
@@ -96,10 +98,6 @@ uintptr_t give_item(uintptr_t inventory, uintptr_t p, uintptr_t decl, int count,
         inventory, p, decl, count, count_is_amount, 0, 1, 0);
 }
 
-bool valid_code_pointer(uintptr_t address) {
-    return address >= image_base && address - image_base < image_size;
-}
-
 uintptr_t current_weapon_decl(uintptr_t p) {
     if (!p) return 0;
     const auto weapon = reinterpret_cast<CurrentWeapon>(image_base + rva_current_weapon)(p);
@@ -123,9 +121,8 @@ bool equip_item(uintptr_t p, uintptr_t item) {
     const auto vtable = *reinterpret_cast<uintptr_t**>(p);
     if (!vtable) return false;
     const auto equip = vtable[0x1588 / 8];
-    if (!valid_code_pointer(equip)) return false;
-    reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(equip)(p, item);
-    return true;
+    if (equip != image_base + 0x1432100) return false;
+    return reinterpret_cast<char(*)(uintptr_t, uintptr_t)>(equip)(p, item) != 0;
 }
 
 char hud_element_setup_detour(uintptr_t element) {
@@ -259,8 +256,7 @@ uint32_t select(void*, uintptr_t p, uint32_t selected) {
         const auto path = selected == SC_SPECIAL_WEAPON_CRUCIBLE ? CRUCIBLE_PATH : HAMMER_PATH;
         const auto decl = find_decl(path);
         if (!decl) return 4;
-        auto item = find_item(inv, decl);
-        if (!item) item = give_item(inv, p, decl, 1, 0);
+        const auto item = find_item(inv, decl);
         if (!item) return 5;
         if (!equip_item(p, item)) return 6;
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
@@ -320,14 +316,14 @@ uint32_t refill(void*, uintptr_t p) {
     return error;
 }
 
-std::atomic<int> configured_key{VK_F9};
+std::atomic<unsigned> configured_keys{VK_F9};
 
 bool present(void*, uintptr_t, uint32_t balance, uint32_t flags, uint32_t used) {
     const auto element = hud_element.load(std::memory_order_acquire);
     const auto expected_vtable = hud_element_vtable.load(std::memory_order_acquire);
     if (!element || !expected_vtable) return false;
     char reward[96]{}, key[32]{};
-    const int vk = configured_key.load(std::memory_order_relaxed);
+    const int vk = (configured_keys.load(std::memory_order_relaxed) & 0xff);
     if (!vk) std::snprintf(key, sizeof(key), "UNBOUND");
     else if (vk >= VK_F1 && vk <= VK_F12) std::snprintf(key, sizeof(key), "F%d", vk - VK_F1 + 1);
     else if (!GetKeyNameTextA(static_cast<LONG>(MapVirtualKeyA(vk, MAPVK_VK_TO_VSC) << 16), key, sizeof(key)))
@@ -368,103 +364,61 @@ void bind_run_state(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hamm
 Calls calls{nullptr, player, read, ensure, select, refill, present, bind_run_state};
 
 namespace {
-// Input seam. The configured local key state is written by the launcher at the
-// existing ammo-refill hotkey path; an absent file means the F9 default.
-
 std::atomic<uint64_t> key_state_checked{0};
-bool key_was_down = false, key_latched = false;
-uint64_t key_release_at = 0;
-constexpr uint64_t key_release_stabilize_ms = 120;
+struct KeyLatch {
+    bool down = false, latched = true;
+    uint64_t released_at = 0;
+    int key = -1;
 
-int token_to_vk(const char* token) {
-    if (!token || !token[0]) return 0;
-    char upper[16]{};
-    size_t n = 0;
-    for (; token[n] && n < sizeof(upper) - 1; ++n) {
-        const auto c = token[n];
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') break;
-        upper[n] = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
-    }
-    upper[n] = 0;
-    if (n >= 2 && n <= 3 && upper[0] == 'F') {
-        int value = 0; bool digits = true;
-        for (size_t i = 1; i < n; ++i) {
-            if (upper[i] < '0' || upper[i] > '9') { digits = false; break; }
-            value = value * 10 + (upper[i] - '0');
+    bool press(int vk, bool pressed, uint64_t now, bool enabled) {
+        if (key != vk || !enabled) {
+            key = vk; latched = true; released_at = 0; down = pressed;
+            return false;
         }
-        if (digits && value >= 1 && value <= 12) return VK_F1 + value - 1;
-    }
-    if (n == 1) {
-        if (upper[0] >= 'A' && upper[0] <= 'Z') return upper[0];
-        if (upper[0] >= '0' && upper[0] <= '9') return upper[0];
-    }
-    if (std::strcmp(upper, "SPACE") == 0) return VK_SPACE;
-    if (std::strcmp(upper, "TAB") == 0) return VK_TAB;
-    if (std::strcmp(upper, "INSERT") == 0) return VK_INSERT;
-    if (std::strcmp(upper, "DELETE") == 0) return VK_DELETE;
-    if (std::strcmp(upper, "HOME") == 0) return VK_HOME;
-    if (std::strcmp(upper, "END") == 0) return VK_END;
-    if (std::strcmp(upper, "PAGEUP") == 0 || std::strcmp(upper, "PGUP") == 0) return VK_PRIOR;
-    if (std::strcmp(upper, "PAGEDOWN") == 0 || std::strcmp(upper, "PGDN") == 0) return VK_NEXT;
-    return 0;
-}
-
-void refresh_configured_key(uint64_t now) {
-    if (now - key_state_checked.load(std::memory_order_relaxed) < 250) return;
-    key_state_checked.store(now, std::memory_order_relaxed);
-    char token[24]{};
-    FILE* file = nullptr;
-    if (fopen_s(&file, "base\\ap_queue\\ammo_refill_hotkey.state", "r") == 0 && file) {
-        char first[24]{}, second[24]{};
-        const auto read = fscanf_s(file, "%23s %23s", first, static_cast<unsigned>(_countof(first)),
-                                   second, static_cast<unsigned>(_countof(second)));
-        std::fclose(file);
-        if (read >= 1) {
-            const char* value = first;
-            if (std::strcmp(first, "AP_AMMO_REFILL_HOTKEY_V1") == 0) value = read >= 2 ? second : "";
-            std::snprintf(token, sizeof(token), "%s", value);
+        if (!vk) { down = false; return false; }
+        if (latched) {
+            down = pressed;
+            if (pressed) released_at = 0;
+            else if (!released_at) released_at = now;
+            else if (now - released_at >= 120) { latched = false; released_at = 0; }
+            return false;
         }
+        const bool rising = pressed && !down;
+        down = pressed;
+        if (rising) { latched = true; released_at = 0; }
+        return rising;
     }
-    if (!token[0]) { configured_key.store(VK_F9, std::memory_order_relaxed); return; }
-    const auto vk = token_to_vk(token);
-    configured_key.store(vk, std::memory_order_relaxed);
-}
+};
+KeyLatch input_latches[2];
 } // namespace
 
-void refresh_input_config() { refresh_configured_key(GetTickCount64()); }
+void refresh_input_config() {
+    const auto now = GetTickCount64();
+    if (now - key_state_checked.load(std::memory_order_relaxed) < 250) return;
+    key_state_checked.store(now, std::memory_order_relaxed);
+    const auto keys = controls::read(L"base\\ap_queue");
+    // A shared key cannot dispatch two actions; conflicting files disable both.
+    const unsigned packed = keys.conflict() ? 0u :
+        static_cast<unsigned>(keys.keys[0] | (keys.keys[1] << 8));
+    configured_keys.store(packed, std::memory_order_relaxed);
+}
 
 void poll_input(uintptr_t p, bool safe_gameplay) {
     if (!ready.load(std::memory_order_acquire)) return;
     const auto now = GetTickCount64();
-    const auto vk = configured_key.load(std::memory_order_relaxed);
+    const auto keys = configured_keys.load(std::memory_order_relaxed);
     DWORD foreground_pid = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &foreground_pid);
-    if (foreground_pid != GetCurrentProcessId()) {
-        key_latched = true; key_was_down = true; key_release_at = 0;
-        return;
+    const bool enabled = safe_gameplay && p && foreground_pid == GetCurrentProcessId();
+    for (unsigned i = 0; i < 2; ++i) {
+        const auto vk = static_cast<int>((keys >> (i * 8)) & 0xff);
+        const bool down = vk && (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (!input_latches[i].press(vk, down, now, enabled)) continue;
+        // Native reconstruction callbacks may invalidate the outer tick scope.
+        if (!native::gameplay_admitted()) continue;
+        if (!i) create_refill_request(now);
+        else toggle_local(save::session().namespace_id().c_str(), calls);
     }
-    if (!vk) {
-        key_was_down = false; key_latched = false; key_release_at = 0;
-        return;
-    }
-    const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
-    if (key_latched) {
-        key_was_down = down;
-        if (down) { key_release_at = 0; return; }
-        if (!key_release_at) { key_release_at = now; return; }
-        if (now - key_release_at < key_release_stabilize_ms) return;
-        key_latched = false; key_release_at = 0; key_was_down = false;
-        return;
-    }
-    const bool rising = down && !key_was_down;
-    key_was_down = down;
-    if (!rising) return;
-    key_latched = true;
-    key_release_at = 0;
-    // Unsafe gameplay or an absent player creates no request at all: there is
-    // no delayed or hidden refill to execute later.
-    if (!safe_gameplay || !p) return;
-    create_refill_request(now);
 }
 
 bool available() { return ready.load(std::memory_order_acquire); }
@@ -499,6 +453,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
     engine::LocalMemory memory;
     struct Site { uint32_t offset; const char* bytes; };
     const Site sites[] = {
+        {0x1432100, "48895c241855565741544155415641574881ecb0000000488b05bac8d7024833"},
         {rva_find_decl, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448"},
         {rva_find_item, "48895c240848896c2410488974241848897c242041564883ec2033ff488bea4c"},
         {rva_give_item, "40555356574154415541564157488d6c24f94881ecb8000000488b05e8ccb102"},

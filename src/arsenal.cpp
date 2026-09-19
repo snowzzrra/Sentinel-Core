@@ -18,7 +18,6 @@ struct RunState {
 
 RunState shared_state{};
 SRWLOCK state_lock = SRWLOCK_INIT;
-uintptr_t last_bound_player = 0;
 
 } // namespace
 
@@ -120,6 +119,8 @@ uint16_t compute_effective_masteries(uint32_t weapons, uint32_t mods,
 }
 
 bool valid(const sc_arsenal_request& request) {
+    if (request.kind == SC_ARSENAL_PURCHASE_UPGRADE || request.kind == SC_ARSENAL_UPDATE_CHALLENGE)
+        return false;
     if (request.kind > SC_ARSENAL_UPDATE_CHALLENGE) return false;
     if (request.mods & ~SC_ARSENAL_ALL_MODS) return false;
     if (request.upgrades & ~SC_ARSENAL_ALL_NORMAL_UPGRADES) return false;
@@ -260,36 +261,6 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
         break;
     }
 
-    case SC_ARSENAL_PURCHASE_UPGRADE: {
-        const uint32_t missing = request.upgrades & ~before.normal_upgrades;
-        if (!missing) {
-            out.outcome = SC_ARSENAL_OUTCOME_NOOP;
-            break;
-        }
-        // Invariant: Mod must be owned for its normal upgrades to be purchased
-        for (unsigned i = 0; i < 28; ++i) {
-            const uint32_t upg_bit = 1u << i;
-            if (missing & upg_bit) {
-                const uint32_t req_mod = mod_for_upgrade(upg_bit);
-                if (!(after.mods & req_mod)) {
-                    out.outcome = SC_ARSENAL_OUTCOME_REJECTED;
-                    ReleaseSRWLockExclusive(&state_lock);
-                    return;
-                }
-            }
-        }
-        shared_state.normal_upgrades |= request.upgrades;
-        after.normal_upgrades |= request.upgrades;
-        if (p && calls.purchase_upgrade) {
-            ReleaseSRWLockExclusive(&state_lock);
-            const auto err = calls.purchase_upgrade(calls.context, p, missing);
-            AcquireSRWLockExclusive(&state_lock);
-            if (err) { out.native_exception = err; out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED; }
-        }
-        mutated = true;
-        break;
-    }
-
     case SC_ARSENAL_PROJECT_MASTERY: {
         // Invariant: AP Mastery ownership does NOT grant base mod or normal upgrades,
         // and does NOT complete the native challenge.
@@ -310,27 +281,9 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
         break;
     }
 
-    case SC_ARSENAL_UPDATE_CHALLENGE: {
-        const uint16_t c_idx = request.challenge_index;
-        if (request.challenge_completed) {
-            shared_state.mission_challenges_completed |= (1u << c_idx);
-            after.mission_challenges_completed |= (1u << c_idx);
-        }
-        after.mission_challenges_progress[c_idx] = request.challenge_progress;
-        if (p && calls.update_challenge) {
-            ReleaseSRWLockExclusive(&state_lock);
-            const auto err = calls.update_challenge(calls.context, p, c_idx,
-                                                   request.challenge_progress, request.challenge_completed);
-            AcquireSRWLockExclusive(&state_lock);
-            if (err) { out.native_exception = err; out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED; }
-        }
-        mutated = true;
-        break;
-    }
     }
 
     ReleaseSRWLockExclusive(&state_lock);
-    const SnapshotFacts expected = after;
     SnapshotFacts actual{};
     const bool read_ok = calls.read && calls.read(calls.context, p, actual);
     after = actual;
@@ -338,11 +291,7 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
     switch (request.kind) {
     case SC_ARSENAL_ENSURE_MODS: postcondition = postcondition && (after.mods & request.mods) == request.mods; break;
     case SC_ARSENAL_SELECT_MOD: postcondition = postcondition && after.selected_mods[request.select_weapon] == request.select_mod; break;
-    case SC_ARSENAL_PURCHASE_UPGRADE: postcondition = postcondition && (after.normal_upgrades & request.upgrades) == request.upgrades; break;
     case SC_ARSENAL_PROJECT_MASTERY: postcondition = postcondition && (after.masteries_ap & request.masteries) == request.masteries; break;
-    case SC_ARSENAL_UPDATE_CHALLENGE:
-        postcondition = postcondition && after.mastery_challenges_completed == expected.mastery_challenges_completed &&
-            after.mission_challenges_completed == expected.mission_challenges_completed; break;
     default: break;
     }
     if (read_ok) out.flags |= SC_ARSENAL_FLAG_AFTER_VALID;
@@ -371,21 +320,9 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
     ReleaseSRWLockExclusive(&state_lock);
 }
 
-void bind_run_state_if_needed(uintptr_t player_ptr) {
-    if (!player_ptr) return;
-    AcquireSRWLockExclusive(&state_lock);
-    if (last_bound_player == player_ptr) {
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
-    }
-    last_bound_player = player_ptr;
-    ReleaseSRWLockExclusive(&state_lock);
-}
-
 void reset_session() {
     AcquireSRWLockExclusive(&state_lock);
     shared_state = RunState{};
-    last_bound_player = 0;
     ReleaseSRWLockExclusive(&state_lock);
 }
 

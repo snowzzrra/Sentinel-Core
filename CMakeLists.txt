@@ -54,7 +54,7 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   include/sentinel_runes.h src/runes.h src/runes.cpp src/runes_native.cpp
   tools/runes_probe.cpp
   include/sentinel_special.h src/special.h src/special.cpp src/special_native.cpp
-  tools/special_probe.cpp
+  tools/special_probe.cpp src/local_controls.h tools/local_controls_probe.cpp
   include/sentinel_deathlink.h src/deathlink.h src/deathlink.cpp src/deathlink_native.cpp
   tools/deathlink_probe.cpp
   src/native_target.h src/native_target.cpp src/native_runtime.h src/native_runtime.cpp
@@ -100,7 +100,7 @@ target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
 add_library(sentinel_save_storage STATIC src/save_storage.cpp src/prelaunch.cpp)
 target_include_directories(sentinel_save_storage PUBLIC src)
 target_link_libraries(sentinel_save_storage PUBLIC bcrypt)
-add_executable(sentinel_probe tools/probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp tools/campaign_menu_probe.cpp tools/inventory_probe.cpp tools/arsenal_probe.cpp tools/runes_probe.cpp tools/special_probe.cpp tools/deathlink_probe.cpp)
+add_executable(sentinel_probe tools/probe.cpp tools/local_controls_probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp tools/campaign_menu_probe.cpp tools/inventory_probe.cpp tools/arsenal_probe.cpp tools/runes_probe.cpp tools/special_probe.cpp tools/deathlink_probe.cpp)
 target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client sentinel_save_storage bcrypt)
 add_library(sentinel_observer STATIC src/engine_observer.cpp src/context_observer.cpp src/save_observer.cpp)
 target_include_directories(sentinel_observer PUBLIC include src)

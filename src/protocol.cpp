@@ -1171,6 +1171,19 @@ template<class Codec> bool inventory_values(Codec& c, sc_inventory_result& v) {
     c.u64(v.operations_applied);
     if (v.abi_version != SC_INVENTORY_ABI_VERSION || v.namespace_id[64] ||
         v.outcome > SC_INV_UNAVAILABLE || (v.flags & ~31u)) return false;
+    const auto mask = [](uint32_t value, uint32_t allowed) {
+        return value == SC_INVENTORY_UNKNOWN_MASK || !(value & ~allowed);
+    };
+    const auto tier = [](uint8_t value) {
+        return value == SC_INVENTORY_UNKNOWN_TIER || value <= SC_INVENTORY_MAX_CAPACITY_TIER;
+    };
+    if (!mask(v.weapons_before, SC_INV_ALL_WEAPONS) || !mask(v.weapons_after, SC_INV_ALL_WEAPONS) ||
+        !mask(v.equipment_before, SC_INV_ALL_EQUIPMENT) || !mask(v.equipment_after, SC_INV_ALL_EQUIPMENT) ||
+        !tier(v.health_tier_before) || !tier(v.health_tier_after) ||
+        !tier(v.armor_tier_before) || !tier(v.armor_tier_after) ||
+        !tier(v.ammo_tier_before) || !tier(v.ammo_tier_after) ||
+        v.special_before || v.special_after || v.upgrades_before || v.upgrades_after ||
+        v.reserved_before || v.reserved_after) return false;
     return true;
 }
 }

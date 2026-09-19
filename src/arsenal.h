@@ -51,7 +51,6 @@ void install(const engine::Binding& binding, HANDLE stop);
 bool available();
 bool admitted(const char* id);
 void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out);
-void bind_run_state_if_needed(uintptr_t player_ptr);
 void reset_session();
 
 #ifdef SC_NATIVE_TESTING

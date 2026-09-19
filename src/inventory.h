@@ -9,13 +9,13 @@ bool same(const sc_inventory_request&, const sc_inventory_request&);
 sc_inventory_result initial(const sc_inventory_request&);
 
 struct SnapshotFacts {
-    uint32_t weapons = 0;
-    uint32_t equipment = 0;
+    uint32_t weapons = SC_INVENTORY_UNKNOWN_MASK;
+    uint32_t equipment = SC_INVENTORY_UNKNOWN_MASK;
     uint32_t special_weapons = 0;
     uint32_t persistent_upgrades = 0;
-    uint8_t health_tier = 0;
-    uint8_t armor_tier = 0;
-    uint8_t ammo_tier = 0;
+    uint8_t health_tier = SC_INVENTORY_UNKNOWN_TIER;
+    uint8_t armor_tier = SC_INVENTORY_UNKNOWN_TIER;
+    uint8_t ammo_tier = SC_INVENTORY_UNKNOWN_TIER;
     uint8_t reserved = 0;
 };
 
@@ -35,7 +35,6 @@ void install(const engine::Binding&, HANDLE stop);
 bool available();
 bool admitted(const char* namespace_id);
 void execute_native(const sc_inventory_request&, sc_inventory_result&);
-void bind_run_state_if_needed(uintptr_t player);
 void reset_session(const char* namespace_id);
 
 #ifdef SC_NATIVE_TESTING

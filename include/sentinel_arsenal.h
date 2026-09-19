@@ -12,14 +12,14 @@ enum {
     SC_ARSENAL_OBSERVE = 0,
     SC_ARSENAL_ENSURE_MODS = 1,
     SC_ARSENAL_SELECT_MOD = 2,
-    SC_ARSENAL_PURCHASE_UPGRADE = 3,
+    SC_ARSENAL_PURCHASE_UPGRADE = 3, /* Reserved/rejected: native menu transaction required. */
     SC_ARSENAL_PROJECT_MASTERY = 4,
-    SC_ARSENAL_UPDATE_CHALLENGE = 5
+    SC_ARSENAL_UPDATE_CHALLENGE = 5 /* Reserved/rejected: index alone is not native identity. */
 };
 
 /* Weapons (8 main arsenal weapons + special weapons) */
 enum {
-    SC_ARSENAL_WEAPON_SHOTGUN         = 1u << 0,  /* 7770900 / 7770000 Combat Shotgun */
+    SC_ARSENAL_WEAPON_SHOTGUN         = 1u << 0,  /* 7770900 Combat Shotgun */
     SC_ARSENAL_WEAPON_SUPER_SHOTGUN   = 1u << 1,  /* 7770003 Super Shotgun */
     SC_ARSENAL_WEAPON_HEAVY_CANNON    = 1u << 2,  /* 7770000 Heavy Cannon */
     SC_ARSENAL_WEAPON_CHAINGUN        = 1u << 3,  /* 7770005 Chaingun */

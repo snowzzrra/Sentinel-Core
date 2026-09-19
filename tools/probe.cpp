@@ -412,7 +412,10 @@ static int automap_command(int argc,wchar_t** argv) {
     return a.outcome==SC_AUTOMAP_ACCEPTED?0:1;
 }
 int deathlink_command(int argc, wchar_t** argv);
+int local_controls_command(int argc, wchar_t** argv);
 int wmain(int argc, wchar_t** argv) {
+    const int controls_result = local_controls_command(argc, argv);
+    if (controls_result >= 0) return controls_result;
     const int automap_res=automap_command(argc,argv);
     if (automap_res!=-1) return automap_res;
     const int deathlink_res = deathlink_command(argc, argv);

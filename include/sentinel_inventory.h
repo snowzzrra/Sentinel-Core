@@ -2,10 +2,12 @@
 #define SENTINEL_INVENTORY_H
 #include "sentinel_native.h"
 
-/* Independent typed capability for Sentinel Core native shared inventory.
-   Retains persistent inventory / run state across Base, TAG1, and TAG2. */
-#define SC_INVENTORY_ABI_VERSION 1u
+/* Ordinary inventory observations and AP intent. UNKNOWN values are not ownership
+   or capacity facts. Special weapons, Runes and map-local keys have other owners. */
+#define SC_INVENTORY_ABI_VERSION 2u
 #define SC_INVENTORY_MAX_CAPACITY_TIER 4u
+#define SC_INVENTORY_UNKNOWN_MASK UINT32_MAX
+#define SC_INVENTORY_UNKNOWN_TIER UINT8_MAX
 
 enum {
     SC_INV_OBSERVE = 0,
@@ -38,14 +40,14 @@ enum {
 };
 #define SC_INV_ALL_EQUIPMENT 0x1Fu
 
-/* Special weapons bitmask */
+/* Reserved wire bits; Inventory requests must set special_weapons to zero. */
 enum {
     SC_INV_SPECIAL_CRUCIBLE       = 1u << 0,  /* 7770007 / 7770901 Crucible */
     SC_INV_SPECIAL_HAMMER         = 1u << 1   /* 7770009 / 7770902 Sentinel Hammer */
 };
 #define SC_INV_ALL_SPECIAL 0x3u
 
-/* Persistent upgrades bitmask (Support Runes and Slayer Gate Keys) */
+/* Reserved wire bits; Inventory requests must set persistent_upgrades to zero. */
 enum {
     SC_INV_UPGRADE_RUNE_PUNCH     = 1u << 0,  /* 7770146 Desperate Punch */
     SC_INV_UPGRADE_RUNE_TAKEBACK  = 1u << 1,  /* 7770147 Take Back */
@@ -101,6 +103,8 @@ typedef struct sc_inventory_result {
     char namespace_id[65];
     uint32_t kind;
     uint32_t outcome, flags, native_exception;
+    /* Ordinary masks can be UNKNOWN_MASK; tiers can be UNKNOWN_TIER.
+       Reserved special/upgrades fields are zero, without an ownership claim. */
     uint32_t weapons_before, weapons_after;
     uint32_t equipment_before, equipment_after;
     uint32_t special_before, special_after;

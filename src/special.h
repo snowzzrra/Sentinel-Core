@@ -37,6 +37,8 @@ struct Calls {
 // pending use-request at most; a press while a live request is pending is
 // coalesced and never queued twice.
 bool create_refill_request(uint64_t now_ms);
+// Uses the same fresh ownership, selection operation and verified preference as IPC.
+void toggle_local(const char* namespace_id, const Calls&);
 
 extern Calls calls;
 

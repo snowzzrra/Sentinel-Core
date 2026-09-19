@@ -282,14 +282,15 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
     }
 
     if (r.kind == SC_SPECIAL_SELECT) {
-        const bool owned = (r.selected == SC_SPECIAL_WEAPON_CRUCIBLE && shared_state.owns_crucible) ||
-                           (r.selected == SC_SPECIAL_WEAPON_HAMMER && shared_state.owns_hammer);
+        const bool owned = (r.selected == SC_SPECIAL_WEAPON_CRUCIBLE &&
+                            (before.known & SC_SPECIAL_KNOWN_CRUCIBLE) && before.native_crucible) ||
+                           (r.selected == SC_SPECIAL_WEAPON_HAMMER &&
+                            (before.known & SC_SPECIAL_KNOWN_HAMMER) && before.native_hammer);
         if (!owned) {
             ReleaseSRWLockExclusive(&state_lock);
             out.outcome = SC_SPECIAL_OUTCOME_REJECTED;
             return;
         }
-        shared_state.selected = r.selected;
         const bool already = (before.known & SC_SPECIAL_KNOWN_SELECTION) && before.native_selected == r.selected;
         ReleaseSRWLockExclusive(&state_lock);
 
@@ -305,7 +306,8 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             fill_facts(after, shared_state, out);
             ReleaseSRWLockExclusive(&state_lock);
         }
-        if (!already) out.flags |= SC_SPECIAL_FLAG_MUTATED;
+        if (read_ok && (after.known & SC_SPECIAL_KNOWN_SELECTION) &&
+            after.native_selected == r.selected && !already) out.flags |= SC_SPECIAL_FLAG_MUTATED;
         if (out.native_exception || !read_ok || !(after.known & SC_SPECIAL_KNOWN_SELECTION) ||
             after.native_selected != r.selected) { out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return; }
         out.outcome = already ? SC_SPECIAL_OUTCOME_NOOP : SC_SPECIAL_OUTCOME_OK;
@@ -422,6 +424,23 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
 
     ReleaseSRWLockExclusive(&state_lock);
     out.outcome = SC_SPECIAL_OUTCOME_REJECTED;
+}
+
+void toggle_local(const char* namespace_id, const Calls& c) {
+    sc_special_request request{};
+    std::memcpy(request.namespace_id, namespace_id, sizeof(request.namespace_id));
+    request.kind = SC_SPECIAL_OBSERVE;
+    auto observed = initial(request);
+    execute(request, observed, c);
+    const auto known = SC_SPECIAL_KNOWN_CRUCIBLE | SC_SPECIAL_KNOWN_HAMMER;
+    if (observed.outcome != SC_SPECIAL_OUTCOME_OK || (observed.native_state_known & known) != known) return;
+    if (!observed.native_crucible && !observed.native_hammer) return;
+    request.kind = SC_SPECIAL_SELECT;
+    request.selected = observed.native_crucible &&
+        (!observed.native_hammer || observed.selected != SC_SPECIAL_WEAPON_CRUCIBLE)
+        ? SC_SPECIAL_WEAPON_CRUCIBLE : SC_SPECIAL_WEAPON_HAMMER;
+    auto result = initial(request);
+    execute(request, result, c);
 }
 
 } // namespace sentinel::special

@@ -180,7 +180,7 @@ static uintptr_t tick_player_safely(uintptr_t fn, uintptr_t active_map, uint64_t
             if (special::admitted(id.c_str())) {
                 special::bind_run_state_if_needed(player, generation);
                 special::poll_input(player, true);
-            }
+            } else special::poll_input(0, false);
         }
         const auto& id = save::session().namespace_id();
         if (deathlink::admitted(id.c_str())) deathlink::tick_native();
@@ -449,6 +449,7 @@ void post_frame() {
     // Autonomous work uses the same fresh native admission as IPC, even with
     // zero diagnostic slots. A diagnostic query is never its actuator.
     const auto player=!why ? tick_player_safely(binding.image.base + 0x69af70, expected_map_address, scope.lifecycle_generation) : 0;
+    if (!player && owner_thread() == GetCurrentThreadId()) special::poll_input(0, false);
     // Player natives may call back into a lifecycle hook before returning.
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
