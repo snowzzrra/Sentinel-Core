@@ -29,11 +29,17 @@ constexpr uint32_t rva_give_item = 0x1691cd0;            // idInventoryCollectio
 constexpr uint32_t rva_item_count = 0x398510;            // idInventoryCollection::Num()
 constexpr uint32_t rva_item_at = 0x1691450;              // idInventoryCollection::GetItem(index)
 constexpr uint32_t rva_unlock_perk = 0xfe2500;           // perk registration/unlock
+constexpr uint32_t rva_activate_perk = 0xfe19b0;         // idPerkComponent::ActivatePerk
+constexpr uint32_t rva_active_perk = 0xfe37f0;           // exact active-perk reader
 constexpr uint32_t rva_perk_typeinfo = 0x1631f90;        // returns idDeclTypeInfo for perks
 constexpr uint32_t rva_current_weapon = 0xbd7740;        // current idWeapon of the player
 constexpr uint32_t rva_hud_earnings = 0xeea070;          // idHUD_MissionChallenge earnings append
 constexpr uint32_t rva_hud_element_setup = 0xeeac40;     // idHUD_MissionChallenge construction
 constexpr uint32_t rva_player = 0x69af70;
+constexpr uint32_t rva_equipment_upgrade_vtable = 0x2e04ba0;
+constexpr uintptr_t perk_component_offset = 0x3b40;
+constexpr uintptr_t equipment_upgrade_offset = 0x26568;
+constexpr uintptr_t hammer_loot_modifier_offset = 0x2d0;
 
 const char* const CRUCIBLE_PATH = "weapon/player/crucible";
 const char* const HAMMER_PATH = "weapon/player/hammer";
@@ -49,6 +55,8 @@ using GiveItem = uintptr_t(*)(uintptr_t, uintptr_t, uintptr_t, int, uint8_t, uin
 using ItemCount = uint32_t(*)(uintptr_t);
 using ItemAt = uintptr_t(*)(uintptr_t, int);
 using UnlockPerk = void(*)(uintptr_t, uintptr_t, uint8_t, uint8_t, uintptr_t, uint8_t);
+using ActivatePerk = void(*)(uintptr_t, uintptr_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+using ActivePerk = uint8_t(*)(uintptr_t, uintptr_t);
 using CurrentWeapon = uintptr_t(*)(uintptr_t);
 using EarningsAppend = void(*)(uintptr_t, const char*, const char*, uint32_t, uint64_t, uint32_t);
 using HudElementSetup = char(*)(uintptr_t);
@@ -83,6 +91,37 @@ uintptr_t find_decl(const char* path) {
     const auto typeinfo = reinterpret_cast<uintptr_t(*)()>(image_base + rva_inventory_typeinfo)();
     if (!typeinfo) return 0;
     return reinterpret_cast<FindDecl>(image_base + rva_find_decl)(typeinfo, path, 1);
+}
+
+uintptr_t find_perk_decl(const char* path) {
+    if (!path) return 0;
+    const auto typeinfo = reinterpret_cast<uintptr_t(*)()>(image_base + rva_perk_typeinfo)();
+    if (!typeinfo) return 0;
+    const auto decl = reinterpret_cast<FindDecl>(image_base + rva_find_decl)(typeinfo, path, 1);
+    const auto resolved = decl_path(decl);
+    return resolved && std::strcmp(resolved, path) == 0 ? decl : 0;
+}
+
+bool hammer_loot_modifier(uintptr_t p, bool& effective) {
+    const auto handler = p + equipment_upgrade_offset;
+    if (*reinterpret_cast<uintptr_t*>(handler) != image_base + rva_equipment_upgrade_vtable) return false;
+    effective = *reinterpret_cast<uintptr_t*>(handler + hammer_loot_modifier_offset) != 0;
+    return true;
+}
+
+bool hammer_perks(uintptr_t p, uintptr_t (&decls)[2], uint8_t& effective_count) {
+    for (size_t i = 0; i < 2; ++i) {
+        decls[i] = find_perk_decl(HAMMER_PERK_PATHS[i]);
+        if (!decls[i]) return false;
+    }
+    bool modifier_effective = false;
+    if (!hammer_loot_modifier(p, modifier_effective)) return false;
+    const auto component = p + perk_component_offset;
+    const auto active = reinterpret_cast<ActivePerk>(image_base + rva_active_perk);
+    uint8_t active_count = 0;
+    for (const auto decl : decls) active_count += active(component, decl) ? 1 : 0;
+    effective_count = modifier_effective ? active_count : 0;
+    return true;
 }
 
 uintptr_t find_item(uintptr_t inventory, uintptr_t decl) {
@@ -185,7 +224,12 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
             facts.known |= SC_SPECIAL_KNOWN_HAMMER;
             facts.native_hammer = find_item(inv, hammer_decl) ? 1 : 0;
         }
-        // Catalog membership does not prove Hammer perk ownership/activation.
+        uintptr_t perk_decls[2]{};
+        uint8_t effective_perks = 0;
+        if (hammer_perks(p, perk_decls, effective_perks)) {
+            facts.known |= SC_SPECIAL_KNOWN_HAMMER_PERKS;
+            facts.native_hammer_perks = effective_perks;
+        }
 
         const auto active_decl = current_weapon_decl(p);
         if (active_decl && ((crucible_decl && active_decl == crucible_decl) ||
@@ -216,11 +260,14 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
 
 uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, uint32_t hammer_tier) {
     if (!p) return 1;
-    if (own_hammer && hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED) return 5;
     uint32_t error = 0;
     __try {
         const auto inv = inventory_of(p);
         if (!inv) return 2;
+        const bool upgraded = own_hammer && hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED;
+        uintptr_t perk_decls[2]{};
+        uint8_t effective_perks = 0;
+        if (upgraded && !hammer_perks(p, perk_decls, effective_perks)) return ERROR_NOT_SUPPORTED;
         const auto crucible_decl = find_decl(CRUCIBLE_PATH);
         const auto hammer_decl = find_decl(HAMMER_PATH);
         const auto before = selection_snapshot(p, inv, crucible_decl, hammer_decl);
@@ -230,6 +277,17 @@ uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, 
         if (own_crucible && !ensure_item(inv, p, CRUCIBLE_PATH, decl, item, mutated)) return 3;
         if (own_hammer && !ensure_item(inv, p, HAMMER_PATH, decl, item, mutated)) return 4;
 
+        if (upgraded) {
+            const auto component = p + perk_component_offset;
+            const auto active = reinterpret_cast<ActivePerk>(image_base + rva_active_perk);
+            const auto unlock = reinterpret_cast<UnlockPerk>(image_base + rva_unlock_perk);
+            const auto activate = reinterpret_cast<ActivatePerk>(image_base + rva_activate_perk);
+            for (const auto perk_decl : perk_decls) {
+                if (active(component, perk_decl)) continue;
+                unlock(component, perk_decl, 0, 0, 0, 0);
+                activate(component, perk_decl, 1, 0, 0, 0, 1);
+            }
+        }
 
         // An acquisition may intrinsically switch the active weapon. Restore the
         // player's prior valid selection instead of inheriting the acquisition.
@@ -460,6 +518,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {rva_item_at, "4883ec2885d2784f3b51087d4a48895c24204863da48c1e3054803198b03488d"},
         {rva_item_count, "8b4108c3cccccccccccccccccccccccc48896c2418574883ec204863790833ed"},
         {rva_unlock_perk, "4885d20f84c903000044884c2420448844241848894c24085356415441564883"},
+        {rva_activate_perk, "44884c24204488442418488954241048894c2408555357415541564157488d6c"},
+        {rva_active_perk, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
+        {rva_perk_typeinfo, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc"},
         {rva_current_weapon, "40534883ec20488b01488bd9ff90b0000000488b13488bcb4885c07412ff92b0"},
         {rva_hud_earnings, "48895c240848896c2410488974241848897c242041564883ec20488db9700600"},
         {rva_player, "488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc"},
@@ -475,6 +536,14 @@ void install(const engine::Binding& binding, HANDLE stop) {
         if (!binding.image.contains(s.offset, actual.size(), IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0) ||
             memory.copy(target.address, actual.data(), actual.size()).reason || actual != target.bytes) return;
     }
+
+    constexpr uint32_t expected_vtable_slots[] = {0x1641b80, 0x16466a0, 0x1647be0, 0x355140};
+    std::array<uintptr_t, std::size(expected_vtable_slots)> actual_vtable{};
+    if (!binding.image.contains(rva_equipment_upgrade_vtable, sizeof(actual_vtable), IMAGE_SCN_MEM_READ, 0) ||
+        memory.copy(image_base + rva_equipment_upgrade_vtable, actual_vtable.data(), sizeof(actual_vtable)).reason)
+        return;
+    for (size_t i = 0; i < actual_vtable.size(); ++i)
+        if (actual_vtable[i] != image_base + expected_vtable_slots[i]) return;
 
     // HUD capture is optional presentation: a failed hook validation or install
     // must not disable ownership/selection/refill, it only disables the on-screen

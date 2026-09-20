@@ -262,6 +262,9 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
                 after.native_selected == before.native_selected) out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
         }
         out.flags |= SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE;
+        if (out.native_exception == ERROR_NOT_SUPPORTED) {
+            out.outcome = SC_SPECIAL_OUTCOME_UNAVAILABLE; return;
+        }
         if (read_ok && (after.native_crucible != before.native_crucible ||
             after.native_hammer != before.native_hammer || after.native_hammer_perks != before.native_hammer_perks))
             out.flags |= SC_SPECIAL_FLAG_MUTATED;

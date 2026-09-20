@@ -179,6 +179,10 @@ set_tests_properties(isolated_save_storage_contract PROPERTIES TIMEOUT 30)
 add_executable(sentinel_native_model_tests tests/native_model.cpp tests/backup_request.cpp)
 target_link_libraries(sentinel_native_model_tests PRIVATE sentinel_native_model sentinel_protocol)
 add_test(NAME native_lifecycle_dispatch_model COMMAND sentinel_native_model_tests)
+
+add_executable(sentinel_special_model_tests tests/special_model.cpp)
+target_link_libraries(sentinel_special_model_tests PRIVATE sentinel_native_model)
+add_test(NAME special_hammer_first_acquisition_model COMMAND sentinel_special_model_tests)
 set_tests_properties(native_lifecycle_dispatch_model PROPERTIES TIMEOUT 10)
 # Separate test executable with explicit fixture adapters. The production Core
 # never compiles SC_NATIVE_TESTING or accepts an address/callback through IPC.

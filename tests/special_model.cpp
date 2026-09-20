@@ -1,0 +1,105 @@
+#include "special.h"
+#include <Windows.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL special model line %d: %s\n", __LINE__, #x); std::exit(1); } } while (0)
+
+namespace sentinel::special { Calls calls{}; }
+
+namespace {
+struct Fixture {
+    sentinel::special::SnapshotFacts facts{};
+    uint32_t ensure_result = 0;
+    unsigned ensure_calls = 0;
+    bool materialize = false;
+    bool player_present = true;
+};
+
+uintptr_t player(void* context) {
+    return static_cast<Fixture*>(context)->player_present ? 1 : 0;
+}
+bool read(void* context, uintptr_t, sentinel::special::SnapshotFacts& facts) {
+    facts = static_cast<Fixture*>(context)->facts;
+    return true;
+}
+uint32_t ensure(void* context, uintptr_t, uint32_t crucible, uint32_t hammer, uint32_t tier) {
+    auto& fixture = *static_cast<Fixture*>(context);
+    ++fixture.ensure_calls;
+    if (fixture.ensure_result) return fixture.ensure_result;
+    if (fixture.materialize) {
+        if (crucible) fixture.facts.native_crucible = 1;
+        if (hammer) fixture.facts.native_hammer = 1;
+        if (hammer && tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED) fixture.facts.native_hammer_perks = 2;
+    }
+    return 0;
+}
+
+sentinel::special::Calls calls(Fixture& fixture) {
+    sentinel::special::Calls result{};
+    result.context = &fixture;
+    result.player = player;
+    result.read = read;
+    result.ensure = ensure;
+    return result;
+}
+
+sc_special_request request(const char* id) {
+    sc_special_request result{};
+    result.kind = SC_SPECIAL_ENSURE_OWNERSHIP;
+    result.own_hammer = 1;
+    result.hammer_tier = SC_SPECIAL_HAMMER_TIER_UPGRADED;
+    strcpy_s(result.namespace_id, id);
+    return result;
+}
+} // namespace
+
+int main() {
+    constexpr uint32_t known = SC_SPECIAL_KNOWN_CRUCIBLE | SC_SPECIAL_KNOWN_HAMMER |
+        SC_SPECIAL_KNOWN_HAMMER_PERKS | SC_SPECIAL_KNOWN_SELECTION;
+
+    Fixture fixture{};
+    fixture.facts = {1, 1, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
+    fixture.materialize = true;
+    auto command = request("special-materialize");
+    sentinel::special::reset_session(command.namespace_id);
+    auto result = sentinel::special::initial(command);
+    sentinel::special::execute(command, result, calls(fixture));
+    CHECK(result.outcome == SC_SPECIAL_OUTCOME_OK && fixture.ensure_calls == 1);
+    CHECK(result.native_crucible == 1 && result.native_hammer_perks == 2);
+    CHECK(result.native_selected == SC_SPECIAL_WEAPON_CRUCIBLE);
+    CHECK(result.flags & SC_SPECIAL_FLAG_SELECTION_PRESERVED);
+
+    result = sentinel::special::initial(command);
+    sentinel::special::execute(command, result, calls(fixture));
+    CHECK(result.outcome == SC_SPECIAL_OUTCOME_NOOP && fixture.ensure_calls == 1);
+
+    Fixture ineffective{};
+    ineffective.facts = {1, 1, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
+    command = request("special-ineffective");
+    sentinel::special::reset_session(command.namespace_id);
+    result = sentinel::special::initial(command);
+    sentinel::special::execute(command, result, calls(ineffective));
+    CHECK(result.outcome == SC_SPECIAL_OUTCOME_NATIVE_FAILED && ineffective.ensure_calls == 1);
+
+    Fixture unavailable{};
+    unavailable.facts = {1, 1, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
+    unavailable.ensure_result = ERROR_NOT_SUPPORTED;
+    command = request("special-provider-missing");
+    sentinel::special::reset_session(command.namespace_id);
+    result = sentinel::special::initial(command);
+    sentinel::special::execute(command, result, calls(unavailable));
+    CHECK(result.outcome == SC_SPECIAL_OUTCOME_UNAVAILABLE && unavailable.ensure_calls == 1);
+
+    Fixture invalid{};
+    invalid.facts = {1, 1, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
+    invalid.player_present = false;
+    command = request("special-invalid-context");
+    sentinel::special::reset_session(command.namespace_id);
+    result = sentinel::special::initial(command);
+    sentinel::special::execute(command, result, calls(invalid));
+    CHECK(result.outcome == SC_SPECIAL_OUTCOME_NO_PLAYER && invalid.ensure_calls == 0);
+
+    std::puts("PASS special Hammer first acquisition, effective readback, provider, duplicate, selection and context contracts");
+}
