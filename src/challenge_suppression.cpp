@@ -245,28 +245,34 @@ void install(const engine::Binding& binding, HANDLE stop) {
     const auto deadline = GetTickCount64() + 10000;
     if (native::validate_target(memory, binding.image, target(image_base, 0x1474a00,
             "48895c24185556574154415541564157488dac2400faffff4881ec0007000048"), stop, deadline)) return;
-    if (native::validate_target(memory, binding.image, target(image_base, 0x13ce4c0,
-            "48895c241048896c2418565741564883ec204863f2450fb6f1418be8488bd944"), stop, deadline)) return;
     if (!unique_leaf(memory, binding.image, image_base + 0x14703b0,
             "4c8bd24c8bc94885d20f8485000000488b4a084533c00fb60184c074180f1f00", stop, deadline)) return;
-    if (!native::function_window(memory, binding.image, image_base + 0x13ce4c0, image_base + 0x13ce4df, 16) ||
-        !native::function_window(memory, binding.image, image_base + 0x13ce4c0, image_base + 0x13ce53a, 16) ||
+    // The WUP owner is installed first and has already replaced the first five
+    // entry bytes with its relative jump. Qualify the currency writer by
+    // supported-image membership and unwind ownership plus the untouched seam
+    // and continuation windows; a pristine entry prefix cannot be required.
+    if (!binding.image.contains(seam::currency_entry_rva, seam::wup_entry_patch_bytes,
+            IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE)) return;
+    if (!native::function_window(memory, binding.image, image_base + seam::currency_entry_rva,
+            image_base + seam::currency_seam_rva, 16) ||
+        !native::function_window(memory, binding.image, image_base + seam::currency_entry_rva,
+            image_base + seam::currency_continuation_rva, 16) ||
         !native::function_window(memory, binding.image, image_base + 0x1474a00, image_base + 0x1475452, 23) ||
         !native::function_window(memory, binding.image, image_base + 0x1474a00, image_base + 0x147546e, 16)) return;
-    if (!bytes_match(memory, image_base + 0x13ce4df, "440184b16ccd0400488b05a2832b0383", 16) ||
-        !bytes_match(memory, image_base + 0x13ce53a, "488d8be05a02008bd6e8888aebff83fe", 16) ||
+    if (!bytes_match(memory, image_base + seam::currency_seam_rva, "440184b16ccd0400488b05a2832b0383", 16) ||
+        !bytes_match(memory, image_base + seam::currency_continuation_rva, "488d8be05a02008bd6e8888aebff83fe", 16) ||
         !bytes_match(memory, image_base + 0x1475452,
             "488b4e104533c9c7442420ffffffff418d5104458d4101", 23) ||
         !bytes_match(memory, image_base + 0x147546e, "418b953c01000083faff741b488b4e10", 16) ||
-        !call_site(memory, image_base, 0x147546e, 0x13ce4c0)) return;
+        !call_site(memory, image_base, 0x147546e, seam::currency_entry_rva)) return;
 
     adapter = static_cast<uint8_t*>(VirtualAlloc(nullptr, seam::adapter_size,
         MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     if (!adapter) return;
     void* trampoline = nullptr;
-    if (MH_CreateHook(reinterpret_cast<void*>(image_base + 0x13ce4df), adapter, &trampoline) != MH_OK) return;
+    if (MH_CreateHook(reinterpret_cast<void*>(image_base + seam::currency_seam_rva), adapter, &trampoline) != MH_OK) return;
     seam::write_adapter(adapter, reinterpret_cast<uintptr_t>(&seam_predicate),
-        reinterpret_cast<uintptr_t>(trampoline), image_base + 0x13ce53a);
+        reinterpret_cast<uintptr_t>(trampoline), image_base + seam::currency_continuation_rva);
     DWORD previous = 0;
     if (!VirtualProtect(adapter, seam::adapter_size, PAGE_EXECUTE_READ, &previous)) return;
     FlushInstructionCache(GetCurrentProcess(), adapter, seam::adapter_size);
@@ -276,7 +282,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
             reinterpret_cast<void*>(read_hook), reinterpret_cast<void**>(&original_read)) != MH_OK) return;
     if (MH_EnableHook(reinterpret_cast<void*>(image_base + 0x1474a00)) != MH_OK) return;
     if (MH_EnableHook(reinterpret_cast<void*>(image_base + 0x14703b0)) != MH_OK) return;
-    if (MH_EnableHook(reinterpret_cast<void*>(image_base + 0x13ce4df)) != MH_OK) return;
+    if (MH_EnableHook(reinterpret_cast<void*>(image_base + seam::currency_seam_rva)) != MH_OK) return;
     ready.store(true, std::memory_order_release);
 }
 

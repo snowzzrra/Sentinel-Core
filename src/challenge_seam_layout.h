@@ -18,6 +18,20 @@ inline constexpr std::size_t adapter_size = 112;
 inline constexpr std::size_t predicate_slot = 88;
 inline constexpr std::size_t trampoline_slot = 96;
 inline constexpr std::size_t continuation_slot = 104;
+// Startup coexistence contract with the Phase5 WUP owner. That owner installs
+// first and patches the 13ce4c0 function entry with its five-byte relative
+// jump, so the completed 32-byte entry prefix is no longer available to this
+// scope. The seam and continuation windows must stay outside that patch; this
+// scope qualifies the function by supported-image membership, unwind ownership
+// and those windows instead of the pristine entry prefix.
+inline constexpr uint32_t currency_entry_rva = 0x13ce4c0;
+inline constexpr uint32_t currency_seam_rva = 0x13ce4df;
+inline constexpr uint32_t currency_continuation_rva = 0x13ce53a;
+inline constexpr uint32_t wup_entry_patch_bytes = 5;
+static_assert(currency_entry_rva + wup_entry_patch_bytes <= currency_seam_rva,
+    "challenge seam window must remain outside the WUP entry patch");
+static_assert(currency_entry_rva + wup_entry_patch_bytes <= currency_continuation_rva,
+    "challenge continuation window must remain outside the WUP entry patch");
 inline constexpr uint8_t adapter_template[adapter_size] = {
     0x9c, 0x50, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53,
     0x48, 0x8b, 0x84, 0x24, 0x78, 0x00, 0x00, 0x00, 0x48, 0x83, 0xec, 0x30,

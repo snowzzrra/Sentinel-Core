@@ -676,10 +676,11 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             if (mh == MH_OK) installation.hook(SC_INSTALL_UNINITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Uninitialize(); });
         }
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
-        // The challenge seam validates the pristine 13ce4c0 entry before the
-        // WUP owner patches it; both hooks then coexist on the same function.
-        if (!why && !stopping.load(std::memory_order_acquire)) challenge::install(binding, stop_event);
+        // The WUP owner validates and patches the 13ce4c0 entry first; the
+        // challenge scope then qualifies the untouched seam/continuation windows
+        // and coexists with that detour on the same function.
         if (!why && !stopping.load(std::memory_order_acquire)) weapon_points::install(binding, stop_event);
+        if (!why && !stopping.load(std::memory_order_acquire)) challenge::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) inventory::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) arsenal::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) runes::install(binding, stop_event);
