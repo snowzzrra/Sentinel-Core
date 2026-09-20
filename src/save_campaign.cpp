@@ -201,7 +201,7 @@ bool Campaign::allow_difficulty(uint32_t value) {
 bool Campaign::allow_access(uintptr_t data,const std::string& directory,bool write,bool erase) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled || directory=="PROFILE") return true;
-    diagnostic_stage_=write?BStage::checkpoint_factory:BStage::resume;
+    diagnostic_stage_=write ? BStage::checkpoint_factory : state_.resumed ? BStage::resume : BStage::creation;
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"campaign_access",state_.operation,
         {{"write",write},{"erase",erase},{"directory_equal",directory==directory_},{"accepting",owner_->accepts_requests()},
          {"initiated",initiated_},{"resumed",state_.resumed},{"phase",phase_id(state_.phase)},{"source_equal",load_data_==data}},data);
@@ -209,7 +209,7 @@ bool Campaign::allow_access(uintptr_t data,const std::string& directory,bool wri
     // to the shell. A previously completed gameplay load is not its owner.
     // It never associates a gameplay load; gameplay parser entry requires the
     // explicit later LoadGameSlot operation and its exact SaveData identity.
-    const bool catalog_read=(state_.resumed && !initiated_ && state_.phase=="armed") ||
+    const bool catalog_read=(!initiated_ && state_.phase=="armed") ||
         (menu_active_ && state_.continuity_persisted && !map_pending_);
     if (!write && !erase && catalog_read &&
         owner_->native_io() && directory==directory_) {

@@ -351,6 +351,24 @@ int wmain(int argc,wchar_t** argv) {
         profile_write(); ++profile_writes;
         CHECK(owner.native_io() && owner.accepts_requests() && !owner.btrace.snapshot().first_failure.sequence);
     };
+    if (defect==L"fresh_catalog") {
+        CHECK(owner.campaign_run.allow_access(source,directory,false,false));
+        const auto snapshot=owner.campaign_run.snapshot();
+        CHECK(snapshot.phase=="armed" && !snapshot.resumed && !snapshot.native_saved && !snapshot.continuity_persisted);
+        CHECK(!owner.btrace.snapshot().first_failure.sequence);
+        std::puts("PASS fresh owned catalog read delegates before create"); return 0;
+    }
+    if (defect==L"foreign_catalog") {
+        CHECK(!owner.campaign_run.allow_access(source,owner.native_root()+"/GAME-AUTOSAVE1",false,false));
+        CHECK(std::strcmp(owner.btrace.snapshot().first_failure.predicate,"campaign_access_outside_authorized_slot")==0);
+        std::puts("PASS foreign campaign read remains refused"); return 0;
+    }
+    if (defect==L"foreign_write" || defect==L"foreign_erase" || defect==L"wrong_slot_write") {
+        const auto target=defect==L"wrong_slot_write" ? owner.native_root()+"/GAME-AUTOSAVE1" : "foreign/GAME-AUTOSAVE0";
+        CHECK(!owner.campaign_run.allow_access(source,target,defect!=L"foreign_erase",defect==L"foreign_erase"));
+        CHECK(std::strcmp(owner.btrace.snapshot().first_failure.predicate,"campaign_access_outside_authorized_slot")==0);
+        std::puts("PASS unqualified campaign mutation remains refused"); return 0;
+    }
     if (defect.rfind(L"cross_map",0)==0) {
         if (resume) {
             CHECK(owner.campaign_run.begin_resume());
