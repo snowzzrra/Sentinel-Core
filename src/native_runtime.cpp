@@ -9,6 +9,7 @@
 #include "save_campaign_native.h"
 #include "campaign_menu.h"
 #include "campaign_menu_native.h"
+#include "challenge_suppression.h"
 #include "fast_travel.h"
 #include "save_session.h"
 #include "context_observer.h"
@@ -675,6 +676,9 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             if (mh == MH_OK) installation.hook(SC_INSTALL_UNINITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Uninitialize(); });
         }
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
+        // The challenge seam validates the pristine 13ce4c0 entry before the
+        // WUP owner patches it; both hooks then coexist on the same function.
+        if (!why && !stopping.load(std::memory_order_acquire)) challenge::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) weapon_points::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) inventory::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) arsenal::install(binding, stop_event);

@@ -45,6 +45,7 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   include/sentinel_native.h src/native_model.h src/native_model.cpp
   include/sentinel_weapon_points.h src/weapon_points.h src/weapon_points.cpp src/weapon_points_native.cpp
   tools/weapon_points_probe.cpp
+  src/challenge_match.h src/challenge_seam_layout.h src/challenge_suppression.h src/challenge_suppression.cpp
   include/sentinel_campaign_menu.h src/campaign_menu.h src/campaign_menu.cpp tools/campaign_menu_probe.cpp
   src/campaign_menu_native.h src/campaign_menu_native.cpp
   include/sentinel_inventory.h src/inventory.h src/inventory.cpp src/inventory_native.cpp
@@ -219,7 +220,7 @@ add_test(NAME missing_core_dependency COMMAND "${CMAKE_COMMAND}"
   "-DPROXY=$<TARGET_FILE:sentinel_bootstrap>" "-DHARNESS=$<TARGET_FILE:sentinel_harness>"
   "-DSTAGE=${CMAKE_BINARY_DIR}/missing-core" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/missing_dependency.cmake")
 foreach(target sentinel_native sentinel_campaign_tests sentinel_native_host)
-  target_sources(${target} PRIVATE src/weapon_points_native.cpp src/inventory_native.cpp src/arsenal_native.cpp src/runes_native.cpp src/special_native.cpp src/deathlink_native.cpp)
+  target_sources(${target} PRIVATE src/weapon_points_native.cpp src/challenge_suppression.cpp src/inventory_native.cpp src/arsenal_native.cpp src/runes_native.cpp src/special_native.cpp src/deathlink_native.cpp)
 endforeach()
 add_executable(sentinel_weapon_points_tests tests/weapon_points.cpp)
 target_link_libraries(sentinel_weapon_points_tests PRIVATE sentinel_native_model sentinel_protocol)
