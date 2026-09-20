@@ -352,11 +352,15 @@ int wmain(int argc,wchar_t** argv) {
         CHECK(owner.native_io() && owner.accepts_requests() && !owner.btrace.snapshot().first_failure.sequence);
     };
     if (defect==L"fresh_catalog") {
-        CHECK(owner.campaign_run.allow_access(source,directory,false,false));
+        remote.files[directory+"/game_duration.dat"]="catalog duration";
+        remote.files[directory+"/game.details"]=payload;
+        writer_fixture::Model reader{remote,source,files,payload,directory};
+        CHECK(writer_fixture::load(reader,true,defect));
         const auto snapshot=owner.campaign_run.snapshot();
         CHECK(snapshot.phase=="armed" && !snapshot.resumed && !snapshot.native_saved && !snapshot.continuity_persisted);
+        CHECK(!snapshot.source_verified && !snapshot.parser_completed);
         CHECK(!owner.btrace.snapshot().first_failure.sequence);
-        std::puts("PASS fresh owned catalog read delegates before create"); return 0;
+        std::puts("PASS complete fresh catalog read leaves gameplay Resume unverified"); return 0;
     }
     if (defect==L"foreign_catalog") {
         CHECK(!owner.campaign_run.allow_access(source,owner.native_root()+"/GAME-AUTOSAVE1",false,false));

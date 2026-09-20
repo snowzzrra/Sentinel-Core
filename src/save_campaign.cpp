@@ -398,6 +398,15 @@ bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t ima
     uintptr_t files=0; int32_t count=0; std::string directory;
     if (!text(memory,data,0,directory)) return reject("resume_directory_unreadable");
     if (directory!=directory_) return reject("resume_directory_mismatch",{{"directory_equal",false}});
+    // Catalog hydration names the owned slot but is not a checkpoint import.
+    // It deliberately stops before inspecting the transient file vector: native
+    // catalog metadata has no Resume payload contract and cannot certify one.
+    if (metadata_only) {
+        metadata_verified_=true;
+        owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"metadata_catalog_verified",state_.operation,
+            {{"metadata_only",true},{"source_verified",state_.source_verified},{"directory_equal",true}},data);
+        return true;
+    }
     if (!read(memory,data,0x1c0,files)) return reject("resume_file_vector_unreadable");
     if (!read(memory,data,0x1c8,count)) return reject("resume_file_count_unreadable");
     // 1414972b0 requests the primary streams OR their -BACKUP counterparts.
@@ -439,9 +448,8 @@ bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t ima
         if (hash!=expected->sha256) return reject("resume_payload_hash_mismatch",{{"file_index",i},{"actual_size",size},{"expected_size",expected->size},{"hash_equal",false}});
         seen.emplace_back(expected->name.data());
     }
-    if (metadata_only) metadata_verified_=true;
-    else { state_.source_verified=true; state_.phase="source_verified"; }
-    owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,metadata_only?"metadata_source_verified":"resume_source_verified",state_.operation,
+    state_.source_verified=true; state_.phase="source_verified";
+    owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"resume_source_verified",state_.operation,
         {{"file_count",count},{"expected_count",primary_count},{"persisted_count",expected_.size()},{"backup_group",backup_group},
          {"metadata_only",metadata_only},{"all_hashes_equal",true},{"source_checkpoint",state_.source_checkpoint}},data); return true;
 }
