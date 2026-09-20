@@ -26,4 +26,6 @@ void test_free(uintptr_t root,void (*free)(uintptr_t,uintptr_t));
 void test_generation_gap();
 void test_dispatch_adapter(const TestAdapter&, const sc_native_scope&);
 void test_post_frame();
+bool test_automap_checked(const sc_automap_request&,const char*,const char*);
+bool test_automap_collect(uintptr_t,uintptr_t,uintptr_t,void (*)(uintptr_t,uintptr_t));
 }

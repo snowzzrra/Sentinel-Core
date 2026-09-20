@@ -23,5 +23,5 @@ typedef struct sc_automap_result {
     uint8_t nonce[16];
     char namespace_id[65];
     uint32_t kind, outcome, known, native_fault;
-    uint64_t revision, scanned, removed, completed_passes;
+    uint64_t revision, scanned, collected, completed_passes;
 } sc_automap_result;

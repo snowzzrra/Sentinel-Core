@@ -138,12 +138,20 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
 #ifdef SC_NATIVE_TESTING
     if (fixture_namespace[0]) { execute(request, out, calls); return; }
 #endif
-    // C is implemented by the three intrinsic-Super-Shotgun detours. This
-    // accepts AP authorization, not a fabricated native Arsenal observation.
-    if (request.kind == SC_ARSENAL_ENSURE_MODS) authorize_hook(request.mods);
-    out.outcome = request.kind == SC_ARSENAL_ENSURE_MODS &&
-        request.mods == SC_ARSENAL_ATTACHMENT_MEAT_HOOK ?
-        SC_ARSENAL_OUTCOME_OK : SC_ARSENAL_OUTCOME_UNAVAILABLE;
+    // The intrinsic Super Shotgun detours consume this shared authorization.
+    if (request.kind == SC_ARSENAL_ENSURE_MODS &&
+        request.mods == SC_ARSENAL_ATTACHMENT_MEAT_HOOK) {
+        out.mods_before = shared_mods();
+        authorize_hook(request.mods);
+        out.mods_after = shared_mods();
+        out.flags |= SC_ARSENAL_FLAG_BEFORE_VALID | SC_ARSENAL_FLAG_AFTER_VALID |
+            SC_ARSENAL_FLAG_SELECTION_PRESERVED;
+        if (out.mods_after != out.mods_before) out.flags |= SC_ARSENAL_FLAG_MUTATED;
+        out.outcome = (out.mods_after & SC_ARSENAL_ATTACHMENT_MEAT_HOOK) ?
+            SC_ARSENAL_OUTCOME_OK : SC_ARSENAL_OUTCOME_UNAVAILABLE;
+        return;
+    }
+    out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE;
 }
 
 #ifdef SC_NATIVE_TESTING

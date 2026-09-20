@@ -244,28 +244,25 @@ void reconcile_fast_travel(uintptr_t map,const char* map_name,uint64_t generatio
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// Native Automap ownership and ABI provenance: phase8g-entry/reva-marker-erase-*.txt.
+// Native Automap collected-state ownership is scoped to exact catalog keys and maps.
 // HUD idPOIManager is a different subsystem and MUST NOT be used on AP props.
 SRWLOCK automap_lock = SRWLOCK_INIT;
 sc_automap_request automap_snapshot{};
 uint64_t automap_checked_floor[8]{};
-uint64_t automap_scanned=0, automap_removed=0, automap_passes=0;
+uint64_t automap_scanned=0, automap_collected=0, automap_passes=0;
 std::atomic<bool> automap_ready{false};
 std::atomic<uint32_t> automap_fault{0};
 uint64_t automap_generation=0;
 uint32_t automap_cursor=0;
 uintptr_t automap_keys=0;
-using AutomapOwner=uintptr_t(*)(uintptr_t);
-using AutomapErase=void(*)(uintptr_t,uintptr_t);
-AutomapOwner automap_owner=nullptr;
-AutomapErase automap_erase=nullptr;
+using AutomapCollect=void(*)(uintptr_t,uintptr_t);
+AutomapCollect automap_collect=nullptr;
 #include "automap_catalog.h"
 
 void install_automap(const engine::Binding& b) {
     engine::LocalMemory memory;
     const struct { uint32_t rva; const char* hex; } sites[] = {
-        {0xa54660,"40534883ec20488d99b00000008b03488d53043b02751b3dfeffff01741c4883"},
-        {0xa56740,"48895c2410574883ec20448b4108488d05cbd301024c8bca4889442430488b11"}
+        {0xa55f90,"40534883ec20448b8148030000488d057cdb01024c8bca4889442430488b9140"}
     };
     for (const auto& s:sites) {
         std::array<uint8_t,32> actual{}, expected{};
@@ -274,8 +271,7 @@ void install_automap(const engine::Binding& b) {
         if (!b.image.contains(s.rva,32,IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ,0) ||
             memory.copy(b.image.base+s.rva,actual.data(),32).reason || actual!=expected) return;
     }
-    automap_owner=reinterpret_cast<AutomapOwner>(b.image.base+0xa54660);
-    automap_erase=reinterpret_cast<AutomapErase>(b.image.base+0xa56740);
+    automap_collect=reinterpret_cast<AutomapCollect>(b.image.base+0xa55f90);
     automap_ready.store(true,std::memory_order_release);
 }
 struct AutomapLists { uintptr_t keys,values; int32_t count,key_capacity,value_capacity; };
@@ -313,6 +309,11 @@ bool automap_checked(const sc_automap_request& snapshot,const char* map,const ch
     }
     return false;
 }
+bool automap_set_collected(uintptr_t system,uintptr_t key,uintptr_t object) {
+    if (*reinterpret_cast<int32_t*>(object+0x134)==3) return true;
+    automap_collect(system,key);
+    return *reinterpret_cast<int32_t*>(object+0x134)==3;
+}
 // Called only by the already-admitted native frame, never by an IPC reader.
 // Every pass rereads native keys/weak owners, including same-epoch reconstruction.
 void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
@@ -320,18 +321,19 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
     sc_automap_request snapshot{};
     AcquireSRWLockShared(&automap_lock); snapshot=automap_snapshot; ReleaseSRWLockShared(&automap_lock);
     if (!snapshot.known || save::session().state()!=save::SessionState::admitted || !save::session().accepts_requests()) return;
-    uint64_t scanned=0,removed=0,passes=0;
+    uint64_t scanned=0,collected=0,passes=0;
     __try {
         const auto image=binding.image.base;
         if (!map || *reinterpret_cast<uintptr_t*>(map)!=image+0x2ab30c8 ||
             *reinterpret_cast<uintptr_t*>(image+0x45f7370)!=map) return;
-        const auto owner=map+0x1a7380+0x340;
+        const auto system=map+0x1a7380;
+        const auto owner=system+0x340;
         AutomapLists list{};
         if (!automap_lists(owner,list)) { automap_fault.store(1); return; }
         if (automap_generation!=generation || automap_keys!=list.keys) {
             automap_generation=generation; automap_keys=list.keys; automap_cursor=0;
         }
-        for (unsigned budget=0;budget<16 && removed<4;++budget) {
+        for (unsigned budget=0;budget<16 && collected<4;++budget) {
             if (!automap_lists(owner,list)) { automap_fault.store(1); break; }
             if (automap_cursor>=static_cast<uint32_t>(list.count)) {
                 automap_cursor=0; ++passes; break;
@@ -339,30 +341,24 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
             const auto key=list.keys+static_cast<uintptr_t>(automap_cursor)*0x30;
             const auto object=list.values+static_cast<uintptr_t>(automap_cursor)*0x150;
             char name[64]{}; ++scanned;
-            if (!automap_name(key,name) || !automap_checked(snapshot,map_name,name)) { ++automap_cursor; continue; }
-            const auto entity=automap_owner(object);
-            if (entity) {
-                const auto type=*reinterpret_cast<uintptr_t*>(entity);
-                char entity_name[64]{};
-                if ((type!=image+0x2c1f300 && type!=image+0x2bf12f0) ||
-                    !automap_name(entity+0x40,entity_name) || std::strcmp(name,entity_name)) {
-                    ++automap_cursor; continue;
-                }
+            if (!automap_name(key,name) || !automap_checked(snapshot,map_name,name) ||
+                *reinterpret_cast<int32_t*>(object+0x134)==3) {
+                ++automap_cursor; continue;
             }
-            // A stale weak owner is allowed only for this exact catalog-owned AP
-            // key on its exact map. No arbitrary entity or marker can be erased.
-            automap_erase(owner,key);
-            AutomapLists after{}; char next[64]{};
-            if (!automap_lists(owner,after) || after.count!=list.count-1 ||
-                (automap_cursor<static_cast<uint32_t>(after.count) &&
-                 (!automap_name(after.keys+static_cast<uintptr_t>(automap_cursor)*0x30,next) || !std::strcmp(name,next)))) {
+            if (!automap_set_collected(system,key,object)) { automap_fault.store(2); break; }
+            AutomapLists after{}; char after_name[64]{};
+            if (!automap_lists(owner,after) || after.count!=list.count ||
+                after.keys!=list.keys || after.values!=list.values ||
+                !automap_name(after.keys+static_cast<uintptr_t>(automap_cursor)*0x30,after_name) ||
+                std::strcmp(name,after_name) ||
+                *reinterpret_cast<int32_t*>(after.values+static_cast<uintptr_t>(automap_cursor)*0x150+0x134)!=3) {
                 automap_fault.store(2); break;
             }
-            ++removed; // Compaction moved the next native key into this index.
+            ++collected; ++automap_cursor;
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { automap_fault.store(GetExceptionCode()); }
     AcquireSRWLockExclusive(&automap_lock);
-    automap_scanned+=scanned; automap_removed+=removed; automap_passes+=passes;
+    automap_scanned+=scanned; automap_collected+=collected; automap_passes+=passes;
     ReleaseSRWLockExclusive(&automap_lock);
 }
 
@@ -790,7 +786,7 @@ sc_automap_result automap_request(const sc_automap_request& request) {
     }
     out.known=automap_snapshot.known; out.revision=automap_snapshot.revision;
     out.native_fault=automap_fault.load(); out.scanned=automap_scanned;
-    out.removed=automap_removed; out.completed_passes=automap_passes;
+    out.collected=automap_collected; out.completed_passes=automap_passes;
     ReleaseSRWLockExclusive(&automap_lock); ReleaseSRWLockShared(&lock);
     return out;
 }
@@ -965,6 +961,13 @@ void test_dispatch_adapter(const TestAdapter& adapter, const sc_native_scope& sc
     fixture=adapter; fixture_active=true; status.scope=scope;
 }
 void test_post_frame() { post_frame(); }
+bool test_automap_checked(const sc_automap_request& snapshot,const char* map,const char* name) {
+    return automap_checked(snapshot,map,name);
+}
+bool test_automap_collect(uintptr_t system,uintptr_t key,uintptr_t object,void (*collect)(uintptr_t,uintptr_t)) {
+    automap_collect=collect;
+    return automap_set_collected(system,key,object);
+}
 void test_start(const TestAdapter& adapter, const Snapshot& identity, HANDLE stop_event) {
     fixture = adapter; fixture_active = true;
     engine::LocalMemory memory; engine::Binding source;

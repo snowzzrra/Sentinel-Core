@@ -24,10 +24,18 @@ constexpr const char* campaign_maps[]={"fixture/same-name-and-address", "game/sp
     "game/hub/hub", "game/dlc/e4m1_rig/e4m1_rig", "game/dlc2/e5m2_earth/e5m2_earth"};
 std::atomic<unsigned> gate_stage{0};
 std::atomic<unsigned> observation_case{0};
+std::atomic<unsigned> automap_collect_calls{0};
+uintptr_t automap_test_object=0;
 HANDLE parked = nullptr, wake = nullptr, gate_entered = nullptr, gate_release = nullptr, changed = nullptr;
 int root_object = 0, common_object = 0, slot_object = 0;
 struct Descriptor { uint8_t checkpoint; bool success; uint32_t destination; };
 constexpr uint64_t change_return = UINT64_C(0x1234567800000001);
+
+void fixture_automap_collect(uintptr_t system,uintptr_t key) {
+    ++automap_collect_calls;
+    if (system==0x1234 && key==0x5678)
+        *reinterpret_cast<int32_t*>(automap_test_object+0x134)=3;
+}
 
 __declspec(noinline) void fixture_frame(uintptr_t self);
 __declspec(noinline) void call_frame() { fixture_frame(reinterpret_cast<uintptr_t>(&common_object)); }
@@ -185,6 +193,19 @@ std::wstring retrieve_args(const sc_diagnostic_request& r, bool cancel) {
 }
 int wmain(int argc, wchar_t** argv) {
     CHECK(argc == 3); const wchar_t* probe = argv[1];
+    sc_automap_request automap{}; automap.known=1;
+    automap.checked_locations[0]|=uint64_t{1}<<(7770001-SC_AUTOMAP_LOCATION_BASE);
+    CHECK(native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro","ap_location_visual_7770001"));
+    CHECK(!native::test_automap_checked(automap,"game/sp/e1m2_battle/e1m2_battle","ap_location_visual_7770001"));
+    std::array<uint8_t,0x150> automap_entry{}; automap_test_object=reinterpret_cast<uintptr_t>(automap_entry.data());
+    *reinterpret_cast<int32_t*>(automap_test_object+0x134)=1;
+    CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
+    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3 && automap_collect_calls==1);
+    CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
+    CHECK(automap_collect_calls==1);
+    *reinterpret_cast<int32_t*>(automap_test_object+0x134)=1;
+    CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
+    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3 && automap_collect_calls==2);
     parked = CreateEventW(nullptr, TRUE, FALSE, nullptr); wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     gate_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr); gate_release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     changed = CreateEventW(nullptr, TRUE, FALSE, nullptr);

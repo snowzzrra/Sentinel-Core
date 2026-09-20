@@ -1585,7 +1585,7 @@ template<class Codec> bool automap_values(Codec& c,sc_automap_result& v) {
     for (auto& b:v.nonce) c.byte(b);
     for (auto& ch:v.namespace_id) { auto b=static_cast<uint8_t>(ch); c.byte(b); ch=static_cast<char>(b); }
     c.u32(v.kind); c.u32(v.outcome); c.u32(v.known); c.u32(v.native_fault);
-    c.u64(v.revision); c.u64(v.scanned); c.u64(v.removed); c.u64(v.completed_passes);
+    c.u64(v.revision); c.u64(v.scanned); c.u64(v.collected); c.u64(v.completed_passes);
     return v.abi_version==SC_AUTOMAP_ABI_VERSION && !v.namespace_id[64] && v.known<=1 &&
         v.kind>=SC_AUTOMAP_PUBLISH && v.kind<=SC_AUTOMAP_OBSERVE && v.outcome<=SC_AUTOMAP_REGRESSION;
 }

@@ -405,10 +405,15 @@ static int automap_command(int argc,wchar_t** argv) {
         std::printf("{\"result\":\"%s\"}\n",sentinel::result_name(result.result)); return 1;
     }
     const auto& a=result.automap;
-    std::printf("{\"result\":\"ok\",\"outcome\":%u,\"known\":%u,\"revision\":%llu,\"native_fault\":%u,"
-        "\"scanned\":%llu,\"removed\":%llu,\"completed_passes\":%llu}\n",a.outcome,a.known,
+    std::printf("{\"result\":\"ok\",\"build_id\":\"%s\",\"namespace\":\"%s\",\"request_id\":%llu,"
+        "\"pid\":%u,\"process_created\":%llu,\"lifecycle_generation\":%llu,"
+        "\"outcome\":%u,\"known\":%u,\"revision\":%llu,\"native_fault\":%u,"
+        "\"scanned\":%llu,\"collected\":%llu,\"completed_passes\":%llu}\n",
+        result.snapshot.core.build_id,a.namespace_id,static_cast<unsigned long long>(a.request_id),a.scope.pid,
+        static_cast<unsigned long long>(a.scope.process_created),static_cast<unsigned long long>(a.scope.lifecycle_generation),
+        a.outcome,a.known,
         static_cast<unsigned long long>(a.revision),a.native_fault,static_cast<unsigned long long>(a.scanned),
-        static_cast<unsigned long long>(a.removed),static_cast<unsigned long long>(a.completed_passes));
+        static_cast<unsigned long long>(a.collected),static_cast<unsigned long long>(a.completed_passes));
     return a.outcome==SC_AUTOMAP_ACCEPTED?0:1;
 }
 int deathlink_command(int argc, wchar_t** argv);
