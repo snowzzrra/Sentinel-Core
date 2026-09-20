@@ -33,6 +33,14 @@ struct Calls {
                            uint32_t hammer_tier, uint32_t selected) = nullptr;
 };
 
+// Pure acquisition-preservation decision for the native Special path.
+// `before_decl`/`before_item` describe the weapon actually in hands immediately
+// before a physical acquisition (item zero when it does not belong to the
+// current inventory); `after_decl` is the weapon in hands afterwards. The
+// preferred Special selection is a separate concept and is never derived here.
+enum class AcquisitionRestore { none, equip_prior, fail_closed };
+AcquisitionRestore acquisition_restore(uintptr_t before_decl, uintptr_t before_item, uintptr_t after_decl);
+
 // Called by the native input seam on the validated game thread. Creates one
 // pending use-request at most; a press while a live request is pending is
 // coalesced and never queued twice.

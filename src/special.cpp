@@ -102,6 +102,15 @@ bool expire_pending_locked(uint64_t now_ms) {
 }
 } // namespace
 
+// The acquisition may intrinsically switch the weapon in hands. A changed
+// declaration is only restored when the prior item was freshly validated
+// against the current inventory; otherwise the caller fails closed instead of
+// fabricating or replaying a prior selection.
+AcquisitionRestore acquisition_restore(uintptr_t before_decl, uintptr_t before_item, uintptr_t after_decl) {
+    if (!before_decl || after_decl == before_decl) return AcquisitionRestore::none;
+    return before_item ? AcquisitionRestore::equip_prior : AcquisitionRestore::fail_closed;
+}
+
 bool valid(const sc_special_request& r) {
     if (r.namespace_id[64] || r.kind > SC_SPECIAL_REFILL_EXECUTE) return false;
     for (size_t i = 0; i < 64; ++i) {

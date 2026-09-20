@@ -177,18 +177,20 @@ char hud_element_setup_detour(uintptr_t element) {
     return original_hud_element_setup ? original_hud_element_setup(element) : 0;
 }
 
-struct PersistedSelection {
-    uint32_t selected = SC_SPECIAL_WEAPON_NONE;
+// The weapon actually in hands before a physical acquisition; separate from the
+// preferred Special selection owned by the generic model. `item` is zero when
+// the declaration does not belong to the current valid inventory, so the caller
+// fails closed instead of restoring a stale or fabricated handle.
+struct HeldWeapon {
+    uintptr_t decl = 0;
     uintptr_t item = 0;
 };
 
-PersistedSelection selection_snapshot(uintptr_t p, uintptr_t inv, uintptr_t crucible_decl, uintptr_t hammer_decl) {
-    PersistedSelection result{};
+HeldWeapon held_weapon_snapshot(uintptr_t p, uintptr_t inv) {
+    HeldWeapon result{};
     const auto decl = current_weapon_decl(p);
     if (!decl) return result;
-    if (crucible_decl && decl == crucible_decl) result.selected = SC_SPECIAL_WEAPON_CRUCIBLE;
-    else if (hammer_decl && decl == hammer_decl) result.selected = SC_SPECIAL_WEAPON_HAMMER;
-    else return result;
+    result.decl = decl;
     result.item = find_item(inv, decl);
     return result;
 }
@@ -268,9 +270,7 @@ uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, 
         uintptr_t perk_decls[2]{};
         uint8_t effective_perks = 0;
         if (upgraded && !hammer_perks(p, perk_decls, effective_perks)) return ERROR_NOT_SUPPORTED;
-        const auto crucible_decl = find_decl(CRUCIBLE_PATH);
-        const auto hammer_decl = find_decl(HAMMER_PATH);
-        const auto before = selection_snapshot(p, inv, crucible_decl, hammer_decl);
+        const auto before = held_weapon_snapshot(p, inv);
 
         uintptr_t decl = 0, item = 0;
         bool mutated = false;
@@ -290,11 +290,13 @@ uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, 
         }
 
         // An acquisition may intrinsically switch the active weapon. Restore the
-        // player's prior valid selection instead of inheriting the acquisition.
-        if (mutated && before.selected != SC_SPECIAL_WEAPON_NONE) {
-            const auto after = selection_snapshot(p, inv, crucible_decl, hammer_decl);
-            if (after.selected != before.selected &&
-                (!before.item || !equip_item(p, before.item))) return 6;
+        // exact prior weapon in hands, ordinary or Special, instead of inheriting
+        // the acquisition; a prior item that cannot be freshly validated fails
+        // closed instead of guessing.
+        if (mutated) {
+            const auto decision = acquisition_restore(before.decl, before.item, current_weapon_decl(p));
+            if (decision == AcquisitionRestore::fail_closed) return 6;
+            if (decision == AcquisitionRestore::equip_prior && !equip_item(p, before.item)) return 6;
         }
 
         SnapshotFacts facts{};

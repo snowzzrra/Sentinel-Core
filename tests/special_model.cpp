@@ -101,5 +101,26 @@ int main() {
     sentinel::special::execute(command, result, calls(invalid));
     CHECK(result.outcome == SC_SPECIAL_OUTCOME_NO_PLAYER && invalid.ensure_calls == 0);
 
-    std::puts("PASS special Hammer first acquisition, effective readback, provider, duplicate, selection and context contracts");
+    // Acquisition preservation: normal weapon held -> Hammer acquisition ->
+    // normal weapon restored. The decision seam carries declaration/item values
+    // only; the native caller owns the qualified EquipItem call and fail-closed
+    // reporting. Crucible and Hammer held share the same equip_prior path.
+    constexpr uintptr_t normal_weapon = 0x1000, other_weapon = 0x2000;
+    constexpr uintptr_t crucible = 0x3000, hammer = 0x4000;
+    CHECK(sentinel::special::acquisition_restore(normal_weapon, normal_weapon, hammer) ==
+          sentinel::special::AcquisitionRestore::equip_prior);
+    CHECK(sentinel::special::acquisition_restore(crucible, crucible, hammer) ==
+          sentinel::special::AcquisitionRestore::equip_prior);
+    CHECK(sentinel::special::acquisition_restore(hammer, hammer, crucible) ==
+          sentinel::special::AcquisitionRestore::equip_prior);
+    CHECK(sentinel::special::acquisition_restore(0, 0, hammer) ==
+          sentinel::special::AcquisitionRestore::none);
+    CHECK(sentinel::special::acquisition_restore(hammer, hammer, hammer) ==
+          sentinel::special::AcquisitionRestore::none);
+    CHECK(sentinel::special::acquisition_restore(other_weapon, 0, hammer) ==
+          sentinel::special::AcquisitionRestore::fail_closed);
+    CHECK(sentinel::special::acquisition_restore(crucible, 0, hammer) ==
+          sentinel::special::AcquisitionRestore::fail_closed);
+
+    std::puts("PASS special Hammer first acquisition, effective readback, provider, duplicate, selection, context and held-weapon restore contracts");
 }
