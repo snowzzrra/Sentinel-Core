@@ -75,6 +75,7 @@ void fill_facts(const SnapshotFacts& before, const State& state, sc_special_resu
     out.native_hammer = before.native_hammer;
     out.native_hammer_perks = before.native_hammer_perks;
     out.native_selected = before.native_selected;
+    if (before.selection_policy) out.flags |= SC_SPECIAL_FLAG_SELECTION_POLICY;
     out.native_state_known = before.known;
     if (before.known & SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE) {
         out.crucible_charge = before.crucible_charge;
@@ -271,6 +272,8 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             ReleaseSRWLockExclusive(&state_lock);
             if ((before.known & after.known & SC_SPECIAL_KNOWN_SELECTION) &&
                 after.native_selected == before.native_selected) out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
+            if (before.held_weapon_decl && before.held_weapon_decl == after.held_weapon_decl)
+                out.flags |= SC_SPECIAL_FLAG_HELD_WEAPON_PRESERVED;
             if ((before.known & after.known & SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE) &&
                 after.crucible_charge == before.crucible_charge &&
                 after.crucible_charge_max == before.crucible_charge_max)
@@ -312,7 +315,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
         const bool already = (before.known & SC_SPECIAL_KNOWN_SELECTION) && before.native_selected == r.selected;
         ReleaseSRWLockExclusive(&state_lock);
 
-        out.native_exception = already ? 0 : c.select(c.context, player, r.selected);
+        out.native_exception = c.select(c.context, player, r.selected);
 
         SnapshotFacts after{};
         const bool read_ok = c.read(c.context, player, after);
@@ -320,7 +323,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
             AcquireSRWLockExclusive(&state_lock);
             adopt_native_locked(after);
-            // Native player state remains the truth for the current projection.
+            // The read callback reports the applied route and its authority.
             fill_facts(after, shared_state, out);
             ReleaseSRWLockExclusive(&state_lock);
         }

@@ -33,8 +33,8 @@ enum {
     SC_SPECIAL_HAMMER_TIER_UPGRADED = 2
 };
 
-/* native_state_known: which native facts could actually be read. Unknown must
-   never be treated as absent. */
+/* native_state_known: observed facts; SELECTION with SELECTION_POLICY identifies
+   the applied Core route rather than a vanilla field. Unknown is not absent. */
 enum {
     SC_SPECIAL_KNOWN_CRUCIBLE          = 1u << 0,
     SC_SPECIAL_KNOWN_HAMMER            = 1u << 1,
@@ -103,7 +103,9 @@ enum {
     SC_SPECIAL_FLAG_REFILL_EXECUTED      = 1u << 8,
     SC_SPECIAL_FLAG_REFILL_EXPIRED       = 1u << 9,
     SC_SPECIAL_FLAG_HUD_PRESENTED        = 1u << 10,
-    SC_SPECIAL_FLAG_REFILL_UNVERIFIED    = 1u << 11
+    SC_SPECIAL_FLAG_REFILL_UNVERIFIED    = 1u << 11,
+    SC_SPECIAL_FLAG_SELECTION_POLICY     = 1u << 12,
+    SC_SPECIAL_FLAG_HELD_WEAPON_PRESERVED = 1u << 13
 };
 
 typedef struct sc_special_result {
@@ -114,7 +116,7 @@ typedef struct sc_special_result {
     uint32_t outcome, flags, native_exception;
     uint32_t owns_crucible, owns_hammer, hammer_tier, selected;      /* shared logical run state */
     uint32_t native_crucible, native_hammer, native_hammer_perks;   /* native materialization */
-    uint32_t native_selected;                                        /* observed native projection */
+    uint32_t native_selected;                                        /* applied route; POLICY flag identifies Core authority */
     uint32_t native_state_known;                                     /* SC_SPECIAL_KNOWN_* */
     uint32_t crucible_charge, crucible_charge_max;                   /* native resource observation */
     uint32_t refill_balance, refill_flags;                           /* AP-authoritative projection */

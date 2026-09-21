@@ -222,6 +222,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"special_installation\":"+b_trace(special::installation_diagnostics())+
                 ",\"arsenal_installation\":"+b_trace(arsenal::installation_diagnostics())+
                 ",\"special_input\":"+b_trace(special::input_diagnostics())+
+                ",\"special_route\":"+b_trace(special::route_diagnostics())+
                 ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
             if (facts != last) {
                 const auto& wide_key = prelaunch::diagnostic_key();

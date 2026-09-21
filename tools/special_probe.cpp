@@ -30,7 +30,7 @@ int special_command(int argc, wchar_t** argv) {
         "\"kind\":%u,\"outcome\":%u,\"flags\":%u,\"native_exception\":%u,"
         "\"owns_crucible\":%u,\"owns_hammer\":%u,\"hammer_tier\":%u,\"selected\":%u,"
         "\"native_crucible\":%u,\"native_hammer\":%u,\"native_hammer_perks\":%u,"
-        "\"native_selected\":%u,\"native_state_known\":%u,"
+        "\"native_selected\":%u,\"native_state_known\":%u,\"selection_source\":\"%s\","
         "\"crucible_charge\":%u,\"crucible_charge_max\":%u,"
         "\"refill_balance\":%u,\"refill_flags\":%u,\"refill_request_id\":\"%llu\","
         "\"refill_request_state\":%u,\"refill_executed\":%u,\"refill_execution_id\":\"%llu\","
@@ -40,6 +40,7 @@ int special_command(int argc, wchar_t** argv) {
         sp.owns_crucible, sp.owns_hammer, sp.hammer_tier, sp.selected,
         sp.native_crucible, sp.native_hammer, sp.native_hammer_perks,
         sp.native_selected, sp.native_state_known,
+        (sp.flags & SC_SPECIAL_FLAG_SELECTION_POLICY) ? "core_policy" : "native_observation",
         sp.crucible_charge, sp.crucible_charge_max,
         sp.refill_balance, sp.refill_flags, sp.refill_request_id,
         sp.refill_request_state, sp.refill_executed, sp.refill_execution_id,

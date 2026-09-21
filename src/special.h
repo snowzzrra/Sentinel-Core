@@ -20,6 +20,8 @@ struct SnapshotFacts {
     uint32_t known = 0;                /* SC_SPECIAL_KNOWN_* */
     uint32_t crucible_charge = 0;
     uint32_t crucible_charge_max = 0;
+    uintptr_t held_weapon_decl = 0;
+    bool selection_policy = false;
 };
 
 // Internal production seam; never externally supplied or serialized.
@@ -57,6 +59,7 @@ void install(const engine::Binding&, HANDLE stop);
 bool available();
 save::BSnapshot installation_diagnostics();
 save::BSnapshot input_diagnostics();
+save::BSnapshot route_diagnostics();
 std::wstring input_directory();
 bool admitted(const char* namespace_id);
 void execute_native(const sc_special_request&, sc_special_result&);
