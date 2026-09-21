@@ -3,3 +3,6 @@
 /CMakeUserPresets.json
 *.log
 /artifacts/
+__pycache__/
+*.py[cod]
+/workflow-fixture-*/

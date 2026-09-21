@@ -46,7 +46,7 @@ AcquisitionRestore acquisition_restore(uintptr_t before_decl, uintptr_t before_i
 // coalesced and never queued twice.
 bool create_refill_request(uint64_t now_ms);
 // Uses the same fresh ownership, selection operation and verified preference as IPC.
-void toggle_local(const char* namespace_id, const Calls&);
+sc_special_result toggle_local(const char* namespace_id, const Calls&);
 
 extern Calls calls;
 

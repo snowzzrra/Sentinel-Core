@@ -13,6 +13,7 @@ struct Fixture {
     sentinel::special::SnapshotFacts facts{};
     uint32_t ensure_result = 0;
     unsigned ensure_calls = 0;
+    unsigned select_calls = 0;
     bool materialize = false;
     bool player_present = true;
 };
@@ -35,6 +36,12 @@ uint32_t ensure(void* context, uintptr_t, uint32_t crucible, uint32_t hammer, ui
     }
     return 0;
 }
+uint32_t select(void* context, uintptr_t, uint32_t selected) {
+    auto& fixture = *static_cast<Fixture*>(context);
+    ++fixture.select_calls;
+    fixture.facts.native_selected = static_cast<uint8_t>(selected);
+    return 0;
+}
 
 sentinel::special::Calls calls(Fixture& fixture) {
     sentinel::special::Calls result{};
@@ -42,6 +49,7 @@ sentinel::special::Calls calls(Fixture& fixture) {
     result.player = player;
     result.read = read;
     result.ensure = ensure;
+    result.select = select;
     return result;
 }
 
@@ -100,6 +108,20 @@ int main() {
     result = sentinel::special::initial(command);
     sentinel::special::execute(command, result, calls(invalid));
     CHECK(result.outcome == SC_SPECIAL_OUTCOME_NO_PLAYER && invalid.ensure_calls == 0);
+
+    Fixture toggle{};
+    toggle.facts = {1, 1, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
+    sentinel::special::reset_session("special-local-toggle");
+    result = sentinel::special::toggle_local("special-local-toggle", calls(toggle));
+    CHECK(result.kind == SC_SPECIAL_SELECT && result.outcome == SC_SPECIAL_OUTCOME_OK);
+    CHECK(result.selected == SC_SPECIAL_WEAPON_HAMMER && toggle.select_calls == 1);
+
+    Fixture no_owned{};
+    no_owned.facts = {0, 0, 0, SC_SPECIAL_WEAPON_NONE, known, 0, 0};
+    sentinel::special::reset_session("special-local-no-owned");
+    result = sentinel::special::toggle_local("special-local-no-owned", calls(no_owned));
+    CHECK(result.kind == SC_SPECIAL_OBSERVE && result.outcome == SC_SPECIAL_OUTCOME_OK);
+    CHECK(no_owned.select_calls == 0);
 
     // Acquisition preservation: normal weapon held -> Hammer acquisition ->
     // normal weapon restored. The decision seam carries declaration/item values

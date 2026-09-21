@@ -475,9 +475,36 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
         const bool down = vk && (GetAsyncKeyState(vk) & 0x8000) != 0;
         if (!input_latches[i].press(vk, down, now, enabled)) continue;
         // Native reconstruction callbacks may invalidate the outer tick scope.
-        if (!native::gameplay_admitted()) continue;
+        const bool admitted = native::gameplay_admitted();
+        save::session().btrace.record(save::BStage::special_input,
+            admitted ? save::BStatus::entered : save::BStatus::refused,
+            admitted ? "local_control_admitted" : "local_control_not_admitted", now,
+            {{"action", i}, {"vk", vk}, {"safe_gameplay", safe_gameplay},
+             {"player", p != 0}, {"foreground", foreground_pid == GetCurrentProcessId()},
+             {"gameplay_admitted", admitted}});
+        if (!admitted) continue;
         if (!i) create_refill_request(now);
-        else toggle_local(save::session().namespace_id().c_str(), calls);
+        else {
+            const auto result = toggle_local(save::session().namespace_id().c_str(), calls);
+            const auto known = SC_SPECIAL_KNOWN_CRUCIBLE | SC_SPECIAL_KNOWN_HAMMER;
+            const bool selected = result.kind == SC_SPECIAL_SELECT &&
+                result.outcome == SC_SPECIAL_OUTCOME_OK;
+            const char* predicate = selected ? "local_toggle_selected" :
+                result.kind != SC_SPECIAL_SELECT && result.outcome != SC_SPECIAL_OUTCOME_OK
+                    ? "local_toggle_observe_failed" :
+                result.kind != SC_SPECIAL_SELECT && (result.native_state_known & known) != known
+                    ? "local_toggle_observe_incomplete" :
+                result.kind != SC_SPECIAL_SELECT ? "local_toggle_no_owned_weapon" :
+                "local_toggle_select_failed";
+            save::session().btrace.record(save::BStage::special_toggle,
+                selected ? save::BStatus::succeeded : save::BStatus::refused,
+                predicate, now,
+                {{"kind", result.kind}, {"outcome", result.outcome},
+                 {"native_known", result.native_state_known},
+                 {"native_crucible", result.native_crucible},
+                 {"native_hammer", result.native_hammer},
+                 {"selected", result.selected}, {"native_selected", result.native_selected}});
+        }
     }
 }
 
