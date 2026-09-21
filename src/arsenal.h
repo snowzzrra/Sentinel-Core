@@ -4,6 +4,7 @@
 #include "engine_observer.h"
 #include <windows.h>
 #include <cstdint>
+#include "save_b_trace.h"
 
 namespace sentinel::arsenal {
 
@@ -49,6 +50,7 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
 
 void install(const engine::Binding& binding, HANDLE stop);
 bool available();
+save::BSnapshot installation_diagnostics();
 bool admitted(const char* id);
 void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out);
 void reset_session();

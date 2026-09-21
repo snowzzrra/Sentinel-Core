@@ -252,6 +252,8 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             ReleaseSRWLockExclusive(&state_lock);
             out.flags |= SC_SPECIAL_FLAG_AFTER_VALID | SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE |
                 SC_SPECIAL_FLAG_RESOURCE_PRESERVED;
+            if (before.known & SC_SPECIAL_KNOWN_SELECTION)
+                out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
             out.outcome = SC_SPECIAL_OUTCOME_NOOP;
             return;
         }
@@ -269,6 +271,10 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             ReleaseSRWLockExclusive(&state_lock);
             if ((before.known & after.known & SC_SPECIAL_KNOWN_SELECTION) &&
                 after.native_selected == before.native_selected) out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
+            if ((before.known & after.known & SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE) &&
+                after.crucible_charge == before.crucible_charge &&
+                after.crucible_charge_max == before.crucible_charge_max)
+                out.flags |= SC_SPECIAL_FLAG_RESOURCE_PRESERVED;
         }
         out.flags |= SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE;
         if (out.native_exception == ERROR_NOT_SUPPORTED) {

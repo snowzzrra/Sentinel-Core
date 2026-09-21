@@ -13,6 +13,9 @@ namespace sentinel::special {
 namespace {
 
 std::atomic<bool> ready{false};
+save::BTrace installation_trace, input_trace;
+SRWLOCK directory_lock = SRWLOCK_INIT;
+std::wstring controls_directory;
 uintptr_t image_base = 0, engine_root = 0;
 uint32_t image_size = 0;
 SnapshotFacts native_facts{};
@@ -456,26 +459,52 @@ void refresh_input_config() {
     const auto now = GetTickCount64();
     if (now - key_state_checked.load(std::memory_order_relaxed) < 250) return;
     key_state_checked.store(now, std::memory_order_relaxed);
-    const auto keys = controls::read(L"base\\ap_queue");
+    wchar_t absolute[MAX_PATH]{};
+    const auto length = GetFullPathNameW(L"base\\ap_queue", MAX_PATH, absolute, nullptr);
+    const bool path_valid = length && length < MAX_PATH;
+    AcquireSRWLockExclusive(&directory_lock);
+    controls_directory = path_valid ? absolute : L"";
+    ReleaseSRWLockExclusive(&directory_lock);
+    const auto keys = path_valid ? controls::read(absolute) : controls::Bindings{};
     // A shared key cannot dispatch two actions; conflicting files disable both.
-    const unsigned packed = keys.conflict() ? 0u :
+    const unsigned packed = !path_valid || keys.conflict() ? 0u :
         static_cast<unsigned>(keys.keys[0] | (keys.keys[1] << 8));
     configured_keys.store(packed, std::memory_order_relaxed);
+    input_trace.record(save::BStage::profile_read, save::BStatus::succeeded, "control_bindings", 0,
+        {{"path_valid", path_valid}, {"refill_vk", keys.keys[0]}, {"toggle_vk", keys.keys[1]},
+         {"invalid", keys.invalid}, {"conflict", keys.conflict()}});
 }
 
 void poll_input(uintptr_t p, bool safe_gameplay) {
-    if (!ready.load(std::memory_order_acquire)) return;
+    static bool observed_down[2]{};
+    static uint32_t attempts[2]{}, dispatches[2]{}, gate_refusals[2]{}, admission_refusals[2]{};
+    const auto count = [](uint32_t& value) { if (value != UINT32_MAX) ++value; };
+    const bool installed = ready.load(std::memory_order_acquire);
     const auto now = GetTickCount64();
     const auto keys = configured_keys.load(std::memory_order_relaxed);
     DWORD foreground_pid = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &foreground_pid);
-    const bool enabled = safe_gameplay && p && foreground_pid == GetCurrentProcessId();
+    const bool enabled = installed && safe_gameplay && p && foreground_pid == GetCurrentProcessId();
+    input_trace.record(save::BStage::special_input, enabled ? save::BStatus::succeeded : save::BStatus::pending,
+        "input_gate", 0, {{"ready", installed}, {"safe_gameplay", safe_gameplay}, {"player", p != 0},
+                         {"foreground", foreground_pid == GetCurrentProcessId()}, {"keys", keys}});
     for (unsigned i = 0; i < 2; ++i) {
         const auto vk = static_cast<int>((keys >> (i * 8)) & 0xff);
         const bool down = vk && (GetAsyncKeyState(vk) & 0x8000) != 0;
-        if (!input_latches[i].press(vk, down, now, enabled)) continue;
+        const bool attempted = down && !observed_down[i];
+        observed_down[i] = down;
+        if (attempted) { count(attempts[i]); if (!enabled) count(gate_refusals[i]); }
+        const bool pressed = input_latches[i].press(vk, down, now, enabled);
+        if (pressed) count(dispatches[i]);
+        input_trace.record(i ? save::BStage::special_toggle : save::BStage::profile_choice,
+            attempted && !enabled ? save::BStatus::refused : pressed ? save::BStatus::entered : save::BStatus::pending, "input_latch", 0,
+            {{"vk", vk}, {"down", down}, {"enabled", enabled}, {"latched", input_latches[i].latched},
+             {"dispatched", pressed}, {"attempts", attempts[i]}, {"dispatches", dispatches[i]},
+             {"gate_refusals", gate_refusals[i]}, {"admission_refusals", admission_refusals[i]}});
+        if (!pressed) continue;
         // Native reconstruction callbacks may invalidate the outer tick scope.
         const bool admitted = native::gameplay_admitted();
+        if (!admitted) count(admission_refusals[i]);
         save::session().btrace.record(save::BStage::special_input,
             admitted ? save::BStatus::entered : save::BStatus::refused,
             admitted ? "local_control_admitted" : "local_control_not_admitted", now,
@@ -509,6 +538,14 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
 }
 
 bool available() { return ready.load(std::memory_order_acquire); }
+save::BSnapshot installation_diagnostics() { return installation_trace.snapshot(); }
+save::BSnapshot input_diagnostics() { return input_trace.snapshot(); }
+std::wstring input_directory() {
+    AcquireSRWLockShared(&directory_lock);
+    auto result = controls_directory;
+    ReleaseSRWLockShared(&directory_lock);
+    return result;
+}
 
 bool admitted(const char* id) {
 #ifdef SC_NATIVE_TESTING
@@ -533,6 +570,7 @@ void use_fixture(Calls value, const char* id) {
 #endif
 
 void install(const engine::Binding& binding, HANDLE stop) {
+    installation_trace.record(save::BStage::native_start, save::BStatus::entered, "validating");
     image_base = binding.image.base;
     image_size = binding.image.size;
     engine_root = binding.root;
@@ -562,17 +600,38 @@ void install(const engine::Binding& binding, HANDLE stop) {
         for (size_t n = 0; n < target.bytes.size(); ++n)
             target.bytes[n] = static_cast<uint8_t>(digit(s.bytes[n * 2]) * 16 + digit(s.bytes[n * 2 + 1]));
         std::array<uint8_t, 32> actual{};
-        if (!binding.image.contains(s.offset, actual.size(), IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0) ||
-            memory.copy(target.address, actual.data(), actual.size()).reason || actual != target.bytes) return;
+        const bool section = binding.image.contains(s.offset, actual.size(), IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0);
+        const auto read = memory.copy(target.address, actual.data(), actual.size());
+        uint64_t expected_words[4]{}, actual_words[4]{};
+        std::memcpy(expected_words, target.bytes.data(), 32);
+        std::memcpy(actual_words, actual.data(), 32);
+        const bool valid = section && !read.reason && actual == target.bytes;
+        installation_trace.record(save::BStage::native_start, valid ? save::BStatus::entered : save::BStatus::refused,
+            valid ? "site_validated" : "site_refused", 0,
+            {{"rva", s.offset}, {"section", section}, {"read_reason", read.reason}, {"read_error", read.error},
+             {"expected0", expected_words[0]}, {"expected1", expected_words[1]},
+             {"expected2", expected_words[2]}, {"expected3", expected_words[3]},
+             {"observed0", actual_words[0]}, {"observed1", actual_words[1]},
+             {"observed2", actual_words[2]}, {"observed3", actual_words[3]}});
+        if (!valid) return;
     }
 
     constexpr uint32_t expected_vtable_slots[] = {0x1641b80, 0x16466a0, 0x1647be0, 0x355140};
     std::array<uintptr_t, std::size(expected_vtable_slots)> actual_vtable{};
     if (!binding.image.contains(rva_equipment_upgrade_vtable, sizeof(actual_vtable), IMAGE_SCN_MEM_READ, 0) ||
         memory.copy(image_base + rva_equipment_upgrade_vtable, actual_vtable.data(), sizeof(actual_vtable)).reason)
+    {
+        installation_trace.record(save::BStage::root_layout, save::BStatus::refused, "vtable_unreadable", 0,
+                                  {{"rva", rva_equipment_upgrade_vtable}});
         return;
+    }
     for (size_t i = 0; i < actual_vtable.size(); ++i)
-        if (actual_vtable[i] != image_base + expected_vtable_slots[i]) return;
+        if (actual_vtable[i] != image_base + expected_vtable_slots[i]) {
+            installation_trace.record(save::BStage::root_layout, save::BStatus::refused, "vtable_mismatch", 0,
+                {{"rva", rva_equipment_upgrade_vtable}, {"slot", i}, {"expected", image_base + expected_vtable_slots[i]},
+                 {"observed", actual_vtable[i]}});
+            return;
+        }
 
     // HUD capture is optional presentation: a failed hook validation or install
     // must not disable ownership/selection/refill, it only disables the on-screen
@@ -584,14 +643,20 @@ void install(const engine::Binding& binding, HANDLE stop) {
     const auto digit = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
     for (size_t n = 0; n < hud_target.bytes.size(); ++n)
         hud_target.bytes[n] = static_cast<uint8_t>(digit(hud_bytes[n * 2]) * 16 + digit(hud_bytes[n * 2 + 1]));
-    if (!native::validate_target(memory, binding.image, hud_target, stop, deadline) &&
+    const auto hud_validation = native::validate_target(memory, binding.image, hud_target, stop, deadline);
+    const auto hud_created = hud_validation ? MH_UNKNOWN :
         MH_CreateHook(reinterpret_cast<void*>(image_base + rva_hud_element_setup),
                       reinterpret_cast<void*>(hud_element_setup_detour),
-                      reinterpret_cast<void**>(&original_hud_element_setup)) == MH_OK &&
-        MH_EnableHook(reinterpret_cast<void*>(image_base + rva_hud_element_setup)) == MH_OK) {
-        // Hook armed; the element pointer arrives when the HUD is constructed.
-    }
+                      reinterpret_cast<void**>(&original_hud_element_setup));
+    const auto hud_enabled = hud_created == MH_OK ?
+        MH_EnableHook(reinterpret_cast<void*>(image_base + rva_hud_element_setup)) : MH_UNKNOWN;
+    installation_trace.record(save::BStage::profile_publish,
+        hud_enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused, "optional_hud_hook", 0,
+        {{"rva", rva_hud_element_setup}, {"validation", hud_validation},
+         {"create_status", static_cast<uint64_t>(hud_created)}, {"enable_status", static_cast<uint64_t>(hud_enabled)}});
     ready.store(true, std::memory_order_release);
+    installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "installed", 0,
+        {{"hud_hook", hud_enabled == MH_OK}});
 }
 
 } // namespace sentinel::special

@@ -3,6 +3,8 @@
 #include "engine_observer.h"
 #include <windows.h>
 #include <cstdint>
+#include <string>
+#include "save_b_trace.h"
 
 namespace sentinel::special {
 
@@ -53,6 +55,9 @@ extern Calls calls;
 void execute(const sc_special_request&, sc_special_result&, const Calls&);
 void install(const engine::Binding&, HANDLE stop);
 bool available();
+save::BSnapshot installation_diagnostics();
+save::BSnapshot input_diagnostics();
+std::wstring input_directory();
 bool admitted(const char* namespace_id);
 void execute_native(const sc_special_request&, sc_special_result&);
 void bind_run_state_if_needed(uintptr_t player, uint64_t generation = 0);

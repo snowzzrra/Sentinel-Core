@@ -24,7 +24,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-add_compile_options(/W4 /WX /permissive-)
+add_compile_options(/W4 /WX /permissive- /Z7)
+add_link_options(/DEBUG /OPT:REF /OPT:ICF)
 add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
 
 # Local Windows candidate only: PE forwarders bind to this host's real System32.
@@ -173,7 +174,6 @@ set_tests_properties(native_profile_selection_contract PROPERTIES TIMEOUT 15)
   add_test(NAME native_catalog_selection_contract COMMAND sentinel_save_session_tests --catalog)
   set_tests_properties(native_catalog_selection_contract PROPERTIES TIMEOUT 15)
   add_test(NAME native_profile_prerequisite_contract COMMAND sentinel_save_session_tests --prerequisite)
-  # Includes two real delays beyond the removed ten-second Core deadline.
   set_tests_properties(native_profile_prerequisite_contract PROPERTIES TIMEOUT 45)
 add_executable(sentinel_save_observer_tests tests/save_observer.cpp)
 target_link_libraries(sentinel_save_observer_tests PRIVATE sentinel_observer sentinel_protocol sentinel_core)

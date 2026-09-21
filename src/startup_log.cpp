@@ -1,6 +1,13 @@
 #include "startup_log.h"
 #include "save_session.h"
 #include "prelaunch.h"
+#include "special.h"
+#include "arsenal.h"
+#include "inventory.h"
+#include "runes.h"
+#include "weapon_points.h"
+#include "deathlink.h"
+#include <filesystem>
 #include <windows.h>
 #include <string>
 #include <cstdio>
@@ -207,7 +214,15 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"prepared_routes\":" + std::to_string(session.prepared_routes) + ",\"required_routes\":" + std::to_string(session.required_routes) +
                 ",\"namespace_id\":\"" + session.namespace_id + "\"},\"startup_route\":" + startup_route(save::session().unrouted_trace()) +
                 ",\"profile\":" + profile(save::session().profile_trace())+",\"campaign\":"+campaign_json+
-                ",\"b_diagnostics\":"+b_trace(save::session().btrace.snapshot());
+                ",\"b_diagnostics\":"+b_trace(save::session().btrace.snapshot())+
+                ",\"domain_installed\":{\"inventory\":"+flag(inventory::available())+
+                ",\"arsenal\":"+flag(arsenal::available())+",\"runes\":"+flag(runes::available())+
+                ",\"weapon_points\":"+flag(weapon_points::available())+",\"special\":"+flag(special::available())+
+                ",\"deathlink\":"+flag(deathlink::available())+"}"+
+                ",\"special_installation\":"+b_trace(special::installation_diagnostics())+
+                ",\"arsenal_installation\":"+b_trace(arsenal::installation_diagnostics())+
+                ",\"special_input\":"+b_trace(special::input_diagnostics())+
+                ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
             if (facts != last) {
                 const auto& wide_key = prelaunch::diagnostic_key();
                 std::string control;

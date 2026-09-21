@@ -293,9 +293,12 @@ bool automap_name(uintptr_t key,char (&name)[64]) {
     return std::strlen(name)==static_cast<size_t>(length);
 }
 bool automap_checked(const sc_automap_request& snapshot,const char* map,const char* name) {
-    constexpr char prefix[]="ap_location_visual_";
-    if (std::strncmp(name,prefix,sizeof(prefix)-1)) return false;
-    const char* digits=name+sizeof(prefix)-1;
+    if (!snapshot.known) return false;
+    constexpr char visual[]="ap_location_visual_", helper[]="ap_automap_location_";
+    const char* digits=nullptr;
+    if (!std::strncmp(name,visual,sizeof(visual)-1)) digits=name+sizeof(visual)-1;
+    else if (!std::strncmp(name,helper,sizeof(helper)-1)) digits=name+sizeof(helper)-1;
+    else return false;
     if (std::strlen(digits)!=7) return false;
     uint32_t id=0;
     for (unsigned i=0;i<7;++i) {
@@ -672,6 +675,8 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             if (mh == MH_OK) installation.hook(SC_INSTALL_UNINITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Uninitialize(); });
         }
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
+        // Special qualifies the shared HUD earnings entry before WUP owns its detour.
+        if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
         // The WUP owner validates and patches the 13ce4c0 entry first; the
         // challenge scope then qualifies the untouched seam/continuation windows
         // and coexists with that detour on the same function.
@@ -680,7 +685,6 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         if (!why && !stopping.load(std::memory_order_acquire)) inventory::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) arsenal::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) runes::install(binding, stop_event);
-    if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
     if (!why && !stopping.load(std::memory_order_acquire)) deathlink::install(binding, stop_event);
     if (!why && !stopping.load(std::memory_order_acquire)) install_automap(binding);
     if (!why && !stopping.load(std::memory_order_acquire)) install_fast_travel(binding);
@@ -872,6 +876,7 @@ sc_special_result submit_special(const sc_special_request& request) {
     const auto now = GetTickCount64(); auto why = prerequisite(now);
     auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
     if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
+    if (!why && !special::available()) why = SC_NATIVE_BINDING_FAILED;
     if (!why && !special::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
     const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &request);
     sc_special_result out = special::initial(request);

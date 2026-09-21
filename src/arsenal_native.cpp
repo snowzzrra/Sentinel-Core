@@ -11,6 +11,7 @@ namespace sentinel::arsenal {
 namespace {
 
 std::atomic<bool> ready{false};
+save::BTrace installation_trace;
 uintptr_t image_base = 0, engine_root = 0;
 uint32_t image_size = 0;
 
@@ -163,6 +164,7 @@ void use_fixture(Calls value, const char* id) {
 #endif
 
 void install(const engine::Binding& binding, HANDLE stop) {
+    installation_trace.record(save::BStage::native_start, save::BStatus::entered, "validating");
     image_base = binding.image.base;
     image_size = binding.image.size;
     engine_root = binding.root;
@@ -176,19 +178,46 @@ void install(const engine::Binding& binding, HANDLE stop) {
     };
     const auto deadline = GetTickCount64() + 10000;
     for (const auto& s : sites) {
-        if (native::validate_target(memory, binding.image, make_target(image_base, s.offset, s.bytes), stop, deadline)) return;
+        const auto target = make_target(image_base, s.offset, s.bytes);
+        const auto reason = native::validate_target(memory, binding.image, target, stop, deadline);
+        std::array<uint8_t, 32> actual{};
+        const auto read = memory.copy(target.address, actual.data(), actual.size());
+        uint64_t expected_words[4]{}, actual_words[4]{};
+        std::memcpy(expected_words, target.bytes.data(), 32);
+        std::memcpy(actual_words, actual.data(), 32);
+        installation_trace.record(save::BStage::native_start, reason ? save::BStatus::refused : save::BStatus::entered,
+            reason ? "site_refused" : "site_validated", 0,
+            {{"rva", s.offset}, {"reason", reason}, {"read_reason", read.reason}, {"read_error", read.error},
+             {"expected0", expected_words[0]}, {"expected1", expected_words[1]},
+             {"expected2", expected_words[2]}, {"expected3", expected_words[3]},
+             {"observed0", actual_words[0]}, {"observed1", actual_words[1]},
+             {"observed2", actual_words[2]}, {"observed3", actual_words[3]}});
+        if (reason) return;
     }
     for (const auto& s : sites) {
         if (s.detour) {
-            if (MH_CreateHook(reinterpret_cast<void*>(image_base + s.offset), s.detour, s.original) != MH_OK) return;
+            const auto status = MH_CreateHook(reinterpret_cast<void*>(image_base + s.offset), s.detour, s.original);
+            if (status != MH_OK) {
+                installation_trace.record(save::BStage::native_start, save::BStatus::refused, "hook_create_failed", 0,
+                    {{"rva", s.offset}, {"native_error", status}});
+                return;
+            }
         }
     }
     for (const auto& s : sites) {
         if (s.detour) {
-            if (MH_EnableHook(reinterpret_cast<void*>(image_base + s.offset)) != MH_OK) return;
+            const auto status = MH_EnableHook(reinterpret_cast<void*>(image_base + s.offset));
+            if (status != MH_OK) {
+                installation_trace.record(save::BStage::native_start, save::BStatus::refused, "hook_enable_failed", 0,
+                    {{"rva", s.offset}, {"native_error", status}});
+                return;
+            }
         }
     }
     ready.store(true, std::memory_order_release);
+    installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "installed", 0, {{"hooks", 3}});
 }
+
+save::BSnapshot installation_diagnostics() { return installation_trace.snapshot(); }
 
 } // namespace sentinel::arsenal

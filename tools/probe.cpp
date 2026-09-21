@@ -405,11 +405,11 @@ static int automap_command(int argc,wchar_t** argv) {
         std::printf("{\"result\":\"%s\"}\n",sentinel::result_name(result.result)); return 1;
     }
     const auto& a=result.automap;
-    std::printf("{\"result\":\"ok\",\"build_id\":\"%s\",\"namespace\":\"%s\",\"request_id\":%llu,"
+    std::printf("{\"result\":\"ok\",\"core_version\":\"%s\",\"core_abi\":%u,\"build_id\":\"%s\",\"namespace\":\"%s\",\"request_id\":%llu,"
         "\"pid\":%u,\"process_created\":%llu,\"lifecycle_generation\":%llu,"
         "\"outcome\":%u,\"known\":%u,\"revision\":%llu,\"native_fault\":%u,"
         "\"scanned\":%llu,\"collected\":%llu,\"completed_passes\":%llu}\n",
-        result.snapshot.core.build_id,a.namespace_id,static_cast<unsigned long long>(a.request_id),a.scope.pid,
+        result.snapshot.core.version,result.snapshot.core.abi_version,result.snapshot.core.build_id,a.namespace_id,static_cast<unsigned long long>(a.request_id),a.scope.pid,
         static_cast<unsigned long long>(a.scope.process_created),static_cast<unsigned long long>(a.scope.lifecycle_generation),
         a.outcome,a.known,
         static_cast<unsigned long long>(a.revision),a.native_fault,static_cast<unsigned long long>(a.scanned),
