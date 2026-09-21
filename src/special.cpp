@@ -333,10 +333,12 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             after.native_selected != r.selected) { out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return; }
         out.outcome = already ? SC_SPECIAL_OUTCOME_NOOP : SC_SPECIAL_OUTCOME_OK;
 
-        AcquireSRWLockExclusive(&state_lock);
-        ++total_operations;
-        out.operations_applied = total_operations;
-        ReleaseSRWLockExclusive(&state_lock);
+        if (!already) {
+            AcquireSRWLockExclusive(&state_lock);
+            ++total_operations;
+            out.operations_applied = total_operations;
+            ReleaseSRWLockExclusive(&state_lock);
+        }
         return;
     }
 

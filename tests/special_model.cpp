@@ -116,6 +116,14 @@ int main() {
     CHECK(result.kind == SC_SPECIAL_SELECT && result.outcome == SC_SPECIAL_OUTCOME_OK);
     CHECK(result.selected == SC_SPECIAL_WEAPON_HAMMER && toggle.select_calls == 1);
 
+    Fixture unchanged{};
+    unchanged.facts = {1, 0, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
+    sentinel::special::reset_session("special-local-unchanged");
+    result = sentinel::special::toggle_local("special-local-unchanged", calls(unchanged));
+    CHECK(result.kind == SC_SPECIAL_SELECT && result.outcome == SC_SPECIAL_OUTCOME_NOOP);
+    CHECK(result.selected == SC_SPECIAL_WEAPON_CRUCIBLE && unchanged.select_calls == 1);
+    CHECK(result.operations_applied == 0);
+
     Fixture no_owned{};
     no_owned.facts = {0, 0, 0, SC_SPECIAL_WEAPON_NONE, known, 0, 0};
     sentinel::special::reset_session("special-local-no-owned");

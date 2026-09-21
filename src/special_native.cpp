@@ -694,10 +694,15 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
         else {
             const auto result = toggle_local(save::session().namespace_id().c_str(), calls);
             const auto known = SC_SPECIAL_KNOWN_CRUCIBLE | SC_SPECIAL_KNOWN_HAMMER;
-            const bool selected = result.kind == SC_SPECIAL_SELECT &&
+            const bool changed = result.kind == SC_SPECIAL_SELECT &&
                 result.outcome == SC_SPECIAL_OUTCOME_OK;
-            if (selected) present_selection(p);
-            const char* predicate = selected ? "local_toggle_selected" :
+            const bool unchanged = result.kind == SC_SPECIAL_SELECT &&
+                result.outcome == SC_SPECIAL_OUTCOME_NOOP &&
+                (result.native_state_known & SC_SPECIAL_KNOWN_SELECTION) &&
+                result.native_selected == result.selected;
+            if (changed) present_selection(p);
+            const char* predicate = changed ? "local_toggle_selected" :
+                unchanged ? "local_toggle_already_selected" :
                 result.kind != SC_SPECIAL_SELECT && result.outcome != SC_SPECIAL_OUTCOME_OK
                     ? "local_toggle_observe_failed" :
                 result.kind != SC_SPECIAL_SELECT && (result.native_state_known & known) != known
@@ -705,7 +710,7 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
                 result.kind != SC_SPECIAL_SELECT ? "local_toggle_no_owned_weapon" :
                 "local_toggle_select_failed";
             save::session().btrace.record(save::BStage::special_toggle,
-                selected ? save::BStatus::succeeded : save::BStatus::refused,
+                changed || unchanged ? save::BStatus::succeeded : save::BStatus::refused,
                 predicate, now,
                 {{"kind", result.kind}, {"outcome", result.outcome},
                  {"native_known", result.native_state_known},
