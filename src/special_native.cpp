@@ -4,6 +4,7 @@
 #include "local_controls.h"
 #include "save_session.h"
 #include "MinHook.h"
+#include "hde/hde64.h"
 #include <atomic>
 #include <cstring>
 #include <cstdio>
@@ -654,6 +655,7 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
     static uint32_t attempts[2]{}, dispatches[2]{}, gate_refusals[2]{}, admission_refusals[2]{};
     const auto count = [](uint32_t& value) { if (value != UINT32_MAX) ++value; };
     const bool installed = ready.load(std::memory_order_acquire);
+    const bool selection_route = route_ready.load(std::memory_order_acquire);
     const auto now = GetTickCount64();
     const auto keys = configured_keys.load(std::memory_order_relaxed);
     DWORD foreground_pid = 0;
@@ -666,13 +668,15 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
         const auto vk = static_cast<int>((keys >> (i * 8)) & 0xff);
         const bool down = vk && (GetAsyncKeyState(vk) & 0x8000) != 0;
         const bool attempted = down && !observed_down[i];
+        const bool action_enabled = enabled && (!i || selection_route);
         observed_down[i] = down;
-        if (attempted) { count(attempts[i]); if (!enabled) count(gate_refusals[i]); }
-        const bool pressed = input_latches[i].press(vk, down, now, enabled);
+        if (attempted) { count(attempts[i]); if (!action_enabled) count(gate_refusals[i]); }
+        const bool pressed = input_latches[i].press(vk, down, now, action_enabled);
         if (pressed) count(dispatches[i]);
         input_trace.record(i ? save::BStage::special_toggle : save::BStage::profile_choice,
-            attempted && !enabled ? save::BStatus::refused : pressed ? save::BStatus::entered : save::BStatus::pending, "input_latch", 0,
-            {{"vk", vk}, {"down", down}, {"enabled", enabled}, {"latched", input_latches[i].latched},
+            attempted && !action_enabled ? save::BStatus::refused : pressed ? save::BStatus::entered : save::BStatus::pending, "input_latch", 0,
+            {{"vk", vk}, {"down", down}, {"enabled", action_enabled}, {"route_ready", selection_route},
+             {"latched", input_latches[i].latched},
              {"dispatched", pressed}, {"attempts", attempts[i]}, {"dispatches", dispatches[i]},
              {"gate_refusals", gate_refusals[i]}, {"admission_refusals", admission_refusals[i]}});
         if (!pressed) continue;
@@ -714,6 +718,7 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
 }
 
 bool available() { return ready.load(std::memory_order_acquire); }
+bool selection_route_available() { return route_ready.load(std::memory_order_acquire); }
 save::BSnapshot installation_diagnostics() { return installation_trace.snapshot(); }
 save::BSnapshot input_diagnostics() { return input_trace.snapshot(); }
 save::BSnapshot route_diagnostics() { return route_trace.snapshot(); }
@@ -810,24 +815,98 @@ void install(const engine::Binding& binding, HANDLE stop) {
             return;
         }
 
-    const Site route_sites[] = {
-        {rva_crucible_resolver, "48895c2408574883ec20488bb9d8d10400488bd94885ff7513488d15206b9601"},
-        {rva_input_down, "80b9a100000000740933c04885c20f95c0c3488b81a80000004885c20f95c0c3"},
-        {0x14433de, "48ba0000000004000000498bcee86084020084c0744f488d8e68650200e860fe"},
-        {rva_weapon_cast, "40534883ec20488bd94885c97427488b01ff50104885c0741c8b40683b05a6cb"},
-        {0x1643260, "488b81b80200004885c075040f57c0c3f30f108194040000f30f5e8090020000"},
+    enum class RouteSiteKind : uint32_t { function_entry = 1, exact_leaf = 2, call_window = 3 };
+    struct RouteSite { uint32_t offset; const char* bytes; RouteSiteKind kind; uint32_t owner; size_t length; };
+    const RouteSite route_sites[] = {
+        {rva_crucible_resolver, "48895c2408574883ec20488bb9d8d10400488bd94885ff7513488d15206b9601",
+            RouteSiteKind::function_entry, rva_crucible_resolver, 32},
+        {rva_input_down, "80b9a100000000740933c04885c20f95c0c3488b81a80000004885c20f95c0c3",
+            RouteSiteKind::exact_leaf, 0, 32},
+        {0x14433de, "48ba0000000004000000498bcee86084020084c0744f488d8e68650200e860fe",
+            RouteSiteKind::call_window, 0x1442c14, rva_hammer_input_return - 0x14433de},
+        {rva_weapon_cast, "40534883ec20488bd94885c97427488b01ff50104885c0741c8b40683b05a6cb",
+            RouteSiteKind::function_entry, rva_weapon_cast, 32},
+        {0x1643260, "488b81b80200004885c075040f57c0c3f30f108194040000f30f5e8090020000",
+            RouteSiteKind::exact_leaf, 0, 33},
     };
     bool route_valid = true;
+    const auto route_deadline = GetTickCount64() + 10000;
+    size_t site_index = 0;
     for (const auto& site : route_sites) {
         native::Target target{};
         target.address = image_base + site.offset;
         const auto hex = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
         for (size_t i = 0; i < target.bytes.size(); ++i)
             target.bytes[i] = static_cast<uint8_t>(hex(site.bytes[2*i])*16 + hex(site.bytes[2*i+1]));
-        const auto error = native::validate_target(memory, binding.image, target, stop, GetTickCount64() + 1000);
-        installation_trace.record(save::BStage::special_toggle, error ? save::BStatus::refused : save::BStatus::entered,
-            "route_site_validation", 0, {{"rva", site.offset}, {"error", error}});
+        native::ValidationDetail detail{};
+        DWORD64 unwind_base = 0;
+        const auto unwind = RtlLookupFunctionEntry(target.address, &unwind_base, nullptr);
+        const uint32_t owner = unwind && unwind_base == image_base ? unwind->BeginAddress : 0;
+        uint32_t error = SC_NATIVE_NONE, observed_call = 0;
+        const char* predicate = "route_site_qualified";
+        if (site.kind == RouteSiteKind::function_entry) {
+            error = native::validate_target(memory, binding.image, target, stop, route_deadline, &detail);
+            if (error == SC_NATIVE_TARGET_BYTES) predicate = "route_entry_bytes";
+            else if (error == SC_NATIVE_TARGET_BOUNDARY) predicate = "route_entry_boundary";
+            else if (error == SC_NATIVE_TARGET_NOT_UNIQUE) predicate = "route_entry_not_unique";
+            else if (error) predicate = "route_entry_read_or_budget";
+        } else if (site.kind == RouteSiteKind::exact_leaf) {
+            error = native::validate_leaf_target(memory, binding.image, target, site.length, stop, route_deadline, &detail);
+            if (error == SC_NATIVE_TARGET_BYTES) predicate = "route_leaf_bytes";
+            else if (error == SC_NATIVE_TARGET_BOUNDARY) predicate = owner ? "route_leaf_unwind_owner" : "route_leaf_boundary";
+            else if (error == SC_NATIVE_TARGET_NOT_UNIQUE) predicate = "route_leaf_not_unique";
+            else if (error) predicate = "route_leaf_read_or_budget";
+        } else {
+            std::array<uint8_t, 32> actual{};
+            const bool section = binding.image.contains(site.offset, actual.size(),
+                IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE);
+            engine::ReadResult read{};
+            if (section) read = memory.copy(target.address, actual.data(), actual.size());
+            else { read.reason = SC_REASON_READ_FAILED; read.error = ERROR_NOACCESS; }
+            detail.read_attempted = section; detail.read = read; detail.byte_count = 32;
+            detail.expected = target.bytes; detail.actual = actual;
+            if (!section || read.reason) { error = SC_NATIVE_READ_FAILED; predicate = "route_window_read"; }
+            else if (owner != site.owner || !native::function_window(memory, binding.image,
+                         image_base + site.owner, target.address, site.length, &detail)) {
+                error = SC_NATIVE_TARGET_BOUNDARY; predicate = "route_window_owner";
+            } else {
+                size_t offset = 0, last = 0;
+                while (offset < site.length) {
+                    last = offset;
+                    hde64s instruction{};
+                    const auto size = hde64_disasm(actual.data() + offset, &instruction);
+                    if (!size || instruction.flags & F_ERROR || offset + size > site.length) break;
+                    offset += size;
+                }
+                if (offset != site.length || last + 5 != site.length || actual[last] != 0xe8) {
+                    error = SC_NATIVE_TARGET_BOUNDARY; predicate = "route_window_instructions";
+                } else if (site.offset + site.length != rva_hammer_input_return) {
+                    error = SC_NATIVE_TARGET_BOUNDARY; predicate = "route_window_return";
+                } else {
+                    int32_t relative = 0; std::memcpy(&relative, actual.data() + last + 1, sizeof(relative));
+                    observed_call = static_cast<uint32_t>(site.offset + site.length + relative);
+                    if (observed_call != rva_input_down) {
+                        error = SC_NATIVE_TARGET_BOUNDARY; predicate = "route_window_call_target";
+                    } else if (actual != target.bytes) {
+                        error = SC_NATIVE_TARGET_BYTES; predicate = "route_window_bytes";
+                    }
+                }
+            }
+        }
+        uint64_t expected0 = 0, actual0 = 0;
+        std::memcpy(&expected0, detail.expected.data(), sizeof(expected0));
+        std::memcpy(&actual0, detail.actual.data(), sizeof(actual0));
+        installation_trace.record(save::BStage::special_toggle,
+            error ? save::BStatus::refused : save::BStatus::entered, predicate, 0,
+            {{"rva", site.offset}, {"site", site_index}, {"error", error},
+             {"kind", static_cast<uint32_t>(site.kind)}, {"owner_rva", owner}, {"expected_owner", site.owner},
+             {"read_attempted", detail.read_attempted}, {"read_reason", detail.read.reason},
+             {"read_error", detail.read.error}, {"window_offset", detail.window_offset},
+             {"byte_count", detail.byte_count}, {"collision_rva", detail.collision_rva},
+             {"expected0", expected0}, {"actual0", actual0},
+             {"expected_call", rva_input_down}, {"observed_call", observed_call}});
         if (error) { route_valid = false; break; }
+        ++site_index;
     }
     if (route_valid) {
         const auto resolver = reinterpret_cast<void*>(image_base + rva_crucible_resolver);
@@ -872,8 +951,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {{"rva", rva_hud_element_setup}, {"validation", hud_validation},
          {"create_status", static_cast<uint64_t>(hud_created)}, {"enable_status", static_cast<uint64_t>(hud_enabled)}});
     ready.store(true, std::memory_order_release);
-    installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "installed", 0,
-        {{"hud_hook", hud_enabled == MH_OK}});
+    installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "ownership_ready", 0,
+        {{"selection_route_ready", route_ready.load(std::memory_order_acquire)},
+         {"hud_hook", hud_enabled == MH_OK}});
 }
 
 } // namespace sentinel::special

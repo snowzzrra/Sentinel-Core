@@ -57,6 +57,7 @@ extern Calls calls;
 void execute(const sc_special_request&, sc_special_result&, const Calls&);
 void install(const engine::Binding&, HANDLE stop);
 bool available();
+bool selection_route_available();
 save::BSnapshot installation_diagnostics();
 save::BSnapshot input_diagnostics();
 save::BSnapshot route_diagnostics();

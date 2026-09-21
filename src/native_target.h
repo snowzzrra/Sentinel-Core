@@ -22,6 +22,12 @@ struct ValidationDetail {
 uint32_t validate_target(engine::Memory& memory, const engine::Image& image,
                          const Target& target, HANDLE stop, uint64_t deadline,
                          ValidationDetail* detail = nullptr);
+// Exact supported-image leaf without x64 unwind metadata. `length` proves the
+// complete instruction stream and terminal return; the first 32 bytes remain
+// the unique signature.
+uint32_t validate_leaf_target(engine::Memory& memory, const engine::Image& image,
+                              const Target& target, size_t length, HANDLE stop,
+                              uint64_t deadline, ValidationDetail* detail = nullptr);
 Target profile_target(uintptr_t base, unsigned index);
 Target save_target(uintptr_t base, unsigned index);
 uint32_t validate_recorded(save::Installation&, engine::Memory&, const engine::Image&, const Target&,

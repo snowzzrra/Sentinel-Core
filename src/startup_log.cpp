@@ -218,6 +218,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"domain_installed\":{\"inventory\":"+flag(inventory::available())+
                 ",\"arsenal\":"+flag(arsenal::available())+",\"runes\":"+flag(runes::available())+
                 ",\"weapon_points\":"+flag(weapon_points::available())+",\"special\":"+flag(special::available())+
+                ",\"special_selection_route\":"+flag(special::selection_route_available())+
                 ",\"deathlink\":"+flag(deathlink::available())+"}"+
                 ",\"special_installation\":"+b_trace(special::installation_diagnostics())+
                 ",\"arsenal_installation\":"+b_trace(arsenal::installation_diagnostics())+

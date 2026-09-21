@@ -154,6 +154,34 @@ bool owned_window(engine::Memory& memory, const engine::Image& image, uintptr_t 
     }
     return true;
 }
+uint32_t unique_signature(engine::Memory& memory, const engine::Image& image,
+                          const std::array<uint8_t, 32>& signature, HANDLE stop,
+                          uint64_t deadline, ValidationDetail* detail) {
+    std::array<uint8_t, 65536> chunk{};
+    unsigned matches = 0;
+    for (const auto& section : image.sections) {
+        if (!(section.flags & IMAGE_SCN_MEM_EXECUTE)) continue;
+        for (size_t offset = 0; offset + signature.size() <= section.size;) {
+            if (GetTickCount64() >= deadline || (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT))
+                return SC_NATIVE_BUDGET;
+            const auto count = std::min(chunk.size(), static_cast<size_t>(section.size) - offset);
+            const auto read = memory.copy(image.base + section.rva + offset, chunk.data(), count);
+            if (detail) { detail->read_attempted = 1; detail->read = read; }
+            if (read.reason != SC_REASON_NONE) return SC_NATIVE_READ_FAILED;
+            auto cursor = chunk.begin(); const auto end = chunk.begin() + count;
+            while ((cursor = std::search(cursor, end, signature.begin(), signature.end())) != end) {
+                if (++matches > 1) {
+                    if (detail) detail->collision_rva = section.rva + static_cast<uint32_t>(offset + (cursor - chunk.begin()));
+                    return SC_NATIVE_TARGET_NOT_UNIQUE;
+                }
+                ++cursor;
+            }
+            if (count <= signature.size()) break;
+            offset += count - signature.size() + 1;
+        }
+    }
+    return matches == 1 ? SC_NATIVE_NONE : SC_NATIVE_TARGET_NOT_UNIQUE;
+}
 }
 bool function_window(engine::Memory& memory, const engine::Image& image, uintptr_t entry_address,
                      uintptr_t address, size_t length, ValidationDetail* detail) {
@@ -205,31 +233,38 @@ uint32_t validate_target(engine::Memory& memory, const engine::Image& image,
         if (!size || instruction.flags & F_ERROR) return SC_NATIVE_TARGET_BOUNDARY;
         length += size;
     }
-    std::array<uint8_t, 65536> chunk{};
-    unsigned matches = 0;
-    for (const auto& section : image.sections) {
-        if (!(section.flags & IMAGE_SCN_MEM_EXECUTE)) continue;
-        for (size_t offset = 0; offset + signature_size <= section.size;) {
-            if (GetTickCount64() >= deadline || (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT))
-                return SC_NATIVE_BUDGET;
-            const auto count = std::min(chunk.size(), static_cast<size_t>(section.size) - offset);
-            read = memory.copy(image.base + section.rva + offset, chunk.data(), count);
-            if (detail) { detail->read_attempted = 1; detail->read = read; }
-            if (read.reason != SC_REASON_NONE)
-                return SC_NATIVE_READ_FAILED;
-            auto cursor = chunk.begin(); const auto end = chunk.begin() + count;
-            while ((cursor = std::search(cursor, end, signature.begin(), signature.end())) != end) {
-                if (++matches > 1) {
-                    if (detail) detail->collision_rva = section.rva + static_cast<uint32_t>(offset + (cursor - chunk.begin()));
-                    return SC_NATIVE_TARGET_NOT_UNIQUE;
-                }
-                ++cursor;
-            }
-            if (count <= signature_size) break;
-            offset += count - signature_size + 1;
-        }
+    return unique_signature(memory, image, signature, stop, deadline, detail);
+}
+uint32_t validate_leaf_target(engine::Memory& memory, const engine::Image& image,
+                              const Target& target, size_t length, HANDLE stop,
+                              uint64_t deadline, ValidationDetail* detail) {
+    if (detail) *detail = {};
+    if (length < target.bytes.size() || length > 64 || target.address < image.base ||
+        target.address - image.base > UINT32_MAX ||
+        !image.contains(static_cast<uint32_t>(target.address - image.base), length,
+                        IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE))
+        return SC_NATIVE_TARGET_BOUNDARY;
+    std::array<uint8_t, 64> actual{};
+    const auto read = memory.copy(target.address, actual.data(), length);
+    if (detail) {
+        detail->read_attempted = 1; detail->read = read; detail->byte_count = static_cast<uint32_t>(length);
+        detail->expected = target.bytes; std::copy_n(actual.begin(), target.bytes.size(), detail->actual.begin());
     }
-    return matches == 1 ? SC_NATIVE_NONE : SC_NATIVE_TARGET_NOT_UNIQUE;
+    if (read.reason) return SC_NATIVE_READ_FAILED;
+    if (std::memcmp(actual.data(), target.bytes.data(), target.bytes.size())) return SC_NATIVE_TARGET_BYTES;
+    DWORD64 base = 0;
+    if (RtlLookupFunctionEntry(target.address, &base, nullptr)) return SC_NATIVE_TARGET_BOUNDARY;
+    size_t offset = 0, last = 0;
+    while (offset < length) {
+        last = offset;
+        hde64s instruction{};
+        const auto size = hde64_disasm(actual.data() + offset, &instruction);
+        if (!size || instruction.flags & F_ERROR || offset + size > length)
+            return SC_NATIVE_TARGET_BOUNDARY;
+        offset += size;
+    }
+    if (offset != length || actual[last] != 0xc3) return SC_NATIVE_TARGET_BOUNDARY;
+    return unique_signature(memory, image, target.bytes, stop, deadline, detail);
 }
 uint32_t validate_recorded(save::Installation& record, engine::Memory& memory, const engine::Image& image,
                             const Target& target, HANDLE stop, uint64_t deadline, uint32_t group, uint32_t index) {
