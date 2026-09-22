@@ -52,7 +52,8 @@ bool opened = false;
 unsigned count = 0;
 size_t history_bytes=0;
 DWORD history_error=0,latest_error=0;
-std::wstring latest_path,temporary_path;
+std::wstring latest_path,temporary_path,history_path;
+uint64_t exported_use_sequence = 0, use_export_lost = 0, history_rotations = 0;
 std::string last;
 std::string quoted(const char* text) {
     std::string out="\"";
@@ -88,14 +89,22 @@ std::string b_trace(const save::BSnapshot& s) {
     for(size_t i=0;i<s.stages.size();++i) { if(i) out+=','; out+=quoted(save::b_stage_names[i])+":"+b_event(s.stages[i]); }
     return out+"}}";
 }
-std::string special_use_history(const special::UseHistory& s) {
+std::string special_use_history(const special::UseHistory& s, uint64_t after = 0) {
     auto out = "{\"sequence\":" + std::to_string(s.sequence) +
         ",\"overwritten\":" + std::to_string(s.overwritten) +
         ",\"lock_dropped\":" + std::to_string(s.lock_dropped) +
+        ",\"attempt\":" + std::to_string(s.attempt) +
+        ",\"attempt_active\":" + (s.attempt_active ? "true" : "false") +
+        ",\"idle_queries\":" + std::to_string(s.idle_queries) +
+        ",\"coalesced\":" + std::to_string(s.coalesced) +
         ",\"first_failure\":" + b_event(s.first_failure) + ",\"events\":[";
+    bool first = true;
     for (uint32_t i = 0; i < s.count; ++i) {
-        if (i) out += ',';
-        out += b_event(s.events[(s.sequence - s.count + i) % s.events.size()]);
+        const auto& e = s.events[(s.sequence - s.count + i) % s.events.size()];
+        if (e.sequence <= after) continue;
+        if (!first) out += ',';
+        first = false;
+        out += b_event(e);
     }
     return out + "]}";
 }
@@ -165,6 +174,7 @@ void open(const Snapshot& core) {
     directory += L"\\diagnostics";
     if (!CreateDirectoryW(directory.c_str(),nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return;
     const auto path = directory + L"\\" + std::to_wstring(core.pid) + L"-" + std::to_wstring(core.process_created) + L".jsonl";
+    history_path = path;
     latest_path=path.substr(0,path.size()-6)+L".latest.json";
     temporary_path=latest_path+L".pending";
     file = CreateFileW(path.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
@@ -176,6 +186,8 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
     try {
         if (!opened) open(core);
         if (!latest_path.empty()) {
+            const auto use_snapshot = special::use_history();
+            const auto use_json = special_use_history(use_snapshot);
             const auto install = save::session().installation.inspect();
             const auto session = save::session().inspect();
             const auto campaign = save::session().campaign_run.snapshot();
@@ -236,7 +248,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"special_input\":"+b_trace(special::input_diagnostics())+
                 ",\"special_route\":"+b_trace(special::route_diagnostics())+
                 ",\"special_hud\":"+b_trace(special::hud_diagnostics())+
-                ",\"special_use_history\":"+special_use_history(special::use_history())+
+                ",\"special_use_history\":"+use_json+
                 ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
             if (facts != last) {
                 const auto& wide_key = prelaunch::diagnostic_key();
@@ -246,15 +258,34 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                     ",\"process_created\":\"" + std::to_string(core.process_created) + "\",\"build_id\":\"" + core.core.build_id +
                     "\",\"at_ms\":" + std::to_string(GetTickCount64()) + ",\"diagnostic_storage\":{\"history_records\":"+
                     std::to_string(count)+",\"history_bytes\":"+std::to_string(history_bytes)+",\"history_error\":"+
-                    std::to_string(history_error)+",\"latest_error\":"+std::to_string(latest_error)+"}," + facts + "}\n";
-                // History and the latest snapshot have independent limits. The
-                // first refusal and each stage survive arbitrary later polling.
+                    std::to_string(history_error)+",\"latest_error\":"+std::to_string(latest_error)+
+                    ",\"history_rotations\":"+std::to_string(history_rotations)+
+                    ",\"use_export_lost\":"+std::to_string(use_export_lost)+"}," + facts + "}\n";
                 if(line.size()>65536) throw std::length_error("diagnostic_snapshot_limit");
-                if(file!=INVALID_HANDLE_VALUE && count<128 && history_bytes+line.size()<=1024*1024) {
+                auto history_line = line;
+                const auto use_at = history_line.find(use_json);
+                if (use_at != std::string::npos)
+                    history_line.replace(use_at, use_json.size(), special_use_history(use_snapshot, exported_use_sequence));
+                // Two bounded generations; file work stays on the diagnostic exporter.
+                if (file != INVALID_HANDLE_VALUE && history_bytes + history_line.size() > 1024 * 1024) {
+                    CloseHandle(file); file = INVALID_HANDLE_VALUE;
+                    if (MoveFileExW(history_path.c_str(), (history_path + L".previous").c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                        file = CreateFileW(history_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+                        history_bytes = 0; ++history_rotations;
+                    }
+                    if (file == INVALID_HANDLE_VALUE) history_error = GetLastError();
+                }
+                if(file!=INVALID_HANDLE_VALUE) {
                     DWORD written=0;
-                    if(!WriteFile(file,line.data(),static_cast<DWORD>(line.size()),&written,nullptr) || written!=line.size()) {
+                    if(!WriteFile(file,history_line.data(),static_cast<DWORD>(history_line.size()),&written,nullptr) || written!=history_line.size()) {
                         history_error=GetLastError(); CloseHandle(file); file=INVALID_HANDLE_VALUE;
-                    } else { FlushFileBuffers(file); history_bytes+=line.size(); ++count; }
+                    } else {
+                        FlushFileBuffers(file); history_bytes+=history_line.size(); ++count;
+                        const auto preceding = use_snapshot.sequence - use_snapshot.count;
+                        if (preceding > exported_use_sequence) use_export_lost += preceding - exported_use_sequence;
+                        exported_use_sequence = use_snapshot.sequence;
+                    }
                 }
                 if(publish_latest(line)) last=facts;
             }

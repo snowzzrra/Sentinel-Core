@@ -64,6 +64,8 @@ save::BSnapshot route_diagnostics();
 save::BSnapshot hud_diagnostics();
 struct UseHistory {
     uint64_t sequence = 0, overwritten = 0, lock_dropped = 0;
+    uint64_t attempt = 0, attempt_started = 0, idle_queries = 0, coalesced = 0;
+    bool attempt_active = false;
     uint32_t count = 0;
     save::BEvent first_failure{};
     std::array<save::BEvent, 32> events{};

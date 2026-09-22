@@ -21,6 +21,20 @@ save::BTrace installation_trace, input_trace, route_trace, hud_trace;
 SRWLOCK use_history_lock = SRWLOCK_INIT;
 UseHistory use_events;
 std::atomic<uint64_t> use_lock_dropped{0};
+std::atomic<uint64_t> use_attempt_started{0};
+
+void begin_use_attempt() {
+    if (!TryAcquireSRWLockExclusive(&use_history_lock)) {
+        ++use_lock_dropped;
+        return;
+    }
+    ++use_events.attempt;
+    use_events.attempt_started = GetTickCount64();
+    use_attempt_started = use_events.attempt_started;
+    use_events.attempt_active = true;
+    use_events.first_failure = {};
+    ReleaseSRWLockExclusive(&use_history_lock);
+}
 
 void record_use(const char* predicate, save::BStatus status,
                 std::initializer_list<save::BFact> facts) {
@@ -33,20 +47,29 @@ void record_use(const char* predicate, save::BStatus status,
     event.status = status;
     event.predicate = predicate;
     event.thread = GetCurrentThreadId();
+    event.operation = use_events.attempt;
     size_t count = 0;
     for (const auto& fact : facts) {
         if (count == event.facts.size()) break;
         event.facts[count++] = fact;
     }
+    const bool query = !std::strcmp(predicate, "crucible_resolver") ||
+        !std::strcmp(predicate, "hammer_input") || !std::strcmp(predicate, "input_job_scope") ||
+        !std::strcmp(predicate, "weapon_dispatch_scope") || !std::strcmp(predicate, "crucible_input_edge");
+    if (query && !use_events.attempt_active) {
+        ++use_events.idle_queries;
+        ReleaseSRWLockExclusive(&use_history_lock);
+        return;
+    }
     // Coalesce repeated samples of the same native caller until its facts change.
     for (uint32_t i = use_events.count; i; --i) {
         const auto& prior = use_events.events[(use_events.sequence - use_events.count + i - 1) % use_events.events.size()];
-        if (prior.predicate != predicate || prior.thread != event.thread ||
+        if (prior.operation != event.operation || prior.predicate != predicate ||
             !prior.facts[0].key || prior.facts[0].value != event.facts[0].value) continue;
         bool equal = prior.status == status;
         for (size_t j = 0; equal && j < event.facts.size(); ++j)
             equal = prior.facts[j].key == event.facts[j].key && prior.facts[j].value == event.facts[j].value;
-        if (equal) { ReleaseSRWLockExclusive(&use_history_lock); return; }
+        if (equal) { ++use_events.coalesced; ReleaseSRWLockExclusive(&use_history_lock); return; }
         break;
     }
     event.sequence = ++use_events.sequence;
@@ -99,6 +122,14 @@ char route_namespace[65]{};
 SRWLOCK route_namespace_lock = SRWLOCK_INIT;
 std::atomic<uint64_t> route_epoch{0};
 std::atomic<uint32_t> route_requested{SC_SPECIAL_WEAPON_NONE};
+struct PolicySnapshot {
+    uintptr_t player = 0;
+    uint64_t epoch = 0;
+    uint32_t selected = 0;
+    bool crucible = false, hammer = false, known = false;
+    char namespace_id[65]{};
+};
+PolicySnapshot published_policy; // Protected with route_namespace_lock.
 std::atomic<bool> special_down{false};
 thread_local uintptr_t input_job_player = 0;
 thread_local uint64_t input_job_epoch = 0;
@@ -297,19 +328,44 @@ uint32_t route_scope_reason(uintptr_t p) {
 bool route_scope(uintptr_t p) { return !route_scope_reason(p); }
 
 uint32_t applied_mode(bool crucible, bool hammer) {
-    uint32_t absent = SC_SPECIAL_WEAPON_NONE;
-    route_requested.compare_exchange_strong(absent, hammer ? SC_SPECIAL_WEAPON_HAMMER :
-        crucible ? SC_SPECIAL_WEAPON_CRUCIBLE : SC_SPECIAL_WEAPON_NONE);
     if (crucible && hammer) return route_requested;
     return crucible ? SC_SPECIAL_WEAPON_CRUCIBLE : hammer ? SC_SPECIAL_WEAPON_HAMMER : SC_SPECIAL_WEAPON_NONE;
 }
 
+void publish_policy(uintptr_t p) {
+    // Only the admitted owner/job samples mutable engine inventory.
+    if (!route_scope(p)) return;
+    bool c = false, h = false;
+    const bool known = route_ownership(p, c, h);
+    AcquireSRWLockExclusive(&route_namespace_lock);
+    if (known && route_requested == SC_SPECIAL_WEAPON_NONE)
+        route_requested = h ? SC_SPECIAL_WEAPON_HAMMER : c ? SC_SPECIAL_WEAPON_CRUCIBLE : SC_SPECIAL_WEAPON_NONE;
+    published_policy = {p, route_epoch.load(), known ? applied_mode(c, h) : 0, c, h, known};
+    std::memcpy(published_policy.namespace_id, route_namespace, 65);
+    ReleaseSRWLockExclusive(&route_namespace_lock);
+}
+
+uint32_t policy_snapshot(uintptr_t p, PolicySnapshot& snapshot) {
+    if (!route_ready.load(std::memory_order_acquire)) return 1;
+    if (!native::gameplay_admitted()) return 4;
+    const auto epoch = native::observation_stamp();
+    AcquireSRWLockShared(&route_namespace_lock);
+    snapshot = published_policy;
+    const bool same_namespace = !std::memcmp(route_namespace, snapshot.namespace_id, 65);
+    ReleaseSRWLockShared(&route_namespace_lock);
+    if (!same_namespace || !hud_owner_snapshot(snapshot.namespace_id).namespace_valid) return 6;
+    if (!snapshot.epoch || snapshot.epoch != epoch || epoch != native::observation_stamp()) return 7;
+    if (!p || snapshot.player != p) return 3;
+    return snapshot.known ? 0 : 8;
+}
+
 __declspec(noinline) bool crucible_resolver_detour(uintptr_t p) {
     const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
-    const auto reason = route_scope_reason(p);
-    bool c = false, h = false;
-    const bool known = !reason && route_ownership(p, c, h);
-    const auto mode = known ? applied_mode(c, h) : SC_SPECIAL_WEAPON_NONE;
+    PolicySnapshot snapshot{};
+    const auto reason = policy_snapshot(p, snapshot);
+    const bool known = !reason;
+    const bool c = snapshot.crucible, h = snapshot.hammer;
+    const auto mode = known ? snapshot.selected : SC_SPECIAL_WEAPON_NONE;
     const bool result = known ? c && mode == SC_SPECIAL_WEAPON_CRUCIBLE : original_crucible_resolver(p);
     record_use("crucible_resolver", known ? save::BStatus::succeeded : save::BStatus::refused,
         {{"caller_rva", caller - image_base}, {"player", p}, {"scope_reason", reason},
@@ -323,6 +379,8 @@ __declspec(noinline) bool crucible_resolver_detour(uintptr_t p) {
 struct RouteObservation {
     uintptr_t held = 0;
     uint32_t known = 0, charge = UINT32_MAX, meter_milli = UINT32_MAX, action = UINT32_MAX, error = 0;
+    uint32_t component20_bits = 0, component28_bits = 0, effect68 = UINT32_MAX, effect80 = UINT32_MAX;
+    int32_t pending_quick_slot = -1;
 };
 RouteObservation observe_route(uintptr_t p);
 
@@ -330,6 +388,8 @@ bool filter_hammer_input(uintptr_t caller, uint64_t button, bool raw, uintptr_t 
     if (caller != image_base + rva_hammer_input_return && button != special_button) return raw;
     const auto reason = route_scope_reason(route_player);
     const bool site = caller == image_base + rva_hammer_input_return && button == special_button;
+    const bool prior_down = site ? special_down.exchange(raw) : special_down.load();
+    if (site && raw && !prior_down) begin_use_attempt();
     bool c = false, h = false;
     const bool known = site && !reason && route_ownership(route_player, c, h);
     const auto selected = known ? applied_mode(c, h) : SC_SPECIAL_WEAPON_NONE;
@@ -340,15 +400,14 @@ bool filter_hammer_input(uintptr_t caller, uint64_t button, bool raw, uintptr_t 
          {"presence_known", known}, {"crucible_present", c}, {"hammer_present", h},
          {"policy_selected", selected}, {"gate_result", result}, {"vanilla_fallback", !known},
          {"action_observed", 0}});
-    if (!known) return raw;
     const bool down = raw;
-    const auto mode = applied_mode(c, h);
+    const auto mode = selected;
     const bool allowed = h && mode == SC_SPECIAL_WEAPON_HAMMER;
-    if (down != special_down) {
+    if (site && down != prior_down) {
         static uint64_t input_sequence = 0;
         if (down) ++input_sequence;
-        const auto observed = observe_route(route_player);
-        record_use("special_input_transition", observed.error ? save::BStatus::refused : save::BStatus::succeeded,
+        const auto observed = !reason ? observe_route(route_player) : RouteObservation{};
+        record_use("special_input_transition", reason || observed.error ? save::BStatus::refused : save::BStatus::succeeded,
             {{"caller_rva", caller - image_base}, {"down", down}, {"policy_selected", mode},
              {"held_decl", observed.held}, {"hands_action", observed.action},
              {"resource_known", observed.known}, {"crucible_charge", observed.charge},
@@ -361,10 +420,9 @@ bool filter_hammer_input(uintptr_t caller, uint64_t button, bool raw, uintptr_t 
              {"hammer_meter_milli", observed.meter_milli}, {"hands_action", observed.action},
              {"observation_error", observed.error}, {"native_handler_return_known", 0}});
     }
-    special_down = down;
     // The query precedes Hammer meter/latch/animation. Preserve every other
     // caller's boolean result; do not queue or synthesize an input.
-    return allowed && raw;
+    return known ? allowed && raw : raw;
 }
 
 __declspec(noinline) bool input_down_detour(uintptr_t input, uint64_t button) {
@@ -480,6 +538,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         facts.held_weapon_decl = current_weapon_decl(p);
         bool route_c = false, route_h = false;
         if (route_scope(p) && route_ownership(p, route_c, route_h)) {
+            publish_policy(p);
             facts.native_selected = static_cast<uint8_t>(applied_mode(route_c, route_h));
             facts.known |= SC_SPECIAL_KNOWN_SELECTION;
             facts.selection_policy = true;
@@ -567,7 +626,11 @@ uint32_t select(void*, uintptr_t p, uint32_t selected) {
             return ERROR_BUSY;
         }
         const auto before = applied_mode(c, h);
+        AcquireSRWLockExclusive(&route_namespace_lock);
         route_requested = selected;
+        published_policy = {p, route_epoch.load(), selected, c, h, true};
+        std::memcpy(published_policy.namespace_id, route_namespace, 65);
+        ReleaseSRWLockExclusive(&route_namespace_lock);
         route_trace.record(save::BStage::special_toggle, save::BStatus::succeeded, "core_policy_applied", GetTickCount64(),
             {{"requested", selected}, {"before", before}, {"applied", applied_mode(c, h)},
              {"held_before", held}, {"held_after", current_weapon_decl(p)}, {"error", 0}});
@@ -638,6 +701,28 @@ RouteObservation observe_route(uintptr_t p) {
         observed.known = facts.known;
         if (facts.known & SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE) observed.charge = facts.crucible_charge;
         observed.action = *reinterpret_cast<uint32_t*>(p + 0x15f98);
+        // SelectPendingWeapon (1461520) writes this; ClearPendingWeapon (14573c0) writes -1.
+        observed.pending_quick_slot = *reinterpret_cast<int32_t*>(p + 0x7158);
+        const auto resource = p + 0x177a0;
+        const auto resource_table = *reinterpret_cast<uintptr_t*>(resource);
+        const auto amount = reinterpret_cast<float(*)(uintptr_t)>(
+            *reinterpret_cast<uintptr_t*>(resource_table + 0x20))(resource);
+        const auto range = reinterpret_cast<float(*)(uintptr_t)>(
+            *reinterpret_cast<uintptr_t*>(resource_table + 0x28))(resource);
+        std::memcpy(&observed.component20_bits, &amount, sizeof(amount));
+        std::memcpy(&observed.component28_bits, &range, sizeof(range));
+        const auto status = reinterpret_cast<uintptr_t(*)(uintptr_t)>(
+            *reinterpret_cast<uintptr_t*>(*reinterpret_cast<uintptr_t*>(p) + 0x570))(p);
+        const auto world = reinterpret_cast<uintptr_t(*)(uintptr_t)>(image_base + 0x699150)(
+            *reinterpret_cast<uintptr_t*>(image_base + 0x45f7370));
+        const auto challenge = world ? *reinterpret_cast<uintptr_t*>(world + 0x35f8) : 0;
+        const auto effect = status && challenge ? reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
+            image_base + 0x156f4b0)(status, *reinterpret_cast<uintptr_t*>(challenge + 0x148)) : 0;
+        if (effect) {
+            const auto table = *reinterpret_cast<uintptr_t*>(effect);
+            observed.effect68 = reinterpret_cast<bool(*)(uintptr_t)>(*reinterpret_cast<uintptr_t*>(table + 0x68))(effect);
+            observed.effect80 = reinterpret_cast<bool(*)(uintptr_t)>(*reinterpret_cast<uintptr_t*>(table + 0x80))(effect);
+        }
         const auto component = p + 0x26568;
         if (*reinterpret_cast<uintptr_t*>(component + 0x2b8)) {
             const auto meter = reinterpret_cast<float(*)(uintptr_t)>(image_base + 0x1643260)(component) * 1000;
@@ -646,6 +731,32 @@ RouteObservation observe_route(uintptr_t p) {
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { observed.error = GetExceptionCode(); }
     return observed;
+}
+
+void sample_use_attempt(uintptr_t p, bool safe) {
+    const auto started = use_attempt_started.load();
+    if (!started) return;
+    safe = safe && !route_scope_reason(p);
+    const auto observed = safe ? observe_route(p) : RouteObservation{};
+    record_use("special_attempt_sample", observed.error ? save::BStatus::refused : save::BStatus::succeeded,
+        {{"player", p}, {"attempt_started", started}, {"safe", safe}, {"selected", route_requested.load()},
+         {"held_decl", observed.held}, {"hands_action", observed.action}, {"inventory_amount", observed.charge},
+         {"resource_known", observed.known}, {"component20_float_bits", observed.component20_bits},
+         {"component28_float_bits", observed.component28_bits}, {"effect68", observed.effect68},
+         {"effect80", observed.effect80}, {"error", observed.error}, {"pending_quick_slot", observed.pending_quick_slot}});
+    const auto elapsed = GetTickCount64() - started;
+    const bool stable = !special_down && !observed.error && observed.action <= 2 && observed.held &&
+        observed.held != find_decl(CRUCIBLE_PATH) && observed.held != find_decl(HAMMER_PATH);
+    if (!safe || elapsed >= 10000 || (elapsed >= 500 && stable)) {
+        record_use("special_attempt_end", safe && stable ? save::BStatus::succeeded : save::BStatus::refused,
+            {{"attempt_started", started}, {"stable", stable}, {"invalidated", !safe}, {"timeout", elapsed >= 10000}});
+        AcquireSRWLockExclusive(&use_history_lock);
+        if (use_events.attempt_started == started) {
+            use_events.attempt_active = false;
+            use_attempt_started = 0;
+        }
+        ReleaseSRWLockExclusive(&use_history_lock);
+    }
 }
 
 void input_job_detour(uintptr_t context) {
@@ -690,6 +801,7 @@ __declspec(noinline) bool input_pressed_detour(uintptr_t input, uint64_t mask) {
     const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
     const bool raw = original_input_pressed(input, mask);
     if (caller == image_base + 0x1465640 || mask == special_button) {
+        if (mask == special_button && raw && !special_down.exchange(true)) begin_use_attempt();
         const auto p = route_player.load(std::memory_order_acquire);
         const auto reason = route_scope_reason(p);
         record_use("crucible_input_edge", reason ? save::BStatus::refused : save::BStatus::succeeded,
@@ -705,14 +817,20 @@ __declspec(noinline) bool crucible_activate_detour(uintptr_t p) {
     const auto before = !reason ? observe_route(p) : RouteObservation{};
     record_use("crucible_activate_enter", reason ? save::BStatus::refused : save::BStatus::entered,
         {{"caller_rva", caller - image_base}, {"player", p}, {"scope_reason", reason},
-         {"charge", before.charge}, {"known", before.known}, {"error", before.error}});
+         {"inventory_amount", before.charge}, {"known", before.known}, {"error", before.error},
+         {"component20_float_bits", before.component20_bits}, {"component28_float_bits", before.component28_bits},
+         {"effect68", before.effect68}, {"effect80", before.effect80}, {"hands_action", before.action}, {"held_decl", before.held},
+         {"pending_quick_slot", before.pending_quick_slot}});
     const bool result = original_crucible_activate(p);
     const bool observed = !reason && !route_scope_reason(p);
     const auto after = observed ? observe_route(p) : RouteObservation{};
     record_use("crucible_activate_return", result ? save::BStatus::succeeded : save::BStatus::refused,
         {{"caller_rva", caller - image_base}, {"player", p}, {"native_result_al", result},
          {"scope_valid", observed}, {"charge_before", before.charge}, {"charge_after", after.charge},
-         {"known_before", before.known}, {"known_after", after.known}, {"error", after.error}});
+         {"known_before", before.known}, {"known_after", after.known}, {"error", after.error},
+         {"component20_float_bits", after.component20_bits}, {"component28_float_bits", after.component28_bits},
+         {"effect68", after.effect68}, {"effect80", after.effect80}, {"hands_action", after.action}, {"held_decl", after.held},
+         {"pending_quick_slot", after.pending_quick_slot}});
     return result;
 }
 
@@ -862,18 +980,24 @@ void refresh_input_config() {
 }
 
 void poll_input(uintptr_t p, bool safe_gameplay) {
+    sample_use_attempt(p, safe_gameplay);
     if (!safe_gameplay || !p) {
         hud_element.store(0, std::memory_order_release);
         hud_element_vtable.store(0, std::memory_order_release);
         hud_player.store(0, std::memory_order_release);
     }
     route_epoch.store(0, std::memory_order_release);
+    AcquireSRWLockExclusive(&route_namespace_lock);
+    if (!safe_gameplay || !p || published_policy.player != p ||
+        published_policy.epoch != native::observation_stamp()) published_policy = {};
+    ReleaseSRWLockExclusive(&route_namespace_lock);
     route_thread = GetCurrentThreadId();
     route_player = 0;
     if (p && safe_gameplay) {
         const auto& id = save::session().namespace_id();
         AcquireSRWLockExclusive(&route_namespace_lock);
         if (std::memcmp(route_namespace, id.c_str(), 65)) {
+            published_policy = {};
             std::memcpy(route_namespace, id.c_str(), 65);
             route_requested = SC_SPECIAL_WEAPON_NONE;
             special_down = false;
@@ -881,6 +1005,7 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
         ReleaseSRWLockExclusive(&route_namespace_lock);
         route_player.store(p, std::memory_order_release);
         route_epoch.store(native::observation_stamp(), std::memory_order_release);
+        publish_policy(p);
     }
     static bool observed_down[2]{};
     static uint32_t attempts[2]{}, dispatches[2]{}, gate_refusals[2]{}, admission_refusals[2]{};
@@ -1254,7 +1379,6 @@ void install(const engine::Binding& binding, HANDLE stop) {
         hud::enabled =
             bind_hud(hud::swf.lookup, 0x185c150, 0, "40534883ec20488b4928488bda488b01ff5028488bc34883c4205bc3cccccccc") &&
             bind_hud(hud::swf.sprite, 0x184e470, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b150f5c06") &&
-            bind_hud(hud::swf.text, 0x184e4b0, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b15d75b06") &&
             bind_hud(hud::swf.release, 0x184e3b0, 0, "4883ec288b0183f8027527488b4908b8fffffffff00fc1413083f80175544885") &&
             bind_hud(hud::swf.string_init, 0x3fa8e0, 39, "488d0591cb6602c7411414000080488901488d411848894108c7411000000000") &&
             bind_hud(hud::swf.string_set, 0x3faff0, 0, "48895c2410488974241848897c242041564883ec304c8bf2488bd94885d20f85") &&
@@ -1269,8 +1393,6 @@ void install(const engine::Binding& binding, HANDLE stop) {
             bind_hud(hud::swf.position, 0x1863ec0, 70, "48837940004c8bc9743b488b41104c63410c49c1e006488b9080000000f3410f") &&
             bind_hud(hud::swf.color, 0x1863d90, 0, "48896c24104889742418574883ec308bf2488bf981fa0d0100000f87f7000000") &&
             bind_hud(hud::swf.material, 0x1863c30, 0, "48895c240848896c24104889742418574883ec20488bd9418bf1488b4960418b") &&
-            bind_hud(hud::swf.set_text, 0x186db00, 0, "40534883ec20488bd94883c140e8ded4b8fe488bcb4883c4205be9e1cbffffcc") &&
-            bind_hud(hud::swf.cached, 0x185d1a0, 0, "40534883ec20488b4110488bd94885c075143941207f064883c4205bc3e8ae1f") &&
             bind_hud(hud::swf.find_material, 0x17aa5d0, 0, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448") &&
             binding.image.contains(0x5e05200, sizeof(uintptr_t), IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_EXECUTE);
         project_crucible_hud = reinterpret_cast<WeaponHudProject>(image_base + 0xf0c230);
