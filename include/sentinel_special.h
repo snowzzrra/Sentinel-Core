@@ -116,7 +116,7 @@ typedef struct sc_special_result {
     uint32_t outcome, flags, native_exception;
     uint32_t owns_crucible, owns_hammer, hammer_tier, selected;      /* shared logical run state */
     uint32_t native_crucible, native_hammer, native_hammer_perks;   /* native materialization */
-    uint32_t native_selected;                                        /* applied route; POLICY flag identifies Core authority */
+    uint32_t native_selected;                                        /* selection policy with POLICY flag; not observed native use */
     uint32_t native_state_known;                                     /* SC_SPECIAL_KNOWN_* */
     uint32_t crucible_charge, crucible_charge_max;                   /* native resource observation */
     uint32_t refill_balance, refill_flags;                           /* AP-authoritative projection */

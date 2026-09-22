@@ -239,12 +239,12 @@ uint32_t validate_leaf_target(engine::Memory& memory, const engine::Image& image
                               const Target& target, size_t length, HANDLE stop,
                               uint64_t deadline, ValidationDetail* detail) {
     if (detail) *detail = {};
-    if (length < target.bytes.size() || length > 64 || target.address < image.base ||
+    if (length < target.bytes.size() || length > 128 || target.address < image.base ||
         target.address - image.base > UINT32_MAX ||
         !image.contains(static_cast<uint32_t>(target.address - image.base), length,
                         IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE))
         return SC_NATIVE_TARGET_BOUNDARY;
-    std::array<uint8_t, 64> actual{};
+    std::array<uint8_t, 128> actual{};
     const auto read = memory.copy(target.address, actual.data(), length);
     if (detail) {
         detail->read_attempted = 1; detail->read = read; detail->byte_count = static_cast<uint32_t>(length);

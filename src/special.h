@@ -61,6 +61,23 @@ bool selection_route_available();
 save::BSnapshot installation_diagnostics();
 save::BSnapshot input_diagnostics();
 save::BSnapshot route_diagnostics();
+save::BSnapshot hud_diagnostics();
+struct UseHistory {
+    uint64_t sequence = 0, overwritten = 0, lock_dropped = 0;
+    uint32_t count = 0;
+    save::BEvent first_failure{};
+    std::array<save::BEvent, 32> events{};
+};
+UseHistory use_history();
+// Cumulative owner state and selection policy, independent of native presence/resources.
+struct HudOwnerSnapshot {
+    uint64_t revision = 0, request_revision = 0;
+    uint32_t owns_crucible = 0, owns_hammer = 0, selected = 0;
+    uint32_t refill_balance = UINT32_MAX, refill_flags = 0;
+    uint32_t refill_request_state = SC_SPECIAL_REFILL_IDLE;
+    bool refill_enabled = false, namespace_valid = false;
+};
+HudOwnerSnapshot hud_owner_snapshot(const char (&namespace_id)[65]);
 std::wstring input_directory();
 bool admitted(const char* namespace_id);
 void execute_native(const sc_special_request&, sc_special_result&);

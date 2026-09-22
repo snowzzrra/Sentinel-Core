@@ -103,6 +103,30 @@ bool expire_pending_locked(uint64_t now_ms) {
 }
 } // namespace
 
+HudOwnerSnapshot hud_owner_snapshot(const char (&namespace_id)[65]) {
+    HudOwnerSnapshot out;
+    AcquireSRWLockShared(&state_lock);
+    if (bound_namespace[0] && !std::memcmp(bound_namespace, namespace_id, sizeof(bound_namespace))) {
+        out.namespace_valid = true;
+        out.revision = total_operations;
+        out.request_revision = shared_state.request_serial;
+        out.owns_crucible = shared_state.owns_crucible;
+        out.owns_hammer = shared_state.owns_hammer;
+        out.selected = shared_state.selected;
+        out.refill_flags = shared_state.refill_flags;
+        out.refill_request_state = shared_state.refill_request_state;
+        constexpr auto known = SC_SPECIAL_REFILL_AUTHORITATIVE | SC_SPECIAL_REFILL_BALANCE_KNOWN;
+        if ((out.refill_flags & known) == known && shared_state.refill_balance <= 3) {
+            out.refill_balance = shared_state.refill_balance;
+            out.refill_enabled = out.refill_balance != 0 &&
+                (out.refill_flags & SC_SPECIAL_REFILL_CONNECTED) != 0 &&
+                out.refill_request_state != SC_SPECIAL_REFILL_PENDING;
+        }
+    }
+    ReleaseSRWLockShared(&state_lock);
+    return out;
+}
+
 // The acquisition may intrinsically switch the weapon in hands. A changed
 // declaration is only restored when the prior item was freshly validated
 // against the current inventory; otherwise the caller fails closed instead of

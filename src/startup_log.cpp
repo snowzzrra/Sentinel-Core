@@ -88,6 +88,17 @@ std::string b_trace(const save::BSnapshot& s) {
     for(size_t i=0;i<s.stages.size();++i) { if(i) out+=','; out+=quoted(save::b_stage_names[i])+":"+b_event(s.stages[i]); }
     return out+"}}";
 }
+std::string special_use_history(const special::UseHistory& s) {
+    auto out = "{\"sequence\":" + std::to_string(s.sequence) +
+        ",\"overwritten\":" + std::to_string(s.overwritten) +
+        ",\"lock_dropped\":" + std::to_string(s.lock_dropped) +
+        ",\"first_failure\":" + b_event(s.first_failure) + ",\"events\":[";
+    for (uint32_t i = 0; i < s.count; ++i) {
+        if (i) out += ',';
+        out += b_event(s.events[(s.sequence - s.count + i) % s.events.size()]);
+    }
+    return out + "]}";
+}
 bool publish_latest(const std::string& line) {
     const auto output=CreateFileW(temporary_path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(output==INVALID_HANDLE_VALUE) { latest_error=GetLastError(); return false; }
@@ -224,6 +235,8 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"arsenal_installation\":"+b_trace(arsenal::installation_diagnostics())+
                 ",\"special_input\":"+b_trace(special::input_diagnostics())+
                 ",\"special_route\":"+b_trace(special::route_diagnostics())+
+                ",\"special_hud\":"+b_trace(special::hud_diagnostics())+
+                ",\"special_use_history\":"+special_use_history(special::use_history())+
                 ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
             if (facts != last) {
                 const auto& wide_key = prelaunch::diagnostic_key();

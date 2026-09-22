@@ -11,17 +11,57 @@
 #include <algorithm>
 #include <intrin.h>
 #include <cmath>
+#include <type_traits>
 
 namespace sentinel::special {
 namespace {
 
 std::atomic<bool> ready{false};
-save::BTrace installation_trace, input_trace, route_trace;
+save::BTrace installation_trace, input_trace, route_trace, hud_trace;
+SRWLOCK use_history_lock = SRWLOCK_INIT;
+UseHistory use_events;
+std::atomic<uint64_t> use_lock_dropped{0};
+
+void record_use(const char* predicate, save::BStatus status,
+                std::initializer_list<save::BFact> facts) {
+    if (!TryAcquireSRWLockExclusive(&use_history_lock)) {
+        use_lock_dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    save::BEvent event{};
+    event.stage = save::BStage::special_input;
+    event.status = status;
+    event.predicate = predicate;
+    event.thread = GetCurrentThreadId();
+    size_t count = 0;
+    for (const auto& fact : facts) {
+        if (count == event.facts.size()) break;
+        event.facts[count++] = fact;
+    }
+    // Coalesce repeated samples of the same native caller until its facts change.
+    for (uint32_t i = use_events.count; i; --i) {
+        const auto& prior = use_events.events[(use_events.sequence - use_events.count + i - 1) % use_events.events.size()];
+        if (prior.predicate != predicate || prior.thread != event.thread ||
+            !prior.facts[0].key || prior.facts[0].value != event.facts[0].value) continue;
+        bool equal = prior.status == status;
+        for (size_t j = 0; equal && j < event.facts.size(); ++j)
+            equal = prior.facts[j].key == event.facts[j].key && prior.facts[j].value == event.facts[j].value;
+        if (equal) { ReleaseSRWLockExclusive(&use_history_lock); return; }
+        break;
+    }
+    event.sequence = ++use_events.sequence;
+    event.at_ms = GetTickCount64();
+    if (use_events.count < use_events.events.size()) ++use_events.count;
+    else ++use_events.overwritten;
+    use_events.events[(event.sequence - 1) % use_events.events.size()] = event;
+    if (status == save::BStatus::refused && !use_events.first_failure.sequence)
+        use_events.first_failure = event;
+    ReleaseSRWLockExclusive(&use_history_lock);
+}
 SRWLOCK directory_lock = SRWLOCK_INIT;
 std::wstring controls_directory;
 uintptr_t image_base = 0, engine_root = 0;
 uint32_t image_size = 0;
-SnapshotFacts native_facts{};
 
 #ifdef SC_NATIVE_TESTING
 char fixture_namespace[65]{};
@@ -48,15 +88,29 @@ constexpr uint32_t rva_hammer_input_return = 0x14433f0;
 constexpr uint32_t rva_weapon_cast = 0x21107c0;
 constexpr uint64_t special_button = UINT64_C(0x400000000);
 using CrucibleResolver = bool(*)(uintptr_t);
-using InputDown = uint64_t(*)(uintptr_t, uint64_t);
+// The qualified leaf returns SETNZ AL; its callers test AL, not RAX.
+using InputDown = bool(*)(uintptr_t, uint64_t);
 CrucibleResolver original_crucible_resolver = nullptr;
 InputDown original_input_down = nullptr;
 std::atomic<bool> route_ready{false};
 std::atomic<DWORD> route_thread{0};
-uintptr_t route_player = 0;
+std::atomic<uintptr_t> route_player{0};
 char route_namespace[65]{};
-uint32_t route_requested = SC_SPECIAL_WEAPON_NONE;
-bool special_down = false;
+SRWLOCK route_namespace_lock = SRWLOCK_INIT;
+std::atomic<uint64_t> route_epoch{0};
+std::atomic<uint32_t> route_requested{SC_SPECIAL_WEAPON_NONE};
+std::atomic<bool> special_down{false};
+thread_local uintptr_t input_job_player = 0;
+thread_local uint64_t input_job_epoch = 0;
+using InputJob = void(*)(uintptr_t);
+InputJob original_input_job = nullptr;
+using HammerAttack = void(*)(uintptr_t);
+HammerAttack original_hammer_attack = nullptr;
+using WeaponDispatch = void(*)(uintptr_t, uintptr_t);
+WeaponDispatch original_weapon_dispatch = nullptr;
+using CrucibleActivate = bool(*)(uintptr_t);
+CrucibleActivate original_crucible_activate = nullptr;
+InputDown original_input_pressed = nullptr;
 constexpr uint32_t rva_equipment_upgrade_vtable = 0x2e04ba0;
 constexpr uintptr_t perk_component_offset = 0x3b40;
 constexpr uintptr_t equipment_upgrade_offset = 0x26568;
@@ -83,6 +137,63 @@ using EarningsAppend = void(*)(uintptr_t, const char*, const char*, uint32_t, ui
 using HudElementSetup = char(*)(uintptr_t);
 
 HudElementSetup original_hud_element_setup = nullptr;
+using WeaponHudUpdate = void(*)(uintptr_t, uintptr_t);
+using WeaponHudProject = void(*)(uintptr_t);
+WeaponHudUpdate original_weapon_hud_update = nullptr;
+WeaponHudProject project_crucible_hud = nullptr, project_hammer_hud = nullptr;
+std::atomic<unsigned> configured_keys{VK_F9};
+#include "special_hud_native.h"
+
+void project_special_hud(uintptr_t element) {
+    const auto epoch = route_epoch.load(std::memory_order_acquire);
+    const bool context_valid = epoch && epoch == native::observation_stamp();
+    char namespace_id[65];
+    AcquireSRWLockShared(&route_namespace_lock);
+    std::memcpy(namespace_id, route_namespace, sizeof(namespace_id));
+    ReleaseSRWLockShared(&route_namespace_lock);
+    const auto owner = hud_owner_snapshot(namespace_id);
+    const bool crucible = owner.selected == SC_SPECIAL_WEAPON_CRUCIBLE && owner.owns_crucible;
+    const bool hammer = owner.selected == SC_SPECIAL_WEAPON_HAMMER && owner.owns_hammer;
+    // The native presentation setters read visibility from their actual owner.
+    // Restore those two fields even if a setter raises; resources stay untouched.
+    __try {
+        const bool valid = context_valid && epoch == native::observation_stamp();
+        hud::project(element, owner, valid, configured_keys.load(std::memory_order_relaxed), epoch);
+        if (!*reinterpret_cast<uintptr_t*>(element + 0x1e8) ||
+            !*reinterpret_cast<uintptr_t*>(element + 0x1f8)) return;
+        if (!valid || (!crucible && !hammer)) {
+            project_crucible_hud(element);
+            project_hammer_hud(element);
+            return;
+        }
+        auto& visible_c = *reinterpret_cast<uint8_t*>(element + 0x169);
+        auto& visible_h = *reinterpret_cast<uint8_t*>(element + 0x1b9);
+        const auto original_c = visible_c, original_h = visible_h;
+        const bool show_c = crucible && *reinterpret_cast<int32_t*>(element + 0x170) > 0;
+        const bool show_h = hammer && original_h;
+        __try {
+            visible_c = show_c;
+            visible_h = show_h;
+            project_crucible_hud(element);
+            project_hammer_hud(element);
+        } __finally {
+            visible_c = original_c;
+            visible_h = original_h;
+        }
+        installation_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
+            "special_hud_projection_submitted", 0,
+            {{"policy", owner.selected}, {"crucible_visible", show_c},
+             {"hammer_visible", show_h}, {"pixels_observed", 0}});
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        installation_trace.record(save::BStage::profile_output, save::BStatus::refused,
+            "special_hud_projection_fault", 0, {{"exception", GetExceptionCode()}});
+    }
+}
+
+void weapon_hud_update_detour(uintptr_t element, uintptr_t time) {
+    original_weapon_hud_update(element, time);
+    project_special_hud(element);
+}
 std::atomic<uintptr_t> hud_element{0};
 std::atomic<uintptr_t> hud_element_vtable{0};
 std::atomic<uintptr_t> hud_player{0};
@@ -168,26 +279,45 @@ bool route_ownership(uintptr_t p, bool& crucible, bool& hammer) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-bool route_scope(uintptr_t p) {
-    return route_ready.load(std::memory_order_acquire) &&
-        GetCurrentThreadId() == route_thread.load(std::memory_order_acquire) && p && p == route_player &&
-        native::gameplay_admitted() && p == player(nullptr) &&
-        !std::memcmp(route_namespace, save::session().namespace_id().c_str(), 65);
+uint32_t route_scope_reason(uintptr_t p) {
+    if (!route_ready.load(std::memory_order_acquire)) return 1;
+    const auto epoch = route_epoch.load(std::memory_order_acquire);
+    if (!epoch || epoch != native::observation_stamp()) return 7;
+    if (GetCurrentThreadId() != route_thread.load(std::memory_order_acquire) &&
+        (input_job_player != p || input_job_epoch != epoch)) return 2;
+    if (!p || p != route_player) return 3;
+    if (!native::gameplay_admitted()) return 4;
+    if (p != player(nullptr)) return 5;
+    AcquireSRWLockShared(&route_namespace_lock);
+    const bool same_namespace = !std::memcmp(route_namespace, save::session().namespace_id().c_str(), 65);
+    ReleaseSRWLockShared(&route_namespace_lock);
+    if (!same_namespace) return 6;
+    return 0;
 }
+bool route_scope(uintptr_t p) { return !route_scope_reason(p); }
 
 uint32_t applied_mode(bool crucible, bool hammer) {
-    if (!route_requested) route_requested = hammer ? SC_SPECIAL_WEAPON_HAMMER :
-        crucible ? SC_SPECIAL_WEAPON_CRUCIBLE : SC_SPECIAL_WEAPON_NONE;
+    uint32_t absent = SC_SPECIAL_WEAPON_NONE;
+    route_requested.compare_exchange_strong(absent, hammer ? SC_SPECIAL_WEAPON_HAMMER :
+        crucible ? SC_SPECIAL_WEAPON_CRUCIBLE : SC_SPECIAL_WEAPON_NONE);
     if (crucible && hammer) return route_requested;
     return crucible ? SC_SPECIAL_WEAPON_CRUCIBLE : hammer ? SC_SPECIAL_WEAPON_HAMMER : SC_SPECIAL_WEAPON_NONE;
 }
 
-bool crucible_resolver_detour(uintptr_t p) {
-    if (!route_scope(p)) return original_crucible_resolver(p);
+__declspec(noinline) bool crucible_resolver_detour(uintptr_t p) {
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const auto reason = route_scope_reason(p);
     bool c = false, h = false;
-    if (!route_ownership(p, c, h)) return original_crucible_resolver(p);
+    const bool known = !reason && route_ownership(p, c, h);
+    const auto mode = known ? applied_mode(c, h) : SC_SPECIAL_WEAPON_NONE;
+    const bool result = known ? c && mode == SC_SPECIAL_WEAPON_CRUCIBLE : original_crucible_resolver(p);
+    record_use("crucible_resolver", known ? save::BStatus::succeeded : save::BStatus::refused,
+        {{"caller_rva", caller - image_base}, {"player", p}, {"scope_reason", reason},
+         {"owner_thread", route_thread.load()}, {"presence_known", known}, {"crucible_present", c},
+         {"hammer_present", h}, {"policy_selected", mode}, {"gate_result", result},
+         {"vanilla_fallback", !known}, {"action_observed", 0}});
     // Resource/action guards remain in the original callers and ActivateCrucible.
-    return c && applied_mode(c, h) == SC_SPECIAL_WEAPON_CRUCIBLE;
+    return result;
 }
 
 struct RouteObservation {
@@ -196,21 +326,35 @@ struct RouteObservation {
 };
 RouteObservation observe_route(uintptr_t p);
 
-uint64_t filter_hammer_input(uintptr_t caller, uint64_t button, uint64_t raw) {
-    if (caller != image_base + rva_hammer_input_return || button != special_button ||
-        GetCurrentThreadId() != route_thread.load(std::memory_order_acquire) || !route_scope(route_player))
-        return raw;
+bool filter_hammer_input(uintptr_t caller, uint64_t button, bool raw, uintptr_t input = 0) {
+    if (caller != image_base + rva_hammer_input_return && button != special_button) return raw;
+    const auto reason = route_scope_reason(route_player);
+    const bool site = caller == image_base + rva_hammer_input_return && button == special_button;
     bool c = false, h = false;
-    if (!route_ownership(route_player, c, h)) return raw;
-    const bool down = static_cast<uint8_t>(raw) != 0;
+    const bool known = site && !reason && route_ownership(route_player, c, h);
+    const auto selected = known ? applied_mode(c, h) : SC_SPECIAL_WEAPON_NONE;
+    const bool result = known ? raw && h && selected == SC_SPECIAL_WEAPON_HAMMER : raw;
+    record_use("hammer_input", known ? save::BStatus::succeeded : save::BStatus::refused,
+        {{"caller_rva", caller - image_base}, {"input", input}, {"mask", button}, {"raw_al", raw},
+         {"scope_reason", reason}, {"owner_thread", route_thread.load()}, {"caller_mask_match", site},
+         {"presence_known", known}, {"crucible_present", c}, {"hammer_present", h},
+         {"policy_selected", selected}, {"gate_result", result}, {"vanilla_fallback", !known},
+         {"action_observed", 0}});
+    if (!known) return raw;
+    const bool down = raw;
     const auto mode = applied_mode(c, h);
     const bool allowed = h && mode == SC_SPECIAL_WEAPON_HAMMER;
     if (down != special_down) {
         static uint64_t input_sequence = 0;
         if (down) ++input_sequence;
         const auto observed = observe_route(route_player);
+        record_use("special_input_transition", observed.error ? save::BStatus::refused : save::BStatus::succeeded,
+            {{"caller_rva", caller - image_base}, {"down", down}, {"policy_selected", mode},
+             {"held_decl", observed.held}, {"hands_action", observed.action},
+             {"resource_known", observed.known}, {"crucible_charge", observed.charge},
+             {"hammer_meter_milli", observed.meter_milli}, {"error", observed.error}});
         route_trace.record(save::BStage::special_input, save::BStatus::succeeded, "core_policy_input_gate", GetTickCount64(),
-            {{"down", down}, {"requested", route_requested}, {"applied", mode}, {"hammer_allowed", allowed},
+            {{"down", down}, {"requested", route_requested.load()}, {"applied", mode}, {"hammer_allowed", allowed},
              {"crucible_owned", c}, {"hammer_owned", h}, {"caller_rva", rva_hammer_input_return},
              {"input_sequence", input_sequence}, {"native_known", observed.known},
              {"held_decl", observed.held}, {"crucible_charge", observed.charge},
@@ -219,13 +363,13 @@ uint64_t filter_hammer_input(uintptr_t caller, uint64_t button, uint64_t raw) {
     }
     special_down = down;
     // The query precedes Hammer meter/latch/animation. Preserve every other
-    // caller and the upper return bits; do not queue or synthesize an input.
-    return allowed ? raw : raw & ~UINT64_C(0xff);
+    // caller's boolean result; do not queue or synthesize an input.
+    return allowed && raw;
 }
 
-uint64_t input_down_detour(uintptr_t input, uint64_t button) {
+__declspec(noinline) bool input_down_detour(uintptr_t input, uint64_t button) {
     const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
-    return filter_hammer_input(caller, button, original_input_down(input, button));
+    return filter_hammer_input(caller, button, original_input_down(input, button), input);
 }
 
 uintptr_t give_item(uintptr_t inventory, uintptr_t p, uintptr_t decl, int count, uint8_t count_is_amount) {
@@ -353,7 +497,6 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
             }
         }
 
-        native_facts = facts;
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -400,7 +543,6 @@ uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, 
 
         SnapshotFacts facts{};
         if (!read(nullptr, p, facts)) return 7;
-        native_facts = facts;
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
     return error;
 }
@@ -421,7 +563,7 @@ uint32_t select(void*, uintptr_t p, uint32_t selected) {
         if (special_down || !held || held == find_decl(CRUCIBLE_PATH) || held == find_decl(HAMMER_PATH) || action > 2) {
             route_trace.record(save::BStage::special_toggle, save::BStatus::refused, "selection_busy", GetTickCount64(),
                 {{"requested", selected}, {"applied", applied_mode(c, h)}, {"held_decl", held},
-                 {"hands_action", action}, {"special_down", special_down}, {"error", ERROR_BUSY}});
+                 {"hands_action", action}, {"special_down", special_down.load()}, {"error", ERROR_BUSY}});
             return ERROR_BUSY;
         }
         const auto before = applied_mode(c, h);
@@ -486,8 +628,6 @@ uint32_t refill(void*, uintptr_t p) {
     return error;
 }
 
-std::atomic<unsigned> configured_keys{VK_F9};
-
 namespace {
 RouteObservation observe_route(uintptr_t p) {
     RouteObservation observed{};
@@ -506,6 +646,92 @@ RouteObservation observe_route(uintptr_t p) {
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { observed.error = GetExceptionCode(); }
     return observed;
+}
+
+void input_job_detour(uintptr_t context) {
+    const auto previous_player = input_job_player;
+    const auto previous_epoch = input_job_epoch;
+    const auto p = route_player.load(std::memory_order_acquire);
+    const auto epoch = route_epoch.load(std::memory_order_acquire);
+    // PE 9809708c: 1441f70 submits player+4d230 to 1438f00, which tail-jumps
+    // through 1442480 into the ordinary input consumer 1442710.
+    input_job_player = p && context == p + 0x4d230 ? p : 0;
+    input_job_epoch = epoch;
+    const auto reason = route_scope_reason(p);
+    record_use("input_job_scope", !reason ? save::BStatus::succeeded : save::BStatus::refused,
+        {{"entry_rva", 0x1438f00}, {"context", context}, {"player", p}, {"epoch", epoch},
+         {"context_match", input_job_player != 0}, {"scope_reason", reason}});
+    __try { original_input_job(context); }
+    __finally {
+        input_job_player = previous_player;
+        input_job_epoch = previous_epoch;
+    }
+}
+
+__declspec(noinline) void weapon_dispatch_detour(uintptr_t p, uintptr_t command) {
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const auto previous_player = input_job_player;
+    const auto previous_epoch = input_job_epoch;
+    const bool site = caller == image_base + 0x13f225c || caller == image_base + 0x13f203a;
+    input_job_player = site ? p : 0;
+    input_job_epoch = route_epoch.load(std::memory_order_acquire);
+    const auto reason = route_scope_reason(p);
+    record_use("weapon_dispatch_scope", !reason ? save::BStatus::succeeded : save::BStatus::refused,
+        {{"caller_rva", caller - image_base}, {"player", p}, {"command", command},
+         {"caller_match", site}, {"scope_reason", reason}, {"epoch", input_job_epoch}});
+    __try { original_weapon_dispatch(p, command); }
+    __finally {
+        input_job_player = previous_player;
+        input_job_epoch = previous_epoch;
+    }
+}
+
+__declspec(noinline) bool input_pressed_detour(uintptr_t input, uint64_t mask) {
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const bool raw = original_input_pressed(input, mask);
+    if (caller == image_base + 0x1465640 || mask == special_button) {
+        const auto p = route_player.load(std::memory_order_acquire);
+        const auto reason = route_scope_reason(p);
+        record_use("crucible_input_edge", reason ? save::BStatus::refused : save::BStatus::succeeded,
+            {{"caller_rva", caller - image_base}, {"input", input}, {"mask", mask}, {"raw_al", raw},
+             {"scope_reason", reason}, {"policy_requested", route_requested.load()}, {"result_al", raw}});
+    }
+    return raw;
+}
+
+__declspec(noinline) bool crucible_activate_detour(uintptr_t p) {
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const auto reason = route_scope_reason(p);
+    const auto before = !reason ? observe_route(p) : RouteObservation{};
+    record_use("crucible_activate_enter", reason ? save::BStatus::refused : save::BStatus::entered,
+        {{"caller_rva", caller - image_base}, {"player", p}, {"scope_reason", reason},
+         {"charge", before.charge}, {"known", before.known}, {"error", before.error}});
+    const bool result = original_crucible_activate(p);
+    const bool observed = !reason && !route_scope_reason(p);
+    const auto after = observed ? observe_route(p) : RouteObservation{};
+    record_use("crucible_activate_return", result ? save::BStatus::succeeded : save::BStatus::refused,
+        {{"caller_rva", caller - image_base}, {"player", p}, {"native_result_al", result},
+         {"scope_valid", observed}, {"charge_before", before.charge}, {"charge_after", after.charge},
+         {"known_before", before.known}, {"known_after", after.known}, {"error", after.error}});
+    return result;
+}
+
+__declspec(noinline) void hammer_attack_detour(uintptr_t p) {
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const auto reason = route_scope_reason(p);
+    const auto before = !reason ? observe_route(p) : RouteObservation{};
+    record_use("hammer_handler_enter", reason ? save::BStatus::refused : save::BStatus::entered,
+        {{"caller_rva", caller - image_base}, {"player", p}, {"scope_reason", reason},
+         {"hands_action", before.action}, {"meter_milli", before.meter_milli}, {"error", before.error}});
+    original_hammer_attack(p);
+    const bool observed = !reason && !route_scope_reason(p);
+    const auto after = observed ? observe_route(p) : RouteObservation{};
+    record_use("hammer_handler_return", observed ? save::BStatus::succeeded : save::BStatus::refused,
+        {{"caller_rva", caller - image_base}, {"player", p}, {"scope_valid", observed},
+         {"action_observed", observed && !after.error && after.action != UINT32_MAX},
+         {"action_before", before.action}, {"action_after", after.action},
+         {"action_started", observed && !before.error && !after.error && before.action != 0x21 && after.action == 0x21},
+         {"meter_before", before.meter_milli}, {"meter_after", after.meter_milli}, {"error", after.error}});
 }
 }
 
@@ -641,15 +867,20 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
         hud_element_vtable.store(0, std::memory_order_release);
         hud_player.store(0, std::memory_order_release);
     }
+    route_epoch.store(0, std::memory_order_release);
     route_thread = GetCurrentThreadId();
-    route_player = safe_gameplay ? p : 0;
+    route_player = 0;
     if (p && safe_gameplay) {
         const auto& id = save::session().namespace_id();
+        AcquireSRWLockExclusive(&route_namespace_lock);
         if (std::memcmp(route_namespace, id.c_str(), 65)) {
             std::memcpy(route_namespace, id.c_str(), 65);
             route_requested = SC_SPECIAL_WEAPON_NONE;
             special_down = false;
         }
+        ReleaseSRWLockExclusive(&route_namespace_lock);
+        route_player.store(p, std::memory_order_release);
+        route_epoch.store(native::observation_stamp(), std::memory_order_release);
     }
     static bool observed_down[2]{};
     static uint32_t attempts[2]{}, dispatches[2]{}, gate_refusals[2]{}, admission_refusals[2]{};
@@ -727,6 +958,14 @@ bool selection_route_available() { return route_ready.load(std::memory_order_acq
 save::BSnapshot installation_diagnostics() { return installation_trace.snapshot(); }
 save::BSnapshot input_diagnostics() { return input_trace.snapshot(); }
 save::BSnapshot route_diagnostics() { return route_trace.snapshot(); }
+save::BSnapshot hud_diagnostics() { return hud_trace.snapshot(); }
+UseHistory use_history() {
+    AcquireSRWLockShared(&use_history_lock);
+    auto snapshot = use_events;
+    ReleaseSRWLockShared(&use_history_lock);
+    snapshot.lock_dropped = use_lock_dropped.load(std::memory_order_relaxed);
+    return snapshot;
+}
 std::wstring input_directory() {
     AcquireSRWLockShared(&directory_lock);
     auto result = controls_directory;
@@ -823,6 +1062,16 @@ void install(const engine::Binding& binding, HANDLE stop) {
     enum class RouteSiteKind : uint32_t { function_entry = 1, exact_leaf = 2, call_window = 3 };
     struct RouteSite { uint32_t offset; const char* bytes; RouteSiteKind kind; uint32_t owner; size_t length; };
     const RouteSite route_sites[] = {
+        {0x146be40, "33c0448bc03881a100000075074c8b81a80000004c85c274113841097504488b",
+            RouteSiteKind::exact_leaf, 0, 45},
+        {0x14644e0, "405556488dac24c8feffff4881ec38020000488b05dfa4d4024833c448898500",
+            RouteSiteKind::function_entry, 0x14644e0, 32},
+        {0x1456310, "4055574883ec28488b01488bf94032edff90700500004885c0751f4c8d05ded6",
+            RouteSiteKind::function_entry, 0x1456310, 32},
+        {0x1438f00, "40534883ec208b5108488bd9488b0d5de41b03e8582026ff4885c074110fb653",
+            RouteSiteKind::function_entry, 0x1438f00, 32},
+        {0x143c7f0, "405356574883ec50488bf9e830f00100488b17488bcf488bd8ff924005000048",
+            RouteSiteKind::function_entry, 0x143c7f0, 32},
         {rva_crucible_resolver, "48895c2408574883ec20488bb9d8d10400488bd94885ff7513488d15206b9601",
             RouteSiteKind::function_entry, rva_crucible_resolver, 32},
         {rva_input_down, "80b9a100000000740933c04885c20f95c0c3488b81a80000004885c20f95c0c3",
@@ -914,29 +1163,43 @@ void install(const engine::Binding& binding, HANDLE stop) {
         ++site_index;
     }
     if (route_valid) {
-        const auto resolver = reinterpret_cast<void*>(image_base + rva_crucible_resolver);
-        const auto input = reinterpret_cast<void*>(image_base + rva_input_down);
-        const auto create_c = MH_CreateHook(resolver, reinterpret_cast<void*>(crucible_resolver_detour),
-                                           reinterpret_cast<void**>(&original_crucible_resolver));
-        const auto create_h = create_c == MH_OK ? MH_CreateHook(input, reinterpret_cast<void*>(input_down_detour),
-                                           reinterpret_cast<void**>(&original_input_down)) : MH_UNKNOWN;
-        const auto queue_c = create_h == MH_OK ? MH_QueueEnableHook(resolver) : MH_UNKNOWN;
-        const auto queue_h = queue_c == MH_OK ? MH_QueueEnableHook(input) : MH_UNKNOWN;
-        const auto enabled = queue_h == MH_OK ? MH_ApplyQueued() : MH_UNKNOWN;
-        const bool installed = enabled == MH_OK;
+        struct Hook { uint32_t rva; void* detour; void** original; };
+        const Hook hooks[] = {
+            {rva_crucible_resolver, reinterpret_cast<void*>(crucible_resolver_detour), reinterpret_cast<void**>(&original_crucible_resolver)},
+            {rva_input_down, reinterpret_cast<void*>(input_down_detour), reinterpret_cast<void**>(&original_input_down)},
+            {0x1438f00, reinterpret_cast<void*>(input_job_detour), reinterpret_cast<void**>(&original_input_job)},
+            {0x143c7f0, reinterpret_cast<void*>(hammer_attack_detour), reinterpret_cast<void**>(&original_hammer_attack)},
+            {0x14644e0, reinterpret_cast<void*>(weapon_dispatch_detour), reinterpret_cast<void**>(&original_weapon_dispatch)},
+            {0x1456310, reinterpret_cast<void*>(crucible_activate_detour), reinterpret_cast<void**>(&original_crucible_activate)},
+            {0x146be40, reinterpret_cast<void*>(input_pressed_detour), reinterpret_cast<void**>(&original_input_pressed)},
+        };
+        size_t created = 0, queued = 0;
+        MH_STATUS status = MH_OK;
+        for (const auto& hook : hooks) {
+            status = MH_CreateHook(reinterpret_cast<void*>(image_base + hook.rva), hook.detour, hook.original);
+            if (status != MH_OK) break;
+            ++created;
+        }
+        if (status == MH_OK) for (const auto& hook : hooks) {
+            status = MH_QueueEnableHook(reinterpret_cast<void*>(image_base + hook.rva));
+            if (status != MH_OK) break;
+            ++queued;
+        }
+        if (status == MH_OK) status = MH_ApplyQueued();
+        const bool installed = status == MH_OK;
         if (!installed) {
-            if (create_h == MH_OK) { MH_DisableHook(input); MH_RemoveHook(input); }
-            if (create_c == MH_OK) { MH_DisableHook(resolver); MH_RemoveHook(resolver); }
+            size_t remove = created;
+            while (remove) {
+                const auto target = reinterpret_cast<void*>(image_base + hooks[--remove].rva);
+                MH_DisableHook(target); MH_RemoveHook(target);
+            }
         }
         route_ready.store(installed, std::memory_order_release);
         installation_trace.record(save::BStage::special_toggle, installed ? save::BStatus::succeeded : save::BStatus::refused,
-            "joint_route_install", 0, {{"create_c", create_c}, {"create_h", create_h},
-                {"queue_c", queue_c}, {"queue_h", queue_h}, {"enabled", enabled}, {"ready", installed}});
+            "joint_route_install", 0, {{"created", created}, {"queued", queued}, {"status", status}, {"ready", installed}});
     }
 
-    // HUD capture is optional presentation: a failed hook validation or install
-    // must not disable ownership/selection/refill, it only disables the on-screen
-    // Ammo Refill projection.
+    // Optional MissionChallenge toast capture is independent of gameplay hooks.
     const auto deadline = GetTickCount64() + 10000;
     native::Target hud_target{};
     hud_target.address = image_base + rva_hud_element_setup;
@@ -955,6 +1218,72 @@ void install(const engine::Binding& binding, HANDLE stop) {
         hud_enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused, "optional_hud_hook", 0,
         {{"rva", rva_hud_element_setup}, {"validation", hud_validation},
          {"create_status", static_cast<uint64_t>(hud_created)}, {"enable_status", static_cast<uint64_t>(hud_enabled)}});
+    const struct { uint32_t rva; const char* bytes; } presentation_sites[] = {
+        {0xf0b3b0, "48895c2418555641564883ec50488bea4533f633d24489742470418bf6488bd9"},
+        {0xf0c230, "40534883ec20488bd9488b89e801000080bb6901000000750e488b01b2014883"},
+        {0xf0c640, "40534883ec20488bd9488b89f801000080bbb901000000750e488b01b2014883"},
+    };
+    bool presentation_valid = true;
+    for (const auto& site : presentation_sites) {
+        native::Target target{};
+        target.address = image_base + site.rva;
+        for (size_t n = 0; n < target.bytes.size(); ++n)
+            target.bytes[n] = static_cast<uint8_t>(digit(site.bytes[n * 2]) * 16 + digit(site.bytes[n * 2 + 1]));
+        const auto error = native::validate_target(memory, binding.image, target, stop, GetTickCount64() + 10000);
+        installation_trace.record(save::BStage::profile_prepare,
+            error ? save::BStatus::refused : save::BStatus::entered,
+            "special_hud_site", 0, {{"rva", site.rva}, {"validation", error}});
+        if (error) { presentation_valid = false; break; }
+    }
+    if (presentation_valid) {
+        const auto bind_hud = [&](auto& function, uint32_t rva, size_t leaf, const char* bytes) {
+            native::Target site{};
+            site.address = image_base + rva;
+            for (size_t n = 0; n < site.bytes.size(); ++n)
+                site.bytes[n] = static_cast<uint8_t>(digit(bytes[n * 2]) * 16 + digit(bytes[n * 2 + 1]));
+            const auto reason = leaf ? native::validate_leaf_target(memory, binding.image, site, leaf, stop, deadline) :
+                                       native::validate_target(memory, binding.image, site, stop, deadline);
+            if (reason) {
+                hud_trace.record(save::BStage::profile_prepare, save::BStatus::refused,
+                    "hud_adapter_site_refused", 0, {{"rva", rva}, {"reason", reason}});
+                return false;
+            }
+            function = reinterpret_cast<std::decay_t<decltype(function)>>(site.address);
+            return true;
+        };
+        hud::enabled =
+            bind_hud(hud::swf.lookup, 0x185c150, 0, "40534883ec20488b4928488bda488b01ff5028488bc34883c4205bc3cccccccc") &&
+            bind_hud(hud::swf.sprite, 0x184e470, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b150f5c06") &&
+            bind_hud(hud::swf.text, 0x184e4b0, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b15d75b06") &&
+            bind_hud(hud::swf.release, 0x184e3b0, 0, "4883ec288b0183f8027527488b4908b8fffffffff00fc1413083f80175544885") &&
+            bind_hud(hud::swf.string_init, 0x3fa8e0, 39, "488d0591cb6602c7411414000080488901488d411848894108c7411000000000") &&
+            bind_hud(hud::swf.string_set, 0x3faff0, 0, "48895c2410488974241848897c242041564883ec304c8bf2488bd94885d20f85") &&
+            bind_hud(hud::swf.string_free, 0x3facb0, 0, "40534883ec20488b5108488d05b7c76602488901488bd94885d2742d8b4114c1") &&
+            bind_hud(hud::swf.duplicate, 0x1859a30, 0, "4883ec28488b41404c8bc24885c0751f488b4130488d0df53c6001488b500848") &&
+            bind_hud(hud::swf.entry, 0x1859db0, 0, "48895c241057448b51784533db8bfa488bd9458bcb4585d27e35488974241048") &&
+            bind_hud(hud::swf.add, 0x1856c70, 0, "48895c2418555657415541564883ec7033f6488bd948634978458bf04d8be98b") &&
+            bind_hud(hud::swf.dirty, 0x1857110, 0, "4c8bdc574883ec70488b05b97895024833c448894424584863410c488bf983f8") &&
+            bind_hud(hud::swf.start, 0x18610d0, 0, "48895c2408574883ec200fb741588bfa488bd93bd074447d0de8928effff488b") &&
+            bind_hud(hud::swf.frame, 0x1865280, 0, "48895c2408574883ec200fb74158bf010000003bd7488bd90f4ffa3bf8742c7d") &&
+            bind_hud(hud::swf.visible, 0x1864430, 97, "440fb6d23851517457807952007551488b41104c6349088851514d03c9488b10") &&
+            bind_hud(hud::swf.position, 0x1863ec0, 70, "48837940004c8bc9743b488b41104c63410c49c1e006488b9080000000f3410f") &&
+            bind_hud(hud::swf.color, 0x1863d90, 0, "48896c24104889742418574883ec308bf2488bf981fa0d0100000f87f7000000") &&
+            bind_hud(hud::swf.material, 0x1863c30, 0, "48895c240848896c24104889742418574883ec20488bd9418bf1488b4960418b") &&
+            bind_hud(hud::swf.set_text, 0x186db00, 0, "40534883ec20488bd94883c140e8ded4b8fe488bcb4883c4205be9e1cbffffcc") &&
+            bind_hud(hud::swf.cached, 0x185d1a0, 0, "40534883ec20488b4110488bd94885c075143941207f064883c4205bc3e8ae1f") &&
+            bind_hud(hud::swf.find_material, 0x17aa5d0, 0, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448") &&
+            binding.image.contains(0x5e05200, sizeof(uintptr_t), IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_EXECUTE);
+        project_crucible_hud = reinterpret_cast<WeaponHudProject>(image_base + 0xf0c230);
+        project_hammer_hud = reinterpret_cast<WeaponHudProject>(image_base + 0xf0c640);
+        const auto target = reinterpret_cast<void*>(image_base + 0xf0b3b0);
+        const auto created = MH_CreateHook(target, reinterpret_cast<void*>(weapon_hud_update_detour),
+                                           reinterpret_cast<void**>(&original_weapon_hud_update));
+        const auto enabled = created == MH_OK ? MH_EnableHook(target) : MH_UNKNOWN;
+        if (created == MH_OK && enabled != MH_OK) MH_RemoveHook(target);
+        installation_trace.record(save::BStage::profile_prepare,
+            enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
+            "special_hud_install", 0, {{"create_status", created}, {"enable_status", enabled}});
+    }
     ready.store(true, std::memory_order_release);
     installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "ownership_ready", 0,
         {{"selection_route_ready", route_ready.load(std::memory_order_acquire)},
