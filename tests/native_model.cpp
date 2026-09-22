@@ -1,4 +1,7 @@
 #include "native_model.h"
+#include "challenge_match.h"
+#include "runes.h"
+#include "special.h"
 #include <Windows.h>
 #include "protocol.h"
 #include <cstdio>
@@ -11,6 +14,8 @@
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL native model line %d: %s\n", __LINE__, #x); std::exit(1); } } while (0)
 using namespace sentinel;
 using namespace sentinel::native;
+namespace sentinel::runes { Calls calls{}; }
+namespace sentinel::special { Calls calls{}; }
 sc_diagnostic_request request(uint64_t id, uint32_t deadline = 100) {
     sc_diagnostic_request r{}; r.expected.pid = 7; r.expected.process_created = 13;
     r.expected.instance_id[0] = 1; r.expected.lifecycle_generation = 1;
@@ -18,6 +23,24 @@ sc_diagnostic_request request(uint64_t id, uint32_t deadline = 100) {
 }
 void run_backup_request_contracts();
 int main() {
+    sentinel::challenge::ScopeFacts challenge_scope{};
+    challenge_scope.active = challenge_scope.admitted = challenge_scope.map_qualified =
+        challenge_scope.record_mission = challenge_scope.canonical_group = true;
+    challenge_scope.epoch = 1; challenge_scope.thread = challenge_scope.owner_thread = 2;
+    challenge_scope.player = 3; challenge_scope.map = 4;
+    sentinel::challenge::CallFacts challenge_call{};
+    challenge_call.admitted = challenge_call.session_admitted = true;
+    challenge_call.epoch = 1; challenge_call.thread = 2; challenge_call.player = 3; challenge_call.map = 4;
+    challenge_call.return_site = challenge_call.expected_return_site = 5;
+    challenge_call.currency = sentinel::challenge::sentinel_battery_currency;
+    challenge_call.delta = sentinel::challenge::sentinel_battery_delta;
+    CHECK(sentinel::challenge::suppression_mismatch(challenge_scope, challenge_call) == nullptr);
+    challenge_scope.active = false;
+    CHECK(std::strcmp(sentinel::challenge::suppression_mismatch(challenge_scope, challenge_call), "active") == 0);
+    challenge_scope.active = true; challenge_call.return_site = 6;
+    CHECK(std::strcmp(sentinel::challenge::suppression_mismatch(challenge_scope, challenge_call), "return_site") == 0);
+    challenge_call.return_site = 5; challenge_call.currency = 5;
+    CHECK(std::strcmp(sentinel::challenge::suppression_mismatch(challenge_scope, challenge_call), "currency") == 0);
     Lifecycle life;
     CHECK(life.generation == 0 && life.state == SC_LIFETIME_UNOBSERVED);
     life.begin(true, true, false, 10, 9);

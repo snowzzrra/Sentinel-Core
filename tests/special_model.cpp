@@ -14,6 +14,7 @@ struct Fixture {
     uint32_t ensure_result = 0;
     unsigned ensure_calls = 0;
     unsigned select_calls = 0;
+    unsigned present_calls = 0;
     bool materialize = false;
     bool player_present = true;
 };
@@ -42,6 +43,10 @@ uint32_t select(void* context, uintptr_t, uint32_t selected) {
     fixture.facts.native_selected = static_cast<uint8_t>(selected);
     return 0;
 }
+bool present(void* context, uintptr_t, uint32_t, uint32_t, uint32_t) {
+    ++static_cast<Fixture*>(context)->present_calls;
+    return true;
+}
 
 sentinel::special::Calls calls(Fixture& fixture) {
     sentinel::special::Calls result{};
@@ -50,6 +55,7 @@ sentinel::special::Calls calls(Fixture& fixture) {
     result.read = read;
     result.ensure = ensure;
     result.select = select;
+    result.present = present;
     return result;
 }
 
@@ -130,6 +136,29 @@ int main() {
     result = sentinel::special::toggle_local("special-local-no-owned", calls(no_owned));
     CHECK(result.kind == SC_SPECIAL_OBSERVE && result.outcome == SC_SPECIAL_OUTCOME_OK);
     CHECK(no_owned.select_calls == 0);
+
+    Fixture refill{};
+    constexpr auto refill_flags = SC_SPECIAL_REFILL_AUTHORITATIVE |
+        SC_SPECIAL_REFILL_BALANCE_KNOWN | SC_SPECIAL_REFILL_CONNECTED;
+    sc_special_request refill_request{};
+    refill_request.kind = SC_SPECIAL_REFILL_PUBLISH;
+    refill_request.refill_balance = 2;
+    refill_request.refill_flags = refill_flags;
+    strcpy_s(refill_request.namespace_id, "special-refill-publish");
+    sentinel::special::reset_session(refill_request.namespace_id);
+    result = sentinel::special::initial(refill_request);
+    sentinel::special::execute(refill_request, result, calls(refill));
+    CHECK(result.outcome == SC_SPECIAL_OUTCOME_OK && result.operations_applied == 1);
+    CHECK(refill.present_calls == 1);
+    result = sentinel::special::initial(refill_request);
+    sentinel::special::execute(refill_request, result, calls(refill));
+    CHECK(result.outcome == SC_SPECIAL_OUTCOME_NOOP && result.operations_applied == 1);
+    CHECK(refill.present_calls == 1);
+    refill_request.refill_balance = 1;
+    result = sentinel::special::initial(refill_request);
+    sentinel::special::execute(refill_request, result, calls(refill));
+    CHECK(result.outcome == SC_SPECIAL_OUTCOME_OK && result.operations_applied == 2);
+    CHECK(refill.present_calls == 2);
 
     // Acquisition preservation: normal weapon held -> Hammer acquisition ->
     // normal weapon restored. The decision seam carries declaration/item values

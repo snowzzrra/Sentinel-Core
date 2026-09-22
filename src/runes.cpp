@@ -130,6 +130,7 @@ void bind_run_state_if_needed(uintptr_t player, uint64_t generation) {
     const auto desired = shared_state;
     ReleaseSRWLockExclusive(&state_lock);
     SnapshotFacts before{}, after{};
+    calls.bind_run_state(calls.context, player);
     if (!calls.read(calls.context, player, before)) return;
     if (calls.ensure_normal_runes(calls.context, player, desired.owned_normal & ~before.owned_normal) ||
         calls.ensure_support_runes(calls.context, player, desired.owned_support & ~before.owned_support) ||

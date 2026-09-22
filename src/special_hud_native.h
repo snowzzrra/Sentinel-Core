@@ -162,7 +162,14 @@ void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     const auto three = child(pips, "pips3");
     if (!three) { refuse("hud_three_pip_template_absent", element, pips, epoch); return; }
     swf.visible(pips, known, true);
-    if (known) swf.frame(three, static_cast<int>(owner.refill_balance + 1));
+    struct RenderedPips { uintptr_t clip{}; uint32_t balance{}; uint64_t revision{}; };
+    thread_local RenderedPips rendered{};
+    if (known && (rendered.clip != three || rendered.balance != owner.refill_balance ||
+                  rendered.revision != owner.revision)) {
+        swf.frame(three, static_cast<int>(owner.refill_balance + 1));
+        swf.dirty(three);
+        rendered = {three, owner.refill_balance, owner.revision};
+    }
     const auto palette = *reinterpret_cast<int32_t*>(widget + 0x1ec);
     if (const auto fill = child(three, "fill")) swf.color(fill, palette);
     if (const auto fill = child(three, "innerFill")) swf.color(fill, palette);

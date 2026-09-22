@@ -339,18 +339,34 @@ bool refresh(void*, uintptr_t p) {
 void bind_run_state(void*, uintptr_t p) {
     if (!p) return;
     __try {
-        ensure_normal_runes(nullptr, p, native_facts.owned_normal);
-        ensure_support_runes(nullptr, p, native_facts.owned_support);
-        for (int slot = 0; slot < 3; ++slot) {
-            if (native_facts.selected_slots[slot] >= 0) {
-                select_normal_rune(nullptr, p, static_cast<uint8_t>(slot), native_facts.selected_slots[slot]);
+        const uintptr_t rm = p + 0x19168;
+        const auto active = reinterpret_cast<char(*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0);
+        const auto assure_size = reinterpret_cast<char(*)(uintptr_t)>(image_base + 0x357040);
+        uintptr_t active_support = 0;
+        int active_count = 0;
+        for (const auto path : SUPPORT_RUNE_PATHS) {
+            const auto perk = find_perk(p, path);
+            if (perk && active && active(p + 0x3b40, perk)) {
+                active_support = perk;
+                ++active_count;
+                auto list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
+                auto count = *reinterpret_cast<int*>(rm + 0x70);
+                auto capacity = *reinterpret_cast<int*>(rm + 0x74);
+                if (count < 0 || count > 16 || capacity < count || (count && !list)) return;
+                bool registered = false;
+                for (int i = 0; i < count; ++i) registered |= list[i] == perk;
+                if (!registered) {
+                    if (count == 16 || (count >= capacity && (!assure_size || !assure_size(rm + 0x68)))) return;
+                    list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
+                    capacity = *reinterpret_cast<int*>(rm + 0x74);
+                    if (!list || *reinterpret_cast<int*>(rm + 0x70) != count || capacity <= count) return;
+                    list[count] = perk;
+                    *reinterpret_cast<int*>(rm + 0x70) = count + 1;
+                }
             }
         }
-        if (native_facts.selected_support >= 0) {
-            select_support_rune(nullptr, p, native_facts.selected_support);
-        }
-        sync_crystal_pairs(nullptr, p, native_facts.derived_pairs);
-        refresh(nullptr, p);
+        if (active_count == 1 && !*reinterpret_cast<uintptr_t*>(rm + 0x98))
+            *reinterpret_cast<uintptr_t*>(rm + 0x98) = active_support;
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 

@@ -31,6 +31,7 @@ struct Scope {
     uintptr_t manager = 0, player = 0, record = 0, decl = 0, map = 0;
     uint32_t witness_count = 0;
     uintptr_t witnesses[max_member_witnesses]{};
+    bool diagnostic_recorded = false;
 };
 thread_local Scope scope{};
 
@@ -143,7 +144,6 @@ uintptr_t current_map() {
 }
 
 bool evaluate(uintptr_t player, uint32_t currency, int32_t delta, uint8_t notify, uintptr_t return_site) {
-    if (!scope.active) return false;
     const Scope current = scope;
     ScopeFacts facts{};
     facts.active = current.active;
@@ -169,7 +169,26 @@ bool evaluate(uintptr_t player, uint32_t currency, int32_t delta, uint8_t notify
     call.currency = currency;
     call.delta = delta;
     call.notify = notify;
-    return suppression_match(facts, call);
+    const char* mismatch = suppression_mismatch(facts, call);
+    if (mismatch && !scope.diagnostic_recorded) {
+        scope.diagnostic_recorded = true;
+        const auto scope_flags = static_cast<uint32_t>(facts.active) |
+            (static_cast<uint32_t>(facts.admitted) << 1) |
+            (static_cast<uint32_t>(facts.map_qualified) << 2) |
+            (static_cast<uint32_t>(facts.record_mission) << 3) |
+            (static_cast<uint32_t>(facts.canonical_group) << 4);
+        const auto call_flags = static_cast<uint32_t>(call.admitted) |
+            (static_cast<uint32_t>(call.session_admitted) << 1);
+        save::session().btrace.record(save::BStage::challenge_suppression, save::BStatus::refused,
+            mismatch, 0, {{"scope_flags", scope_flags}, {"call_flags", call_flags},
+            {"scope_epoch", facts.epoch}, {"scope_thread", facts.thread},
+            {"scope_owner_thread", facts.owner_thread}, {"scope_player", facts.player},
+            {"scope_map", facts.map}, {"call_epoch", call.epoch}, {"call_thread", call.thread},
+            {"call_player", call.player}, {"call_map", call.map}, {"return_site", call.return_site},
+            {"expected_return_site", call.expected_return_site}, {"currency", call.currency},
+            {"delta", call.delta}, {"notify", call.notify}});
+    }
+    return mismatch == nullptr;
 }
 
 bool seam_predicate(uintptr_t player, uint32_t currency, int32_t delta, uint8_t notify, uintptr_t return_site) {

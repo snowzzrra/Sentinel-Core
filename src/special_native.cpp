@@ -853,37 +853,8 @@ __declspec(noinline) void hammer_attack_detour(uintptr_t p) {
 }
 }
 
-bool present(void*, uintptr_t, uint32_t balance, uint32_t flags, uint32_t used) {
-    const auto element = hud_element.load(std::memory_order_acquire);
-    const auto expected_vtable = hud_element_vtable.load(std::memory_order_acquire);
-    if (!element || !expected_vtable) return false;
-    char reward[96]{}, key[32]{};
-    const int vk = (configured_keys.load(std::memory_order_relaxed) & 0xff);
-    if (!vk) std::snprintf(key, sizeof(key), "UNBOUND");
-    else if (vk >= VK_F1 && vk <= VK_F12) std::snprintf(key, sizeof(key), "F%d", vk - VK_F1 + 1);
-    else if (!GetKeyNameTextA(static_cast<LONG>(MapVirtualKeyA(vk, MAPVK_VK_TO_VSC) << 16), key, sizeof(key)))
-        std::snprintf(key, sizeof(key), "VK %u", static_cast<unsigned>(vk));
-    if (!(flags & SC_SPECIAL_REFILL_AUTHORITATIVE) || !(flags & SC_SPECIAL_REFILL_CONNECTED)) {
-        std::snprintf(reward, sizeof(reward), "UNAVAILABLE");
-    } else if (!(flags & SC_SPECIAL_REFILL_BALANCE_KNOWN)) {
-        std::snprintf(reward, sizeof(reward), "-- CHARGES [%s]", key);
-    } else if (used) {
-        std::snprintf(reward, sizeof(reward), "USED; BALANCE PENDING");
-    } else {
-        std::snprintf(reward, sizeof(reward), "%u CHARGE%s [%s]", balance, balance == 1 ? "" : "S", key);
-    }
-    __try {
-        // The captured element must still be the same live class; a destroyed and
-        // reused address is rejected instead of receiving a foreign write.
-        if (*reinterpret_cast<uintptr_t*>(element) != expected_vtable) {
-            hud_element.store(0, std::memory_order_release);
-            hud_element_vtable.store(0, std::memory_order_release);
-            return false;
-        }
-        reinterpret_cast<EarningsAppend>(image_base + rva_hud_earnings)(
-            element, "AMMO REFILL", reward, 3000, 0, 0);
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+bool present(void*, uintptr_t player, uint32_t, uint32_t, uint32_t) {
+    return player != 0;
 }
 
 void present_selection(uintptr_t p) {

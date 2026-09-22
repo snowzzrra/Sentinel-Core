@@ -373,6 +373,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
         shared_state.refill_flags = r.refill_flags;
         const auto balance = shared_state.refill_balance;
         const auto flags = shared_state.refill_flags;
+        if (changed) ++total_operations;
         fill_facts(before, shared_state, out);
         ReleaseSRWLockExclusive(&state_lock);
 
@@ -380,10 +381,6 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             out.flags |= SC_SPECIAL_FLAG_HUD_PRESENTED;
         out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
         out.outcome = changed ? SC_SPECIAL_OUTCOME_OK : SC_SPECIAL_OUTCOME_NOOP;
-        AcquireSRWLockExclusive(&state_lock);
-        ++total_operations;
-        out.operations_applied = total_operations;
-        ReleaseSRWLockExclusive(&state_lock);
         return;
     }
 

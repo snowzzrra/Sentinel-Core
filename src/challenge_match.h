@@ -40,14 +40,26 @@ struct CallFacts {
 // A match requires the exact native player/map/thread/epoch identity, the
 // canonical three-member campaign aggregate captured from the native group
 // scan, the documented caller/return site and the exact currency arguments.
+inline const char* suppression_mismatch(const ScopeFacts& scope, const CallFacts& call) {
+    if (!scope.active) return "active";
+    if (!scope.admitted) return "admitted";
+    if (!scope.map_qualified) return "map_qualified";
+    if (!scope.record_mission) return "record_mission";
+    if (!scope.canonical_group) return "canonical_group";
+    if (!scope.epoch) return "epoch";
+    if (!scope.thread || scope.owner_thread != scope.thread) return "thread_owner";
+    if (!scope.player || !scope.map) return "scope_player_map";
+    if (!call.admitted || !call.session_admitted) return "call_admission";
+    if (call.thread != scope.thread || call.epoch != scope.epoch ||
+        call.player != scope.player || call.map != scope.map) return "call_identity";
+    if (call.return_site != call.expected_return_site) return "return_site";
+    if (call.currency != sentinel_battery_currency) return "currency";
+    if (call.delta != sentinel_battery_delta) return "delta";
+    if (call.notify != 0) return "notify";
+    return nullptr;
+}
+
 inline bool suppression_match(const ScopeFacts& scope, const CallFacts& call) {
-    return scope.active && scope.admitted && scope.map_qualified && scope.record_mission &&
-        scope.canonical_group && scope.epoch != 0 && scope.thread != 0 &&
-        scope.owner_thread == scope.thread && scope.player != 0 && scope.map != 0 &&
-        call.admitted && call.session_admitted && call.thread == scope.thread &&
-        call.epoch == scope.epoch && call.player == scope.player && call.map == scope.map &&
-        call.return_site == call.expected_return_site &&
-        call.currency == sentinel_battery_currency && call.delta == sentinel_battery_delta &&
-        call.notify == 0;
+    return suppression_mismatch(scope, call) == nullptr;
 }
 }
