@@ -55,7 +55,7 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   tools/arsenal_probe.cpp
   include/sentinel_runes.h src/runes.h src/runes.cpp src/runes_native.cpp
   tools/runes_probe.cpp
-  include/sentinel_special.h src/special.h src/special.cpp src/special_native.cpp
+  include/sentinel_special.h src/special.h src/special.cpp src/special_native.cpp src/special_hud_native.h
   tools/special_probe.cpp src/local_controls.h tools/local_controls_probe.cpp
   include/sentinel_deathlink.h src/deathlink.h src/deathlink.cpp src/deathlink_native.cpp
   tools/deathlink_probe.cpp

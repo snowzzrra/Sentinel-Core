@@ -111,11 +111,13 @@ void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     auto refill = child(parent, "apAmmoRefill");
     auto refill_label = child(parent, "apRefillBind");
     auto special_label = child(parent, "apSpecialBind");
+    auto special_arrow = child(parent, "apSpecialSwitch");
     const bool visible = valid && owner.namespace_valid && *reinterpret_cast<uint8_t*>(element + 0x209);
     // All references come from this update's live parent, including invalidation.
     if (refill) swf.visible(refill, false, true);
     if (refill_label) swf.visible(refill_label, false, true);
     if (special_label) swf.visible(special_label, false, true);
+    if (special_arrow) swf.visible(special_arrow, false, true);
     if (!visible) {
         hud_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
             "hud_invalidated", 0, {{"owner", element}, {"parent", parent}, {"generation", epoch},
@@ -144,6 +146,13 @@ void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
         refuse(!refill ? "hud_refill_clone_failed" : "hud_binding_text_template_unavailable",
                element, template_text, epoch); return;
     }
+    const bool switch_available = owner.owns_crucible && owner.owns_hammer;
+    const auto arrow_source = switch_available ? child(parent, "swapEquipment") : 0;
+    if (switch_available && !special_arrow)
+        special_arrow = clone(arrow_source, parent, "apSpecialSwitch", created);
+    if (switch_available && !special_arrow) {
+        refuse("hud_native_switch_template_unavailable", element, parent, epoch); return;
+    }
     hud_trace.record(save::BStage::profile_prepare, save::BStatus::succeeded,
         "hud_bound", 0, {{"owner", element}, {"parent", parent}, {"layout_source", source},
                          {"generation", epoch}, {"created", created}, {"refill", refill}});
@@ -153,20 +162,29 @@ void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     swf.frame(refill, owner.refill_enabled ? 1 : 2);
     const auto icon = child(child(refill, "icon"), "iconStatic");
     if (!icon) { refuse("hud_refill_icon_absent", element, refill, epoch); return; }
-    struct MaterialAttempt { uintptr_t owner, parent, clip, icon; uint64_t epoch; bool attempted; };
+    struct MaterialAttempt {
+        uintptr_t owner, parent, clip, icon;
+        uint64_t epoch, retry_at;
+        bool applied;
+    };
     thread_local MaterialAttempt attempt{};
     if (new_refill || attempt.owner != element || attempt.parent != parent || attempt.clip != refill ||
         attempt.icon != icon || attempt.epoch != epoch)
-        attempt = {element, parent, refill, icon, epoch, false};
-    if (!*reinterpret_cast<uintptr_t*>(icon + 0x60)) {
-        if (!attempt.attempted) {
-            attempt.attempted = true;
-            const auto material = swf.find_material(image_base + 0x5e05200, "art/ui/icons/ammo/bullets", 0);
-            if (material) swf.material(icon, material, -1, -1, 0);
+        attempt = {element, parent, refill, icon, epoch, 0, false};
+    if (attempt.applied && !*reinterpret_cast<uintptr_t*>(icon + 0x60)) {
+        attempt.applied = false;
+        attempt.retry_at = 0;
+    }
+    if (!attempt.applied && GetTickCount64() >= attempt.retry_at) {
+        attempt.retry_at = GetTickCount64() + 1000;
+        const auto material = swf.find_material(image_base + 0x5e05200, "art/ui/icons/ammo/bullets", 0);
+        if (material) {
+            swf.material(icon, material, -1, -1, 0);
+            attempt.applied = *reinterpret_cast<uintptr_t*>(icon + 0x60) == material;
         }
-        if (!*reinterpret_cast<uintptr_t*>(icon + 0x60)) {
-            refuse("hud_ammo_material_unavailable", element, icon, epoch); return;
-        }
+    }
+    if (!attempt.applied) {
+        refuse("hud_ammo_material_unavailable", element, icon, epoch); return;
     }
     const auto pips = child(refill, "pips");
     if (!pips) { refuse("hud_pips_absent", element, refill, epoch); return; }
@@ -183,25 +201,30 @@ void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     key_label((keys >> 8) & 0xff, special_key);
     std::snprintf(refill_text, sizeof(refill_text), "%s%s", refill_key,
                   !known ? " ?" : pending ? " ..." : !connected ? " OFF" : "");
-    std::snprintf(special_text, sizeof(special_text), "%s <>", special_key);
+    std::snprintf(special_text, sizeof(special_text), "%s", special_key);
     const Point offset{-step.y * 0.35f, step.x * 0.35f};
     if (!label(refill_label, refill_text, {refill_at.x + offset.x, refill_at.y + offset.y})) {
         refuse("hud_refill_text_absent", element, refill_label, epoch); return;
     }
-    if (owner.owns_crucible && owner.owns_hammer &&
-        !label(special_label, special_text, {anchor.x + offset.x, anchor.y + offset.y})) {
+    if (switch_available &&
+        !label(special_label, special_text, {anchor.x + offset.x * 2, anchor.y + offset.y * 2})) {
         refuse("hud_special_text_absent", element, special_label, epoch); return;
     }
     swf.position(refill, refill_at.x, refill_at.y);
     swf.visible(refill, true, true);
     swf.visible(refill_label, true, true);
-    swf.visible(special_label, owner.owns_crucible && owner.owns_hammer, true);
+    swf.visible(special_label, switch_available, true);
+    if (switch_available) {
+        swf.position(special_arrow, anchor.x + offset.x, anchor.y + offset.y);
+        swf.visible(special_arrow, true, true);
+    }
     hud_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
         "hud_projection_applied", 0,
         {{"owner", element}, {"parent", parent}, {"generation", epoch}, {"created", created},
          {"snapshot_valid", owner.namespace_valid}, {"policy", owner.selected}, {"balance", owner.refill_balance},
          {"pending", pending}, {"connected", connected}, {"binds", keys},
          {"snapshot_revision", owner.revision}, {"request_revision", owner.request_revision},
-         {"render_callback_observed", 0}, {"pixels_observed", 0}});
+         {"render_callback_observed", 0}, {"pixels_observed", 0},
+         {"switch_source", arrow_source}, {"switch_clip", special_arrow}});
 }
 } // namespace hud
