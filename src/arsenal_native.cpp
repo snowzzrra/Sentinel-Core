@@ -161,6 +161,14 @@ bool apply_mastery(uintptr_t component, uintptr_t upgrade) {
     return applied;
 }
 
+void mastery_result(unsigned index, uintptr_t component, bool target_found, bool applied) {
+    const auto bit = static_cast<uint16_t>(1u << index);
+    mastery_state.applied = (mastery_state.applied & ~bit) | (applied ? bit : 0);
+    mastery_state.target_unavailable = (mastery_state.target_unavailable & ~bit) | (!target_found ? bit : 0);
+    mastery_state.apply_failed = (mastery_state.apply_failed & ~bit) | (target_found && !applied ? bit : 0);
+    mastery_state.components[index] = applied ? component : 0;
+}
+
 void reapply_masteries(uintptr_t component) {
     if (!mastery_ready.load(std::memory_order_acquire) || applying_mastery ||
         !active() || !native::gameplay_admitted() || !mastery_state.desired ||
@@ -172,15 +180,7 @@ void reapply_masteries(uintptr_t component) {
         if (!(mastery_state.desired & bit)) continue;
         uintptr_t owned_component = 0, upgrade = 0;
         if (mastery_target(p, i, owned_component, upgrade) && owned_component == component) {
-            mastery_state.applied &= ~bit;
-            if (apply_mastery(component, upgrade)) {
-                mastery_state.applied |= bit;
-                mastery_state.target_unavailable &= ~bit;
-                mastery_state.apply_failed &= ~bit;
-                mastery_state.components[i] = component;
-            } else {
-                mastery_state.apply_failed |= bit;
-            }
+            mastery_result(i, component, true, apply_mastery(component, upgrade));
         }
     }
 }
@@ -250,22 +250,14 @@ void tick_masteries(uint64_t generation, uintptr_t p) {
         if (!(mastery_state.desired & bit)) continue;
         uintptr_t component = 0, upgrade = 0;
         if (!mastery_target(p, i, component, upgrade)) {
-            mastery_state.applied &= ~bit;
-            mastery_state.target_unavailable |= bit;
-            mastery_state.apply_failed &= ~bit;
-            mastery_state.components[i] = 0;
+            mastery_result(i, 0, false, false);
             continue;
         }
-        if ((mastery_state.applied & bit) && mastery_state.components[i] == component) continue;
-        mastery_state.applied &= ~bit;
-        if (apply_mastery(component, upgrade)) {
-            mastery_state.applied |= bit;
-            mastery_state.target_unavailable &= ~bit;
-            mastery_state.apply_failed &= ~bit;
-            mastery_state.components[i] = component;
-        } else {
-            mastery_state.apply_failed |= bit;
+        if ((mastery_state.applied & bit) && mastery_state.components[i] == component) {
+            mastery_result(i, component, true, true);
+            continue;
         }
+        mastery_result(i, component, true, apply_mastery(component, upgrade));
     }
 }
 
@@ -339,6 +331,30 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
 }
 
 #ifdef SC_NATIVE_TESTING
+bool test_mastery_masks() {
+    const auto saved = mastery_state;
+    mastery_state = {};
+    const auto check = [](uint16_t target, uint16_t failed, uint16_t applied, uintptr_t component) {
+        return mastery_state.target_unavailable == target && mastery_state.apply_failed == failed &&
+            mastery_state.applied == applied && mastery_state.components[0] == component;
+    };
+    mastery_result(0, 0, false, false);
+    const bool a = check(1, 0, 0, 0);
+    mastery_result(0, 0x100, true, false);
+    const bool b = check(0, 1, 0, 0);
+    mastery_result(0, 0x100, true, true);
+    const bool c = check(0, 0, 1, 0x100);
+    mastery_result(0, 0x100, true, false);
+    const bool d = check(0, 1, 0, 0);
+    mastery_result(0, 0x100, true, true);
+    const bool e = check(0, 0, 1, 0x100);
+    mastery_result(0, 0x200, true, true);
+    const bool f = check(0, 0, 1, 0x200);
+    mastery_result(0, 0, false, false);
+    const bool g = check(1, 0, 0, 0);
+    mastery_state = saved;
+    return a && b && c && d && e && f && g;
+}
 void use_fixture(Calls value, const char* id) {
     calls = value;
     std::memcpy(fixture_namespace, id, 65);

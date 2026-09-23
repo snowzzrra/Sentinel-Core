@@ -66,6 +66,7 @@ public:
     CampaignSnapshot snapshot() const;
     bool backup_continuity(const SdkWriteObservation&, storage::TransportMetadata&) const;
 private:
+    enum class MenuSaveSource { none, cold_catalog, persisted_gameplay };
     bool reject(const char*,std::initializer_list<BFact> facts={});
     bool save_record(const std::string&, bool create);
     void persist_checkpoint(const SdkWriteObservation&,engine::Memory&);
@@ -85,6 +86,7 @@ private:
     bool catalog_hydrated_ = false;
     bool menu_active_ = false;
     bool menu_save_pending_ = false;
+    MenuSaveSource menu_save_source_ = MenuSaveSource::none;
     uint64_t menu_save_generation_ = 0;
     bool contract_created_ = false, checkpoint_exists_ = false, initiated_ = false, map_pending_ = false;
     std::optional<SdkWriteObservation> checkpoint_awaiting_transition_;

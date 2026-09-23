@@ -177,6 +177,12 @@ class CampaignContinuity(unittest.TestCase):
                 result = self.stage('resume', root, 2, 'native_read_shell' + suffix)
                 self.assertIn('owned Mission Select shell save/readback/load and boundary refusals', result)
 
+    def test_native_mission_select_cold_presave(self):
+        with tempfile.TemporaryDirectory(prefix='sentinel-menu-cold-') as root:
+            self.stage('create', root, 2, 'native_read')
+            result = self.stage('resume', root, 2, 'native_read_menu_cold')
+            self.assertIn('cold Mission Select native save without Continue', result)
+
     def test_native_menu_and_continue_refuse_missing_duplicate_mixed_failed_or_uncorrelated_reads(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-native-read-refusal-') as root:
             self.stage('create', root, 3, 'native_read')

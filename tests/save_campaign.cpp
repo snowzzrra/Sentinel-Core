@@ -13,6 +13,8 @@
 #include "campaign_menu.h"
 #include "campaign_menu_native.h"
 #include "protocol.h"
+#include "arsenal.h"
+#include "special.h"
 #include <windows.h>
 #include <array>
 #include <cstdio>
@@ -237,6 +239,10 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
+    if (defect==L"hud_source" || defect==L"mastery_masks") {
+        CHECK(defect==L"hud_source" ? sentinel::special::test_hud_source() : sentinel::arsenal::test_mastery_masks());
+        std::puts("PASS native HUD source / Q3 mask fixture"); return 0;
+    }
     const bool profile_lifecycle=defect==L"profile_lifecycle";
     const bool native_read=defect.rfind(L"native_read",0)==0;
     const bool profile_overlap=defect.rfind(L"cross_map_profile_overlap",0)==0;
@@ -405,6 +411,11 @@ int wmain(int argc,wchar_t** argv) {
     if (resume) {
             CHECK(owner.campaign_run.snapshot().source_checkpoint==(profile_lifecycle || defect==L"native_read_delta_resume" || defect==L"native_read_checkpoint_resume"?2u:1u));
         if (native_read) {
+            if (defect==L"native_read_menu_cold") {
+                CampaignTransition unhydrated{};
+                unhydrated.observed=true;
+                CHECK(!owner.campaign_run.prepare_menu_save(unhydrated));
+            }
             writer_fixture::Model reader{remote,source,files,payload,directory};
             const bool corrupt=defect==L"native_read_hash";
             const bool metadata_ok=writer_fixture::load(reader,true,corrupt || defect==L"native_read_checkpoint_assign"?L"native_read":defect);
@@ -430,9 +441,13 @@ int wmain(int argc,wchar_t** argv) {
                 binding.root=reinterpret_cast<uintptr_t>(native_root.data());
                 binding.image.base=image;
                 test_campaign_binding(binding.image.base,binding.root);
-                native::test_events(binding,native_load);
+                native::test_cold_events(binding,native_load);
                 const auto boundary=native::checkpoint_transition();
-                CHECK(boundary.observed && !boundary.observation_reason && !boundary.depth);
+                CHECK(boundary.observed && !boundary.observation_reason && !boundary.depth && !boundary.generation_after);
+                auto invalid=boundary; invalid.depth=1;
+                CHECK(!owner.campaign_run.prepare_menu_save(invalid));
+                invalid=boundary; invalid.observation_reason=SC_NATIVE_WRONG_THREAD;
+                CHECK(!owner.campaign_run.prepare_menu_save(invalid));
                 CHECK(owner.campaign_run.prepare_menu_save(boundary));
                 payload += " / native cold MissionSelect shell rewrite";
                 store(file,0x150,uint64_t(payload.size())); store(file,0x158,uint64_t(payload.size()));
@@ -516,6 +531,9 @@ int wmain(int argc,wchar_t** argv) {
             },{},{},destination,[&] {
                 if (defect.rfind(L"native_read_shell",0)!=0) return;
                 const auto boundary=native::checkpoint_transition();
+                CHECK(boundary.generation_after);
+                auto zero=boundary; zero.generation_after=0;
+                CHECK(!owner.campaign_run.prepare_menu_save(zero));
                 if (defect!=L"native_read_shell_unarmed") CHECK(owner.campaign_run.prepare_menu_save(boundary));
                 if (defect==L"native_read_shell_unarmed" || defect==L"native_read_shell_generation") {
                     auto wrong=boundary; wrong.state_read=true; wrong.game=SC_GAME_MAIN_MENU;

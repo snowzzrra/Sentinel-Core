@@ -90,6 +90,7 @@ void poll_input(uintptr_t player, bool safe_gameplay);
 void reset_session(const char* namespace_id);
 
 #ifdef SC_NATIVE_TESTING
+bool test_hud_source();
 void use_fixture(Calls, const char* namespace_id);
 #endif
 }

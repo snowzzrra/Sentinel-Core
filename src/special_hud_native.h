@@ -114,38 +114,68 @@ uintptr_t clone(uintptr_t source, uintptr_t parent, const char* name, bool& crea
     return result;
 }
 
+struct GraphicsSource {
+    uintptr_t widget = 0, hammer = 0, quickuse = 0, secondary = 0;
+    uintptr_t primary_root = 0, secondary_root = 0, crucible_root = 0, hammer_root = 0;
+    uintptr_t parent = 0, movie = 0, source = 0;
+    bool crucible_movie_match = false, hammer_movie_match = false;
+};
+
+GraphicsSource graphics_source(uintptr_t element) {
+    GraphicsSource s{};
+    s.widget = *reinterpret_cast<uintptr_t*>(element + 0x1e8);
+    s.hammer = *reinterpret_cast<uintptr_t*>(element + 0x1f8);
+    s.quickuse = *reinterpret_cast<uintptr_t*>(element + 0x1d0);
+    s.secondary = *reinterpret_cast<uintptr_t*>(element + 0x1d8);
+    s.primary_root = s.quickuse ? *reinterpret_cast<uintptr_t*>(s.quickuse + 0x18) : 0;
+    s.secondary_root = s.secondary ? *reinterpret_cast<uintptr_t*>(s.secondary + 0x18) : 0;
+    s.crucible_root = s.widget ? *reinterpret_cast<uintptr_t*>(s.widget + 0x18) : 0;
+    s.hammer_root = s.hammer ? *reinterpret_cast<uintptr_t*>(s.hammer + 0x18) : 0;
+    s.parent = s.primary_root ? *reinterpret_cast<uintptr_t*>(s.primary_root + 0x40) : 0;
+    s.movie = s.parent ? *reinterpret_cast<uintptr_t*>(s.parent + 0x30) : 0;
+    if (!s.movie || !s.secondary_root ||
+        *reinterpret_cast<uintptr_t*>(s.primary_root + 0x30) != s.movie ||
+        *reinterpret_cast<uintptr_t*>(s.secondary_root + 0x30) != s.movie ||
+        *reinterpret_cast<uintptr_t*>(s.secondary_root + 0x40) != s.parent) return s;
+    const auto matches = [&](uintptr_t root) {
+        if (!root || *reinterpret_cast<uintptr_t*>(root + 0x30) != s.movie) return false;
+        const auto root_parent = *reinterpret_cast<uintptr_t*>(root + 0x40);
+        return root_parent && *reinterpret_cast<uintptr_t*>(root_parent + 0x30) == s.movie;
+    };
+    s.crucible_movie_match = matches(s.crucible_root);
+    s.hammer_movie_match = matches(s.hammer_root);
+    if (s.crucible_movie_match && child(s.crucible_root, "icon") && child(s.crucible_root, "pips"))
+        s.source = s.crucible_root;
+    else if (s.hammer_movie_match && child(s.hammer_root, "icon") && child(s.hammer_root, "pips"))
+        s.source = s.hammer_root;
+    return s;
+}
+
 bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsigned keys, uint64_t epoch) {
     if (!graphics_ready) {
         refuse("hud_graphics_unavailable", element, 0, epoch);
         return false;
     }
     if (!valid) return false;
-    const auto widget = *reinterpret_cast<uintptr_t*>(element + 0x1e8);
-    const auto hammer = *reinterpret_cast<uintptr_t*>(element + 0x1f8);
-    const auto quickuse = *reinterpret_cast<uintptr_t*>(element + 0x1d0);
-    const auto secondary = *reinterpret_cast<uintptr_t*>(element + 0x1d8);
-    const auto primary_root = quickuse ? *reinterpret_cast<uintptr_t*>(quickuse + 0x18) : 0;
-    const auto secondary_root = secondary ? *reinterpret_cast<uintptr_t*>(secondary + 0x18) : 0;
-    const auto crucible_root = widget ? *reinterpret_cast<uintptr_t*>(widget + 0x18) : 0;
-    const auto hammer_root = hammer ? *reinterpret_cast<uintptr_t*>(hammer + 0x18) : 0;
-    const auto source = crucible_root && child(crucible_root, "icon") && child(crucible_root, "pips")
-        ? crucible_root : hammer_root && child(hammer_root, "icon") && child(hammer_root, "pips")
-        ? hammer_root : 0;
-    const auto parent = primary_root ? *reinterpret_cast<uintptr_t*>(primary_root + 0x40) : 0;
-    if (!parent || !source) {
+    const auto context = graphics_source(element);
+    const auto source = context.source, parent = context.parent, movie = context.movie;
+    const auto primary_root = context.primary_root, secondary_root = context.secondary_root;
+    const auto crucible_root = context.crucible_root, quickuse = context.quickuse;
+    const auto widget = context.widget, hammer = context.hammer;
+    if (!source) {
         hud_trace.record(save::BStage::profile_output, save::BStatus::refused,
             "hud_graphics_source_unavailable", 0,
-            {{"owner", element}, {"quickuse", quickuse}, {"primary_root", primary_root},
-             {"parent", parent}, {"crucible_root", crucible_root}, {"hammer_root", hammer_root},
-             {"generation", epoch}});
+            {{"owner", element}, {"widget", widget}, {"hammer", hammer},
+             {"quickuse", quickuse}, {"secondary", context.secondary},
+             {"primary_root", primary_root}, {"secondary_root", secondary_root},
+             {"parent", parent}, {"movie", movie}, {"crucible_root", crucible_root},
+             {"crucible_movie_match", context.crucible_movie_match},
+             {"hammer_root", context.hammer_root},
+             {"hammer_movie_match", context.hammer_movie_match}, {"generation", epoch}});
         return false;
     }
     Point anchor{}, adjacent{};
-    const auto movie = *reinterpret_cast<uintptr_t*>(parent + 0x30);
-    if (!movie || !secondary_root || *reinterpret_cast<uintptr_t*>(source + 0x30) != movie ||
-        *reinterpret_cast<uintptr_t*>(secondary_root + 0x30) != movie ||
-        *reinterpret_cast<uintptr_t*>(secondary_root + 0x40) != parent ||
-        !position(primary_root, anchor) || !position(secondary_root, adjacent)) {
+    if (!position(primary_root, anchor) || !position(secondary_root, adjacent)) {
         refuse("hud_swf_context_unavailable", element, source, epoch); return false;
     }
     auto refill = child(parent, "apAmmoRefill");

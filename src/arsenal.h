@@ -57,6 +57,7 @@ void reset_session();
 void tick_masteries(uint64_t generation, uintptr_t player);
 
 #ifdef SC_NATIVE_TESTING
+bool test_mastery_masks();
 void use_fixture(Calls value, const char* id);
 #endif
 

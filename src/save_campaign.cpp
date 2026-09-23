@@ -136,8 +136,9 @@ bool Campaign::prepare_menu_save(const CampaignTransition& boundary) {
     const bool persisted=menu_active_ && state_.continuity_persisted;
     if (!owner_->accepts_requests() || (!catalog && !persisted) || !checkpoint_exists_ || expected_.empty() ||
         map_pending_ || state_.phase=="native_save_pending" || !boundary.observed || boundary.observation_reason ||
-        boundary.depth) return false;
+        boundary.depth || (!catalog && !boundary.generation_after)) return false;
     initiated_=true; menu_active_=true; menu_save_pending_=true;
+    menu_save_source_=catalog ? MenuSaveSource::cold_catalog : MenuSaveSource::persisted_gameplay;
     menu_save_generation_=boundary.generation_after;
     owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"native_mission_presave_reserved",state_.operation,
         {{"generation",menu_save_generation_},{"checkpoint",state_.checkpoint},{"catalog",catalog}});
@@ -161,6 +162,7 @@ bool Campaign::begin_resume(const std::string& mission_destination) {
         {{"choice_valid",choice_valid},{"slot_equal",choice.name.data()==state_.slot},{"index",choice.index}});
     initiated_=true; menu_active_=false; state_.resumed=true; state_.phase="resume_requested";
     menu_save_pending_=false;
+    menu_save_source_=MenuSaveSource::none;
     state_.source_checkpoint=state_.checkpoint;
     load_data_=0; state_.source_verified=false; state_.parser_completed=false;
     metadata_data_=0; metadata_verified_=false; catalog_hydrated_=false;
@@ -252,6 +254,7 @@ bool Campaign::write_started(uint64_t operation,const std::string& directory,boo
     if (!save_record(contract_+"state=native_save_pending\n",!checkpoint_exists_)) return false;
     state_.operation=operation; state_.native_factory_matched=true; state_.native_saved=false; state_.readback_verified=false;
     menu_save_pending_=false;
+    menu_save_source_=MenuSaveSource::none;
     state_.continuity_persisted=false; state_.phase="native_save_pending";
     owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"checkpoint_write_associated",operation,
         {{"native_factory_matched",native_factory_matched},{"generation",state_.generation_after},{"checkpoint",state_.checkpoint}}); return true;
@@ -641,7 +644,9 @@ bool Campaign::checkpoint_ready(const CampaignTransition& result) {
             {{"session_state",owner_->state()},{"session_fault",owner_->fault()}}); return false;
     }
     if (menu_save_pending_) {
-        if (!menu_active_ || !initiated_ || !result.observed || result.observation_reason || result.depth ||
+        if (!menu_active_ || !initiated_ || menu_save_source_==MenuSaveSource::none ||
+            (menu_save_source_==MenuSaveSource::persisted_gameplay && !result.generation_after) ||
+            !result.observed || result.observation_reason || result.depth ||
             result.generation_after!=menu_save_generation_ || !result.state_read || result.game!=SC_GAME_MAIN_MENU)
             return reject("native_mission_presave_boundary_mismatch");
         state_.save_ready=true;

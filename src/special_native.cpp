@@ -1511,4 +1511,55 @@ void install(const engine::Binding& binding, HANDLE stop) {
          {"hud_hook", hud_enabled == MH_OK}});
 }
 
+#ifdef SC_NATIVE_TESTING
+bool test_hud_source() {
+    struct Clip { uintptr_t words[16]{}; };
+    struct Widget { uintptr_t words[4]{}; };
+    std::array<uintptr_t, 0x300 / 8> element{};
+    Widget widget{}, hammer_widget{}, quickuse{}, secondary_widget{};
+    Clip primary{}, secondary{}, crucible{}, hammer{}, parent{}, rebuilt_parent{}, foreign_parent{};
+    const auto addr = [](const auto& object) { return reinterpret_cast<uintptr_t>(&object); };
+    element[0x1e8 / 8] = addr(widget); element[0x1f8 / 8] = addr(hammer_widget);
+    element[0x1d0 / 8] = addr(quickuse); element[0x1d8 / 8] = addr(secondary_widget);
+    widget.words[3] = addr(crucible); hammer_widget.words[3] = addr(hammer);
+    quickuse.words[3] = addr(primary); secondary_widget.words[3] = addr(secondary);
+    parent.words[6] = 1; foreign_parent.words[6] = 2;
+    primary.words[6] = secondary.words[6] = 1;
+    primary.words[8] = secondary.words[8] = addr(parent);
+    crucible.words[6] = hammer.words[6] = 2;
+    crucible.words[8] = hammer.words[8] = addr(foreign_parent);
+    static uintptr_t crucible_address = 0, hammer_address = 0;
+    static int crucible_hits = 0, hammer_hits = 0;
+    crucible_address = addr(crucible); hammer_address = addr(hammer);
+    const auto original = hud::swf;
+    hud::swf.lookup = [](uintptr_t root, hud::Value* value, const char*) -> hud::Value* {
+        if (root == crucible_address) ++crucible_hits;
+        if (root == hammer_address) ++hammer_hits;
+        value->payload = 1;
+        return value;
+    };
+    hud::swf.sprite = [](const hud::Value* value) { return value->payload; };
+    const auto source = [&] { crucible_hits = hammer_hits = 0; return hud::graphics_source(addr(element)); };
+    const bool a = !source().source && !crucible_hits && !hammer_hits;
+    crucible.words[6] = hammer.words[6] = 1;
+    crucible.words[8] = hammer.words[8] = addr(parent);
+    secondary.words[8] = addr(foreign_parent);
+    const bool b = !source().source && !crucible_hits && !hammer_hits;
+    secondary.words[8] = addr(parent);
+    hammer.words[6] = 2;
+    const bool c = source().source == addr(crucible) && crucible_hits == 2 && !hammer_hits;
+    crucible.words[6] = 2; hammer.words[6] = 1;
+    const bool d = source().source == addr(hammer) && !crucible_hits && hammer_hits == 2;
+    crucible.words[6] = 1;
+    const bool e = source().source == addr(crucible) && crucible_hits == 2 && !hammer_hits;
+    rebuilt_parent.words[6] = 3;
+    primary.words[6] = secondary.words[6] = 3;
+    primary.words[8] = secondary.words[8] = addr(rebuilt_parent);
+    hammer.words[6] = 3; hammer.words[8] = addr(rebuilt_parent);
+    const bool f = source().source == addr(hammer) && !crucible_hits && hammer_hits == 2;
+    hud::swf = original;
+    return a && b && c && d && e && f;
+}
+#endif
+
 } // namespace sentinel::special

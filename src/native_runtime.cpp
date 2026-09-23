@@ -977,6 +977,11 @@ void test_events(const engine::Binding& source, uint64_t (*change)(uintptr_t,uin
     status={}; status.game_state=SC_GAME_MAIN_MENU; event_depth=0; event_thread=0;
     original_change=change; fault=0; gaps=0; accepting=true;
 }
+void test_cold_events(const engine::Binding& source, uint64_t (*change)(uintptr_t,uintptr_t,uintptr_t)) {
+    binding=source; fixture={}; fixture.owner=[]() -> uint32_t { return GetCurrentThreadId(); }; fixture_active=true;
+    lifetime={}; status={}; status.game_state=SC_GAME_MAIN_MENU; event_depth=0; event_thread=0;
+    original_change=change; fault=0; gaps=0; accepting=true;
+}
 uint64_t test_change(uintptr_t root, uintptr_t descriptor, uintptr_t files) { return change_detour(root,descriptor,files); }
 void test_free(uintptr_t root,void (*free)(uintptr_t,uintptr_t)) { original_free=free; free_detour(root,root+0x50); }
 void test_generation_gap() { ++lifetime.generation; }
