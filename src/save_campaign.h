@@ -82,6 +82,7 @@ private:
     uintptr_t load_data_ = 0;
     uintptr_t metadata_data_ = 0;
     bool metadata_verified_ = false;
+    bool catalog_hydrated_ = false;
     bool menu_active_ = false;
     bool menu_save_pending_ = false;
     uint64_t menu_save_generation_ = 0;

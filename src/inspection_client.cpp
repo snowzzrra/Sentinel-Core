@@ -104,7 +104,6 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     if (error != ERROR_SUCCESS) return fail(error);
     WireResult code{};
     result.failure_stage = "decode_response";
-    // Old wire-v1 servers reject op 2 with their unchanged op-1 error envelope.
     bool decoded = automap ? decode_automap_response(data, count, code, result.snapshot, result.automap) :
         deathlink ? decode_deathlink_response(data, count, code, operation, result.snapshot, result.deathlink) :
         special ? decode_special_response(data, count, code, operation, result.snapshot, result.special) :

@@ -423,6 +423,27 @@ int wmain(int argc,wchar_t** argv) {
                 std::puts("PASS precise ordinary-read/parser refusal without invented checkpoint completion"); return 0;
             }
             CHECK(owner.campaign_run.snapshot().phase=="armed");
+            if (defect==L"native_read_menu_cold") {
+                std::array<unsigned char,0x1000> native_root{};
+                store(native_root,0x44,uint32_t{SC_GAME_MAIN_MENU});
+                engine::Binding binding{};
+                binding.root=reinterpret_cast<uintptr_t>(native_root.data());
+                binding.image.base=image;
+                test_campaign_binding(binding.image.base,binding.root);
+                native::test_events(binding,native_load);
+                const auto boundary=native::checkpoint_transition();
+                CHECK(boundary.observed && !boundary.observation_reason && !boundary.depth);
+                CHECK(owner.campaign_run.prepare_menu_save(boundary));
+                payload += " / native cold MissionSelect shell rewrite";
+                store(file,0x150,uint64_t(payload.size())); store(file,0x158,uint64_t(payload.size()));
+                store(file,0x168,reinterpret_cast<uintptr_t>(payload.data()));
+                writer_fixture::Model presave{remote,source,files,payload,directory};
+                writer_fixture::save(presave,L"queued_checkpoint");
+                const auto rewritten=owner.campaign_run.snapshot();
+                CHECK(rewritten.checkpoint==2 && rewritten.continuity_persisted && rewritten.readback_verified &&
+                      !rewritten.map_active && !rewritten.save_ready);
+                std::puts("PASS cold Mission Select native save without Continue"); return 0;
+            }
             navigation_fixture::continue_files();
             const std::string destination=defect.rfind(L"native_read_mission",0)==0?"game/dlc2/e5m1_spear/e5m1_spear":"";
             CHECK(owner.campaign_run.begin_resume(destination));

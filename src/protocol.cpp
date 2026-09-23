@@ -1107,7 +1107,7 @@ template<class Codec> bool arsenal_values(Codec& c, sc_arsenal_result& v) {
     c.u32(v.mission_challenges_completed_before); c.u32(v.mission_challenges_completed_after);
     c.u64(v.operations_applied);
     if (v.abi_version != SC_ARSENAL_ABI_VERSION || v.namespace_id[64] ||
-        v.outcome > SC_ARSENAL_OUTCOME_CRASH_PROTECTED || (v.flags & ~63u)) return false;
+        v.outcome > SC_ARSENAL_OUTCOME_CRASH_PROTECTED || (v.flags & ~127u)) return false;
     return true;
 }
 }
@@ -1456,7 +1456,7 @@ template<class Codec> bool special_values(Codec& c, sc_special_result& v) {
     c.u64(v.operations_applied);
     if (v.abi_version != SC_SPECIAL_ABI_VERSION || v.namespace_id[64] ||
         v.outcome > SC_SPECIAL_OUTCOME_CRASH_PROTECTED ||
-        (v.flags & ~(4095u | SC_SPECIAL_FLAG_SELECTION_POLICY | SC_SPECIAL_FLAG_HELD_WEAPON_PRESERVED))) return false;
+        (v.flags & ~SC_SPECIAL_FLAGS_SUPPORTED)) return false;
     if (v.owns_crucible > 1 || v.owns_hammer > 1 || v.hammer_tier > SC_SPECIAL_HAMMER_TIER_UPGRADED ||
         v.selected > SC_SPECIAL_WEAPON_HAMMER || v.native_crucible > 1 || v.native_hammer > 1 ||
         v.native_hammer_perks > 2 || v.native_selected > SC_SPECIAL_WEAPON_HAMMER ||

@@ -38,6 +38,8 @@ struct MasteryState {
     uintptr_t player = 0;
     uint16_t desired = 0;
     uint16_t applied = 0;
+    uint16_t target_unavailable = 0;
+    uint16_t apply_failed = 0;
     uintptr_t components[13]{};
     uint64_t next_check_ms = 0;
 };
@@ -173,7 +175,11 @@ void reapply_masteries(uintptr_t component) {
             mastery_state.applied &= ~bit;
             if (apply_mastery(component, upgrade)) {
                 mastery_state.applied |= bit;
+                mastery_state.target_unavailable &= ~bit;
+                mastery_state.apply_failed &= ~bit;
                 mastery_state.components[i] = component;
+            } else {
+                mastery_state.apply_failed |= bit;
             }
         }
     }
@@ -231,6 +237,8 @@ void tick_masteries(uint64_t generation, uintptr_t p) {
         mastery_state.generation = generation;
         mastery_state.player = p;
         mastery_state.applied = 0;
+        mastery_state.target_unavailable = 0;
+        mastery_state.apply_failed = 0;
         std::fill_n(mastery_state.components, 13, uintptr_t{0});
         mastery_state.next_check_ms = 0;
     }
@@ -243,6 +251,8 @@ void tick_masteries(uint64_t generation, uintptr_t p) {
         uintptr_t component = 0, upgrade = 0;
         if (!mastery_target(p, i, component, upgrade)) {
             mastery_state.applied &= ~bit;
+            mastery_state.target_unavailable |= bit;
+            mastery_state.apply_failed &= ~bit;
             mastery_state.components[i] = 0;
             continue;
         }
@@ -250,7 +260,11 @@ void tick_masteries(uint64_t generation, uintptr_t p) {
         mastery_state.applied &= ~bit;
         if (apply_mastery(component, upgrade)) {
             mastery_state.applied |= bit;
+            mastery_state.target_unavailable &= ~bit;
+            mastery_state.apply_failed &= ~bit;
             mastery_state.components[i] = component;
+        } else {
+            mastery_state.apply_failed |= bit;
         }
     }
 }
@@ -303,7 +317,7 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
         tick_masteries(request.execution.expected.lifecycle_generation, player(nullptr));
         out.masteries_ap_after = mastery_state.desired;
         out.flags |= SC_ARSENAL_FLAG_BEFORE_VALID | SC_ARSENAL_FLAG_AFTER_VALID |
-            SC_ARSENAL_FLAG_SELECTION_PRESERVED;
+            SC_ARSENAL_FLAG_SELECTION_PRESERVED | SC_ARSENAL_FLAG_EFFECTIVE_UNOBSERVED;
         if (out.masteries_ap_before != out.masteries_ap_after) out.flags |= SC_ARSENAL_FLAG_MUTATED;
         if ((mastery_state.applied & request.masteries) != request.masteries) {
             out.flags |= SC_ARSENAL_FLAG_DEFERRED;
@@ -312,6 +326,13 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
             out.outcome = out.masteries_ap_before == out.masteries_ap_after ?
                 SC_ARSENAL_OUTCOME_NOOP : SC_ARSENAL_OUTCOME_OK;
         }
+        save::session().btrace.record(save::BStage::native_start,
+            out.outcome == SC_ARSENAL_OUTCOME_DEFERRED ? save::BStatus::refused : save::BStatus::succeeded,
+            "mastery_projection_state", 0,
+            {{"requested", request.masteries}, {"desired", mastery_state.desired},
+             {"applied", mastery_state.applied}, {"target_unavailable", mastery_state.target_unavailable},
+             {"apply_failed", mastery_state.apply_failed}, {"player", mastery_state.player},
+             {"generation", mastery_state.generation}});
         return;
     }
     out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE;

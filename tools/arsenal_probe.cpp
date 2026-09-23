@@ -37,6 +37,7 @@ int arsenal_command(int argc, wchar_t** argv) {
         "\"mastery_challenges_active_before\":%u,\"mastery_challenges_active_after\":%u,"
         "\"mastery_challenges_completed_before\":%u,\"mastery_challenges_completed_after\":%u,"
         "\"masteries_effective_before\":%u,\"masteries_effective_after\":%u,"
+        "\"masteries_effective_observed\":%s,"
         "\"mission_challenges_active_before\":%u,\"mission_challenges_active_after\":%u,"
         "\"mission_challenges_completed_before\":%u,\"mission_challenges_completed_after\":%u,"
         "\"operations_applied\":\"%llu\"}\n",
@@ -53,6 +54,7 @@ int arsenal_command(int argc, wchar_t** argv) {
         ars.mastery_challenges_active_before, ars.mastery_challenges_active_after,
         ars.mastery_challenges_completed_before, ars.mastery_challenges_completed_after,
         ars.masteries_effective_before, ars.masteries_effective_after,
+        (ars.flags & SC_ARSENAL_FLAG_EFFECTIVE_UNOBSERVED) ? "false" : "true",
         ars.mission_challenges_active_before, ars.mission_challenges_active_after,
         ars.mission_challenges_completed_before, ars.mission_challenges_completed_after,
         ars.operations_applied);

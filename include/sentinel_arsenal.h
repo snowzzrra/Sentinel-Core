@@ -145,7 +145,8 @@ enum {
     SC_ARSENAL_FLAG_MUTATED              = 1u << 2,
     SC_ARSENAL_FLAG_SELECTION_PRESERVED  = 1u << 3,
     SC_ARSENAL_FLAG_SHARED_STATE_BOUND   = 1u << 4,
-    SC_ARSENAL_FLAG_DEFERRED             = 1u << 5
+    SC_ARSENAL_FLAG_DEFERRED             = 1u << 5,
+    SC_ARSENAL_FLAG_EFFECTIVE_UNOBSERVED = 1u << 6
 };
 
 typedef struct sc_arsenal_result {

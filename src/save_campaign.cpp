@@ -132,11 +132,11 @@ bool Campaign::prepare_menu_save(const CampaignTransition& boundary) {
     // Called only after the native menu accepted a visible, unlocked selection.
     // Initial catalog metadata or an owned persisted shell checkpoint supplies
     // the source; selecting a mission never fabricates a gameplay transition.
-    const bool catalog=state_.resumed && !initiated_ && metadata_verified_;
+    const bool catalog=state_.resumed && !initiated_ && catalog_hydrated_;
     const bool persisted=menu_active_ && state_.continuity_persisted;
     if (!owner_->accepts_requests() || (!catalog && !persisted) || !checkpoint_exists_ || expected_.empty() ||
         map_pending_ || state_.phase=="native_save_pending" || !boundary.observed || boundary.observation_reason ||
-        boundary.depth || !boundary.generation_after) return false;
+        boundary.depth) return false;
     initiated_=true; menu_active_=true; menu_save_pending_=true;
     menu_save_generation_=boundary.generation_after;
     owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"native_mission_presave_reserved",state_.operation,
@@ -163,7 +163,7 @@ bool Campaign::begin_resume(const std::string& mission_destination) {
     menu_save_pending_=false;
     state_.source_checkpoint=state_.checkpoint;
     load_data_=0; state_.source_verified=false; state_.parser_completed=false;
-    metadata_data_=0; metadata_verified_=false;
+    metadata_data_=0; metadata_verified_=false; catalog_hydrated_=false;
     mission_destination_=mission_destination;
     if (!mission_destination.empty()) state_.native_subtype=2;
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"resume_requested",0,{{"source_checkpoint",state_.source_checkpoint},{"expected_files",expected_.size()}});
@@ -213,7 +213,7 @@ bool Campaign::allow_access(uintptr_t data,const std::string& directory,bool wri
         (menu_active_ && state_.continuity_persisted && !map_pending_);
     if (!write && !erase && catalog_read &&
         owner_->native_io() && directory==directory_) {
-        metadata_data_=data; metadata_verified_=false; return true;
+        metadata_data_=data; metadata_verified_=false; catalog_hydrated_=false; return true;
     }
     if (!owner_->accepts_requests() || !initiated_ || directory!=directory_ || erase)
         return reject("campaign_access_outside_authorized_slot",{{"accepting",owner_->accepts_requests()},
@@ -497,7 +497,10 @@ void Campaign::parser_leave(uint32_t result,bool metadata_only) {
     diagnostic_stage_=BStage::parser;
     if (metadata_only) {
         if (result) reject("native_metadata_parser_failed",{{"native_result",result}});
-        else owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"native_metadata_parser_succeeded",0,{{"native_result",result}});
+        else {
+            catalog_hydrated_=true;
+            owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"native_metadata_parser_succeeded",0,{{"native_result",result}});
+        }
         return; // Hydration does not prove a gameplay load or activate its map.
     }
     state_.parser_result=result; state_.parser_completed=result==0;

@@ -2,6 +2,7 @@
 #include "native_runtime.h"
 #include "inspection_server.h"
 #include "pipe_io.h"
+#include "special.h"
 #include <intrin.h>
 #include <atomic>
 #include <cstdio>
@@ -283,7 +284,8 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(native::inspect().availability == SC_NATIVE_ENABLED && native::inspect().installed_hooks == 7);
     CHECK(native::inspect().lifecycle == SC_LIFETIME_UNOBSERVED && !native::inspect().context_generation);
     transition(1); ready();
-    if (std::wcscmp(argv[2], L"weapon-points-service") == 0) {
+    const bool special_service = std::wcscmp(argv[2], L"special-service") == 0;
+    if (std::wcscmp(argv[2], L"weapon-points-service") == 0 || special_service) {
         struct Currency { uint32_t current = 0, gained = 0, purchases = 0, other = 41, encounters = 0; } currency;
         weapon_points::Calls calls{
             &currency, [](void*) -> uintptr_t { return 42; },
@@ -298,6 +300,28 @@ int wmain(int argc, wchar_t** argv) {
         };
         const std::string namespace_id(64,'a');
         weapon_points::use_fixture(calls,namespace_id.c_str());
+        special::SnapshotFacts special_facts{};
+        if (special_service) {
+            special_facts.known = SC_SPECIAL_KNOWN_CRUCIBLE | SC_SPECIAL_KNOWN_HAMMER |
+                SC_SPECIAL_KNOWN_SELECTION | SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE;
+            special_facts.native_selected = SC_SPECIAL_WEAPON_CRUCIBLE;
+            special_facts.crucible_charge = special_facts.crucible_charge_max = 3;
+            special::Calls special_calls{
+                &special_facts, [](void*) -> uintptr_t { return 42; },
+                [](void* p, uintptr_t, special::SnapshotFacts& out) { out = *static_cast<special::SnapshotFacts*>(p); return true; },
+                [](void* p, uintptr_t, uint32_t crucible, uint32_t hammer, uint32_t tier) -> uint32_t {
+                    auto& f = *static_cast<special::SnapshotFacts*>(p);
+                    f.native_crucible |= static_cast<uint8_t>(crucible);
+                    f.native_hammer |= static_cast<uint8_t>(hammer);
+                    if (tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED) f.hammer_loot_projected = true;
+                    return 0;
+                },
+                [](void* p, uintptr_t, uint32_t selected) -> uint32_t {
+                    static_cast<special::SnapshotFacts*>(p)->native_selected = static_cast<uint8_t>(selected); return 0;
+                }, nullptr, nullptr, nullptr
+            };
+            special::use_fixture(special_calls,namespace_id.c_str());
+        }
         resume(); std::printf("{\"ready\":true,\"pid\":%u}\n",GetCurrentProcessId()); std::fflush(stdout);
         std::string action;
         while (std::cin >> action && action != "quit") {

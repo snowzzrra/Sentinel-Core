@@ -121,17 +121,31 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     }
     if (!valid) return false;
     const auto widget = *reinterpret_cast<uintptr_t*>(element + 0x1e8);
-    const auto chainsaw = *reinterpret_cast<uintptr_t*>(element + 0x1e0);
-    const auto source = widget ? *reinterpret_cast<uintptr_t*>(widget + 0x18) : 0;
-    const auto neighbor = chainsaw ? *reinterpret_cast<uintptr_t*>(chainsaw + 0x18) : 0;
-    const auto parent = source ? *reinterpret_cast<uintptr_t*>(source + 0x40) : 0;
-    if (!parent) { refuse("hud_parent_absent", element, source, epoch); return false; }
+    const auto hammer = *reinterpret_cast<uintptr_t*>(element + 0x1f8);
+    const auto quickuse = *reinterpret_cast<uintptr_t*>(element + 0x1d0);
+    const auto secondary = *reinterpret_cast<uintptr_t*>(element + 0x1d8);
+    const auto primary_root = quickuse ? *reinterpret_cast<uintptr_t*>(quickuse + 0x18) : 0;
+    const auto secondary_root = secondary ? *reinterpret_cast<uintptr_t*>(secondary + 0x18) : 0;
+    const auto crucible_root = widget ? *reinterpret_cast<uintptr_t*>(widget + 0x18) : 0;
+    const auto hammer_root = hammer ? *reinterpret_cast<uintptr_t*>(hammer + 0x18) : 0;
+    const auto source = crucible_root && child(crucible_root, "icon") && child(crucible_root, "pips")
+        ? crucible_root : hammer_root && child(hammer_root, "icon") && child(hammer_root, "pips")
+        ? hammer_root : 0;
+    const auto parent = primary_root ? *reinterpret_cast<uintptr_t*>(primary_root + 0x40) : 0;
+    if (!parent || !source) {
+        hud_trace.record(save::BStage::profile_output, save::BStatus::refused,
+            "hud_graphics_source_unavailable", 0,
+            {{"owner", element}, {"quickuse", quickuse}, {"primary_root", primary_root},
+             {"parent", parent}, {"crucible_root", crucible_root}, {"hammer_root", hammer_root},
+             {"generation", epoch}});
+        return false;
+    }
     Point anchor{}, adjacent{};
     const auto movie = *reinterpret_cast<uintptr_t*>(parent + 0x30);
-    if (!movie || !neighbor || *reinterpret_cast<uintptr_t*>(source + 0x30) != movie ||
-        *reinterpret_cast<uintptr_t*>(neighbor + 0x30) != movie ||
-        *reinterpret_cast<uintptr_t*>(neighbor + 0x40) != parent ||
-        !position(source, anchor) || !position(neighbor, adjacent)) {
+    if (!movie || !secondary_root || *reinterpret_cast<uintptr_t*>(source + 0x30) != movie ||
+        *reinterpret_cast<uintptr_t*>(secondary_root + 0x30) != movie ||
+        *reinterpret_cast<uintptr_t*>(secondary_root + 0x40) != parent ||
+        !position(primary_root, anchor) || !position(secondary_root, adjacent)) {
         refuse("hud_swf_context_unavailable", element, source, epoch); return false;
     }
     auto refill = child(parent, "apAmmoRefill");
@@ -218,7 +232,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
             swf.dirty(three);
         }
     }
-    const auto palette = *reinterpret_cast<int32_t*>(widget + 0x1ec);
+    const auto palette = *reinterpret_cast<int32_t*>((source == crucible_root ? widget : hammer) + 0x1ec);
     if (const auto fill = child(three, "fill")) swf.color(fill, palette);
     if (const auto fill = child(three, "innerFill")) swf.color(fill, palette);
     swf.position(refill, refill_at.x, refill_at.y);
@@ -231,8 +245,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
              {"keycap_ready", keycap_ready}});
         return graphics_applied;
     }
-    const auto quickuse = *reinterpret_cast<uintptr_t*>(element + 0x1d0);
-    const auto donor_root = quickuse ? *reinterpret_cast<uintptr_t*>(quickuse + 0x18) : 0;
+    const auto donor_root = primary_root;
     const auto donor = quickuse ? *reinterpret_cast<uintptr_t*>(quickuse + 0x1f0) : 0;
     Point donor_offset{};
     if (!donor_root || *reinterpret_cast<uintptr_t*>(donor_root + 0x40) != parent ||
