@@ -80,17 +80,25 @@ uintptr_t clone(uintptr_t source, uintptr_t parent, const char* name, bool& crea
     return result;
 }
 
-void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsigned keys, uint64_t epoch) {
-    if (!enabled) return;
+bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsigned keys, uint64_t epoch) {
+    if (!enabled || !valid) return false;
     const auto widget = *reinterpret_cast<uintptr_t*>(element + 0x1e8);
     const auto chainsaw = *reinterpret_cast<uintptr_t*>(element + 0x1e0);
     const auto source = widget ? *reinterpret_cast<uintptr_t*>(widget + 0x18) : 0;
     const auto neighbor = chainsaw ? *reinterpret_cast<uintptr_t*>(chainsaw + 0x18) : 0;
     const auto parent = source ? *reinterpret_cast<uintptr_t*>(source + 0x40) : 0;
-    if (!parent) { refuse("hud_parent_absent", element, source, epoch); return; }
+    if (!parent) { refuse("hud_parent_absent", element, source, epoch); return false; }
+    Point anchor{}, adjacent{};
+    const auto movie = *reinterpret_cast<uintptr_t*>(parent + 0x30);
+    if (!movie || !neighbor || *reinterpret_cast<uintptr_t*>(source + 0x30) != movie ||
+        *reinterpret_cast<uintptr_t*>(neighbor + 0x30) != movie ||
+        *reinterpret_cast<uintptr_t*>(neighbor + 0x40) != parent ||
+        !position(source, anchor) || !position(neighbor, adjacent)) {
+        refuse("hud_swf_context_unavailable", element, source, epoch); return false;
+    }
     auto refill = child(parent, "apAmmoRefill");
     auto special_arrow = child(parent, "apSpecialSwitch");
-    const bool visible = valid && owner.namespace_valid && *reinterpret_cast<uint8_t*>(element + 0x209);
+    const bool visible = owner.namespace_valid && *reinterpret_cast<uint8_t*>(element + 0x209);
     // All references come from this update's live parent, including invalidation.
     if (refill) swf.visible(refill, false, true);
     if (special_arrow) swf.visible(special_arrow, false, true);
@@ -98,16 +106,11 @@ void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
         hud_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
             "hud_invalidated", 0, {{"owner", element}, {"parent", parent}, {"generation", epoch},
                                    {"snapshot_valid", owner.namespace_valid}, {"context_valid", valid}});
-        return;
-    }
-    Point anchor{}, adjacent{};
-    if (!position(source, anchor) || !position(neighbor, adjacent) ||
-        *reinterpret_cast<uintptr_t*>(neighbor + 0x40) != parent) {
-        refuse("hud_slot_anchor_unavailable", element, neighbor, epoch); return;
+        return false;
     }
     const Point step{anchor.x - adjacent.x, anchor.y - adjacent.y};
     if (step.x * step.x + step.y * step.y < 1.0f) {
-        refuse("hud_slot_spacing_unknown", element, source, epoch); return;
+        refuse("hud_slot_spacing_unknown", element, source, epoch); return false;
     }
     const Point refill_at{anchor.x + step.x, anchor.y + step.y};
     const Point offset{-step.y * 0.35f, step.x * 0.35f};
@@ -122,7 +125,7 @@ void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     }
     const bool new_refill = !refill;
     if (!refill) refill = clone(source, parent, "apAmmoRefill", created);
-    if (!refill) { refuse("hud_refill_clone_failed", element, source, epoch); return; }
+    if (!refill) { refuse("hud_refill_clone_failed", element, source, epoch); return false; }
     hud_trace.record(save::BStage::profile_prepare, save::BStatus::succeeded,
         "hud_bound", 0, {{"owner", element}, {"parent", parent}, {"layout_source", source},
                          {"generation", epoch}, {"created", created}, {"refill", refill}});
@@ -131,7 +134,7 @@ void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     const bool connected = (owner.refill_flags & SC_SPECIAL_REFILL_CONNECTED) != 0;
     swf.frame(refill, owner.refill_enabled ? 1 : 2);
     const auto icon = child(child(refill, "icon"), "iconStatic");
-    if (!icon) { refuse("hud_refill_icon_absent", element, refill, epoch); return; }
+    if (!icon) { refuse("hud_refill_icon_absent", element, refill, epoch); return false; }
     struct MaterialAttempt {
         uintptr_t owner, parent, clip, icon;
         uint64_t epoch, retry_at;
@@ -154,21 +157,21 @@ void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
         }
     }
     if (!attempt.applied) {
-        refuse("hud_ammo_material_unavailable", element, icon, epoch); return;
+        refuse("hud_ammo_material_unavailable", element, icon, epoch); return false;
     }
     const auto pips = child(refill, "pips");
-    if (!pips) { refuse("hud_pips_absent", element, refill, epoch); return; }
+    if (!pips) { refuse("hud_pips_absent", element, refill, epoch); return false; }
     swf.frame(pips, 3);
     const auto three = child(pips, "pips3");
-    if (!three) { refuse("hud_three_pip_template_absent", element, pips, epoch); return; }
+    if (!three) { refuse("hud_three_pip_template_absent", element, pips, epoch); return false; }
     swf.visible(pips, known, true);
-    struct RenderedPips { uintptr_t clip{}; uint32_t balance{}; uint64_t revision{}; };
-    thread_local RenderedPips rendered{};
-    if (known && (rendered.clip != three || rendered.balance != owner.refill_balance ||
-                  rendered.revision != owner.revision)) {
-        swf.frame(three, static_cast<int>(owner.refill_balance + 1));
-        swf.dirty(three);
-        rendered = {three, owner.refill_balance, owner.revision};
+    const auto frame_before = *reinterpret_cast<uint16_t*>(three + 0x58);
+    const auto desired = static_cast<uint16_t>(owner.refill_balance + 1);
+    if (known) {
+        if (*reinterpret_cast<uint16_t*>(three + 0x58) != desired) {
+            swf.frame(three, desired);
+            swf.dirty(three);
+        }
     }
     const auto palette = *reinterpret_cast<int32_t*>(widget + 0x1ec);
     if (const auto fill = child(three, "fill")) swf.color(fill, palette);
@@ -181,7 +184,9 @@ void project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
          {"snapshot_valid", owner.namespace_valid}, {"policy", owner.selected}, {"balance", owner.refill_balance},
          {"pending", pending}, {"connected", connected}, {"binds", keys},
          {"snapshot_revision", owner.revision}, {"request_revision", owner.request_revision},
+         {"pip_frame_before", frame_before}, {"pip_frame_after", *reinterpret_cast<uint16_t*>(three + 0x58)},
          {"native_crucible_170", *reinterpret_cast<int32_t*>(element + 0x170)}, {"pixels_observed", 0},
          {"switch_source", arrow_source}, {"switch_clip", special_arrow}});
+    return known && *reinterpret_cast<uint16_t*>(three + 0x58) == desired;
 }
 } // namespace hud

@@ -195,8 +195,9 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(argc == 3); const wchar_t* probe = argv[1];
     sc_automap_request automap{}; automap.known=1;
     automap.checked_locations[0]|=uint64_t{1}<<(7770001-SC_AUTOMAP_LOCATION_BASE);
-    CHECK(native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro","ap_location_visual_7770001"));
-    CHECK(!native::test_automap_checked(automap,"game/sp/e1m2_battle/e1m2_battle","ap_location_visual_7770001"));
+    CHECK(native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro","ap_automap_location_7770001"));
+    CHECK(!native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro","ap_location_visual_7770001"));
+    CHECK(!native::test_automap_checked(automap,"game/sp/e1m2_battle/e1m2_battle","ap_automap_location_7770001"));
     std::array<uint8_t,0x150> automap_entry{}; automap_test_object=reinterpret_cast<uintptr_t>(automap_entry.data());
     *reinterpret_cast<int32_t*>(automap_test_object+0x134)=1;
     CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));

@@ -97,13 +97,16 @@ constexpr uint32_t rva_find_item = 0x1690660;            // idInventoryCollectio
 constexpr uint32_t rva_give_item = 0x1691cd0;            // idInventoryCollection::GiveItem(...)
 constexpr uint32_t rva_item_count = 0x398510;            // idInventoryCollection::Num()
 constexpr uint32_t rva_item_at = 0x1691450;              // idInventoryCollection::GetItem(index)
-constexpr uint32_t rva_unlock_perk = 0xfe2500;           // perk registration/unlock
-constexpr uint32_t rva_activate_perk = 0xfe19b0;         // idPerkComponent::ActivatePerk
 constexpr uint32_t rva_active_perk = 0xfe37f0;           // exact active-perk reader
+constexpr uint32_t rva_loot_consumer = 0xaa44f0;          // idLootDropComponent::CalculateSpawnAmount
+constexpr uint32_t rva_loot_have_return = 0xaa46be;
+constexpr uint32_t rva_loot_not_return = 0xaa46de;
 constexpr uint32_t rva_perk_typeinfo = 0x1631f90;        // returns idDeclTypeInfo for perks
 constexpr uint32_t rva_current_weapon = 0xbd7740;        // current idWeapon of the player
 constexpr uint32_t rva_hud_earnings = 0xeea070;          // idHUD_MissionChallenge earnings append
 constexpr uint32_t rva_hud_element_setup = 0xeeac40;     // idHUD_MissionChallenge construction
+constexpr uint32_t rva_fast_travel_checkpoint_render = 0xf4a100;
+constexpr uint32_t rva_fast_travel_widget_resolve = 0x1599920;
 constexpr uint32_t rva_player = 0x69af70;
 constexpr uint32_t rva_crucible_resolver = 0x145d640;
 constexpr uint32_t rva_input_down = 0x146b850;
@@ -142,6 +145,19 @@ WeaponDispatch original_weapon_dispatch = nullptr;
 using CrucibleActivate = bool(*)(uintptr_t);
 CrucibleActivate original_crucible_activate = nullptr;
 InputDown original_input_pressed = nullptr;
+using FastTravelCheckpointRender = void(*)(uintptr_t, int);
+FastTravelCheckpointRender original_fast_travel_checkpoint_render = nullptr;
+
+void fast_travel_checkpoint_render_detour(uintptr_t screen, int index) {
+    if (!original_fast_travel_checkpoint_render || !screen) return;
+    const auto widget = *reinterpret_cast<uintptr_t*>(screen + 0x108);
+    if (!widget) return;
+    if (!*reinterpret_cast<uintptr_t*>(widget + 0x18)) {
+        const auto resolve = reinterpret_cast<bool(*)(uintptr_t)>(image_base + rva_fast_travel_widget_resolve);
+        if (!resolve(widget)) return;
+    }
+    original_fast_travel_checkpoint_render(screen, index);
+}
 constexpr uint32_t rva_equipment_upgrade_vtable = 0x2e04ba0;
 constexpr uintptr_t perk_component_offset = 0x3b40;
 constexpr uintptr_t equipment_upgrade_offset = 0x26568;
@@ -160,9 +176,8 @@ using FindItem = uintptr_t(*)(uintptr_t, uintptr_t);
 using GiveItem = uintptr_t(*)(uintptr_t, uintptr_t, uintptr_t, int, uint8_t, uint8_t, uint8_t, uint8_t);
 using ItemCount = uint32_t(*)(uintptr_t);
 using ItemAt = uintptr_t(*)(uintptr_t, int);
-using UnlockPerk = void(*)(uintptr_t, uintptr_t, uint8_t, uint8_t, uintptr_t, uint8_t);
-using ActivatePerk = void(*)(uintptr_t, uintptr_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 using ActivePerk = uint8_t(*)(uintptr_t, uintptr_t);
+ActivePerk original_active_perk = nullptr;
 using CurrentWeapon = uintptr_t(*)(uintptr_t);
 using EarningsAppend = void(*)(uintptr_t, const char*, const char*, uint32_t, uint64_t, uint32_t);
 using HudElementSetup = char(*)(uintptr_t);
@@ -174,6 +189,9 @@ WeaponHudUpdate original_weapon_hud_update = nullptr;
 WeaponHudProject project_crucible_hud = nullptr, project_hammer_hud = nullptr;
 std::atomic<unsigned> configured_keys{VK_F9};
 #include "special_hud_native.h"
+std::atomic<uintptr_t> hud_element{0};
+std::atomic<uintptr_t> hud_element_vtable{0};
+std::atomic<uintptr_t> hud_player{0};
 
 void project_special_hud(uintptr_t element) {
     const auto epoch = route_epoch.load(std::memory_order_acquire);
@@ -189,7 +207,12 @@ void project_special_hud(uintptr_t element) {
     // Restore those two fields even if a setter raises; resources stay untouched.
     __try {
         const bool valid = context_valid && epoch == native::observation_stamp();
-        hud::project(element, owner, valid, configured_keys.load(std::memory_order_relaxed), epoch);
+        const auto current_player = route_player.load(std::memory_order_acquire);
+        const bool hud_valid = valid && element && current_player &&
+            element == hud_element.load(std::memory_order_acquire) &&
+            hud_player.load(std::memory_order_acquire) == current_player &&
+            *reinterpret_cast<uintptr_t*>(element) == hud_element_vtable.load(std::memory_order_acquire);
+        hud::project(element, owner, hud_valid, configured_keys.load(std::memory_order_relaxed), epoch);
         if (!*reinterpret_cast<uintptr_t*>(element + 0x1e8) ||
             !*reinterpret_cast<uintptr_t*>(element + 0x1f8)) return;
         if (!valid || (!crucible && !hammer)) {
@@ -225,10 +248,6 @@ void weapon_hud_update_detour(uintptr_t element, uintptr_t time) {
     original_weapon_hud_update(element, time);
     project_special_hud(element);
 }
-std::atomic<uintptr_t> hud_element{0};
-std::atomic<uintptr_t> hud_element_vtable{0};
-std::atomic<uintptr_t> hud_player{0};
-
 uintptr_t player(void*) {
     __try {
         const auto map = *reinterpret_cast<uintptr_t*>(engine_root + 0x50);
@@ -357,6 +376,24 @@ uint32_t policy_snapshot(uintptr_t p, PolicySnapshot& snapshot) {
     if (!snapshot.epoch || snapshot.epoch != epoch || epoch != native::observation_stamp()) return 7;
     if (!p || snapshot.player != p) return 3;
     return snapshot.known ? 0 : 8;
+}
+
+__declspec(noinline) uint8_t active_perk_detour(uintptr_t component, uintptr_t perk_decl) {
+    const auto native = original_active_perk(component, perk_decl);
+    if (native) return native;
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    if (caller != image_base + rva_loot_have_return && caller != image_base + rva_loot_not_return)
+        return native;
+    const auto path = decl_path(perk_decl);
+    if (!path || (std::strcmp(path, HAMMER_PERK_PATHS[0]) && std::strcmp(path, HAMMER_PERK_PATHS[1])))
+        return native;
+    if (component < perk_component_offset) return native;
+    const auto p = component - perk_component_offset;
+    PolicySnapshot snapshot{};
+    if (policy_snapshot(p, snapshot) || !snapshot.hammer) return native;
+    const auto owner = hud_owner_snapshot(snapshot.namespace_id);
+    return owner.namespace_valid && owner.owns_hammer &&
+        owner.hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED;
 }
 
 __declspec(noinline) bool crucible_resolver_detour(uintptr_t p) {
@@ -534,6 +571,13 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
             facts.known |= SC_SPECIAL_KNOWN_HAMMER_PERKS;
             facts.native_hammer_perks = effective_perks;
         }
+        PolicySnapshot loot_policy{};
+        if (facts.native_hammer && route_ready.load(std::memory_order_acquire) &&
+            !policy_snapshot(p, loot_policy) && loot_policy.hammer) {
+            const auto owner = hud_owner_snapshot(loot_policy.namespace_id);
+            facts.hammer_loot_projected = owner.namespace_valid && owner.owns_hammer &&
+                owner.hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED;
+        }
 
         facts.held_weapon_decl = current_weapon_decl(p);
         bool route_c = false, route_h = false;
@@ -567,27 +611,13 @@ uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, 
         const auto inv = inventory_of(p);
         if (!inv) return 2;
         const bool upgraded = own_hammer && hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED;
-        uintptr_t perk_decls[2]{};
-        uint8_t effective_perks = 0;
-        if (upgraded && !hammer_perks(p, perk_decls, effective_perks)) return ERROR_NOT_SUPPORTED;
+        if (upgraded && !route_ready.load(std::memory_order_acquire)) return ERROR_NOT_SUPPORTED;
         const auto before = held_weapon_snapshot(p, inv);
 
         uintptr_t decl = 0, item = 0;
         bool mutated = false;
         if (own_crucible && !ensure_item(inv, p, CRUCIBLE_PATH, decl, item, mutated)) return 3;
         if (own_hammer && !ensure_item(inv, p, HAMMER_PATH, decl, item, mutated)) return 4;
-
-        if (upgraded) {
-            const auto component = p + perk_component_offset;
-            const auto active = reinterpret_cast<ActivePerk>(image_base + rva_active_perk);
-            const auto unlock = reinterpret_cast<UnlockPerk>(image_base + rva_unlock_perk);
-            const auto activate = reinterpret_cast<ActivatePerk>(image_base + rva_activate_perk);
-            for (const auto perk_decl : perk_decls) {
-                if (active(component, perk_decl)) continue;
-                unlock(component, perk_decl, 0, 0, 0, 0);
-                activate(component, perk_decl, 1, 0, 0, 0, 1);
-            }
-        }
 
         // An acquisition may intrinsically switch the active weapon. Restore the
         // exact prior weapon in hands, ordinary or Special, instead of inheriting
@@ -854,7 +884,22 @@ __declspec(noinline) void hammer_attack_detour(uintptr_t p) {
 }
 
 bool present(void*, uintptr_t player, uint32_t, uint32_t, uint32_t) {
-    return player != 0;
+    const auto epoch = route_epoch.load(std::memory_order_acquire);
+    if (!player || !epoch || epoch != native::observation_stamp() ||
+        route_player.load(std::memory_order_acquire) != player ||
+        hud_player.load(std::memory_order_acquire) != player) return false;
+    const auto element = hud_element.load(std::memory_order_acquire);
+    if (!element) return false;
+    char namespace_id[65];
+    AcquireSRWLockShared(&route_namespace_lock);
+    std::memcpy(namespace_id, route_namespace, sizeof(namespace_id));
+    ReleaseSRWLockShared(&route_namespace_lock);
+    const auto owner = hud_owner_snapshot(namespace_id);
+    __try {
+        if (*reinterpret_cast<uintptr_t*>(element) != hud_element_vtable.load(std::memory_order_acquire))
+            return false;
+        return hud::project(element, owner, true, configured_keys.load(std::memory_order_relaxed), epoch);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
 void present_selection(uintptr_t p) {
@@ -1106,9 +1151,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {rva_give_item, "40555356574154415541564157488d6c24f94881ecb8000000488b05e8ccb102"},
         {rva_item_at, "4883ec2885d2784f3b51087d4a48895c24204863da48c1e3054803198b03488d"},
         {rva_item_count, "8b4108c3cccccccccccccccccccccccc48896c2418574883ec204863790833ed"},
-        {rva_unlock_perk, "4885d20f84c903000044884c2420448844241848894c24085356415441564883"},
-        {rva_activate_perk, "44884c24204488442418488954241048894c2408555357415541564157488d6c"},
         {rva_active_perk, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
+        {0xaa46a6, "488b95600100004885d27414488d8e403b0000e832f1530084c00f840a030000"},
+        {0xaa46c6, "488b95680100004885d27414488d8e403b0000e812f1530084c00f85ea020000"},
         {rva_perk_typeinfo, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc"},
         {rva_current_weapon, "40534883ec20488b01488bd9ff90b0000000488b13488bcb4885c07412ff92b0"},
         {rva_hud_earnings, "48895c240848896c2410488974241848897c242041564883ec20488db9700600"},
@@ -1127,7 +1172,12 @@ void install(const engine::Binding& binding, HANDLE stop) {
         uint64_t expected_words[4]{}, actual_words[4]{};
         std::memcpy(expected_words, target.bytes.data(), 32);
         std::memcpy(actual_words, actual.data(), 32);
-        const bool valid = section && !read.reason && actual == target.bytes;
+        bool valid = section && !read.reason && actual == target.bytes;
+        if (valid && (s.offset == 0xaa46a6 || s.offset == 0xaa46c6)) {
+            DWORD64 unwind_base = 0;
+            const auto entry = RtlLookupFunctionEntry(target.address, &unwind_base, nullptr);
+            valid = entry && unwind_base == image_base && entry->BeginAddress == rva_loot_consumer;
+        }
         installation_trace.record(save::BStage::native_start, valid ? save::BStatus::entered : save::BStatus::refused,
             valid ? "site_validated" : "site_refused", 0,
             {{"rva", s.offset}, {"section", section}, {"read_reason", read.reason}, {"read_error", read.error},
@@ -1268,6 +1318,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
             {0x14644e0, reinterpret_cast<void*>(weapon_dispatch_detour), reinterpret_cast<void**>(&original_weapon_dispatch)},
             {0x1456310, reinterpret_cast<void*>(crucible_activate_detour), reinterpret_cast<void**>(&original_crucible_activate)},
             {0x146be40, reinterpret_cast<void*>(input_pressed_detour), reinterpret_cast<void**>(&original_input_pressed)},
+            {rva_active_perk, reinterpret_cast<void*>(active_perk_detour), reinterpret_cast<void**>(&original_active_perk)},
         };
         size_t created = 0, queued = 0;
         MH_STATUS status = MH_OK;
@@ -1314,6 +1365,30 @@ void install(const engine::Binding& binding, HANDLE stop) {
         hud_enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused, "optional_hud_hook", 0,
         {{"rva", rva_hud_element_setup}, {"validation", hud_validation},
          {"create_status", static_cast<uint64_t>(hud_created)}, {"enable_status", static_cast<uint64_t>(hud_enabled)}});
+    const struct { uint32_t rva; const char* bytes; } fast_travel_sites[] = {
+        {rva_fast_travel_checkpoint_render, "48895c24185556574881ecc0000000488b05c24826034833c448898424b00000"},
+        {rva_fast_travel_widget_resolve, "40534883ec20488bd9488b89680100004885c9750832c04883c4205bc38b9398"},
+    };
+    bool fast_travel_valid = true;
+    for (const auto& site : fast_travel_sites) {
+        native::Target target{};
+        target.address = image_base + site.rva;
+        for (size_t n = 0; n < target.bytes.size(); ++n)
+            target.bytes[n] = static_cast<uint8_t>(digit(site.bytes[n * 2]) * 16 + digit(site.bytes[n * 2 + 1]));
+        const auto reason = native::validate_target(memory, binding.image, target, stop, deadline);
+        if (reason) { fast_travel_valid = false; break; }
+    }
+    const auto fast_travel_target = reinterpret_cast<void*>(image_base + rva_fast_travel_checkpoint_render);
+    const auto fast_travel_created = fast_travel_valid ?
+        MH_CreateHook(fast_travel_target, reinterpret_cast<void*>(fast_travel_checkpoint_render_detour),
+                      reinterpret_cast<void**>(&original_fast_travel_checkpoint_render)) : MH_UNKNOWN;
+    const auto fast_travel_enabled = fast_travel_created == MH_OK ? MH_EnableHook(fast_travel_target) : MH_UNKNOWN;
+    if (fast_travel_created == MH_OK && fast_travel_enabled != MH_OK) MH_RemoveHook(fast_travel_target);
+    installation_trace.record(save::BStage::profile_publish,
+        fast_travel_enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
+        "fast_travel_checkpoint_guard", 0,
+        {{"validated", fast_travel_valid}, {"create_status", fast_travel_created},
+         {"enable_status", fast_travel_enabled}});
     const struct { uint32_t rva; const char* bytes; } presentation_sites[] = {
         {0xf0b3b0, "48895c2418555641564883ec50488bea4533f633d24489742470418bf6488bd9"},
         {0xf0c230, "40534883ec20488bd9488b89e801000080bb6901000000750e488b01b2014883"},

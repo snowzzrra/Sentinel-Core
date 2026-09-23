@@ -54,6 +54,7 @@ save::BSnapshot installation_diagnostics();
 bool admitted(const char* id);
 void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out);
 void reset_session();
+void tick_masteries(uint64_t generation, uintptr_t player);
 
 #ifdef SC_NATIVE_TESTING
 void use_fixture(Calls value, const char* id);

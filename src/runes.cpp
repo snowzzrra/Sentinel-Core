@@ -8,8 +8,7 @@ SRWLOCK state_lock = SRWLOCK_INIT;
 SnapshotFacts shared_state{};
 uint64_t total_operations = 0;
 char bound_namespace[65]{};
-uintptr_t last_bound_player = 0;
-uint64_t last_bound_generation = 0, next_bind_at = 0;
+uint64_t next_bind_at = 0;
 
 void reset_state_locked(const char* id) {
     shared_state = {};
@@ -18,8 +17,7 @@ void reset_state_locked(const char* id) {
     shared_state.selected_slots[2] = -1;
     shared_state.selected_support = -1;
     total_operations = 0;
-    last_bound_player = 0;
-    last_bound_generation = 0; next_bind_at = 0;
+    next_bind_at = 0;
     if (id) std::memcpy(bound_namespace, id, sizeof(bound_namespace));
     else std::memset(bound_namespace, 0, sizeof(bound_namespace));
 }
@@ -119,11 +117,11 @@ void reset_session(const char* namespace_id) {
     ReleaseSRWLockExclusive(&state_lock);
 }
 
-void bind_run_state_if_needed(uintptr_t player, uint64_t generation) {
+void bind_run_state_if_needed(uintptr_t player, uint64_t) {
     if (!player) return;
     const auto now = GetTickCount64();
     AcquireSRWLockExclusive(&state_lock);
-    if ((player == last_bound_player && generation == last_bound_generation) || now < next_bind_at) {
+    if (now < next_bind_at) {
         ReleaseSRWLockExclusive(&state_lock); return;
     }
     next_bind_at = now + 500;
@@ -138,10 +136,6 @@ void bind_run_state_if_needed(uintptr_t player, uint64_t generation) {
         (after.owned_normal & desired.owned_normal) != desired.owned_normal ||
         (after.owned_support & desired.owned_support) != desired.owned_support) return;
     // Native save owns selections. Never replay stale cached choices or pair(0).
-    AcquireSRWLockExclusive(&state_lock);
-    last_bound_player = player;
-    last_bound_generation = generation;
-    ReleaseSRWLockExclusive(&state_lock);
 }
 
 void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {

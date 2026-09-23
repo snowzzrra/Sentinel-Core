@@ -33,7 +33,7 @@ uint32_t ensure(void* context, uintptr_t, uint32_t crucible, uint32_t hammer, ui
     if (fixture.materialize) {
         if (crucible) fixture.facts.native_crucible = 1;
         if (hammer) fixture.facts.native_hammer = 1;
-        if (hammer && tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED) fixture.facts.native_hammer_perks = 2;
+        if (hammer && tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED) fixture.facts.hammer_loot_projected = true;
     }
     return 0;
 }
@@ -81,13 +81,22 @@ int main() {
     auto result = sentinel::special::initial(command);
     sentinel::special::execute(command, result, calls(fixture));
     CHECK(result.outcome == SC_SPECIAL_OUTCOME_OK && fixture.ensure_calls == 1);
-    CHECK(result.native_crucible == 1 && result.native_hammer_perks == 2);
+    CHECK(result.native_crucible == 1 && result.native_hammer_perks == 0);
+    CHECK(fixture.facts.hammer_loot_projected);
     CHECK(result.native_selected == SC_SPECIAL_WEAPON_CRUCIBLE);
     CHECK(result.flags & SC_SPECIAL_FLAG_SELECTION_PRESERVED);
 
     result = sentinel::special::initial(command);
     sentinel::special::execute(command, result, calls(fixture));
     CHECK(result.outcome == SC_SPECIAL_OUTCOME_NOOP && fixture.ensure_calls == 1);
+
+    Fixture native{};
+    native.facts = {1, 1, 2, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
+    command = request("special-native-hammer-upgraded");
+    sentinel::special::reset_session(command.namespace_id);
+    result = sentinel::special::initial(command);
+    sentinel::special::execute(command, result, calls(native));
+    CHECK(result.outcome == SC_SPECIAL_OUTCOME_NATIVE_FAILED && native.ensure_calls == 1);
 
     Fixture ineffective{};
     ineffective.facts = {1, 1, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};

@@ -112,6 +112,7 @@ HudOwnerSnapshot hud_owner_snapshot(const char (&namespace_id)[65]) {
         out.request_revision = shared_state.request_serial;
         out.owns_crucible = shared_state.owns_crucible;
         out.owns_hammer = shared_state.owns_hammer;
+        out.hammer_tier = shared_state.hammer_tier;
         out.selected = shared_state.selected;
         out.refill_flags = shared_state.refill_flags;
         out.refill_request_state = shared_state.refill_request_state;
@@ -230,7 +231,7 @@ void bind_run_state_if_needed(uintptr_t player, uint64_t generation) {
         (desired.owns_crucible && (!(after.known & SC_SPECIAL_KNOWN_CRUCIBLE) || !after.native_crucible)) ||
         (desired.owns_hammer && (!(after.known & SC_SPECIAL_KNOWN_HAMMER) || !after.native_hammer)) ||
         (desired.hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED &&
-         (!(after.known & SC_SPECIAL_KNOWN_HAMMER_PERKS) || after.native_hammer_perks < 2))) return;
+         !after.hammer_loot_projected)) return;
     AcquireSRWLockExclusive(&state_lock);
     last_bound_player = player;
     last_bound_generation = generation;
@@ -270,8 +271,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
         const bool native_satisfied =
             (!desired_crucible || ((before.known & SC_SPECIAL_KNOWN_CRUCIBLE) && before.native_crucible)) &&
             (!desired_hammer || ((before.known & SC_SPECIAL_KNOWN_HAMMER) && before.native_hammer &&
-             (desired_tier < SC_SPECIAL_HAMMER_TIER_UPGRADED ||
-              ((before.known & SC_SPECIAL_KNOWN_HAMMER_PERKS) && before.native_hammer_perks >= 2))));
+             (desired_tier < SC_SPECIAL_HAMMER_TIER_UPGRADED || before.hammer_loot_projected)));
         if (native_satisfied) {
             fill_facts(before, shared_state, out);
             ReleaseSRWLockExclusive(&state_lock);
@@ -314,7 +314,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             (desired_crucible && (!(after.known & SC_SPECIAL_KNOWN_CRUCIBLE) || !after.native_crucible)) ||
             (desired_hammer && (!(after.known & SC_SPECIAL_KNOWN_HAMMER) || !after.native_hammer)) ||
             (desired_hammer && desired_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED &&
-             (!(after.known & SC_SPECIAL_KNOWN_HAMMER_PERKS) || after.native_hammer_perks < 2))) {
+             !after.hammer_loot_projected)) {
             out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return;
         }
         out.outcome = SC_SPECIAL_OUTCOME_OK;

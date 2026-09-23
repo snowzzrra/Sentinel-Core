@@ -13,6 +13,8 @@ namespace sentinel::challenge {
 namespace {
 
 std::atomic<bool> ready{false};
+std::atomic<bool> install_attempted{false};
+std::atomic<bool> first_candidate_mismatch_recorded{false};
 uintptr_t image_base = 0, engine_root = 0;
 
 // Scoped native completion context for one 1474a00 invocation. The native call
@@ -31,7 +33,6 @@ struct Scope {
     uintptr_t manager = 0, player = 0, record = 0, decl = 0, map = 0;
     uint32_t witness_count = 0;
     uintptr_t witnesses[max_member_witnesses]{};
-    bool diagnostic_recorded = false;
 };
 thread_local Scope scope{};
 
@@ -170,8 +171,8 @@ bool evaluate(uintptr_t player, uint32_t currency, int32_t delta, uint8_t notify
     call.delta = delta;
     call.notify = notify;
     const char* mismatch = suppression_mismatch(facts, call);
-    if (mismatch && !scope.diagnostic_recorded) {
-        scope.diagnostic_recorded = true;
+    if (mismatch && suppression_diagnostic_candidate(facts, call) &&
+        !first_candidate_mismatch_recorded.exchange(true, std::memory_order_acq_rel)) {
         const auto scope_flags = static_cast<uint32_t>(facts.active) |
             (static_cast<uint32_t>(facts.admitted) << 1) |
             (static_cast<uint32_t>(facts.map_qualified) << 2) |
@@ -257,6 +258,7 @@ bool call_site(engine::Memory& memory, uintptr_t base, uint32_t after, uint32_t 
 bool available() { return ready.load(std::memory_order_acquire); }
 
 void install(const engine::Binding& binding, HANDLE stop) {
+    if (install_attempted.exchange(true, std::memory_order_acq_rel)) return;
     image_base = binding.image.base;
     engine_root = binding.root;
 

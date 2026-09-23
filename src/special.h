@@ -22,6 +22,7 @@ struct SnapshotFacts {
     uint32_t crucible_charge_max = 0;
     uintptr_t held_weapon_decl = 0;
     bool selection_policy = false;
+    bool hammer_loot_projected = false;
 };
 
 // Internal production seam; never externally supplied or serialized.
@@ -74,7 +75,7 @@ UseHistory use_history();
 // Cumulative owner state and selection policy, independent of native presence/resources.
 struct HudOwnerSnapshot {
     uint64_t revision = 0, request_revision = 0;
-    uint32_t owns_crucible = 0, owns_hammer = 0, selected = 0;
+    uint32_t owns_crucible = 0, owns_hammer = 0, hammer_tier = 0, selected = 0;
     uint32_t refill_balance = UINT32_MAX, refill_flags = 0;
     uint32_t refill_request_state = SC_SPECIAL_REFILL_IDLE;
     bool refill_enabled = false, namespace_valid = false;

@@ -59,7 +59,7 @@ uintptr_t find_perk(uintptr_t p, const char* target_name) {
         if (!perk_list || perk_count <= 0 || perk_count > 4000) return 0;
         for (int i = 0; i < perk_count; ++i) {
             const auto perk = perk_list[i];
-            if (!perk) return 2;
+            if (!perk) continue;
             const auto name = *reinterpret_cast<const char**>(perk + 8);
             if (name && std::strcmp(name, target_name) == 0) {
                 return perk;
@@ -340,13 +340,21 @@ void bind_run_state(void*, uintptr_t p) {
     if (!p) return;
     __try {
         const uintptr_t rm = p + 0x19168;
-        const auto active = reinterpret_cast<char(*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0);
         const auto assure_size = reinterpret_cast<char(*)(uintptr_t)>(image_base + 0x357040);
+        const auto active_list = *reinterpret_cast<const uintptr_t**>(p + 0x3ba8);
+        const auto active_entries = *reinterpret_cast<const int*>(p + 0x3bb0);
+        if (active_entries < 0 || active_entries > 4000 || (active_entries && !active_list)) return;
         uintptr_t active_support = 0;
         int active_count = 0;
-        for (const auto path : SUPPORT_RUNE_PATHS) {
-            const auto perk = find_perk(p, path);
-            if (perk && active && active(p + 0x3b40, perk)) {
+        uint8_t seen = 0;
+        for (int i = 0; i < active_entries; ++i) {
+            const auto perk = active_list[i * 2];
+            if (!perk) continue;
+            const auto name = *reinterpret_cast<const char**>(perk + 8);
+            if (!name) continue;
+            for (int s = 0; s < 3; ++s) {
+                if (std::strcmp(name, SUPPORT_RUNE_PATHS[s]) != 0 || (seen & (1u << s))) continue;
+                seen |= static_cast<uint8_t>(1u << s);
                 active_support = perk;
                 ++active_count;
                 auto list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
@@ -354,7 +362,7 @@ void bind_run_state(void*, uintptr_t p) {
                 auto capacity = *reinterpret_cast<int*>(rm + 0x74);
                 if (count < 0 || count > 16 || capacity < count || (count && !list)) return;
                 bool registered = false;
-                for (int i = 0; i < count; ++i) registered |= list[i] == perk;
+                for (int entry = 0; entry < count; ++entry) registered |= list[entry] == perk;
                 if (!registered) {
                     if (count == 16 || (count >= capacity && (!assure_size || !assure_size(rm + 0x68)))) return;
                     list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
@@ -363,6 +371,7 @@ void bind_run_state(void*, uintptr_t p) {
                     list[count] = perk;
                     *reinterpret_cast<int*>(rm + 0x70) = count + 1;
                 }
+                break;
             }
         }
         if (active_count == 1 && !*reinterpret_cast<uintptr_t*>(rm + 0x98))

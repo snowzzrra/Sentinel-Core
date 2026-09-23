@@ -23,6 +23,41 @@ sc_diagnostic_request request(uint64_t id, uint32_t deadline = 100) {
 }
 void run_backup_request_contracts();
 int main() {
+    struct RuneFixture { sentinel::runes::SnapshotFacts facts{}; int bound = 0, reads = 0; bool active = true; } rune;
+    sentinel::runes::calls = {
+        &rune, nullptr,
+        [](void* context, uintptr_t, sentinel::runes::SnapshotFacts& facts) {
+            auto& state = *static_cast<RuneFixture*>(context);
+            ++state.reads; facts = state.facts; return true;
+        },
+        [](void*, uintptr_t, uint32_t) { return 0u; },
+        [](void*, uintptr_t, uint32_t) { return 0u; },
+        nullptr, nullptr, nullptr, nullptr,
+        [](void* context, uintptr_t) {
+            auto& state = *static_cast<RuneFixture*>(context);
+            ++state.bound;
+            if (!state.active) return;
+            state.facts.owned_support = 1u << 2;
+            state.facts.selected_support = 2;
+        }
+    };
+    sentinel::runes::bind_run_state_if_needed(0x1234, 1);
+    CHECK(rune.bound == 1 && rune.reads == 2 && rune.facts.owned_support == 4 &&
+          rune.facts.selected_support == 2 && rune.facts.selected_slots[0] == -1);
+    sentinel::runes::reset_session(nullptr);
+    rune.active = false;
+    rune.facts = {};
+    rune.facts.selected_support = -1;
+    rune.facts.selected_slots[0] = rune.facts.selected_slots[1] = rune.facts.selected_slots[2] = -1;
+    sentinel::runes::bind_run_state_if_needed(0x1234, 2);
+    CHECK(rune.facts.owned_support == 0 && rune.facts.selected_support == -1);
+    rune.active = true;
+    Sleep(510);
+    sentinel::runes::bind_run_state_if_needed(0x1234, 2);
+    CHECK(rune.facts.owned_support == 4 && rune.facts.selected_support == 2 &&
+          rune.facts.selected_slots[0] == -1 && rune.facts.selected_slots[1] == -1 &&
+          rune.facts.selected_slots[2] == -1);
+
     sentinel::challenge::ScopeFacts challenge_scope{};
     challenge_scope.active = challenge_scope.admitted = challenge_scope.map_qualified =
         challenge_scope.record_mission = challenge_scope.canonical_group = true;
@@ -35,12 +70,16 @@ int main() {
     challenge_call.currency = sentinel::challenge::sentinel_battery_currency;
     challenge_call.delta = sentinel::challenge::sentinel_battery_delta;
     CHECK(sentinel::challenge::suppression_mismatch(challenge_scope, challenge_call) == nullptr);
+    CHECK(sentinel::challenge::suppression_diagnostic_candidate(challenge_scope, challenge_call));
     challenge_scope.active = false;
     CHECK(std::strcmp(sentinel::challenge::suppression_mismatch(challenge_scope, challenge_call), "active") == 0);
+    CHECK(sentinel::challenge::suppression_diagnostic_candidate(challenge_scope, challenge_call));
     challenge_scope.active = true; challenge_call.return_site = 6;
     CHECK(std::strcmp(sentinel::challenge::suppression_mismatch(challenge_scope, challenge_call), "return_site") == 0);
+    CHECK(sentinel::challenge::suppression_diagnostic_candidate(challenge_scope, challenge_call));
     challenge_call.return_site = 5; challenge_call.currency = 5;
     CHECK(std::strcmp(sentinel::challenge::suppression_mismatch(challenge_scope, challenge_call), "currency") == 0);
+    CHECK(!sentinel::challenge::suppression_diagnostic_candidate(challenge_scope, challenge_call));
     Lifecycle life;
     CHECK(life.generation == 0 && life.state == SC_LIFETIME_UNOBSERVED);
     life.begin(true, true, false, 10, 9);

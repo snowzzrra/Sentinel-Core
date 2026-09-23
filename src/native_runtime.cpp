@@ -294,11 +294,9 @@ bool automap_name(uintptr_t key,char (&name)[64]) {
 }
 bool automap_checked(const sc_automap_request& snapshot,const char* map,const char* name) {
     if (!snapshot.known) return false;
-    constexpr char visual[]="ap_location_visual_", helper[]="ap_automap_location_";
-    const char* digits=nullptr;
-    if (!std::strncmp(name,visual,sizeof(visual)-1)) digits=name+sizeof(visual)-1;
-    else if (!std::strncmp(name,helper,sizeof(helper)-1)) digits=name+sizeof(helper)-1;
-    else return false;
+    constexpr char helper[]="ap_automap_location_";
+    if (std::strncmp(name,helper,sizeof(helper)-1)) return false;
+    const char* digits=name+sizeof(helper)-1;
     if (std::strlen(digits)!=7) return false;
     uint32_t id=0;
     for (unsigned i=0;i<7;++i) {
@@ -457,6 +455,7 @@ void post_frame() {
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
     if (!why) reconcile_automap(expected_map_address, facts.current_map.bytes, scope.lifecycle_generation);
+    if (!why && player) arsenal::tick_masteries(scope.lifecycle_generation, player);
     if (!slot) return;
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
