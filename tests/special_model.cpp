@@ -83,12 +83,14 @@ int main() {
     CHECK(result.outcome == SC_SPECIAL_OUTCOME_OK && fixture.ensure_calls == 1);
     CHECK(result.native_crucible == 1 && result.native_hammer_perks == 0);
     CHECK(fixture.facts.hammer_loot_projected);
+    CHECK(result.flags & SC_SPECIAL_FLAG_HAMMER_LOOT_PROJECTED);
     CHECK(result.native_selected == SC_SPECIAL_WEAPON_CRUCIBLE);
     CHECK(result.flags & SC_SPECIAL_FLAG_SELECTION_PRESERVED);
 
     result = sentinel::special::initial(command);
     sentinel::special::execute(command, result, calls(fixture));
     CHECK(result.outcome == SC_SPECIAL_OUTCOME_NOOP && fixture.ensure_calls == 1);
+    CHECK(result.flags & SC_SPECIAL_FLAG_HAMMER_LOOT_PROJECTED);
 
     Fixture native{};
     native.facts = {1, 1, 2, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
@@ -97,6 +99,7 @@ int main() {
     result = sentinel::special::initial(command);
     sentinel::special::execute(command, result, calls(native));
     CHECK(result.outcome == SC_SPECIAL_OUTCOME_NATIVE_FAILED && native.ensure_calls == 1);
+    CHECK(!(result.flags & SC_SPECIAL_FLAG_HAMMER_LOOT_PROJECTED));
 
     Fixture ineffective{};
     ineffective.facts = {1, 1, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};

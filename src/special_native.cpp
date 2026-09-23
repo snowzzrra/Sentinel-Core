@@ -119,6 +119,8 @@ using InputDown = bool(*)(uintptr_t, uint64_t);
 CrucibleResolver original_crucible_resolver = nullptr;
 InputDown original_input_down = nullptr;
 std::atomic<bool> route_ready{false};
+std::atomic<bool> native_perk_reader_ready{false};
+std::atomic<bool> hammer_loot_ready{false};
 std::atomic<DWORD> route_thread{0};
 std::atomic<uintptr_t> route_player{0};
 char route_namespace[65]{};
@@ -380,7 +382,7 @@ uint32_t policy_snapshot(uintptr_t p, PolicySnapshot& snapshot) {
 
 __declspec(noinline) uint8_t active_perk_detour(uintptr_t component, uintptr_t perk_decl) {
     const auto native = original_active_perk(component, perk_decl);
-    if (native) return native;
+    if (native || !hammer_loot_ready.load(std::memory_order_acquire)) return native;
     const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
     if (caller != image_base + rva_loot_have_return && caller != image_base + rva_loot_not_return)
         return native;
@@ -567,12 +569,13 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         }
         uintptr_t perk_decls[2]{};
         uint8_t effective_perks = 0;
-        if (hammer_perks(p, perk_decls, effective_perks)) {
+        if (native_perk_reader_ready.load(std::memory_order_acquire) &&
+            hammer_perks(p, perk_decls, effective_perks)) {
             facts.known |= SC_SPECIAL_KNOWN_HAMMER_PERKS;
             facts.native_hammer_perks = effective_perks;
         }
         PolicySnapshot loot_policy{};
-        if (facts.native_hammer && route_ready.load(std::memory_order_acquire) &&
+        if (facts.native_hammer && hammer_loot_ready.load(std::memory_order_acquire) &&
             !policy_snapshot(p, loot_policy) && loot_policy.hammer) {
             const auto owner = hud_owner_snapshot(loot_policy.namespace_id);
             facts.hammer_loot_projected = owner.namespace_valid && owner.owns_hammer &&
@@ -611,7 +614,7 @@ uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, 
         const auto inv = inventory_of(p);
         if (!inv) return 2;
         const bool upgraded = own_hammer && hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED;
-        if (upgraded && !route_ready.load(std::memory_order_acquire)) return ERROR_NOT_SUPPORTED;
+        if (upgraded && !hammer_loot_ready.load(std::memory_order_acquire)) return ERROR_NOT_SUPPORTED;
         const auto before = held_weapon_snapshot(p, inv);
 
         uintptr_t decl = 0, item = 0;
@@ -1151,9 +1154,6 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {rva_give_item, "40555356574154415541564157488d6c24f94881ecb8000000488b05e8ccb102"},
         {rva_item_at, "4883ec2885d2784f3b51087d4a48895c24204863da48c1e3054803198b03488d"},
         {rva_item_count, "8b4108c3cccccccccccccccccccccccc48896c2418574883ec204863790833ed"},
-        {rva_active_perk, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
-        {0xaa46a6, "488b95600100004885d27414488d8e403b0000e832f1530084c00f840a030000"},
-        {0xaa46c6, "488b95680100004885d27414488d8e403b0000e812f1530084c00f85ea020000"},
         {rva_perk_typeinfo, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc"},
         {rva_current_weapon, "40534883ec20488b01488bd9ff90b0000000488b13488bcb4885c07412ff92b0"},
         {rva_hud_earnings, "48895c240848896c2410488974241848897c242041564883ec20488db9700600"},
@@ -1173,11 +1173,6 @@ void install(const engine::Binding& binding, HANDLE stop) {
         std::memcpy(expected_words, target.bytes.data(), 32);
         std::memcpy(actual_words, actual.data(), 32);
         bool valid = section && !read.reason && actual == target.bytes;
-        if (valid && (s.offset == 0xaa46a6 || s.offset == 0xaa46c6)) {
-            DWORD64 unwind_base = 0;
-            const auto entry = RtlLookupFunctionEntry(target.address, &unwind_base, nullptr);
-            valid = entry && unwind_base == image_base && entry->BeginAddress == rva_loot_consumer;
-        }
         installation_trace.record(save::BStage::native_start, valid ? save::BStatus::entered : save::BStatus::refused,
             valid ? "site_validated" : "site_refused", 0,
             {{"rva", s.offset}, {"section", section}, {"read_reason", read.reason}, {"read_error", read.error},
@@ -1318,7 +1313,6 @@ void install(const engine::Binding& binding, HANDLE stop) {
             {0x14644e0, reinterpret_cast<void*>(weapon_dispatch_detour), reinterpret_cast<void**>(&original_weapon_dispatch)},
             {0x1456310, reinterpret_cast<void*>(crucible_activate_detour), reinterpret_cast<void**>(&original_crucible_activate)},
             {0x146be40, reinterpret_cast<void*>(input_pressed_detour), reinterpret_cast<void**>(&original_input_pressed)},
-            {rva_active_perk, reinterpret_cast<void*>(active_perk_detour), reinterpret_cast<void**>(&original_active_perk)},
         };
         size_t created = 0, queued = 0;
         MH_STATUS status = MH_OK;
@@ -1344,6 +1338,59 @@ void install(const engine::Binding& binding, HANDLE stop) {
         route_ready.store(installed, std::memory_order_release);
         installation_trace.record(save::BStage::special_toggle, installed ? save::BStatus::succeeded : save::BStatus::refused,
             "joint_route_install", 0, {{"created", created}, {"queued", queued}, {"status", status}, {"ready", installed}});
+    }
+
+    // The loot consumer is optional; its signatures and hook cannot disable Special routing.
+    const Site loot_sites[] = {
+        {rva_active_perk, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
+        {0xaa46a6, "488b95600100004885d27414488d8e403b0000e832f1530084c00f840a030000"},
+        {0xaa46c6, "488b95680100004885d27414488d8e403b0000e812f1530084c00f85ea020000"},
+    };
+    bool loot_valid = route_ready.load(std::memory_order_acquire);
+    if (!loot_valid)
+        installation_trace.record(save::BStage::special_toggle, save::BStatus::refused,
+            "hammer_loot_route_unavailable");
+    for (const auto& site : loot_sites) {
+        native::Target target{};
+        target.address = image_base + site.offset;
+        const auto hex = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
+        for (size_t i = 0; i < target.bytes.size(); ++i)
+            target.bytes[i] = static_cast<uint8_t>(hex(site.bytes[2*i])*16 + hex(site.bytes[2*i+1]));
+        std::array<uint8_t, 32> actual{};
+        const bool section = binding.image.contains(site.offset, actual.size(),
+            IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0);
+        const auto sample = section ? memory.copy(target.address, actual.data(), actual.size()) :
+            engine::ReadResult{SC_REASON_READ_FAILED, ERROR_NOACCESS};
+        bool valid = section && !sample.reason && actual == target.bytes;
+        uint32_t owner_rva = 0;
+        if (valid && site.offset != rva_active_perk) {
+            DWORD64 unwind_base = 0;
+            const auto entry = RtlLookupFunctionEntry(target.address, &unwind_base, nullptr);
+            if (entry && unwind_base == image_base) owner_rva = entry->BeginAddress;
+            valid = owner_rva == rva_loot_consumer;
+        }
+        if (site.offset == rva_active_perk)
+            native_perk_reader_ready.store(valid, std::memory_order_release);
+        installation_trace.record(save::BStage::special_toggle,
+            valid ? save::BStatus::entered : save::BStatus::refused,
+            valid ? "hammer_loot_site_validated" : "hammer_loot_site_refused", 0,
+            {{"rva", site.offset}, {"section", section}, {"read_reason", sample.reason},
+             {"read_error", sample.error}, {"bytes_match", actual == target.bytes},
+             {"owner_rva", owner_rva}, {"expected_owner_rva", site.offset == rva_active_perk ? 0 : rva_loot_consumer}});
+        loot_valid &= valid;
+    }
+    if (loot_valid) {
+        const auto target = reinterpret_cast<void*>(image_base + rva_active_perk);
+        const auto created = MH_CreateHook(target, reinterpret_cast<void*>(active_perk_detour),
+            reinterpret_cast<void**>(&original_active_perk));
+        const auto enabled = created == MH_OK ? MH_EnableHook(target) : MH_UNKNOWN;
+        if (created == MH_OK && enabled != MH_OK) MH_RemoveHook(target);
+        hammer_loot_ready.store(enabled == MH_OK, std::memory_order_release);
+        installation_trace.record(save::BStage::special_toggle,
+            enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
+            "hammer_loot_install", 0,
+            {{"create_status", created}, {"enable_status", enabled},
+             {"route_ready", route_ready.load(std::memory_order_acquire)}});
     }
 
     // Optional MissionChallenge toast capture is independent of gameplay hooks.
@@ -1425,6 +1472,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
         hud::enabled =
             bind_hud(hud::swf.lookup, 0x185c150, 0, "40534883ec20488b4928488bda488b01ff5028488bc34883c4205bc3cccccccc") &&
             bind_hud(hud::swf.sprite, 0x184e470, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b150f5c06") &&
+            bind_hud(hud::swf.text, 0x184e4b0, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b15d75b06") &&
             bind_hud(hud::swf.release, 0x184e3b0, 0, "4883ec288b0183f8027527488b4908b8fffffffff00fc1413083f80175544885") &&
             bind_hud(hud::swf.string_init, 0x3fa8e0, 39, "488d0591cb6602c7411414000080488901488d411848894108c7411000000000") &&
             bind_hud(hud::swf.string_set, 0x3faff0, 0, "48895c2410488974241848897c242041564883ec304c8bf2488bd94885d20f85") &&
@@ -1436,6 +1484,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
             bind_hud(hud::swf.start, 0x18610d0, 0, "48895c2408574883ec200fb741588bfa488bd93bd074447d0de8928effff488b") &&
             bind_hud(hud::swf.frame, 0x1865280, 0, "48895c2408574883ec200fb74158bf010000003bd7488bd90f4ffa3bf8742c7d") &&
             bind_hud(hud::swf.visible, 0x1864430, 97, "440fb6d23851517457807952007551488b41104c6349088851514d03c9488b10") &&
+            bind_hud(hud::swf.set_text, 0x186db00, 0, "40534883ec20488bd94883c140e8ded4b8fe488bcb4883c4205be9e1cbffffcc") &&
             bind_hud(hud::swf.position, 0x1863ec0, 70, "48837940004c8bc9743b488b41104c63410c49c1e006488b9080000000f3410f") &&
             bind_hud(hud::swf.color, 0x1863d90, 0, "48896c24104889742418574883ec308bf2488bf981fa0d0100000f87f7000000") &&
             bind_hud(hud::swf.material, 0x1863c30, 0, "48895c240848896c24104889742418574883ec20488bd9418bf1488b4960418b") &&

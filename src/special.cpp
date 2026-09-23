@@ -74,6 +74,8 @@ void fill_facts(const SnapshotFacts& before, const State& state, sc_special_resu
     out.native_crucible = before.native_crucible;
     out.native_hammer = before.native_hammer;
     out.native_hammer_perks = before.native_hammer_perks;
+    out.flags &= ~SC_SPECIAL_FLAG_HAMMER_LOOT_PROJECTED;
+    if (before.hammer_loot_projected) out.flags |= SC_SPECIAL_FLAG_HAMMER_LOOT_PROJECTED;
     out.native_selected = before.native_selected;
     if (before.selection_policy) out.flags |= SC_SPECIAL_FLAG_SELECTION_POLICY;
     out.native_state_known = before.known;

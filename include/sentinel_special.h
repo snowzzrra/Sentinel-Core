@@ -25,8 +25,7 @@ enum {
     SC_SPECIAL_WEAPON_HAMMER = 2
 };
 
-/* Permanent Hammer upgrade representation. Base and upgraded are the same
-   physical weapon; the upgraded tier only adds permanent perks. */
+/* Hammer ownership tiers. Tier 2 projects the AP loot effect at the native consumer. */
 enum {
     SC_SPECIAL_HAMMER_TIER_NONE = 0,
     SC_SPECIAL_HAMMER_TIER_BASE = 1,
@@ -105,7 +104,8 @@ enum {
     SC_SPECIAL_FLAG_HUD_PRESENTED        = 1u << 10,
     SC_SPECIAL_FLAG_REFILL_UNVERIFIED    = 1u << 11,
     SC_SPECIAL_FLAG_SELECTION_POLICY     = 1u << 12,
-    SC_SPECIAL_FLAG_HELD_WEAPON_PRESERVED = 1u << 13
+    SC_SPECIAL_FLAG_HELD_WEAPON_PRESERVED = 1u << 13,
+    SC_SPECIAL_FLAG_HAMMER_LOOT_PROJECTED = 1u << 14
 };
 
 typedef struct sc_special_result {
