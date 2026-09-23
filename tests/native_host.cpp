@@ -36,6 +36,11 @@ void fixture_automap_collect(uintptr_t system,uintptr_t key) {
     if (system==0x1234 && key==0x5678)
         *reinterpret_cast<int32_t*>(automap_test_object+0x134)=3;
 }
+void fixture_automap_uncollected(uintptr_t object,int state) {
+    CHECK(state==1);
+    *reinterpret_cast<int32_t*>(object+0x134)=state;
+    *reinterpret_cast<uintptr_t*>(object+0x28)=*reinterpret_cast<uintptr_t*>(object+0x18);
+}
 
 __declspec(noinline) void fixture_frame(uintptr_t self);
 __declspec(noinline) void call_frame() { fixture_frame(reinterpret_cast<uintptr_t>(&common_object)); }
@@ -207,6 +212,10 @@ int wmain(int argc, wchar_t** argv) {
     *reinterpret_cast<int32_t*>(automap_test_object+0x134)=1;
     CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
     CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3 && automap_collect_calls==2);
+    *reinterpret_cast<int32_t*>(automap_test_object+0x134)=0;
+    *reinterpret_cast<uintptr_t*>(automap_test_object+0x18)=0x12345678;
+    CHECK(native::test_automap_uncollected(automap_test_object,fixture_automap_uncollected));
+    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==1);
     parked = CreateEventW(nullptr, TRUE, FALSE, nullptr); wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     gate_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr); gate_release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     changed = CreateEventW(nullptr, TRUE, FALSE, nullptr);

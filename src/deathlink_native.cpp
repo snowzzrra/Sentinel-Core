@@ -22,7 +22,7 @@ constexpr uint32_t rva_player_death = 0x11feae0;      // idPlayerAnalyzer::Playe
 constexpr uint32_t rva_extra_life = 0xa9c230;         // idPlayerAccessibility TryUseExtraLife wrapper
 constexpr uint32_t rva_player_damage_slot = 0x4e8;    // idPlayer vtable slot: native Damage pipeline
 
-const char* const LETHAL_DAMAGE_PATH = "damage/code_referenced/crush";
+const char* const LETHAL_DAMAGE_PATH = "damage/code_referenced/triggerHurt1000";
 
 using PlayerAt = uintptr_t(*)(uintptr_t, uint32_t);
 using DamageTypeInfo = uintptr_t(*)();
@@ -31,6 +31,7 @@ using Protection = char(*)(uintptr_t);
 using PlayerDeath = void(*)(uintptr_t);
 using TryExtraLife = char(*)(uintptr_t, uintptr_t);
 using DamageCall = void(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, float, uintptr_t, uintptr_t);
+using PlayerHealth = int(*)(uintptr_t);
 
 PlayerDeath original_player_death = nullptr;
 TryExtraLife original_extra_life = nullptr;
@@ -81,6 +82,8 @@ bool valid_code_pointer(uintptr_t address) {
 uint32_t apply_lethal(void*, uintptr_t p, ApplicationOutcome& outcome) {
     if (!p) return 1;
     uint32_t error = 0;
+    int health_before = -10001, health_after = -10001;
+    bool damage_called = false;
     __try {
         const auto typeinfo = reinterpret_cast<DamageTypeInfo>(image_base + rva_damage_typeinfo)();
         if (!typeinfo) return 2;
@@ -90,6 +93,9 @@ uint32_t apply_lethal(void*, uintptr_t p, ApplicationOutcome& outcome) {
         if (!vtable) return 4;
         const auto damage = vtable[rva_player_damage_slot / 8];
         if (!valid_code_pointer(damage)) return 5;
+        const auto health = vtable[0x6e8 / 8];
+        const auto read_health = valid_code_pointer(health) ? reinterpret_cast<PlayerHealth>(health) : nullptr;
+        if (read_health) health_before = read_health(p);
 
         // Exactly one legitimate lethal event through Doom's own player damage
         // pipeline. Extra Life, Saving Throw and native invulnerability are all
@@ -98,15 +104,26 @@ uint32_t apply_lethal(void*, uintptr_t p, ApplicationOutcome& outcome) {
         const auto before_deaths = application_deaths.load(std::memory_order_relaxed);
         const auto before_lives = application_extra_lives.load(std::memory_order_relaxed);
         application_active.store(true, std::memory_order_release);
+        damage_called = true;
         reinterpret_cast<DamageCall>(damage)(p, 0, 0, decl + 0x90, 1.0f,
                                              reinterpret_cast<uintptr_t>(direction), 0);
         application_active.store(false, std::memory_order_release);
+        if (read_health) health_after = read_health(p);
         outcome.true_death = application_deaths.load(std::memory_order_relaxed) - before_deaths;
         outcome.extra_life = application_extra_lives.load(std::memory_order_relaxed) - before_lives;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         application_active.store(false, std::memory_order_release);
         error = GetExceptionCode();
     }
+    save::session().btrace.record(save::BStage::deathlink,
+        error ? save::BStatus::refused : save::BStatus::succeeded,
+        "native_lethal_application", 0,
+        {{"damage_called", damage_called}, {"health_before", health_before},
+         {"health_after", health_after},
+         {"health_valid", health_before >= -10000 && health_before <= 10000 &&
+                          health_after >= -10000 && health_after <= 10000},
+         {"true_death_delta", outcome.true_death}, {"extra_life_delta", outcome.extra_life},
+         {"native_exception", error}});
     return error;
 }
 

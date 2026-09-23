@@ -391,11 +391,17 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {0x1651040, "4885d20f8450030000448844241853415541574883ec4048896c2460450fb6e9", reinterpret_cast<void*>(upgrade_activate_hook), reinterpret_cast<void**>(&original_upgrade_activate)},
     };
     for (const auto& s : mastery_sites) {
-        const auto reason = native::validate_target(memory, binding.image,
-            make_target(image_base, s.offset, s.bytes), stop, mastery_deadline);
+        const auto reason = s.offset == 0x1631f90 ?
+            native::validate_leaf_target(memory, binding.image,
+                make_target(image_base, s.offset, s.bytes), 8, stop, mastery_deadline) :
+            native::validate_target(memory, binding.image,
+                make_target(image_base, s.offset, s.bytes), stop, mastery_deadline);
         if (reason) {
+            const char* diagnostic = s.offset == 0x1631f90 ? "mastery_typeinfo_leaf_refused" :
+                s.offset == 0x164fc20 ? "mastery_apply_target_refused" :
+                s.offset == 0x164e9b0 ? "mastery_replay_hook_refused" : "mastery_activation_hook_refused";
             installation_trace.record(save::BStage::native_start, save::BStatus::refused,
-                "mastery_site_refused", 0, {{"rva", s.offset}, {"reason", reason}});
+                diagnostic, 0, {{"rva", s.offset}, {"reason", reason}});
             return;
         }
     }

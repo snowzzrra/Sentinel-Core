@@ -257,12 +257,15 @@ uint32_t automap_cursor=0;
 uintptr_t automap_keys=0;
 using AutomapCollect=void(*)(uintptr_t,uintptr_t);
 AutomapCollect automap_collect=nullptr;
+using AutomapState=void(*)(uintptr_t,int);
+AutomapState automap_state=nullptr;
 #include "automap_catalog.h"
 
 void install_automap(const engine::Binding& b) {
     engine::LocalMemory memory;
     const struct { uint32_t rva; const char* hex; } sites[] = {
-        {0xa55f90,"40534883ec20448b8148030000488d057cdb01024c8bca4889442430488b9140"}
+        {0xa55f90,"40534883ec20448b8148030000488d057cdb01024c8bca4889442430488b9140"},
+        {0xa604f0,"48895c2408574883ec208bfa488bd93b9134010000747485d27530488b491848"}
     };
     for (const auto& s:sites) {
         std::array<uint8_t,32> actual{}, expected{};
@@ -272,6 +275,7 @@ void install_automap(const engine::Binding& b) {
             memory.copy(b.image.base+s.rva,actual.data(),32).reason || actual!=expected) return;
     }
     automap_collect=reinterpret_cast<AutomapCollect>(b.image.base+0xa55f90);
+    automap_state=reinterpret_cast<AutomapState>(b.image.base+0xa604f0);
     automap_ready.store(true,std::memory_order_release);
 }
 struct AutomapLists { uintptr_t keys,values; int32_t count,key_capacity,value_capacity; };
@@ -292,7 +296,7 @@ bool automap_name(uintptr_t key,char (&name)[64]) {
     std::memcpy(name,data,static_cast<size_t>(length)); name[length]=0;
     return std::strlen(name)==static_cast<size_t>(length);
 }
-bool automap_checked(const sc_automap_request& snapshot,const char* map,const char* name) {
+int automap_status(const sc_automap_request& snapshot,const char* map,const char* name) {
     if (!snapshot.known) return false;
     constexpr char helper[]="ap_automap_location_";
     if (std::strncmp(name,helper,sizeof(helper)-1)) return false;
@@ -306,7 +310,7 @@ bool automap_checked(const sc_automap_request& snapshot,const char* map,const ch
     for (const auto& marker:automap_markers) {
         if (marker.location!=id || std::strcmp(marker.map,map)) continue;
         const auto bit=id-SC_AUTOMAP_LOCATION_BASE;
-        return (snapshot.checked_locations[bit/64] & (uint64_t{1}<<(bit%64)))!=0;
+        return (snapshot.checked_locations[bit/64] & (uint64_t{1}<<(bit%64)))!=0 ? 2 : 1;
     }
     return false;
 }
@@ -314,6 +318,14 @@ bool automap_set_collected(uintptr_t system,uintptr_t key,uintptr_t object) {
     if (*reinterpret_cast<int32_t*>(object+0x134)==3) return true;
     automap_collect(system,key);
     return *reinterpret_cast<int32_t*>(object+0x134)==3;
+}
+bool automap_set_uncollected(uintptr_t object) {
+    const auto state=*reinterpret_cast<int32_t*>(object+0x134);
+    if (state==1 || state==2) return true;
+    if (state!=0 || !*reinterpret_cast<uintptr_t*>(object+0x18)) return false;
+    automap_state(object,1);
+    return *reinterpret_cast<int32_t*>(object+0x134)==1 &&
+        *reinterpret_cast<uintptr_t*>(object+0x28)==*reinterpret_cast<uintptr_t*>(object+0x18);
 }
 // Called only by the already-admitted native frame, never by an IPC reader.
 // Every pass rereads native keys/weak owners, including same-epoch reconstruction.
@@ -342,8 +354,15 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
             const auto key=list.keys+static_cast<uintptr_t>(automap_cursor)*0x30;
             const auto object=list.values+static_cast<uintptr_t>(automap_cursor)*0x150;
             char name[64]{}; ++scanned;
-            if (!automap_name(key,name) || !automap_checked(snapshot,map_name,name) ||
-                *reinterpret_cast<int32_t*>(object+0x134)==3) {
+            if (!automap_name(key,name)) {
+                ++automap_cursor; continue;
+            }
+            const auto marker_status=automap_status(snapshot,map_name,name);
+            if (marker_status==1) {
+                if (!automap_set_uncollected(object)) { automap_fault.store(3); break; }
+                ++automap_cursor; continue;
+            }
+            if (marker_status!=2 || *reinterpret_cast<int32_t*>(object+0x134)==3) {
                 ++automap_cursor; continue;
             }
             if (!automap_set_collected(system,key,object)) { automap_fault.store(2); break; }
@@ -966,11 +985,15 @@ void test_dispatch_adapter(const TestAdapter& adapter, const sc_native_scope& sc
 }
 void test_post_frame() { post_frame(); }
 bool test_automap_checked(const sc_automap_request& snapshot,const char* map,const char* name) {
-    return automap_checked(snapshot,map,name);
+    return automap_status(snapshot,map,name)==2;
 }
 bool test_automap_collect(uintptr_t system,uintptr_t key,uintptr_t object,void (*collect)(uintptr_t,uintptr_t)) {
     automap_collect=collect;
     return automap_set_collected(system,key,object);
+}
+bool test_automap_uncollected(uintptr_t object,void (*set_state)(uintptr_t,int)) {
+    automap_state=set_state;
+    return automap_set_uncollected(object);
 }
 void test_start(const TestAdapter& adapter, const Snapshot& identity, HANDLE stop_event) {
     fixture = adapter; fixture_active = true;

@@ -25,7 +25,7 @@ struct Calls {
     void (*material)(uintptr_t, uintptr_t, int, int, unsigned) = nullptr;
     uintptr_t (*find_material)(uintptr_t, const char*, int) = nullptr;
 } swf;
-bool enabled = false;
+bool graphics_ready = false, keycap_ready = false;
 
 void refuse(const char* reason, uintptr_t owner, uintptr_t element, uint64_t epoch) {
     hud_trace.record(save::BStage::profile_output, save::BStatus::refused,
@@ -115,7 +115,11 @@ uintptr_t clone(uintptr_t source, uintptr_t parent, const char* name, bool& crea
 }
 
 bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsigned keys, uint64_t epoch) {
-    if (!enabled || !valid) return false;
+    if (!graphics_ready) {
+        refuse("hud_graphics_unavailable", element, 0, epoch);
+        return false;
+    }
+    if (!valid) return false;
     const auto widget = *reinterpret_cast<uintptr_t*>(element + 0x1e8);
     const auto chainsaw = *reinterpret_cast<uintptr_t*>(element + 0x1e0);
     const auto source = widget ? *reinterpret_cast<uintptr_t*>(widget + 0x18) : 0;
@@ -219,12 +223,23 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     if (const auto fill = child(three, "innerFill")) swf.color(fill, palette);
     swf.position(refill, refill_at.x, refill_at.y);
     swf.visible(refill, true, true);
-    const auto donor = child(child(source, "icon"), "cta");
+    const bool graphics_applied = known && *reinterpret_cast<uint16_t*>(three + 0x58) == desired;
+    if (!keycap_ready) {
+        hud_trace.record(save::BStage::profile_output, save::BStatus::pending,
+            "hud_graphics_applied_keycaps_unavailable", 0,
+            {{"owner", element}, {"parent", parent}, {"graphics_ready", graphics_ready},
+             {"keycap_ready", keycap_ready}});
+        return graphics_applied;
+    }
+    const auto quickuse = *reinterpret_cast<uintptr_t*>(element + 0x1d0);
+    const auto donor_root = quickuse ? *reinterpret_cast<uintptr_t*>(quickuse + 0x18) : 0;
+    const auto donor = quickuse ? *reinterpret_cast<uintptr_t*>(quickuse + 0x1f0) : 0;
     Point donor_offset{};
-    if (!donor || !key_offset(donor, source, movie, donor_offset) ||
+    if (!donor_root || *reinterpret_cast<uintptr_t*>(donor_root + 0x40) != parent ||
+        !donor || !key_offset(donor, donor_root, movie, donor_offset) ||
         !child(donor, "kbm") || !child(donor, "joy")) {
         refuse("hud_native_keycap_donor_unavailable", element, donor, epoch);
-        return false;
+        return graphics_applied;
     }
     struct BindState {
         uintptr_t parent = 0, refill = 0, special = 0;
@@ -258,7 +273,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
         !bind_key(special_bind, "apSpecialToggleBind", toggle_key,
                   {anchor.x + offset.x, anchor.y + offset.y}, binds.toggle_key)) {
         refuse("hud_native_keycap_bind_failed", element, donor, epoch);
-        return false;
+        return graphics_applied;
     }
     binds.refill = refill_bind;
     binds.special = special_bind;
@@ -271,6 +286,6 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
          {"pip_frame_before", frame_before}, {"pip_frame_after", *reinterpret_cast<uint16_t*>(three + 0x58)},
          {"native_crucible_170", *reinterpret_cast<int32_t*>(element + 0x170)}, {"pixels_observed", 0},
          {"switch_source", arrow_source}, {"switch_clip", special_arrow}});
-    return known && *reinterpret_cast<uint16_t*>(three + 0x58) == desired;
+    return graphics_applied;
 }
 } // namespace hud

@@ -98,7 +98,7 @@ constexpr uint32_t rva_give_item = 0x1691cd0;            // idInventoryCollectio
 constexpr uint32_t rva_item_count = 0x398510;            // idInventoryCollection::Num()
 constexpr uint32_t rva_item_at = 0x1691450;              // idInventoryCollection::GetItem(index)
 constexpr uint32_t rva_active_perk = 0xfe37f0;           // exact active-perk reader
-constexpr uint32_t rva_loot_consumer = 0xaa44f0;          // idLootDropComponent::CalculateSpawnAmount
+constexpr uint32_t rva_loot_unwind_owner = 0xaa457a;      // unwind fragment of the 0xaa44f0 loot consumer
 constexpr uint32_t rva_loot_have_return = 0xaa46be;
 constexpr uint32_t rva_loot_not_return = 0xaa46de;
 constexpr uint32_t rva_perk_typeinfo = 0x1631f90;        // returns idDeclTypeInfo for perks
@@ -1367,7 +1367,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
             DWORD64 unwind_base = 0;
             const auto entry = RtlLookupFunctionEntry(target.address, &unwind_base, nullptr);
             if (entry && unwind_base == image_base) owner_rva = entry->BeginAddress;
-            valid = owner_rva == rva_loot_consumer;
+            valid = owner_rva == rva_loot_unwind_owner;
         }
         if (site.offset == rva_active_perk)
             native_perk_reader_ready.store(valid, std::memory_order_release);
@@ -1376,7 +1376,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
             valid ? "hammer_loot_site_validated" : "hammer_loot_site_refused", 0,
             {{"rva", site.offset}, {"section", section}, {"read_reason", sample.reason},
              {"read_error", sample.error}, {"bytes_match", actual == target.bytes},
-             {"owner_rva", owner_rva}, {"expected_owner_rva", site.offset == rva_active_perk ? 0 : rva_loot_consumer}});
+              {"owner_rva", owner_rva}, {"expected_owner_rva", site.offset == rva_active_perk ? 0 : rva_loot_unwind_owner}});
         loot_valid &= valid;
     }
     if (loot_valid) {
@@ -1454,7 +1454,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
         if (error) { presentation_valid = false; break; }
     }
     if (presentation_valid) {
-        const auto bind_hud = [&](auto& function, uint32_t rva, size_t leaf, const char* bytes) {
+        const auto bind_hud = [&](auto& function, const char* name, uint32_t rva, size_t leaf, const char* bytes) {
             native::Target site{};
             site.address = image_base + rva;
             for (size_t n = 0; n < site.bytes.size(); ++n)
@@ -1463,33 +1463,37 @@ void install(const engine::Binding& binding, HANDLE stop) {
                                        native::validate_target(memory, binding.image, site, stop, deadline);
             if (reason) {
                 hud_trace.record(save::BStage::profile_prepare, save::BStatus::refused,
-                    "hud_adapter_site_refused", 0, {{"rva", rva}, {"reason", reason}});
+                    name, 0, {{"rva", rva}, {"reason", reason},
+                              {"graphics_ready", hud::graphics_ready}, {"keycap_ready", hud::keycap_ready}});
                 return false;
             }
             function = reinterpret_cast<std::decay_t<decltype(function)>>(site.address);
             return true;
         };
-        hud::enabled =
-            bind_hud(hud::swf.lookup, 0x185c150, 0, "40534883ec20488b4928488bda488b01ff5028488bc34883c4205bc3cccccccc") &&
-            bind_hud(hud::swf.sprite, 0x184e470, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b150f5c06") &&
-            bind_hud(hud::swf.text, 0x184e4b0, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b15d75b06") &&
-            bind_hud(hud::swf.release, 0x184e3b0, 0, "4883ec288b0183f8027527488b4908b8fffffffff00fc1413083f80175544885") &&
-            bind_hud(hud::swf.string_init, 0x3fa8e0, 39, "488d0591cb6602c7411414000080488901488d411848894108c7411000000000") &&
-            bind_hud(hud::swf.string_set, 0x3faff0, 0, "48895c2410488974241848897c242041564883ec304c8bf2488bd94885d20f85") &&
-            bind_hud(hud::swf.string_free, 0x3facb0, 0, "40534883ec20488b5108488d05b7c76602488901488bd94885d2742d8b4114c1") &&
-            bind_hud(hud::swf.duplicate, 0x1859a30, 0, "4883ec28488b41404c8bc24885c0751f488b4130488d0df53c6001488b500848") &&
-            bind_hud(hud::swf.entry, 0x1859db0, 0, "48895c241057448b51784533db8bfa488bd9458bcb4585d27e35488974241048") &&
-            bind_hud(hud::swf.add, 0x1856c70, 0, "48895c2418555657415541564883ec7033f6488bd948634978458bf04d8be98b") &&
-            bind_hud(hud::swf.dirty, 0x1857110, 0, "4c8bdc574883ec70488b05b97895024833c448894424584863410c488bf983f8") &&
-            bind_hud(hud::swf.start, 0x18610d0, 0, "48895c2408574883ec200fb741588bfa488bd93bd074447d0de8928effff488b") &&
-            bind_hud(hud::swf.frame, 0x1865280, 0, "48895c2408574883ec200fb74158bf010000003bd7488bd90f4ffa3bf8742c7d") &&
-            bind_hud(hud::swf.visible, 0x1864430, 97, "440fb6d23851517457807952007551488b41104c6349088851514d03c9488b10") &&
-            bind_hud(hud::swf.set_text, 0x186db00, 0, "40534883ec20488bd94883c140e8ded4b8fe488bcb4883c4205be9e1cbffffcc") &&
-            bind_hud(hud::swf.position, 0x1863ec0, 70, "48837940004c8bc9743b488b41104c63410c49c1e006488b9080000000f3410f") &&
-            bind_hud(hud::swf.color, 0x1863d90, 0, "48896c24104889742418574883ec308bf2488bf981fa0d0100000f87f7000000") &&
-            bind_hud(hud::swf.material, 0x1863c30, 0, "48895c240848896c24104889742418574883ec20488bd9418bf1488b4960418b") &&
-            bind_hud(hud::swf.find_material, 0x17aa5d0, 0, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448") &&
+        hud::graphics_ready =
+            bind_hud(hud::swf.lookup, "lookup", 0x185c150, 0, "40534883ec20488b4928488bda488b01ff5028488bc34883c4205bc3cccccccc") &&
+            bind_hud(hud::swf.sprite, "sprite", 0x184e470, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b150f5c06") &&
+            bind_hud(hud::swf.release, "release", 0x184e3b0, 0, "4883ec288b0183f8027527488b4908b8fffffffff00fc1413083f80175544885") &&
+            bind_hud(hud::swf.string_init, "string_init", 0x3fa8e0, 39, "488d0591cb6602c7411414000080488901488d411848894108c7411000000000") &&
+            bind_hud(hud::swf.string_set, "string_set", 0x3faff0, 0, "48895c2410488974241848897c242041564883ec304c8bf2488bd94885d20f85") &&
+            bind_hud(hud::swf.string_free, "string_free", 0x3facb0, 0, "40534883ec20488b5108488d05b7c76602488901488bd94885d2742d8b4114c1") &&
+            bind_hud(hud::swf.duplicate, "duplicate", 0x1859a30, 0, "4883ec28488b41404c8bc24885c0751f488b4130488d0df53c6001488b500848") &&
+            bind_hud(hud::swf.entry, "entry", 0x1859db0, 0, "48895c241057448b51784533db8bfa488bd9458bcb4585d27e35488974241048") &&
+            bind_hud(hud::swf.add, "add", 0x1856c70, 0, "48895c2418555657415541564883ec7033f6488bd948634978458bf04d8be98b") &&
+            bind_hud(hud::swf.dirty, "dirty", 0x1857110, 0, "4c8bdc574883ec70488b05b97895024833c448894424584863410c488bf983f8") &&
+            bind_hud(hud::swf.start, "start", 0x18610d0, 0, "48895c2408574883ec200fb741588bfa488bd93bd074447d0de8928effff488b") &&
+            bind_hud(hud::swf.frame, "frame", 0x1865280, 0, "48895c2408574883ec200fb74158bf010000003bd7488bd90f4ffa3bf8742c7d") &&
+            bind_hud(hud::swf.visible, "visible", 0x1864430, 97, "440fb6d23851517457807952007551488b41104c6349088851514d03c9488b10") &&
+            bind_hud(hud::swf.position, "position", 0x1863ec0, 70, "48837940004c8bc9743b488b41104c63410c49c1e006488b9080000000f3410f") &&
+            bind_hud(hud::swf.color, "color", 0x1863d90, 0, "48896c24104889742418574883ec308bf2488bf981fa0d0100000f87f7000000") &&
+            bind_hud(hud::swf.material, "material", 0x1863c30, 0, "48895c240848896c24104889742418574883ec20488bd9418bf1488b4960418b") &&
+            bind_hud(hud::swf.find_material, "find_material", 0x17aa5d0, 0, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448") &&
             binding.image.contains(0x5e05200, sizeof(uintptr_t), IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_EXECUTE);
+        hud::keycap_ready = hud::graphics_ready &&
+            bind_hud(hud::swf.text, "text", 0x184e4b0, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b15d75b06") &&
+            bind_hud(hud::swf.set_text, "set_text", 0x186db00, 0, "40534883ec20488bd94883c140e8ded4b8fe488bcb4883c4205be9e1cbffffcc");
+        hud_trace.record(save::BStage::profile_prepare, save::BStatus::entered,
+            "hud_adapters_ready", 0, {{"graphics_ready", hud::graphics_ready}, {"keycap_ready", hud::keycap_ready}});
         project_crucible_hud = reinterpret_cast<WeaponHudProject>(image_base + 0xf0c230);
         project_hammer_hud = reinterpret_cast<WeaponHudProject>(image_base + 0xf0c640);
         const auto target = reinterpret_cast<void*>(image_base + 0xf0b3b0);
