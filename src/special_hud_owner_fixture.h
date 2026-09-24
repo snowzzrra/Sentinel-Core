@@ -12,7 +12,7 @@ struct HudTestFixture {
         std::map<std::pair<uintptr_t, std::string>, uintptr_t> children;
         std::array<uint8_t, 0x40> entry{};
         uintptr_t entry_source = 0;
-        unsigned lookups = 0, clones = 0, frames = 0, visibility = 0, text_writes = 0;
+        unsigned lookups = 0, clones = 0, frames = 0, visibility = 0, positions = 0, text_writes = 0;
         unsigned updates = 0, earnings = 0;
         uintptr_t earnings_owner = 0;
 
@@ -24,12 +24,24 @@ struct HudTestFixture {
             std::memcpy(&value, reinterpret_cast<void*>(address + offset), sizeof(value));
             return value;
         }
+        void set_text(uintptr_t address, const char* value) {
+            auto* clip = clips.at(address);
+            clip->text = value;
+            put(address, 0x48, clip->text.c_str());
+            put(address, 0x50, static_cast<int32_t>(clip->text.size()));
+        }
+        void set_visible(uintptr_t address, bool visible) {
+            clips.at(address)->visible = visible;
+            put(address, 0x51, static_cast<uint8_t>(visible));
+        }
         uintptr_t make(uintptr_t parent, uintptr_t movie, float x = 0, float y = 0) {
             auto clip = std::make_unique<HudTestClip>();
             const auto address = reinterpret_cast<uintptr_t>(clip->bytes.data());
             put(address, 0x10, reinterpret_cast<uintptr_t>(clip->context.data()));
             put(reinterpret_cast<uintptr_t>(clip->context.data()), 0x80,
                 reinterpret_cast<uintptr_t>(clip->transform.data()));
+            put(reinterpret_cast<uintptr_t>(clip->transform.data()), 0x4, 1.0f);
+            put(reinterpret_cast<uintptr_t>(clip->transform.data()), 0x8, 1.0f);
             put(reinterpret_cast<uintptr_t>(clip->transform.data()), 0x14, x);
             put(reinterpret_cast<uintptr_t>(clip->transform.data()), 0x18, y);
             put(address, 0x30, movie);
@@ -55,6 +67,10 @@ struct HudTestFixture {
             auto* target = clips.at(clone);
             target->transform = original->transform;
             put(clone, 0x58, get<uint16_t>(source, 0x58));
+            put(clone, 0x50, get<uint8_t>(source, 0x50));
+            put(clone, 0x5c, get<uint16_t>(source, 0x5c));
+            if (std::strcmp(name, "txtVal") == 0) set_text(clone, original->text.c_str());
+            else target->text = original->text;
             ++clones;
             for (const auto& [key, child] : children)
                 if (key.first == source) copy(child, clone, key.second.c_str());
@@ -124,12 +140,13 @@ bool test_hud_owner_path() {
         Fixture::put(clip, 0x5c, uint16_t{0});
     };
     hud::swf.visible = [](uintptr_t clip, bool shown, bool) {
-        ++active->visibility; active->clips.at(clip)->visible = shown;
+        ++active->visibility; active->set_visible(clip, shown);
     };
     hud::swf.set_text = [](uintptr_t clip, const char* label) {
-        ++active->text_writes; active->clips.at(clip)->text = label;
+        ++active->text_writes; active->set_text(clip, label);
     };
     hud::swf.position = [](uintptr_t clip, float x, float y) {
+        ++active->positions;
         auto* target = active->clips.at(clip);
         Fixture::put(reinterpret_cast<uintptr_t>(target->transform.data()), 0x14, x);
         Fixture::put(reinterpret_cast<uintptr_t>(target->transform.data()), 0x18, y);
@@ -174,7 +191,7 @@ bool test_hud_owner_path() {
         fixture.clips.at(fixture.add(scene.parent, movie, "vanilla_bind_v"))->text = "V";
         const auto donor = fixture.make(scene.primary, movie, 1, 1);
         const auto kbm = fixture.add(donor, movie, "kbm");
-        fixture.add(kbm, movie, "txtVal");
+        fixture.set_text(fixture.add(kbm, movie, "txtVal"), "[BIND]");
         fixture.add(donor, movie, "joy");
         Fixture::put(reinterpret_cast<uintptr_t>(scene.crucible.data()), 0x18, source);
         Fixture::put(reinterpret_cast<uintptr_t>(scene.hammer.data()), 0x18, other);
@@ -188,6 +205,15 @@ bool test_hud_owner_path() {
     };
     build(first, 1);
     build(rebuilt, 2);
+    const auto first_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(first.primary)->transform.data());
+    Fixture::put(first_transform, 0x4, 2.0f);
+    Fixture::put(first_transform, 0x8, 1.5f);
+    Fixture::put(first_transform, 0xc, 0.5f);
+    Fixture::put(first_transform, 0x10, 0.25f);
+    hud::Point affine_offset{};
+    const auto first_donor = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(first.quickuse.data()), 0x1f0);
+    const bool affine_ok = hud::key_offset(first_donor, first.primary, 1, affine_offset) &&
+        affine_offset.x == 2.5f && affine_offset.y == 1.75f;
     alignas(8) std::array<uint8_t, 0x300> challenge{};
     const auto a = reinterpret_cast<uintptr_t>(challenge.data());
     Fixture::put(a, 0, image_base + rva_mission_challenge_vtable);
@@ -241,7 +267,7 @@ bool test_hud_owner_path() {
     };
     constexpr uint32_t known = SC_SPECIAL_REFILL_CONNECTED | SC_SPECIAL_REFILL_AUTHORITATIVE |
         SC_SPECIAL_REFILL_BALANCE_KNOWN;
-    bool ok = old_guard_blocks_b && warmup_refused &&
+    bool ok = affine_ok && old_guard_blocks_b && warmup_refused &&
         response.outcome == SC_SPECIAL_OUTCOME_OK && publish(3, known);
     hud_element_setup_detour(a);
     ok &= challenge_element.load() == a;
@@ -267,7 +293,9 @@ bool test_hud_owner_path() {
     const auto pips = fixture.find(refill, "pips");
     const auto three = fixture.find(pips, "pips3");
     ok &= refill && arrow && fixture.clips.at(refill)->visible &&
-        Fixture::get<uint16_t>(three, 0x58) == 4 && fixture.find(first.parent, "apAmmoRefillBind") == 0;
+        Fixture::get<uint16_t>(three, 0x58) == 4 &&
+        Fixture::get<uint16_t>(refill, 0x58) == 1 &&
+        fixture.find(first.parent, "apAmmoRefillBind") == 0;
     ok &= weapon_info_element.load() == b && challenge_element.load() == a;
     const auto clips_before = fixture.clones;
     hud::keycap_ready = true;
@@ -278,6 +306,7 @@ bool test_hud_owner_path() {
     ok &= fixture.clips.at(fixture.find(fixture.find(refill_bind, "kbm"), "txtVal"))->text == "F9";
     ok &= fixture.clips.at(fixture.find(fixture.find(toggle_bind, "kbm"), "txtVal"))->text == "F10";
     const auto clones_stable = fixture.clones, frames_stable = fixture.frames;
+    const auto visibility_stable = fixture.visibility, positions_stable = fixture.positions;
     const auto text_stable = fixture.text_writes;
     std::atomic<int> next_worker{0};
     DWORD hud_thread_one = 0, hud_thread_two = 0;
@@ -298,32 +327,109 @@ bool test_hud_owner_path() {
     ok &= hud_thread_one != hud_thread_two && hud_thread_one != route_thread.load() &&
         hud_thread_two != route_thread.load();
     ok &= fixture.clones == clones_stable && fixture.frames == frames_stable &&
+        fixture.visibility == visibility_stable && fixture.positions == positions_stable &&
         fixture.text_writes == text_stable;
     const auto refill_icon = fixture.find(fixture.find(refill, "icon"), "iconStatic");
     const auto arrow_cta = fixture.find(arrow, "cta");
+    const auto nested_arrow_cta = fixture.find(fixture.find(arrow, "icon"), "cta");
+    const auto f9_kbm = fixture.find(refill_bind, "kbm");
+    const auto f10_kbm = fixture.find(toggle_bind, "kbm");
     Fixture::put(refill, 0x5c, uint16_t{7});
     Fixture::put(pips, 0x58, uint16_t{2});
+    Fixture::put(three, 0x5c, uint16_t{8});
+    Fixture::put(arrow, 0x50, uint8_t{1});
+    Fixture::put(f9_kbm, 0x50, uint8_t{1});
     Fixture::put(refill_icon, 0x60, uintptr_t{11});
-    fixture.clips.at(arrow_cta)->visible = true;
+    fixture.set_visible(arrow_cta, true);
+    fixture.set_visible(nested_arrow_cta, true);
     update_on_hud(b);
     ok &= Fixture::get<uint16_t>(refill, 0x5c) == 0 &&
         Fixture::get<uint16_t>(pips, 0x58) == 3 &&
+        Fixture::get<uint16_t>(three, 0x5c) == 0 &&
+        Fixture::get<uint8_t>(arrow, 0x50) == 0 &&
+        Fixture::get<uint8_t>(f9_kbm, 0x50) == 0 &&
         Fixture::get<uintptr_t>(refill_icon, 0x60) == 9 &&
-        !fixture.clips.at(arrow_cta)->visible && fixture.clips.at(refill)->visible;
+        !fixture.clips.at(arrow_cta)->visible &&
+        !fixture.clips.at(nested_arrow_cta)->visible && fixture.clips.at(refill)->visible;
+    const auto clones_before_text_mutation = fixture.clones;
+    const auto f9_replacement = fixture.add(f9_kbm, 1, "txtVal");
+    const auto f10_replacement = fixture.add(f10_kbm, 1, "txtVal");
+    fixture.set_text(f9_replacement, "[BIND]");
+    fixture.set_text(f10_replacement, "[BIND]");
+    update_on_hud(b);
+    ok &= fixture.clips.at(f9_replacement)->text == "F9" &&
+        fixture.clips.at(f10_replacement)->text == "F10" &&
+        fixture.clones == clones_before_text_mutation;
+    fixture.set_text(f9_replacement, "[BIND]");
+    fixture.set_text(f10_replacement, "[BIND]");
+    update_on_hud(b);
+    ok &= fixture.clips.at(f9_replacement)->text == "F9" &&
+        fixture.clips.at(f10_replacement)->text == "F10";
+    const auto stable_text_writes = fixture.text_writes;
+    update_on_hud(b);
+    ok &= fixture.text_writes == stable_text_writes;
+    configured_keys.store(VK_F10 << 8);
+    update_on_hud(b);
+    ok &= !fixture.clips.at(refill_bind)->visible && fixture.clips.at(toggle_bind)->visible;
+    configured_keys.store(VK_F9);
+    update_on_hud(b);
+    ok &= fixture.clips.at(refill_bind)->visible && !fixture.clips.at(toggle_bind)->visible &&
+        !fixture.clips.at(arrow)->visible;
+    configured_keys.store(VK_F9 | (VK_F10 << 8));
+    update_on_hud(b);
+    ok &= fixture.clips.at(refill_bind)->visible && fixture.clips.at(toggle_bind)->visible;
+    hud::keycap_ready = false;
+    update_on_hud(b);
+    ok &= !fixture.clips.at(refill_bind)->visible && !fixture.clips.at(toggle_bind)->visible;
+    hud::keycap_ready = true;
+    update_on_hud(b);
+    ok &= fixture.clips.at(refill_bind)->visible && fixture.clips.at(toggle_bind)->visible;
     for (uint32_t balance : {2u, 1u, 0u}) {
         ok &= publish(balance, known);
         update_on_hud(b);
-        ok &= Fixture::get<uint16_t>(three, 0x58) == balance + 1;
+        ok &= Fixture::get<uint16_t>(three, 0x58) == balance + 1 &&
+            Fixture::get<uint16_t>(refill, 0x58) == (balance ? 1 : 2) &&
+            fixture.clips.at(pips)->visible;
     }
     ok &= publish(0, SC_SPECIAL_REFILL_CONNECTED);
     update_on_hud(b);
-    ok &= !fixture.clips.at(pips)->visible && Fixture::get<uint16_t>(three, 0x58) == 1;
+    ok &= !fixture.clips.at(pips)->visible && Fixture::get<uint16_t>(refill, 0x58) == 2;
     configured_keys.store(VK_F8 | (VK_F10 << 8));
     const auto text_before = fixture.text_writes;
     update_on_hud(b);
     ok &= fixture.text_writes == text_before + 1;
     ok &= fixture.clips.at(fixture.find(fixture.find(toggle_bind, "kbm"), "txtVal"))->text == "F10";
     ok &= fixture.clips.at(fixture.find(first.parent, "vanilla_bind_v"))->text == "V";
+    const auto refill_icon_parent = fixture.find(refill, "icon");
+    const auto clones_before_partial = fixture.clones;
+    fixture.children.erase({refill_icon_parent, "iconStatic"});
+    update_on_hud(b);
+    ok &= !fixture.clips.at(refill)->visible && !fixture.clips.at(refill_bind)->visible;
+    fixture.children[{refill_icon_parent, "iconStatic"}] = refill_icon;
+    update_on_hud(b);
+    ok &= fixture.clips.at(refill)->visible && fixture.clips.at(refill_bind)->visible &&
+        fixture.clones == clones_before_partial;
+    const auto crucible_source = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(first.crucible.data()), 0x18);
+    const auto hammer_source = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(first.hammer.data()), 0x18);
+    const auto crucible_icon = fixture.find(crucible_source, "icon");
+    const auto hammer_icon = fixture.find(hammer_source, "icon");
+    fixture.children.erase({crucible_source, "icon"});
+    fixture.children.erase({hammer_source, "icon"});
+    update_on_hud(b);
+    ok &= !fixture.clips.at(refill)->visible && !fixture.clips.at(arrow)->visible &&
+        !fixture.clips.at(refill_bind)->visible && !fixture.clips.at(toggle_bind)->visible;
+    fixture.children[{crucible_source, "icon"}] = crucible_icon;
+    fixture.children[{hammer_source, "icon"}] = hammer_icon;
+    update_on_hud(b);
+    ok &= fixture.clips.at(refill)->visible && fixture.clips.at(arrow)->visible;
+    Fixture::put(b, 0x209, uint8_t{0});
+    update_on_hud(b);
+    fixture.set_visible(refill, true);
+    update_on_hud(b);
+    ok &= !fixture.clips.at(refill)->visible && !fixture.clips.at(refill_bind)->visible;
+    Fixture::put(b, 0x209, uint8_t{1});
+    update_on_hud(b);
+    ok &= fixture.clips.at(refill)->visible && fixture.clips.at(refill_bind)->visible;
     test_selection_read = [](uintptr_t, SnapshotFacts& facts) { facts = model_facts; return true; };
     test_earnings_append = [](uintptr_t owner, const char*, const char*, uint32_t, uint64_t, uint32_t) {
         ++active->earnings; active->earnings_owner = owner;
@@ -348,6 +454,15 @@ bool test_hud_owner_path() {
     Fixture::put(first.primary, 0x30, uintptr_t{3});
     update_on_hud(b);
     ok &= fixture.lookups == invalid_lookups;
+    Scene missing{};
+    build(missing, 3);
+    fixture.children.erase({missing.parent, "swapEquipment"});
+    update_on_hud(missing.address());
+    const auto missing_output = hud_trace.snapshot().stages[static_cast<size_t>(save::BStage::profile_output)];
+    ok &= std::strcmp(missing_output.predicate, "switch_source_missing") == 0 &&
+        fixture.find(missing.parent, "apAmmoRefillBind") != 0 &&
+        fixture.find(missing.parent, "apSpecialSwitch") == 0 &&
+        fixture.find(missing.parent, "apSpecialToggleBind") == 0;
     update_on_hud(b2);
     ok &= weapon_info_element.load() == b2 && fixture.find(rebuilt.parent, "apAmmoRefill") != 0 &&
         fixture.find(rebuilt.parent, "apAmmoRefillBind") != 0 &&
@@ -355,6 +470,14 @@ bool test_hud_owner_path() {
     const auto rebuilt_clones = fixture.clones, rebuilt_frames = fixture.frames;
     update_on_hud(b2);
     ok &= fixture.clones == rebuilt_clones && fixture.frames == rebuilt_frames;
+    ok &= publish(2, known) && create_refill_request(GetTickCount64());
+    update_on_hud(b2);
+    const auto pending_refill = fixture.find(rebuilt.parent, "apAmmoRefill");
+    const auto pending_pips = fixture.find(pending_refill, "pips");
+    const auto pending_three = fixture.find(pending_pips, "pips3");
+    ok &= Fixture::get<uint16_t>(pending_refill, 0x58) == 2 &&
+        Fixture::get<uint16_t>(pending_three, 0x58) == 3 &&
+        fixture.clips.at(pending_pips)->visible;
     hud_element_setup_detour(b);
     present_selection(42);
     ok &= challenge_element.load() == 0 && fixture.earnings == 1;
