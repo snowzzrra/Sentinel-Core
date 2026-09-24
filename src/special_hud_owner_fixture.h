@@ -13,6 +13,7 @@ struct HudTestFixture {
         std::array<uint8_t, 0x40> entry{};
         uintptr_t entry_source = 0;
         unsigned lookups = 0, clones = 0, frames = 0, visibility = 0, positions = 0, text_writes = 0;
+        unsigned materials = 0;
         unsigned updates = 0, earnings = 0;
         uintptr_t earnings_owner = 0;
 
@@ -34,6 +35,24 @@ struct HudTestFixture {
             clips.at(address)->visible = visible;
             put(address, 0x51, static_cast<uint8_t>(visible));
         }
+        void set_bounds(uintptr_t address, float width, float height,
+                        float dx = 0, float dy = 0) {
+            hud::Point origin{};
+            const auto movie = get<uintptr_t>(address, 0x30);
+            if (!hud::affine_to(address, 0, movie, {0, 0}, origin)) return;
+            put(address, 0xa8, origin.x + dx - width * 0.5f);
+            put(address, 0xac, origin.y + dy - height * 0.5f);
+            put(address, 0xb0, origin.x + dx + width * 0.5f);
+            put(address, 0xb4, origin.y + dy + height * 0.5f);
+        }
+        void shift_bounds(uintptr_t address, float dx, float dy) {
+            for (const auto offset : {0xa8u, 0xb0u})
+                put(address, offset, get<float>(address, offset) + dx);
+            for (const auto offset : {0xacu, 0xb4u})
+                put(address, offset, get<float>(address, offset) + dy);
+            for (const auto& [key, child] : children)
+                if (key.first == address) shift_bounds(child, dx, dy);
+        }
         uintptr_t make(uintptr_t parent, uintptr_t movie, float x = 0, float y = 0) {
             auto clip = std::make_unique<HudTestClip>();
             const auto address = reinterpret_cast<uintptr_t>(clip->bytes.data());
@@ -49,6 +68,7 @@ struct HudTestFixture {
             put(address, 0x48, int32_t{1});
             clips[address] = clip.get();
             storage.push_back(std::move(clip));
+            set_bounds(address, 2, 2);
             return address;
         }
         uintptr_t add(uintptr_t parent, uintptr_t movie, const char* name, float x = 0, float y = 0) {
@@ -69,6 +89,14 @@ struct HudTestFixture {
             put(clone, 0x58, get<uint16_t>(source, 0x58));
             put(clone, 0x50, get<uint8_t>(source, 0x50));
             put(clone, 0x5c, get<uint16_t>(source, 0x5c));
+            for (const auto offset : {0xa8u, 0xacu, 0xb0u, 0xb4u})
+                put(clone, offset, get<float>(source, offset));
+            hud::Point source_origin{}, clone_origin{};
+            hud::affine_to(source, 0, movie, {0, 0}, source_origin);
+            hud::affine_to(clone, 0, movie, {0, 0}, clone_origin);
+            shift_bounds(clone, clone_origin.x - source_origin.x,
+                              clone_origin.y - source_origin.y);
+            set_visible(clone, original->visible);
             if (std::strcmp(name, "txtVal") == 0) set_text(clone, original->text.c_str());
             else target->text = original->text;
             ++clones;
@@ -148,11 +176,17 @@ bool test_hud_owner_path() {
     hud::swf.position = [](uintptr_t clip, float x, float y) {
         ++active->positions;
         auto* target = active->clips.at(clip);
+        hud::Point before{}, after{};
+        const auto movie = Fixture::get<uintptr_t>(clip, 0x30);
+        hud::affine_to(clip, 0, movie, {0, 0}, before);
         Fixture::put(reinterpret_cast<uintptr_t>(target->transform.data()), 0x14, x);
         Fixture::put(reinterpret_cast<uintptr_t>(target->transform.data()), 0x18, y);
+        hud::affine_to(clip, 0, movie, {0, 0}, after);
+        active->shift_bounds(clip, after.x - before.x, after.y - before.y);
     };
     hud::swf.color = [](uintptr_t, int) {};
     hud::swf.material = [](uintptr_t clip, uintptr_t material, int, int, unsigned) {
+        ++active->materials;
         Fixture::put(clip, 0x60, material);
     };
     hud::swf.find_material = [](uintptr_t, const char*, int) -> uintptr_t { return 9; };
@@ -161,8 +195,8 @@ bool test_hud_owner_path() {
 
     struct Scene {
         alignas(8) std::array<uint8_t, 0x300> element{};
-        alignas(8) std::array<uint8_t, 0x220> crucible{}, hammer{}, quickuse{}, secondary{};
-        uintptr_t parent = 0, primary = 0, adjacent = 0;
+        alignas(8) std::array<uint8_t, 0x220> crucible{}, hammer{}, quickuse{}, secondary{}, flame{};
+        uintptr_t parent = 0, primary = 0, adjacent = 0, flame_root = 0, ammo_panel = 0;
         uintptr_t address() { return reinterpret_cast<uintptr_t>(element.data()); }
     } first{}, rebuilt{};
     const auto build = [&](Scene& scene, uintptr_t movie) {
@@ -173,23 +207,40 @@ bool test_hud_owner_path() {
         scene.parent = fixture.make(0, movie);
         scene.primary = fixture.make(scene.parent, movie, 100, 100);
         scene.adjacent = fixture.make(scene.parent, movie, 80, 100);
-        const auto source = fixture.add(scene.parent, movie, "crucible_source");
-        const auto other = fixture.add(scene.parent, movie, "hammer_source");
+        fixture.set_bounds(scene.primary, 16, 16);
+        fixture.set_bounds(scene.adjacent, 16, 16);
+        scene.flame_root = fixture.make(scene.parent, movie, 80, 100);
+        fixture.set_bounds(scene.flame_root, 16, 16);
+        scene.ammo_panel = fixture.make(scene.parent, movie, 100, 130);
+        fixture.set_bounds(scene.ammo_panel, 100, 12);
+        const auto source = fixture.add(scene.parent, movie, "crucible_source", 60, 100);
+        const auto other = fixture.add(scene.parent, movie, "hammer_source", 60, 100);
         for (const auto root : {source, other}) {
+            fixture.set_bounds(root, 16, 16);
             const auto icon = fixture.add(root, movie, "icon");
             fixture.add(icon, movie, "cta");
-            fixture.add(icon, movie, "iconStatic");
+            const auto static_icon = fixture.add(icon, movie, "iconStatic");
+            Fixture::put(static_icon, 0x58, static_cast<uint16_t>(root == source ? 3 : 5));
+            const auto small = fixture.add(icon, movie, "iconSmall");
+            fixture.set_visible(small, true);
             const auto pips = fixture.add(root, movie, "pips");
             const auto three = fixture.add(pips, movie, "pips3");
             fixture.add(three, movie, "fill");
             fixture.add(three, movie, "innerFill");
         }
-        const auto swap = fixture.add(scene.parent, movie, "swapEquipment");
-        fixture.add(swap, movie, "cta");
+        const auto swap = fixture.add(scene.parent, movie, "swapEquipment", 120, 100);
+        const auto backer = fixture.add(swap, movie, "backer");
+        const auto swap_cta = fixture.add(swap, movie, "cta");
+        const auto swap_arrow = fixture.add(swap, movie, "arrow");
+        fixture.set_bounds(swap_arrow, 6, 12);
+        fixture.set_visible(backer, true);
+        fixture.set_visible(swap_cta, true);
+        fixture.set_visible(swap_arrow, true);
         const auto swap_icon = fixture.add(swap, movie, "icon");
         fixture.add(swap_icon, movie, "cta");
         fixture.clips.at(fixture.add(scene.parent, movie, "vanilla_bind_v"))->text = "V";
         const auto donor = fixture.make(scene.primary, movie, 1, 1);
+        fixture.set_bounds(donor, 10, 4, 0, -22);
         const auto kbm = fixture.add(donor, movie, "kbm");
         fixture.set_text(fixture.add(kbm, movie, "txtVal"), "[BIND]");
         fixture.add(donor, movie, "joy");
@@ -198,10 +249,12 @@ bool test_hud_owner_path() {
         Fixture::put(reinterpret_cast<uintptr_t>(scene.quickuse.data()), 0x18, scene.primary);
         Fixture::put(reinterpret_cast<uintptr_t>(scene.quickuse.data()), 0x1f0, donor);
         Fixture::put(reinterpret_cast<uintptr_t>(scene.secondary.data()), 0x18, scene.adjacent);
+        Fixture::put(reinterpret_cast<uintptr_t>(scene.flame.data()), 0x18, scene.flame_root);
         Fixture::put(e, 0x1e8, reinterpret_cast<uintptr_t>(scene.crucible.data()));
         Fixture::put(e, 0x1f8, reinterpret_cast<uintptr_t>(scene.hammer.data()));
         Fixture::put(e, 0x1d0, reinterpret_cast<uintptr_t>(scene.quickuse.data()));
         Fixture::put(e, 0x1d8, reinterpret_cast<uintptr_t>(scene.secondary.data()));
+        Fixture::put(e, 0x1f0, reinterpret_cast<uintptr_t>(scene.flame.data()));
     };
     build(first, 1);
     build(rebuilt, 2);
@@ -210,6 +263,28 @@ bool test_hud_owner_path() {
     Fixture::put(first_transform, 0x8, 1.5f);
     Fixture::put(first_transform, 0xc, 0.5f);
     Fixture::put(first_transform, 0x10, 0.25f);
+    const auto first_swap = fixture.find(first.parent, "swapEquipment");
+    const auto swap_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(first_swap)->transform.data());
+    Fixture::put(swap_transform, 0x4, 0.8f);
+    Fixture::put(swap_transform, 0x8, 1.1f);
+    Fixture::put(swap_transform, 0xc, 0.12f);
+    Fixture::put(swap_transform, 0x10, -0.07f);
+    fixture.set_bounds(fixture.find(first_swap, "arrow"), 6, 12);
+    const auto first_donor_bounds = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(first.quickuse.data()), 0x1f0);
+    fixture.set_bounds(first_donor_bounds, 10, 4, 0, -22);
+    const auto rebuilt_parent_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(rebuilt.parent)->transform.data());
+    Fixture::put(rebuilt_parent_transform, 0x4, 1.2f);
+    Fixture::put(rebuilt_parent_transform, 0x8, 0.8f);
+    Fixture::put(rebuilt_parent_transform, 0xc, 0.2f);
+    Fixture::put(rebuilt_parent_transform, 0x10, 0.1f);
+    for (const auto root : {rebuilt.primary, rebuilt.adjacent, rebuilt.flame_root,
+            Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.crucible.data()), 0x18),
+            Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.hammer.data()), 0x18)})
+        fixture.set_bounds(root, 16, 16);
+    const auto rebuilt_swap = fixture.find(rebuilt.parent, "swapEquipment");
+    fixture.set_bounds(fixture.find(rebuilt_swap, "arrow"), 6, 12);
+    fixture.set_bounds(Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.quickuse.data()), 0x1f0),
+                       10, 4, 0, -22);
     hud::Point affine_offset{};
     const auto first_donor = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(first.quickuse.data()), 0x1f0);
     const bool affine_ok = hud::key_offset(first_donor, first.primary, 1, affine_offset) &&
@@ -296,6 +371,26 @@ bool test_hud_owner_path() {
         Fixture::get<uint16_t>(three, 0x58) == 4 &&
         Fixture::get<uint16_t>(refill, 0x58) == 1 &&
         fixture.find(first.parent, "apAmmoRefillBind") == 0;
+    const auto stage_center = [&](uintptr_t clip) {
+        hud::Rect rect{};
+        hud::bounds(clip, rect);
+        return hud::center(rect);
+    };
+    const auto close_to = [](float a, float b) { return std::fabs(a - b) < 0.02f; };
+    const auto crucible_source = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(first.crucible.data()), 0x18);
+    const auto hammer_source = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(first.hammer.data()), 0x18);
+    const auto arrow_leaf = fixture.find(arrow, "arrow");
+    const auto arrow_backer = fixture.find(arrow, "backer");
+    const auto native_arrow = fixture.find(first_swap, "arrow");
+    ok &= close_to(stage_center(crucible_source).x, 40) &&
+        close_to(stage_center(hammer_source).x, 40) &&
+        close_to(stage_center(arrow_leaf).x, 60) &&
+        close_to(stage_center(first.flame_root).x, 80) &&
+        close_to(stage_center(first.primary).x, 100) &&
+        close_to(stage_center(native_arrow).x, 120) &&
+        close_to(stage_center(refill).x, 140) &&
+        !fixture.clips.at(arrow_backer)->visible &&
+        fixture.clips.at(arrow_leaf)->visible && fixture.clips.at(native_arrow)->visible;
     ok &= weapon_info_element.load() == b && challenge_element.load() == a;
     const auto clips_before = fixture.clones;
     hud::keycap_ready = true;
@@ -305,9 +400,40 @@ bool test_hud_owner_path() {
     ok &= refill_bind && toggle_bind && fixture.clones > clips_before;
     ok &= fixture.clips.at(fixture.find(fixture.find(refill_bind, "kbm"), "txtVal"))->text == "F9";
     ok &= fixture.clips.at(fixture.find(fixture.find(toggle_bind, "kbm"), "txtVal"))->text == "F10";
+    ok &= close_to(stage_center(refill_bind).x, 142.5f) &&
+        close_to(stage_center(toggle_bind).x, 62.5f) &&
+        stage_center(refill_bind).y < stage_center(refill).y &&
+        stage_center(toggle_bind).y < stage_center(arrow_leaf).y;
+    hud::Rect special_rect{}, ap_arrow_rect{}, f10_rect{}, flame_rect{}, ammo_rect{},
+              native_arrow_rect{}, f9_rect{};
+    hud::bounds(crucible_source, special_rect);
+    hud::bounds(arrow_leaf, ap_arrow_rect);
+    hud::bounds(toggle_bind, f10_rect);
+    hud::bounds(first.flame_root, flame_rect);
+    hud::bounds(first.ammo_panel, ammo_rect);
+    hud::bounds(native_arrow, native_arrow_rect);
+    hud::bounds(refill_bind, f9_rect);
+    ok &= special_rect.br.x < ap_arrow_rect.tl.x &&
+        ap_arrow_rect.br.x < flame_rect.tl.x &&
+        f10_rect.br.x < flame_rect.tl.x &&
+        f10_rect.br.y < ammo_rect.tl.y &&
+        native_arrow_rect.br.x < f9_rect.tl.x;
+    const auto f9_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(refill_bind)->transform.data());
+    const auto f10_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(toggle_bind)->transform.data());
+    const auto arrow_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(arrow)->transform.data());
+    ok &= close_to(Fixture::get<float>(f9_transform, 0x4), 2.0f) &&
+        close_to(Fixture::get<float>(f9_transform, 0x8), 1.5f) &&
+        close_to(Fixture::get<float>(f9_transform, 0xc), 0.5f) &&
+        close_to(Fixture::get<float>(f9_transform, 0x10), 0.25f) &&
+        close_to(Fixture::get<float>(f10_transform, 0x4), 2.0f) &&
+        close_to(Fixture::get<float>(f10_transform, 0xc), 0.5f) &&
+        close_to(Fixture::get<float>(arrow_transform, 0x4), 0.8f) &&
+        close_to(Fixture::get<float>(arrow_transform, 0x8), 1.1f) &&
+        close_to(Fixture::get<float>(arrow_transform, 0xc), 0.12f) &&
+        close_to(Fixture::get<float>(arrow_transform, 0x10), -0.07f);
     const auto clones_stable = fixture.clones, frames_stable = fixture.frames;
     const auto visibility_stable = fixture.visibility, positions_stable = fixture.positions;
-    const auto text_stable = fixture.text_writes;
+    const auto text_stable = fixture.text_writes, material_stable = fixture.materials;
     std::atomic<int> next_worker{0};
     DWORD hud_thread_one = 0, hud_thread_two = 0;
     std::thread hud_one([&] {
@@ -328,7 +454,8 @@ bool test_hud_owner_path() {
         hud_thread_two != route_thread.load();
     ok &= fixture.clones == clones_stable && fixture.frames == frames_stable &&
         fixture.visibility == visibility_stable && fixture.positions == positions_stable &&
-        fixture.text_writes == text_stable;
+        fixture.text_writes == text_stable && fixture.materials == material_stable &&
+        close_to(stage_center(crucible_source).x, 40) && close_to(stage_center(hammer_source).x, 40);
     const auto refill_icon = fixture.find(fixture.find(refill, "icon"), "iconStatic");
     const auto arrow_cta = fixture.find(arrow, "cta");
     const auto nested_arrow_cta = fixture.find(fixture.find(arrow, "icon"), "cta");
@@ -340,6 +467,9 @@ bool test_hud_owner_path() {
     Fixture::put(arrow, 0x50, uint8_t{1});
     Fixture::put(f9_kbm, 0x50, uint8_t{1});
     Fixture::put(refill_icon, 0x60, uintptr_t{11});
+    Fixture::put(refill_icon, 0x58, uint16_t{7});
+    const auto refill_small = fixture.find(fixture.find(refill, "icon"), "iconSmall");
+    fixture.set_visible(refill_small, true);
     fixture.set_visible(arrow_cta, true);
     fixture.set_visible(nested_arrow_cta, true);
     update_on_hud(b);
@@ -349,6 +479,8 @@ bool test_hud_owner_path() {
         Fixture::get<uint8_t>(arrow, 0x50) == 0 &&
         Fixture::get<uint8_t>(f9_kbm, 0x50) == 0 &&
         Fixture::get<uintptr_t>(refill_icon, 0x60) == 9 &&
+        Fixture::get<uint16_t>(refill_icon, 0x58) == 1 &&
+        !fixture.clips.at(refill_small)->visible &&
         !fixture.clips.at(arrow_cta)->visible &&
         !fixture.clips.at(nested_arrow_cta)->visible && fixture.clips.at(refill)->visible;
     const auto clones_before_text_mutation = fixture.clones;
@@ -409,27 +541,29 @@ bool test_hud_owner_path() {
     update_on_hud(b);
     ok &= fixture.clips.at(refill)->visible && fixture.clips.at(refill_bind)->visible &&
         fixture.clones == clones_before_partial;
-    const auto crucible_source = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(first.crucible.data()), 0x18);
-    const auto hammer_source = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(first.hammer.data()), 0x18);
     const auto crucible_icon = fixture.find(crucible_source, "icon");
     const auto hammer_icon = fixture.find(hammer_source, "icon");
     fixture.children.erase({crucible_source, "icon"});
     fixture.children.erase({hammer_source, "icon"});
     update_on_hud(b);
     ok &= !fixture.clips.at(refill)->visible && !fixture.clips.at(arrow)->visible &&
-        !fixture.clips.at(refill_bind)->visible && !fixture.clips.at(toggle_bind)->visible;
+        !fixture.clips.at(refill_bind)->visible && !fixture.clips.at(toggle_bind)->visible &&
+        close_to(stage_center(crucible_source).x, 60) && close_to(stage_center(hammer_source).x, 60);
     fixture.children[{crucible_source, "icon"}] = crucible_icon;
     fixture.children[{hammer_source, "icon"}] = hammer_icon;
     update_on_hud(b);
-    ok &= fixture.clips.at(refill)->visible && fixture.clips.at(arrow)->visible;
+    ok &= fixture.clips.at(refill)->visible && fixture.clips.at(arrow)->visible &&
+        close_to(stage_center(crucible_source).x, 40) && close_to(stage_center(hammer_source).x, 40);
     Fixture::put(b, 0x209, uint8_t{0});
     update_on_hud(b);
     fixture.set_visible(refill, true);
     update_on_hud(b);
-    ok &= !fixture.clips.at(refill)->visible && !fixture.clips.at(refill_bind)->visible;
+    ok &= !fixture.clips.at(refill)->visible && !fixture.clips.at(refill_bind)->visible &&
+        close_to(stage_center(crucible_source).x, 60) && close_to(stage_center(hammer_source).x, 60);
     Fixture::put(b, 0x209, uint8_t{1});
     update_on_hud(b);
-    ok &= fixture.clips.at(refill)->visible && fixture.clips.at(refill_bind)->visible;
+    ok &= fixture.clips.at(refill)->visible && fixture.clips.at(refill_bind)->visible &&
+        close_to(stage_center(crucible_source).x, 40) && close_to(stage_center(hammer_source).x, 40);
     test_selection_read = [](uintptr_t, SnapshotFacts& facts) { facts = model_facts; return true; };
     test_earnings_append = [](uintptr_t owner, const char*, const char*, uint32_t, uint64_t, uint32_t) {
         ++active->earnings; active->earnings_owner = owner;
@@ -464,9 +598,20 @@ bool test_hud_owner_path() {
         fixture.find(missing.parent, "apSpecialSwitch") == 0 &&
         fixture.find(missing.parent, "apSpecialToggleBind") == 0;
     update_on_hud(b2);
+    const auto rebuilt_crucible = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.crucible.data()), 0x18);
+    const auto rebuilt_hammer = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.hammer.data()), 0x18);
+    const auto rebuilt_arrow = fixture.find(rebuilt.parent, "apSpecialSwitch");
+    const auto rebuilt_refill = fixture.find(rebuilt.parent, "apAmmoRefill");
     ok &= weapon_info_element.load() == b2 && fixture.find(rebuilt.parent, "apAmmoRefill") != 0 &&
         fixture.find(rebuilt.parent, "apAmmoRefillBind") != 0 &&
-        fixture.find(first.parent, "apAmmoRefill") == refill;
+        fixture.find(first.parent, "apAmmoRefill") == refill &&
+        close_to(stage_center(rebuilt_crucible).x, 68) &&
+        close_to(stage_center(rebuilt_hammer).x, 68) &&
+        close_to(stage_center(fixture.find(rebuilt_arrow, "arrow")).x, 92) &&
+        close_to(stage_center(rebuilt.flame_root).x, 116) &&
+        close_to(stage_center(rebuilt.primary).x, 140) &&
+        close_to(stage_center(fixture.find(rebuilt_swap, "arrow")).x, 164) &&
+        close_to(stage_center(rebuilt_refill).x, 188);
     const auto rebuilt_clones = fixture.clones, rebuilt_frames = fixture.frames;
     update_on_hud(b2);
     ok &= fixture.clones == rebuilt_clones && fixture.frames == rebuilt_frames;

@@ -123,6 +123,150 @@ bool key_offset(uintptr_t clip, uintptr_t source, uintptr_t movie, Point& out) {
     return false;
 }
 
+struct Rect { Point tl, br; };
+bool bounds(uintptr_t clip, Rect& out) {
+    if (!clip) return false;
+    out = {*reinterpret_cast<Point*>(clip + 0xa8), *reinterpret_cast<Point*>(clip + 0xb0)};
+    return std::isfinite(out.tl.x) && std::isfinite(out.tl.y) &&
+        std::isfinite(out.br.x) && std::isfinite(out.br.y) &&
+        out.br.x > out.tl.x && out.br.y > out.tl.y;
+}
+Point center(Rect rect) { return {(rect.tl.x + rect.br.x) * 0.5f,
+                                  (rect.tl.y + rect.br.y) * 0.5f}; }
+
+uintptr_t transform_slot(uintptr_t clip) {
+    if (!clip) return 0;
+    const auto slot = *reinterpret_cast<int32_t*>(clip + 0xc);
+    const auto context = *reinterpret_cast<uintptr_t*>(clip + 0x10);
+    if (slot < 0 || !context) return 0;
+    const auto transforms = *reinterpret_cast<uintptr_t*>(context + 0x80);
+    return transforms ? transforms + static_cast<uintptr_t>(slot) * 0x40 : 0;
+}
+
+bool affine_to(uintptr_t clip, uintptr_t ancestor, uintptr_t movie, Point point, Point& out) {
+    for (unsigned i = 0; i < 16 && clip != ancestor; ++i) {
+        if (!clip || *reinterpret_cast<uintptr_t*>(clip + 0x30) != movie) return false;
+        const auto t = transform_slot(clip);
+        if (!t) return false;
+        point = {*reinterpret_cast<float*>(t + 0x4) * point.x +
+                     *reinterpret_cast<float*>(t + 0xc) * point.y +
+                     *reinterpret_cast<float*>(t + 0x14),
+                 *reinterpret_cast<float*>(t + 0x10) * point.x +
+                     *reinterpret_cast<float*>(t + 0x8) * point.y +
+                     *reinterpret_cast<float*>(t + 0x18)};
+        if (!std::isfinite(point.x) || !std::isfinite(point.y)) return false;
+        clip = *reinterpret_cast<uintptr_t*>(clip + 0x40);
+    }
+    out = point;
+    return clip == ancestor;
+}
+
+bool from_stage(uintptr_t parent, uintptr_t movie, Point stage, Point& out, bool delta = false) {
+    Point origin{}, x{}, y{};
+    if (!affine_to(parent, 0, movie, {0, 0}, origin) ||
+        !affine_to(parent, 0, movie, {1, 0}, x) ||
+        !affine_to(parent, 0, movie, {0, 1}, y)) return false;
+    x = {x.x - origin.x, x.y - origin.y};
+    y = {y.x - origin.x, y.y - origin.y};
+    const float det = x.x * y.y - y.x * x.y;
+    if (!std::isfinite(det) || std::fabs(det) < 0.00001f) return false;
+    if (!delta) stage = {stage.x - origin.x, stage.y - origin.y};
+    out = {(y.y * stage.x - y.x * stage.y) / det,
+           (x.x * stage.y - x.y * stage.x) / det};
+    return std::isfinite(out.x) && std::isfinite(out.y);
+}
+
+// Match the donor's complete visual transform when a nested sprite is cloned
+// under WeaponInfo. Position is written separately by swf.position.
+bool match_linear(uintptr_t clone, uintptr_t source, uintptr_t parent, uintptr_t movie) {
+    Point origin{}, x{}, y{}, base{}, bx{}, by{};
+    if (!affine_to(source, 0, movie, {0, 0}, origin) ||
+        !affine_to(source, 0, movie, {1, 0}, x) ||
+        !affine_to(source, 0, movie, {0, 1}, y) ||
+        !from_stage(parent, movie, origin, base) ||
+        !from_stage(parent, movie, x, bx) ||
+        !from_stage(parent, movie, y, by)) return false;
+    const auto t = transform_slot(clone);
+    if (!t) return false;
+    const float values[4]{bx.x - base.x, by.y - base.y,
+                          by.x - base.x, bx.y - base.y};
+    const unsigned offsets[4]{0x4, 0x8, 0xc, 0x10};
+    bool changed = false;
+    for (unsigned i = 0; i < 4; ++i) {
+        auto& current = *reinterpret_cast<float*>(t + offsets[i]);
+        if (current != values[i]) { current = values[i]; changed = true; }
+    }
+    if (changed) swf.dirty(clone);
+    return true;
+}
+
+bool visual_offset(uintptr_t source, uintptr_t visual_leaf, uintptr_t movie, Point& out) {
+    Rect rect{};
+    Point origin{};
+    if (!bounds(visual_leaf, rect) ||
+        !affine_to(source, 0, movie, {0, 0}, origin)) return false;
+    const Point visual = center(rect);
+    out = {visual.x - origin.x, visual.y - origin.y};
+    return true;
+}
+
+bool place_visual(uintptr_t clone, uintptr_t source, uintptr_t parent,
+                  uintptr_t movie, Point desired, Point offset) {
+    Point at{};
+    if (!match_linear(clone, source, parent, movie) ||
+        !from_stage(parent, movie,
+            {desired.x - offset.x, desired.y - offset.y}, at)) return false;
+    place(clone, at);
+    return true;
+}
+
+struct NativePosition {
+    uintptr_t root = 0, parent = 0, movie = 0;
+    uint64_t epoch = 0;
+    Point base{}, applied{}, local_center{};
+};
+
+bool remember_native(NativePosition& saved, uintptr_t root, uintptr_t movie, uint64_t epoch) {
+    Point current{};
+    if (!root || *reinterpret_cast<uintptr_t*>(root + 0x30) != movie ||
+        !position(root, current)) return false;
+    const auto parent = *reinterpret_cast<uintptr_t*>(root + 0x40);
+    if (saved.root != root || saved.parent != parent || saved.movie != movie ||
+        saved.epoch != epoch || current.x != saved.applied.x || current.y != saved.applied.y) {
+        Rect rect{};
+        Point local{};
+        if (!bounds(root, rect) || !from_stage(root, movie, center(rect), local)) return false;
+        saved = {root, parent, movie, epoch, current, current, local};
+    }
+    return true;
+}
+
+bool native_center(const NativePosition& saved, Point& out) {
+    const auto t = transform_slot(saved.root);
+    if (!t) return false;
+    const Point local{
+        *reinterpret_cast<float*>(t + 0x4) * saved.local_center.x +
+            *reinterpret_cast<float*>(t + 0xc) * saved.local_center.y + saved.base.x,
+        *reinterpret_cast<float*>(t + 0x10) * saved.local_center.x +
+            *reinterpret_cast<float*>(t + 0x8) * saved.local_center.y + saved.base.y};
+    return affine_to(saved.parent, 0, saved.movie, local, out);
+}
+
+bool move_native(NativePosition& saved, Point stage_delta) {
+    Point local{};
+    if (!from_stage(saved.parent, saved.movie, stage_delta, local, true)) return false;
+    saved.applied = {saved.base.x + local.x, saved.base.y + local.y};
+    place(saved.root, saved.applied);
+    return true;
+}
+
+void restore_native(NativePosition& saved, uintptr_t root, uintptr_t movie, uint64_t epoch) {
+    if (root && saved.root == root && saved.movie == movie && saved.epoch == epoch) {
+        place(root, saved.base);
+        saved.applied = saved.base;
+    }
+}
+
 bool key_name(unsigned vk, char (&name)[16]) {
     if (!vk) return false;
     if (vk >= VK_F1 && vk <= VK_F12) {
@@ -162,8 +306,8 @@ uintptr_t clone(uintptr_t source, uintptr_t parent, const char* name, bool& crea
 }
 
 struct GraphicsSource {
-    uintptr_t widget = 0, hammer = 0, quickuse = 0, secondary = 0;
-    uintptr_t primary_root = 0, secondary_root = 0, crucible_root = 0, hammer_root = 0;
+    uintptr_t widget = 0, hammer = 0, quickuse = 0, secondary = 0, flame = 0;
+    uintptr_t primary_root = 0, secondary_root = 0, crucible_root = 0, hammer_root = 0, flame_root = 0;
     uintptr_t parent = 0, movie = 0, source = 0;
     bool crucible_movie_match = false, hammer_movie_match = false;
 };
@@ -174,10 +318,12 @@ GraphicsSource graphics_source(uintptr_t element) {
     s.hammer = *reinterpret_cast<uintptr_t*>(element + 0x1f8);
     s.quickuse = *reinterpret_cast<uintptr_t*>(element + 0x1d0);
     s.secondary = *reinterpret_cast<uintptr_t*>(element + 0x1d8);
+    s.flame = *reinterpret_cast<uintptr_t*>(element + 0x1f0);
     s.primary_root = s.quickuse ? *reinterpret_cast<uintptr_t*>(s.quickuse + 0x18) : 0;
     s.secondary_root = s.secondary ? *reinterpret_cast<uintptr_t*>(s.secondary + 0x18) : 0;
     s.crucible_root = s.widget ? *reinterpret_cast<uintptr_t*>(s.widget + 0x18) : 0;
     s.hammer_root = s.hammer ? *reinterpret_cast<uintptr_t*>(s.hammer + 0x18) : 0;
+    s.flame_root = s.flame ? *reinterpret_cast<uintptr_t*>(s.flame + 0x18) : 0;
     s.parent = s.primary_root ? *reinterpret_cast<uintptr_t*>(s.primary_root + 0x40) : 0;
     s.movie = s.parent ? *reinterpret_cast<uintptr_t*>(s.parent + 0x30) : 0;
     if (!s.movie || !s.secondary_root ||
@@ -209,7 +355,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         std::atomic_flag& flag;
         ~ReleasePresentation() { flag.clear(std::memory_order_release); }
     } release{presenting};
+    static NativePosition crucible_position{}, hammer_position{};
     if (!graphics_ready) {
+        restore_native(crucible_position, context.crucible_root, context.movie, epoch);
+        restore_native(hammer_position, context.hammer_root, context.movie, epoch);
         refuse("hud_graphics_unavailable", element, 0, epoch);
         return false;
     }
@@ -221,6 +370,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     struct Refusal { uintptr_t element, widget, hammer, primary, secondary, parent, movie; uint64_t epoch; };
     static Refusal last{};
     if (!source) {
+        restore_native(crucible_position, context.crucible_root, movie, epoch);
+        restore_native(hammer_position, context.hammer_root, movie, epoch);
         if (parent && movie && primary_root && secondary_root &&
             *reinterpret_cast<uintptr_t*>(parent + 0x30) == movie &&
             *reinterpret_cast<uintptr_t*>(primary_root + 0x30) == movie &&
@@ -266,11 +417,6 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         uint64_t retry_at = 0;
     };
     static RenderState shared_rendered{};
-    RenderState rendered;
-    {
-        std::lock_guard lock(state_mutex);
-        rendered = shared_rendered;
-    }
     const auto save_render = [&](RenderState state) {
         std::lock_guard lock(state_mutex);
         shared_rendered = state;
@@ -280,24 +426,6 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         owner.refill_request_state, owner.selected, owner.owns_crucible, owner.owns_hammer,
         keys, owner.namespace_valid, keycap_ready,
         *reinterpret_cast<uint8_t*>(element + 0x209) != 0};
-    const bool same = rendered.element == current.element && rendered.parent == current.parent &&
-        rendered.movie == current.movie && rendered.source == current.source &&
-        rendered.primary == current.primary && rendered.secondary == current.secondary &&
-        rendered.epoch == current.epoch && rendered.revision == current.revision &&
-        rendered.request_revision == current.request_revision && rendered.balance == current.balance &&
-        rendered.flags == current.flags && rendered.request_state == current.request_state &&
-        rendered.selected == current.selected && rendered.owns_crucible == current.owns_crucible &&
-        rendered.owns_hammer == current.owns_hammer && rendered.namespace_valid == current.namespace_valid &&
-        rendered.keys == current.keys &&
-        rendered.keycaps == current.keycaps && rendered.element_visible == current.element_visible;
-    if (same && rendered.presented && !current.element_visible) {
-        const auto hidden = [&](const char* name) {
-            const auto clip = child(parent, name);
-            return !clip || !*reinterpret_cast<uint8_t*>(clip + 0x51);
-        };
-        if (hidden("apAmmoRefill") && hidden("apSpecialSwitch") &&
-            hidden("apAmmoRefillBind") && hidden("apSpecialToggleBind")) return false;
-    }
     Point anchor{}, adjacent{};
     if (!position(primary_root, anchor) || !position(secondary_root, adjacent)) {
         refuse("hud_swf_context_unavailable", element, source, epoch); return false;
@@ -309,6 +437,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool visible = owner.namespace_valid && *reinterpret_cast<uint8_t*>(element + 0x209);
     // All references come from this update's live parent, including invalidation.
     if (!visible) {
+        restore_native(crucible_position, context.crucible_root, movie, epoch);
+        restore_native(hammer_position, context.hammer_root, movie, epoch);
         if (refill) show(refill, false);
         if (special_arrow) show(special_arrow, false);
         if (refill_bind) show(refill_bind, false);
@@ -323,26 +453,86 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     }
     const Point step{anchor.x - adjacent.x, anchor.y - adjacent.y};
     if (step.x * step.x + step.y * step.y < 1.0f) {
+        restore_native(crucible_position, context.crucible_root, movie, epoch);
+        restore_native(hammer_position, context.hammer_root, movie, epoch);
         refuse("hud_slot_spacing_unknown", element, source, epoch); return false;
     }
-    const Point refill_at{anchor.x + step.x, anchor.y + step.y};
-    const Point offset{-step.y * 0.35f, step.x * 0.35f};
+    const Point fallback_refill{anchor.x + step.x, anchor.y + step.y};
     bool created = false;
     const bool switch_available = owner.owns_crucible && owner.owns_hammer &&
         route_ready.load(std::memory_order_acquire) && ((keys >> 8) & 0xff);
-    const auto arrow_source = switch_available ? child(parent, "swapEquipment") : 0;
-    const char* switch_failure = switch_available && !arrow_source ? "switch_source_missing" : nullptr;
-    if (switch_available && !special_arrow)
-        special_arrow = clone(arrow_source, parent, "apSpecialSwitch", created);
-    if (switch_available && !special_arrow && !switch_failure)
-        switch_failure = "switch_clone_failed";
-    if (switch_available && special_arrow) {
-        hold_frame(special_arrow, 1);
-        if (const auto cta = child(special_arrow, "cta")) show(cta, false);
-        if (const auto cta = child(child(special_arrow, "icon"), "cta")) show(cta, false);
-        place(special_arrow, {anchor.x + offset.x, anchor.y + offset.y});
-        show(special_arrow, true);
-    } else if (special_arrow) show(special_arrow, false);
+    const auto arrow_source = child(parent, "swapEquipment");
+    const auto native_arrow = child(arrow_source, "arrow");
+    Rect equipment_bounds{}, arrow_bounds{};
+    const bool native_layout = bounds(primary_root, equipment_bounds) &&
+        bounds(native_arrow, arrow_bounds) &&
+        center(arrow_bounds).x > center(equipment_bounds).x;
+    const Point equipment_center = center(equipment_bounds);
+    const Point arrow_center = center(arrow_bounds);
+    const float advance = arrow_center.x - equipment_center.x;
+    const Point refill_target{arrow_center.x + advance, equipment_center.y};
+    Point refill_offset{}, arrow_offset{}, toggle_target{};
+    const bool refill_visual = native_layout && visual_offset(source, source, movie, refill_offset);
+    const bool arrow_visual = native_layout &&
+        visual_offset(arrow_source, native_arrow, movie, arrow_offset);
+    const char* switch_failure = nullptr;
+    if (switch_available) {
+        if (!arrow_source) switch_failure = "switch_source_missing";
+        else if (!native_arrow) switch_failure = "switch_arrow_leaf_missing";
+        else if (!arrow_visual ||
+                 !remember_native(crucible_position, context.crucible_root, movie, epoch) ||
+                 !remember_native(hammer_position, context.hammer_root, movie, epoch) ||
+                 !native_center(crucible_position, toggle_target))
+            switch_failure = "switch_layout_unavailable";
+    }
+    if (!switch_failure && switch_available) {
+        const Point original_special = toggle_target;
+        toggle_target = {original_special.x, arrow_center.y};
+        Rect crucible_bounds{}, hammer_bounds{}, flame_bounds{};
+        Point hammer_center{};
+        if (!bounds(context.crucible_root, crucible_bounds) ||
+            !bounds(context.hammer_root, hammer_bounds) ||
+            !native_center(hammer_position, hammer_center))
+            switch_failure = "switch_layout_unavailable";
+        else {
+            const float special_right =
+                (original_special.x + (crucible_bounds.br.x - crucible_bounds.tl.x) * 0.5f >
+                 hammer_center.x + (hammer_bounds.br.x - hammer_bounds.tl.x) * 0.5f
+                    ? original_special.x + (crucible_bounds.br.x - crucible_bounds.tl.x) * 0.5f
+                    : hammer_center.x + (hammer_bounds.br.x - hammer_bounds.tl.x) * 0.5f) - advance;
+            const float arrow_half = (arrow_bounds.br.x - arrow_bounds.tl.x) * 0.5f;
+            if (special_right > toggle_target.x - arrow_half ||
+                (bounds(context.flame_root, flame_bounds) &&
+                 toggle_target.x + arrow_half > flame_bounds.tl.x))
+                switch_failure = "switch_layout_overlap";
+        }
+    }
+    bool arrow_ready = false;
+    if (switch_available && !switch_failure) {
+        if (!special_arrow) special_arrow = clone(arrow_source, parent, "apSpecialSwitch", created);
+        if (!special_arrow) switch_failure = "switch_clone_failed";
+        else {
+            hold_frame(special_arrow, 1);
+            if (const auto backer = child(special_arrow, "backer")) show(backer, false);
+            if (const auto cta = child(special_arrow, "cta")) show(cta, false);
+            if (const auto cta = child(child(special_arrow, "icon"), "cta")) show(cta, false);
+            if (const auto leaf = child(special_arrow, "arrow")) show(leaf, true);
+            else switch_failure = "switch_arrow_leaf_missing";
+            if (!switch_failure &&
+                !place_visual(special_arrow, arrow_source, parent, movie, toggle_target, arrow_offset))
+                switch_failure = "switch_layout_unavailable";
+            const Point shift{-advance, 0};
+            if (!switch_failure &&
+                (!move_native(crucible_position, shift) || !move_native(hammer_position, shift)))
+                switch_failure = "switch_layout_unavailable";
+            if (!switch_failure) { show(special_arrow, true); arrow_ready = true; }
+        }
+    }
+    if (!arrow_ready) {
+        restore_native(crucible_position, context.crucible_root, movie, epoch);
+        restore_native(hammer_position, context.hammer_root, movie, epoch);
+        if (special_arrow) show(special_arrow, false);
+    }
     const bool new_refill = !refill;
     if (!refill) refill = clone(source, parent, "apAmmoRefill", created);
     if (!refill) { refuse("hud_refill_clone_failed", element, source, epoch); return false; }
@@ -359,8 +549,11 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     hold_frame(refill, owner.refill_enabled ? 1 : 2);
     // The equipment clone carries its donor CTA; the AP labels are separate clips.
     if (const auto cta = child(child(refill, "icon"), "cta")) show(cta, false);
-    const auto icon = child(child(refill, "icon"), "iconStatic");
+    const auto icon_group = child(refill, "icon");
+    if (const auto small = child(icon_group, "iconSmall")) show(small, false);
+    const auto icon = child(icon_group, "iconStatic");
     if (!icon) return fail_refill("hud_refill_icon_absent", refill);
+    hold_frame(icon, 1);
     struct MaterialAttempt {
         uintptr_t owner, parent, clip, icon, material;
         uint64_t epoch, retry_at;
@@ -406,7 +599,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const auto palette = *reinterpret_cast<int32_t*>((source == crucible_root ? widget : hammer) + 0x1ec);
     if (const auto fill = child(three, "fill")) swf.color(fill, palette);
     if (const auto fill = child(three, "innerFill")) swf.color(fill, palette);
-    place(refill, refill_at);
+    if (refill_visual) {
+        if (!place_visual(refill, source, parent, movie, refill_target, refill_offset))
+            return fail_refill("hud_refill_layout_unavailable", refill);
+    } else place(refill, fallback_refill);
     show(refill, true);
     const bool graphics_applied = !known || *reinterpret_cast<uint16_t*>(three + 0x58) == desired;
     if (!keycap_ready) {
@@ -438,9 +634,22 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         refuse("hud_native_keycap_donor_unavailable", element, donor, epoch);
         return graphics_applied;
     }
+    Rect donor_bounds{};
+    Point donor_visual_offset{};
+    const bool donor_visual = bounds(donor, donor_bounds) &&
+        visual_offset(donor, donor, movie, donor_visual_offset);
+    const Point donor_stage_offset{center(donor_bounds).x - equipment_center.x,
+                                   center(donor_bounds).y - equipment_center.y};
+    const Point refill_key_target{refill_target.x + donor_stage_offset.x,
+                                   refill_target.y + donor_stage_offset.y};
+    const Point toggle_key_target{toggle_target.x + donor_stage_offset.x,
+                                   toggle_target.y + donor_stage_offset.y};
+    Point fallback_switch{};
+    if (arrow_ready) from_stage(parent, movie, toggle_target, fallback_switch);
     const char* bind_failure = nullptr;
     const auto bind_key = [&](uintptr_t& clip, const char* name, unsigned vk,
-                              Point at, const char* missing_clip, const char* missing_text) {
+                              Point fallback_at, Point visual_at, bool use_visual,
+                              const char* missing_clip, const char* missing_text) {
         char label[16]{};
         if (!key_name(vk, label)) {
             if (clip) show(clip, false);
@@ -468,16 +677,24 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         }
         show(joy, false);
         show(kbm, true);
-        place(clip, {at.x + donor_offset.x, at.y + donor_offset.y});
+        if (use_visual) {
+            if (!place_visual(clip, donor, parent, movie, visual_at, donor_visual_offset)) {
+                show(clip, false);
+                bind_failure = missing_clip;
+                return false;
+            }
+        } else place(clip, {fallback_at.x + donor_offset.x,
+                            fallback_at.y + donor_offset.y});
         show(clip, true);
         return true;
     };
     const auto ammo_key = keys & 0xff;
-    const auto toggle_key = switch_available && special_arrow ? (keys >> 8) & 0xff : 0;
-    if (!bind_key(refill_bind, "apAmmoRefillBind", ammo_key, refill_at,
+    const auto toggle_key = arrow_ready ? (keys >> 8) & 0xff : 0;
+    if (!bind_key(refill_bind, "apAmmoRefillBind", ammo_key,
+                  fallback_refill, refill_key_target, refill_visual && donor_visual,
                   "ammo_keycap_missing", "ammo_text_failed") ||
         !bind_key(special_bind, "apSpecialToggleBind", toggle_key,
-                  {anchor.x + offset.x, anchor.y + offset.y},
+                  fallback_switch, toggle_key_target, arrow_ready && donor_visual,
                   "toggle_keycap_missing", "toggle_text_failed")) {
         auto state = current;
         state.presented = true;
