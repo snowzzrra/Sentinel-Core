@@ -11,11 +11,13 @@
 #include <algorithm>
 #include <intrin.h>
 #include <cmath>
+#include <mutex>
 #include <type_traits>
 #ifdef SC_NATIVE_TESTING
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 #endif
 
@@ -204,6 +206,18 @@ std::atomic<uintptr_t> challenge_player{0};
 std::atomic<uintptr_t> weapon_info_element{0};
 std::atomic<uintptr_t> weapon_info_player{0};
 std::atomic<uint64_t> weapon_info_epoch{0};
+thread_local bool weapon_info_update_phase = false;
+struct HudCounts { uintptr_t owner = 0; uint64_t epoch = 0; uint32_t attempts = 0, presentations = 0; };
+std::mutex hud_counts_mutex;
+HudCounts hud_counts;
+HudCounts note_hud_update(uintptr_t owner, uint64_t epoch, bool presented) {
+    std::lock_guard lock(hud_counts_mutex);
+    if (hud_counts.owner != owner || hud_counts.epoch != epoch)
+        hud_counts = {owner, epoch};
+    auto& count = presented ? hud_counts.presentations : hud_counts.attempts;
+    if (count != UINT32_MAX) ++count;
+    return hud_counts;
+}
 uintptr_t player(void*);
 #ifdef SC_NATIVE_TESTING
 uintptr_t test_hud_player = 0;
@@ -233,46 +247,67 @@ void project_special_hud(uintptr_t element) {
     __try {
         const bool valid = context_valid && epoch == native::observation_stamp();
         const auto current_player = route_player.load(std::memory_order_acquire);
+        const auto native_player = current_hud_player();
         const auto observed_vtable = element ? *reinterpret_cast<uintptr_t*>(element) : 0;
-        const bool hud_valid = valid && element && current_player &&
-            route_thread == GetCurrentThreadId() && current_hud_player() == current_player &&
+        const auto counts = observed_vtable == image_base + rva_weapon_info_vtable ?
+            note_hud_update(element, epoch, false) : HudCounts{};
+        const bool hud_valid = valid && weapon_info_update_phase && element && current_player &&
+            native_player == current_player && owner.namespace_valid &&
             observed_vtable == image_base + rva_weapon_info_vtable;
         hud::GraphicsSource graphics{};
-        if (hud_valid) graphics = hud::graphics_source(element);
+        const bool source_evaluated = hud_valid && hud::graphics_ready;
+        if (source_evaluated) graphics = hud::graphics_source(element);
         const unsigned keys = configured_keys.load(std::memory_order_relaxed);
-        const uint32_t refusal = !valid ? 1 : !current_player || current_hud_player() != current_player ? 2 :
-            route_thread != GetCurrentThreadId() ? 3 :
+        const uint32_t refusal = !valid ? 1 : !weapon_info_update_phase ? 6 :
+            !current_player || native_player != current_player ? 2 :
+            !owner.namespace_valid ? 5 :
             observed_vtable != image_base + rva_weapon_info_vtable ? 4 : 0;
-        static thread_local std::array<uint64_t, 12> previous_context{};
-        const std::array<uint64_t, 12> context{element, observed_vtable, current_player, epoch,
-            graphics.parent, graphics.movie, owner.revision, owner.request_revision, keys,
-            refusal, hud::graphics_ready, hud::keycap_ready};
+        static thread_local std::array<uint64_t, 14> previous_context{};
+        const std::array<uint64_t, 14> context{element, observed_vtable, current_player, epoch,
+            owner.revision, owner.request_revision, keys, refusal, hud::graphics_ready,
+            hud::keycap_ready, source_evaluated, owner.namespace_valid,
+            GetCurrentThreadId(), route_thread.load(std::memory_order_acquire)};
         if (context != previous_context) {
             previous_context = context;
-            hud_trace.record(save::BStage::profile_output,
+            hud_trace.record(refusal ? save::BStage::profile_choice : save::BStage::profile_read,
                 refusal ? save::BStatus::refused : save::BStatus::entered,
                 "hud_weapon_info_update_context", 0,
                 {{"expected_vtable", image_base + rva_weapon_info_vtable},
                  {"observed_vtable", observed_vtable}, {"weapon_info_owner", element},
                  {"mission_challenge_owner", challenge_element.load(std::memory_order_acquire)},
-                 {"player", current_player}, {"parent", graphics.parent}, {"movie", graphics.movie},
+                 {"player", current_player}, {"callback_thread", GetCurrentThreadId()},
+                 {"publisher_thread", route_thread.load(std::memory_order_acquire)},
                  {"observation_epoch", epoch},
                  {"lifecycle_generation", native::inspect(0).scope.lifecycle_generation},
                  {"graphics_ready", hud::graphics_ready}, {"keycap_ready", hud::keycap_ready},
-                 {"balance_known", owner.refill_balance <= 3}, {"balance", owner.refill_balance},
-                 {"revision", owner.revision}, {"keys", keys}, {"refusal", refusal}});
+                 {"namespace_valid", owner.namespace_valid}, {"source_evaluated", source_evaluated},
+                 {"revision", owner.revision}, {"attempts", counts.attempts}, {"refusal", refusal}});
         }
         if (hud_valid) {
             weapon_info_element.store(element, std::memory_order_release);
             weapon_info_player.store(current_player, std::memory_order_release);
             weapon_info_epoch.store(epoch, std::memory_order_release);
-            hud::project(element, owner, graphics, keys, epoch);
+            bool clips_applied = false;
+            hud::project(element, owner, graphics, keys, epoch, clips_applied);
+            if (clips_applied) {
+                const auto updated = note_hud_update(element, epoch, true);
+                hud_trace.record(save::BStage::profile_capture, save::BStatus::succeeded,
+                    "hud_projection_clips_applied", 0,
+                    {{"weapon_info_owner", element}, {"parent", graphics.parent},
+                     {"movie", graphics.movie}, {"observation_epoch", epoch},
+                     {"attempts", updated.attempts}, {"presentations", updated.presentations},
+                     {"callback_thread", GetCurrentThreadId()},
+                     {"publisher_thread", route_thread.load(std::memory_order_acquire)},
+                     {"snapshot_revision", owner.revision}, {"balance", owner.refill_balance},
+                     {"keys", keys}, {"pixels_observed", 0}});
+            }
         }
         else {
             weapon_info_element.store(0, std::memory_order_release);
             weapon_info_player.store(0, std::memory_order_release);
             weapon_info_epoch.store(0, std::memory_order_release);
         }
+        if (!weapon_info_update_phase) return;
         if (observed_vtable != image_base + rva_weapon_info_vtable) return;
         if (!*reinterpret_cast<uintptr_t*>(element + 0x1e8) ||
             !*reinterpret_cast<uintptr_t*>(element + 0x1f8)) return;
@@ -307,7 +342,10 @@ void project_special_hud(uintptr_t element) {
 
 void weapon_hud_update_detour(uintptr_t element, uintptr_t time) {
     original_weapon_hud_update(element, time);
+    const bool previous = weapon_info_update_phase;
+    weapon_info_update_phase = true;
     project_special_hud(element);
+    weapon_info_update_phase = previous;
 }
 uintptr_t player(void*) {
     __try {
@@ -571,7 +609,7 @@ char hud_element_setup_detour(uintptr_t element) {
             if (vtable == image_base + rva_mission_challenge_vtable) {
                 challenge_player.store(current_hud_player(), std::memory_order_release);
                 challenge_element.store(element, std::memory_order_release);
-                hud_trace.record(save::BStage::profile_output, save::BStatus::entered,
+                hud_trace.record(save::BStage::catalog, save::BStatus::entered,
                     "hud_earnings_setup", 0,
                     {{"mission_challenge_owner", element}, {"expected_vtable", image_base + rva_mission_challenge_vtable},
                      {"observed_vtable", vtable}, {"player", challenge_player.load(std::memory_order_acquire)}});
@@ -968,7 +1006,7 @@ bool present(void*, uintptr_t p, uint32_t, uint32_t, uint32_t) {
             last_revision = owner.revision;
             last_epoch = epoch;
             last_player = p;
-            hud_trace.record(save::BStage::profile_output, save::BStatus::pending,
+            hud_trace.record(save::BStage::profile_publish, save::BStatus::pending,
                 "hud_presentation_request", 0,
                 {{"weapon_info_owner", weapon_info_element.load(std::memory_order_acquire)},
                  {"mission_challenge_owner", challenge_element.load(std::memory_order_acquire)},
@@ -1126,11 +1164,12 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
     input_trace.record(save::BStage::special_input, enabled ? save::BStatus::succeeded : save::BStatus::pending,
         "input_gate", 0, {{"ready", installed}, {"safe_gameplay", safe_gameplay}, {"player", p != 0},
                          {"foreground", foreground_pid == GetCurrentProcessId()}, {"keys", keys}});
-    for (unsigned i = 0; i < 2; ++i) {
+    // The packaged client owns F9 refill requests and their AP ledger transaction.
+    for (unsigned i = 1; i < 2; ++i) {
         const auto vk = static_cast<int>((keys >> (i * 8)) & 0xff);
         const bool down = vk && (GetAsyncKeyState(vk) & 0x8000) != 0;
         const bool attempted = down && !observed_down[i];
-        const bool action_enabled = enabled && (!i || selection_route);
+        const bool action_enabled = enabled && selection_route;
         observed_down[i] = down;
         if (attempted) { count(attempts[i]); if (!action_enabled) count(gate_refusals[i]); }
         const bool pressed = input_latches[i].press(vk, down, now, action_enabled);
@@ -1152,8 +1191,7 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
              {"player", p != 0}, {"foreground", foreground_pid == GetCurrentProcessId()},
              {"gameplay_admitted", admitted}});
         if (!admitted) continue;
-        if (!i) create_refill_request(now);
-        else {
+        {
             const auto result = toggle_local(save::session().namespace_id().c_str(), calls);
             const auto known = SC_SPECIAL_KNOWN_CRUCIBLE | SC_SPECIAL_KNOWN_HAMMER;
             const bool changed = result.kind == SC_SPECIAL_SELECT &&

@@ -118,7 +118,10 @@ bool test_hud_owner_path() {
     hud::swf.dirty = [](uintptr_t) {};
     hud::swf.start = [](uintptr_t, int) {};
     hud::swf.frame = [](uintptr_t clip, int frame) {
-        ++active->frames; Fixture::put(clip, 0x58, static_cast<uint16_t>(frame));
+        ++active->frames;
+        Fixture::put(clip, 0x58, static_cast<uint16_t>(frame));
+        Fixture::put(clip, 0x50, uint8_t{0});
+        Fixture::put(clip, 0x5c, uint16_t{0});
     };
     hud::swf.visible = [](uintptr_t clip, bool shown, bool) {
         ++active->visibility; active->clips.at(clip)->visible = shown;
@@ -164,7 +167,10 @@ bool test_hud_owner_path() {
             fixture.add(three, movie, "fill");
             fixture.add(three, movie, "innerFill");
         }
-        fixture.add(scene.parent, movie, "swapEquipment");
+        const auto swap = fixture.add(scene.parent, movie, "swapEquipment");
+        fixture.add(swap, movie, "cta");
+        const auto swap_icon = fixture.add(swap, movie, "icon");
+        fixture.add(swap_icon, movie, "cta");
         fixture.clips.at(fixture.add(scene.parent, movie, "vanilla_bind_v"))->text = "V";
         const auto donor = fixture.make(scene.primary, movie, 1, 1);
         const auto kbm = fixture.add(donor, movie, "kbm");
@@ -187,9 +193,26 @@ bool test_hud_owner_path() {
     Fixture::put(a, 0, image_base + rva_mission_challenge_vtable);
     const auto b = first.address(), b2 = rebuilt.address();
     const bool old_guard_blocks_b = b != a && Fixture::get<uintptr_t>(a, 0x1e8) == 0;
+    const auto update_on_hud = [&](uintptr_t target) {
+        DWORD callback = 0;
+        std::thread worker([&] {
+            callback = GetCurrentThreadId();
+            weapon_hud_update_detour(target, 0);
+        });
+        worker.join();
+        return callback;
+    };
+    route_thread = GetCurrentThreadId();
+    route_player.store(0);
+    route_epoch.store(0);
+    test_hud_player = 0;
+    hud_element_setup_detour(a);
+    const auto warmup_lookups = fixture.lookups;
+    const auto warmup_thread = update_on_hud(b);
+    const bool warmup_refused = warmup_thread != route_thread.load() &&
+        fixture.lookups == warmup_lookups && !fixture.find(first.parent, "apAmmoRefill");
     test_hud_player = 42;
     route_player.store(42);
-    route_thread = GetCurrentThreadId();
     native::test_observation_epoch(77);
     route_epoch.store(77);
     route_ready.store(true);
@@ -218,12 +241,26 @@ bool test_hud_owner_path() {
     };
     constexpr uint32_t known = SC_SPECIAL_REFILL_CONNECTED | SC_SPECIAL_REFILL_AUTHORITATIVE |
         SC_SPECIAL_REFILL_BALANCE_KNOWN;
-    bool ok = old_guard_blocks_b && response.outcome == SC_SPECIAL_OUTCOME_OK && publish(3, known);
+    bool ok = old_guard_blocks_b && warmup_refused &&
+        response.outcome == SC_SPECIAL_OUTCOME_OK && publish(3, known);
     hud_element_setup_detour(a);
     ok &= challenge_element.load() == a;
     const auto before_invalid = fixture.lookups;
     weapon_hud_update_detour(a, 0);
     ok &= fixture.lookups == before_invalid && weapon_info_element.load() == 0;
+    DWORD hud_thread = 0;
+    std::thread first_hud_update([&] {
+        hud_thread = GetCurrentThreadId();
+        weapon_hud_update_detour(b, 0);
+    });
+    first_hud_update.join();
+    if (!fixture.find(first.parent, "apAmmoRefill")) {
+        const auto diagnostic = hud_trace.snapshot().stages[static_cast<size_t>(save::BStage::profile_output)];
+        std::fprintf(stderr, "hud_owner worker=%lu publisher=%lu refusal=%lld\n",
+            static_cast<unsigned long>(hud_thread), static_cast<unsigned long>(route_thread.load()),
+            static_cast<long long>(diagnostic.facts[15].value));
+    }
+    ok &= hud_thread != route_thread.load() && fixture.find(first.parent, "apAmmoRefill") != 0;
     weapon_hud_update_detour(b, 0);
     const auto refill = fixture.find(first.parent, "apAmmoRefill");
     const auto arrow = fixture.find(first.parent, "apSpecialSwitch");
@@ -234,28 +271,56 @@ bool test_hud_owner_path() {
     ok &= weapon_info_element.load() == b && challenge_element.load() == a;
     const auto clips_before = fixture.clones;
     hud::keycap_ready = true;
-    weapon_hud_update_detour(b, 0);
+    update_on_hud(b);
     const auto refill_bind = fixture.find(first.parent, "apAmmoRefillBind");
     const auto toggle_bind = fixture.find(first.parent, "apSpecialToggleBind");
     ok &= refill_bind && toggle_bind && fixture.clones > clips_before;
     ok &= fixture.clips.at(fixture.find(fixture.find(refill_bind, "kbm"), "txtVal"))->text == "F9";
     ok &= fixture.clips.at(fixture.find(fixture.find(toggle_bind, "kbm"), "txtVal"))->text == "F10";
     const auto clones_stable = fixture.clones, frames_stable = fixture.frames;
-    const auto visibility_stable = fixture.visibility, text_stable = fixture.text_writes;
-    weapon_hud_update_detour(b, 0);
+    const auto text_stable = fixture.text_writes;
+    std::atomic<int> next_worker{0};
+    DWORD hud_thread_one = 0, hud_thread_two = 0;
+    std::thread hud_one([&] {
+        hud_thread_one = GetCurrentThreadId();
+        weapon_hud_update_detour(b, 0);
+        next_worker.store(1, std::memory_order_release);
+        while (next_worker.load(std::memory_order_acquire) != 2) std::this_thread::yield();
+    });
+    while (next_worker.load(std::memory_order_acquire) != 1) std::this_thread::yield();
+    std::thread hud_two([&] {
+        hud_thread_two = GetCurrentThreadId();
+        weapon_hud_update_detour(b, 0);
+        next_worker.store(2, std::memory_order_release);
+    });
+    hud_two.join();
+    hud_one.join();
+    ok &= hud_thread_one != hud_thread_two && hud_thread_one != route_thread.load() &&
+        hud_thread_two != route_thread.load();
     ok &= fixture.clones == clones_stable && fixture.frames == frames_stable &&
-        fixture.visibility == visibility_stable && fixture.text_writes == text_stable;
+        fixture.text_writes == text_stable;
+    const auto refill_icon = fixture.find(fixture.find(refill, "icon"), "iconStatic");
+    const auto arrow_cta = fixture.find(arrow, "cta");
+    Fixture::put(refill, 0x5c, uint16_t{7});
+    Fixture::put(pips, 0x58, uint16_t{2});
+    Fixture::put(refill_icon, 0x60, uintptr_t{11});
+    fixture.clips.at(arrow_cta)->visible = true;
+    update_on_hud(b);
+    ok &= Fixture::get<uint16_t>(refill, 0x5c) == 0 &&
+        Fixture::get<uint16_t>(pips, 0x58) == 3 &&
+        Fixture::get<uintptr_t>(refill_icon, 0x60) == 9 &&
+        !fixture.clips.at(arrow_cta)->visible && fixture.clips.at(refill)->visible;
     for (uint32_t balance : {2u, 1u, 0u}) {
         ok &= publish(balance, known);
-        weapon_hud_update_detour(b, 0);
+        update_on_hud(b);
         ok &= Fixture::get<uint16_t>(three, 0x58) == balance + 1;
     }
     ok &= publish(0, SC_SPECIAL_REFILL_CONNECTED);
-    weapon_hud_update_detour(b, 0);
+    update_on_hud(b);
     ok &= !fixture.clips.at(pips)->visible && Fixture::get<uint16_t>(three, 0x58) == 1;
     configured_keys.store(VK_F8 | (VK_F10 << 8));
     const auto text_before = fixture.text_writes;
-    weapon_hud_update_detour(b, 0);
+    update_on_hud(b);
     ok &= fixture.text_writes == text_before + 1;
     ok &= fixture.clips.at(fixture.find(fixture.find(toggle_bind, "kbm"), "txtVal"))->text == "F10";
     ok &= fixture.clips.at(fixture.find(first.parent, "vanilla_bind_v"))->text == "V";
@@ -267,30 +332,49 @@ bool test_hud_owner_path() {
     ok &= fixture.earnings == 1 && fixture.earnings_owner == a && !present(nullptr, 42, 0, 0, 0);
     const auto invalid_lookups = fixture.lookups;
     test_hud_player = 43;
-    weapon_hud_update_detour(b, 0);
+    update_on_hud(b);
     ok &= fixture.lookups == invalid_lookups;
     test_hud_player = 42;
-    route_thread = 0;
-    weapon_hud_update_detour(b, 0);
+    project_special_hud(b);
     ok &= fixture.lookups == invalid_lookups;
-    route_thread = GetCurrentThreadId();
+    route_namespace[0] = 'b';
+    update_on_hud(b);
+    ok &= fixture.lookups == invalid_lookups;
+    route_namespace[0] = 'a';
     route_epoch.store(78);
-    weapon_hud_update_detour(b, 0);
+    update_on_hud(b);
     ok &= fixture.lookups == invalid_lookups;
     route_epoch.store(77);
     Fixture::put(first.primary, 0x30, uintptr_t{3});
-    weapon_hud_update_detour(b, 0);
+    update_on_hud(b);
     ok &= fixture.lookups == invalid_lookups;
-    weapon_hud_update_detour(b2, 0);
+    update_on_hud(b2);
     ok &= weapon_info_element.load() == b2 && fixture.find(rebuilt.parent, "apAmmoRefill") != 0 &&
         fixture.find(rebuilt.parent, "apAmmoRefillBind") != 0 &&
         fixture.find(first.parent, "apAmmoRefill") == refill;
     const auto rebuilt_clones = fixture.clones, rebuilt_frames = fixture.frames;
-    weapon_hud_update_detour(b2, 0);
+    update_on_hud(b2);
     ok &= fixture.clones == rebuilt_clones && fixture.frames == rebuilt_frames;
     hud_element_setup_detour(b);
     present_selection(42);
     ok &= challenge_element.load() == 0 && fixture.earnings == 1;
+    const auto trace = hud_trace.snapshot();
+    const auto& admission = trace.stages[static_cast<size_t>(save::BStage::profile_read)];
+    const auto& clips = trace.stages[static_cast<size_t>(save::BStage::profile_output)];
+    const auto& presentations = trace.stages[static_cast<size_t>(save::BStage::profile_capture)];
+    ok &= std::strcmp(trace.first_failure.predicate, "hud_weapon_info_update_context") == 0 &&
+        std::strcmp(trace.first_failure.facts[15].key, "refusal") == 0 &&
+        trace.first_failure.facts[15].value == 1;
+    ok &= admission.sequence && admission.facts[5].value != admission.facts[6].value &&
+        admission.facts[12].key &&
+        std::strcmp(admission.facts[12].key, "source_evaluated") == 0 &&
+        admission.facts[12].value == 1;
+    ok &= std::strcmp(clips.predicate, "hud_native_keycaps_applied") == 0 &&
+        clips.status == save::BStatus::succeeded &&
+        std::strcmp(clips.facts[13].key, "pixels_observed") == 0 && clips.facts[13].value == 0;
+    ok &= std::strcmp(presentations.predicate, "hud_projection_clips_applied") == 0 &&
+        presentations.status == save::BStatus::succeeded && presentations.facts[5].value >= 1 &&
+        presentations.facts[11].value == 0;
     hud::swf = saved_swf;
     original_hud_element_setup = saved_setup;
     original_weapon_hud_update = saved_update;

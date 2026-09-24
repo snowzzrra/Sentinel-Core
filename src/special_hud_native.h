@@ -63,6 +63,12 @@ bool position(uintptr_t sprite, Point& out) {
     return std::isfinite(out.x) && std::isfinite(out.y);
 }
 
+void hold_frame(uintptr_t clip, uint16_t frame) {
+    if (*reinterpret_cast<uint16_t*>(clip + 0x58) != frame ||
+        *reinterpret_cast<uint8_t*>(clip + 0x50) ||
+        *reinterpret_cast<uint16_t*>(clip + 0x5c)) swf.frame(clip, frame);
+}
+
 bool key_offset(uintptr_t clip, uintptr_t source, uintptr_t movie, Point& out) {
     out = {};
     for (unsigned i = 0; i < 3 && clip && clip != source; ++i) {
@@ -152,24 +158,29 @@ GraphicsSource graphics_source(uintptr_t element) {
 }
 
 bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSource& context,
-             unsigned keys, uint64_t epoch) {
+             unsigned keys, uint64_t epoch, bool& clips_applied) {
+    clips_applied = false;
     if (!graphics_ready) {
         refuse("hud_graphics_unavailable", element, 0, epoch);
         return false;
     }
+    static std::mutex state_mutex;
     const auto source = context.source, parent = context.parent, movie = context.movie;
     const auto primary_root = context.primary_root, secondary_root = context.secondary_root;
     const auto crucible_root = context.crucible_root, quickuse = context.quickuse;
     const auto widget = context.widget, hammer = context.hammer;
+    struct Refusal { uintptr_t element, widget, hammer, primary, secondary, parent, movie; uint64_t epoch; };
+    static Refusal last{};
     if (!source) {
-        struct Refusal { uintptr_t element, widget, hammer, primary, secondary, parent, movie; uint64_t epoch; };
-        static thread_local Refusal last{};
         const Refusal current{element, widget, hammer, primary_root, secondary_root, parent, movie, epoch};
-        if (last.element == current.element && last.widget == current.widget &&
-            last.hammer == current.hammer && last.primary == current.primary &&
-            last.secondary == current.secondary && last.parent == current.parent &&
-            last.movie == current.movie && last.epoch == current.epoch) return false;
-        last = current;
+        {
+            std::lock_guard lock(state_mutex);
+            if (last.element == current.element && last.widget == current.widget &&
+                last.hammer == current.hammer && last.primary == current.primary &&
+                last.secondary == current.secondary && last.parent == current.parent &&
+                last.movie == current.movie && last.epoch == current.epoch) return false;
+            last = current;
+        }
         hud_trace.record(save::BStage::profile_output, save::BStatus::refused,
             "hud_graphics_source_unavailable", 0,
             {{"owner", element}, {"widget", widget}, {"hammer", hammer},
@@ -181,6 +192,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
              {"hammer_movie_match", context.hammer_movie_match}, {"generation", epoch}});
         return false;
     }
+    {
+        std::lock_guard lock(state_mutex);
+        last = {};
+    }
     struct RenderState {
         uintptr_t element = 0, parent = 0, movie = 0, source = 0, primary = 0, secondary = 0;
         uint64_t epoch = 0, revision = 0, request_revision = 0;
@@ -191,7 +206,16 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         bool graphics_applied = false, fully_applied = false;
         uint64_t retry_at = 0;
     };
-    static thread_local RenderState rendered{};
+    static RenderState shared_rendered{};
+    RenderState rendered;
+    {
+        std::lock_guard lock(state_mutex);
+        rendered = shared_rendered;
+    }
+    const auto save_render = [&](RenderState state) {
+        std::lock_guard lock(state_mutex);
+        shared_rendered = state;
+    };
     const RenderState current{element, parent, movie, source, primary_root, secondary_root,
         epoch, owner.revision, owner.request_revision, owner.refill_balance, owner.refill_flags,
         owner.refill_request_state, owner.selected, owner.owns_crucible, owner.owns_hammer,
@@ -207,15 +231,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         rendered.owns_hammer == current.owns_hammer && rendered.namespace_valid == current.namespace_valid &&
         rendered.keys == current.keys &&
         rendered.keycaps == current.keycaps && rendered.element_visible == current.element_visible;
-    const bool switch_expected = owner.owns_crucible && owner.owns_hammer &&
-        route_ready.load(std::memory_order_acquire) && ((keys >> 8) & 0xff);
-    const bool clips_present = child(parent, "apAmmoRefill") &&
-        (!switch_expected || child(parent, "apSpecialSwitch")) &&
-        (!keycap_ready || !rendered.fully_applied || (child(parent, "apAmmoRefillBind") &&
-                           (!switch_expected || child(parent, "apSpecialToggleBind"))));
-    if (same && rendered.presented &&
-        clips_present && (!keycap_ready || rendered.fully_applied || GetTickCount64() < rendered.retry_at))
-        return rendered.graphics_applied;
+    if (same && rendered.presented && !current.element_visible) return false;
     Point anchor{}, adjacent{};
     if (!position(primary_root, anchor) || !position(secondary_root, adjacent)) {
         refuse("hud_swf_context_unavailable", element, source, epoch); return false;
@@ -226,11 +242,14 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     auto special_bind = child(parent, "apSpecialToggleBind");
     const bool visible = owner.namespace_valid && *reinterpret_cast<uint8_t*>(element + 0x209);
     // All references come from this update's live parent, including invalidation.
-    if (refill) swf.visible(refill, false, true);
-    if (special_arrow) swf.visible(special_arrow, false, true);
-    if (refill_bind) swf.visible(refill_bind, false, true);
-    if (special_bind) swf.visible(special_bind, false, true);
     if (!visible) {
+        if (refill) swf.visible(refill, false, true);
+        if (special_arrow) swf.visible(special_arrow, false, true);
+        if (refill_bind) swf.visible(refill_bind, false, true);
+        if (special_bind) swf.visible(special_bind, false, true);
+        auto state = current;
+        state.presented = true;
+        save_render(state);
         hud_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
             "hud_invalidated", 0, {{"owner", element}, {"parent", parent}, {"generation", epoch},
                                    {"snapshot_valid", owner.namespace_valid}, {"context_valid", 1}});
@@ -249,9 +268,12 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     if (switch_available && !special_arrow)
         special_arrow = clone(arrow_source, parent, "apSpecialSwitch", created);
     if (switch_available && special_arrow) {
+        hold_frame(special_arrow, 1);
+        if (const auto cta = child(special_arrow, "cta")) swf.visible(cta, false, true);
+        if (const auto cta = child(child(special_arrow, "icon"), "cta")) swf.visible(cta, false, true);
         swf.position(special_arrow, anchor.x + offset.x, anchor.y + offset.y);
         swf.visible(special_arrow, true, true);
-    }
+    } else if (special_arrow) swf.visible(special_arrow, false, true);
     const bool new_refill = !refill;
     if (!refill) refill = clone(source, parent, "apAmmoRefill", created);
     if (!refill) { refuse("hud_refill_clone_failed", element, source, epoch); return false; }
@@ -259,21 +281,26 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         "hud_bound", 0, {{"owner", element}, {"parent", parent}, {"layout_source", source},
                          {"generation", epoch}, {"created", created}, {"refill", refill}});
     const bool known = owner.refill_balance <= 3;
-    swf.frame(refill, owner.refill_enabled ? 1 : 2);
+    hold_frame(refill, owner.refill_enabled ? 1 : 2);
     // The equipment clone carries its donor CTA; the AP labels are separate clips.
     if (const auto cta = child(child(refill, "icon"), "cta")) swf.visible(cta, false, true);
     const auto icon = child(child(refill, "icon"), "iconStatic");
     if (!icon) { refuse("hud_refill_icon_absent", element, refill, epoch); return false; }
     struct MaterialAttempt {
-        uintptr_t owner, parent, clip, icon;
+        uintptr_t owner, parent, clip, icon, material;
         uint64_t epoch, retry_at;
         bool applied;
     };
-    thread_local MaterialAttempt attempt{};
+    static MaterialAttempt shared_attempt{};
+    MaterialAttempt attempt;
+    {
+        std::lock_guard lock(state_mutex);
+        attempt = shared_attempt;
+    }
     if (new_refill || attempt.owner != element || attempt.parent != parent || attempt.clip != refill ||
         attempt.icon != icon || attempt.epoch != epoch)
-        attempt = {element, parent, refill, icon, epoch, 0, false};
-    if (attempt.applied && !*reinterpret_cast<uintptr_t*>(icon + 0x60)) {
+        attempt = {element, parent, refill, icon, 0, epoch, 0, false};
+    if (attempt.applied && *reinterpret_cast<uintptr_t*>(icon + 0x60) != attempt.material) {
         attempt.applied = false;
         attempt.retry_at = 0;
     }
@@ -282,23 +309,28 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         const auto material = swf.find_material(image_base + 0x5e05200, "art/ui/icons/ammo/bullets", 0);
         if (material) {
             swf.material(icon, material, -1, -1, 0);
+            attempt.material = material;
             attempt.applied = *reinterpret_cast<uintptr_t*>(icon + 0x60) == material;
         }
+    }
+    {
+        std::lock_guard lock(state_mutex);
+        shared_attempt = attempt;
     }
     if (!attempt.applied) {
         refuse("hud_ammo_material_unavailable", element, icon, epoch); return false;
     }
     const auto pips = child(refill, "pips");
     if (!pips) { refuse("hud_pips_absent", element, refill, epoch); return false; }
-    swf.frame(pips, 3);
+    hold_frame(pips, 3);
     const auto three = child(pips, "pips3");
     if (!three) { refuse("hud_three_pip_template_absent", element, pips, epoch); return false; }
     swf.visible(pips, known, true);
-    const auto frame_before = *reinterpret_cast<uint16_t*>(three + 0x58);
     const auto desired = static_cast<uint16_t>(owner.refill_balance + 1);
     if (known) {
-        if (*reinterpret_cast<uint16_t*>(three + 0x58) != desired) {
-            swf.frame(three, desired);
+        if (*reinterpret_cast<uint16_t*>(three + 0x58) != desired ||
+            *reinterpret_cast<uint8_t*>(three + 0x50)) {
+            hold_frame(three, desired);
             swf.dirty(three);
         }
     }
@@ -309,9 +341,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     swf.visible(refill, true, true);
     const bool graphics_applied = known && *reinterpret_cast<uint16_t*>(three + 0x58) == desired;
     if (!keycap_ready) {
-        rendered = current;
-        rendered.presented = true;
-        rendered.graphics_applied = graphics_applied;
+        auto state = current;
+        state.presented = true;
+        state.graphics_applied = graphics_applied;
+        save_render(state);
         hud_trace.record(save::BStage::profile_output, save::BStatus::pending,
             "hud_graphics_applied_keycaps_unavailable", 0,
             {{"owner", element}, {"parent", parent}, {"graphics_ready", graphics_ready},
@@ -324,10 +357,11 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     if (!donor_root || *reinterpret_cast<uintptr_t*>(donor_root + 0x40) != parent ||
         !donor || !key_offset(donor, donor_root, movie, donor_offset) ||
         !child(donor, "kbm") || !child(donor, "joy")) {
-        rendered = current;
-        rendered.presented = true;
-        rendered.graphics_applied = graphics_applied;
-        rendered.retry_at = GetTickCount64() + 1000;
+        auto state = current;
+        state.presented = true;
+        state.graphics_applied = graphics_applied;
+        state.retry_at = GetTickCount64() + 1000;
+        save_render(state);
         refuse("hud_native_keycap_donor_unavailable", element, donor, epoch);
         return graphics_applied;
     }
@@ -336,7 +370,12 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         uint64_t epoch = 0;
         unsigned ammo_key = 0, toggle_key = 0;
     };
-    thread_local BindState binds{};
+    static BindState shared_binds{};
+    BindState binds;
+    {
+        std::lock_guard lock(state_mutex);
+        binds = shared_binds;
+    }
     const auto bind_key = [&](uintptr_t& clip, const char* name, unsigned vk,
                               Point at, unsigned& cached_key) {
         char label[16]{};
@@ -359,30 +398,39 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         binds = {parent, refill_bind, special_bind, epoch};
     const auto ammo_key = keys & 0xff;
     const auto toggle_key = switch_available && special_arrow ? (keys >> 8) & 0xff : 0;
+    if (!toggle_key && special_bind) swf.visible(special_bind, false, true);
     if (!bind_key(refill_bind, "apAmmoRefillBind", ammo_key, refill_at, binds.ammo_key) ||
         !bind_key(special_bind, "apSpecialToggleBind", toggle_key,
                   {anchor.x + offset.x, anchor.y + offset.y}, binds.toggle_key)) {
-        rendered = current;
-        rendered.presented = true;
-        rendered.graphics_applied = graphics_applied;
-        rendered.retry_at = GetTickCount64() + 1000;
+        auto state = current;
+        state.presented = true;
+        state.graphics_applied = graphics_applied;
+        state.retry_at = GetTickCount64() + 1000;
+        save_render(state);
         refuse("hud_native_keycap_bind_failed", element, donor, epoch);
         return graphics_applied;
     }
     binds.refill = refill_bind;
     binds.special = special_bind;
-    rendered = current;
-    rendered.presented = true;
-    rendered.graphics_applied = graphics_applied;
-    rendered.fully_applied = true;
-    hud_trace.record(save::BStage::profile_output, save::BStatus::pending,
+    {
+        std::lock_guard lock(state_mutex);
+        shared_binds = binds;
+    }
+    auto state = current;
+    state.presented = true;
+    state.graphics_applied = graphics_applied;
+    state.fully_applied = true;
+    save_render(state);
+    clips_applied = true;
+    hud_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
         "hud_native_keycaps_applied", 0,
-        {{"owner", element}, {"parent", parent}, {"generation", epoch}, {"created", created},
-         {"policy", owner.selected}, {"balance", owner.refill_balance}, {"binds", keys},
+        {{"owner", element}, {"parent", parent}, {"movie", movie}, {"generation", epoch},
+         {"created", created}, {"balance", owner.refill_balance}, {"binds", keys},
          {"snapshot_revision", owner.revision},
-         {"pip_frame_before", frame_before}, {"pip_frame_after", *reinterpret_cast<uint16_t*>(three + 0x58)},
+         {"pip_frame_after", *reinterpret_cast<uint16_t*>(three + 0x58)},
          {"refill_clip", refill}, {"switch_clip", special_arrow},
-         {"refill_bind_clip", refill_bind}, {"toggle_bind_clip", special_bind}});
+         {"refill_bind_clip", refill_bind}, {"toggle_bind_clip", special_bind},
+         {"pixels_observed", 0}});
     return graphics_applied;
 }
 } // namespace hud
