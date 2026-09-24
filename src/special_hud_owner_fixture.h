@@ -3,6 +3,7 @@ struct alignas(8) HudTestClip {
         std::array<uint8_t, 0x100> bytes{};
         std::array<uint8_t, 0x88> context{};
         std::array<uint8_t, 0x40> transform{};
+        hud::Rect local_bounds{};
         bool visible = false;
         std::string text;
 };
@@ -14,8 +15,11 @@ struct HudTestFixture {
         uintptr_t entry_source = 0;
         unsigned lookups = 0, clones = 0, frames = 0, visibility = 0, positions = 0, text_writes = 0;
         unsigned materials = 0;
+        uintptr_t last_material_clip = 0;
+        std::string material_name;
         unsigned updates = 0, earnings = 0;
         uintptr_t earnings_owner = 0;
+        bool unrendered_clones = false;
 
         template<class T> static void put(uintptr_t address, size_t offset, T value) {
             std::memcpy(reinterpret_cast<void*>(address + offset), &value, sizeof(value));
@@ -30,6 +34,11 @@ struct HudTestFixture {
             clip->text = value;
             put(address, 0x48, clip->text.c_str());
             put(address, 0x50, static_cast<int32_t>(clip->text.size()));
+            const auto parent = get<uintptr_t>(address, 0x40);
+            if (parent && find(parent, "txtVal") == address) {
+                const float width = 4.0f + 3.0f * static_cast<float>(clip->text.size());
+                set_bounds(parent, width, 4, (width - 10.0f) * 0.5f, -22);
+            }
         }
         void set_visible(uintptr_t address, bool visible) {
             clips.at(address)->visible = visible;
@@ -37,21 +46,41 @@ struct HudTestFixture {
         }
         void set_bounds(uintptr_t address, float width, float height,
                         float dx = 0, float dy = 0) {
-            hud::Point origin{};
-            const auto movie = get<uintptr_t>(address, 0x30);
-            if (!hud::affine_to(address, 0, movie, {0, 0}, origin)) return;
-            put(address, 0xa8, origin.x + dx - width * 0.5f);
-            put(address, 0xac, origin.y + dy - height * 0.5f);
-            put(address, 0xb0, origin.x + dx + width * 0.5f);
-            put(address, 0xb4, origin.y + dy + height * 0.5f);
+            clips.at(address)->local_bounds = {{dx - width * 0.5f, dy - height * 0.5f},
+                                               {dx + width * 0.5f, dy + height * 0.5f}};
+            for (const auto offset : {0x90u, 0x94u, 0x98u, 0x9cu, 0xa0u, 0xa4u})
+                put(address, offset, offset < 0x98 ? 1.0f : 0.0f);
+            put(address, 0xa8, dx - width * 0.5f);
+            put(address, 0xac, dy - height * 0.5f);
+            put(address, 0xb0, dx + width * 0.5f);
+            put(address, 0xb4, dy + height * 0.5f);
         }
-        void shift_bounds(uintptr_t address, float dx, float dy) {
-            for (const auto offset : {0xa8u, 0xb0u})
-                put(address, offset, get<float>(address, offset) + dx);
-            for (const auto offset : {0xacu, 0xb4u})
-                put(address, offset, get<float>(address, offset) + dy);
-            for (const auto& [key, child] : children)
-                if (key.first == address) shift_bounds(child, dx, dy);
+        void render(uintptr_t root) {
+            for (const auto& [address, clip] : clips) {
+                auto ancestor = address;
+                while (ancestor && ancestor != root) ancestor = get<uintptr_t>(ancestor, 0x40);
+                if (!ancestor) continue;
+                const auto project = [&](hud::Point point) {
+                    for (auto node = address; node; node = get<uintptr_t>(node, 0x40)) {
+                        const auto t = reinterpret_cast<uintptr_t>(clips.at(node)->transform.data());
+                        point = {get<float>(t, 4) * point.x + get<float>(t, 12) * point.y + get<float>(t, 20),
+                                 get<float>(t, 16) * point.x + get<float>(t, 8) * point.y + get<float>(t, 24)};
+                    }
+                    return point;
+                };
+                const auto origin = project({0, 0}), x = project({1, 0}), y = project({0, 1});
+                const float matrix[]{x.x - origin.x, y.y - origin.y, y.x - origin.x,
+                                     x.y - origin.y, origin.x, origin.y};
+                std::memcpy(reinterpret_cast<void*>(address + 0x90), matrix, sizeof(matrix));
+                const auto rect = clip->local_bounds;
+                auto lo = project(rect.tl), hi = lo;
+                for (auto point : {project({rect.br.x, rect.tl.y}), project({rect.tl.x, rect.br.y}), project(rect.br)}) {
+                    lo = {std::min(lo.x, point.x), std::min(lo.y, point.y)};
+                    hi = {std::max(hi.x, point.x), std::max(hi.y, point.y)};
+                }
+                put(address, 0xa8, lo);
+                put(address, 0xb0, hi);
+            }
         }
         uintptr_t make(uintptr_t parent, uintptr_t movie, float x = 0, float y = 0) {
             auto clip = std::make_unique<HudTestClip>();
@@ -86,22 +115,22 @@ struct HudTestFixture {
             const auto* original = clips.at(source);
             auto* target = clips.at(clone);
             target->transform = original->transform;
+            target->local_bounds = original->local_bounds;
             put(clone, 0x58, get<uint16_t>(source, 0x58));
             put(clone, 0x50, get<uint8_t>(source, 0x50));
             put(clone, 0x5c, get<uint16_t>(source, 0x5c));
-            for (const auto offset : {0xa8u, 0xacu, 0xb0u, 0xb4u})
+            for (const auto offset : {0x90u, 0x94u, 0x98u, 0x9cu, 0xa0u, 0xa4u, 0xa8u, 0xacu, 0xb0u, 0xb4u})
                 put(clone, offset, get<float>(source, offset));
-            hud::Point source_origin{}, clone_origin{};
-            hud::affine_to(source, 0, movie, {0, 0}, source_origin);
-            hud::affine_to(clone, 0, movie, {0, 0}, clone_origin);
-            shift_bounds(clone, clone_origin.x - source_origin.x,
-                              clone_origin.y - source_origin.y);
             set_visible(clone, original->visible);
             if (std::strcmp(name, "txtVal") == 0) set_text(clone, original->text.c_str());
             else target->text = original->text;
             ++clones;
             for (const auto& [key, child] : children)
                 if (key.first == source) copy(child, clone, key.second.c_str());
+            if (unrendered_clones) {
+                put(clone, 0xa8, hud::Point{});
+                put(clone, 0xb0, hud::Point{});
+            }
             return clone;
         }
 };
@@ -145,7 +174,7 @@ bool test_hud_owner_path() {
         active->entry_source = 0;
         for (const auto& [address, clip] : active->clips)
             if (Fixture::get<uintptr_t>(address, 0x40) == parent &&
-                Fixture::get<int32_t>(address, 0x48) == depth && active->find(address, "kbm")) {
+                Fixture::get<int32_t>(address, 0x48) == depth) {
                 active->entry_source = address;
                 break;
             }
@@ -176,27 +205,28 @@ bool test_hud_owner_path() {
     hud::swf.position = [](uintptr_t clip, float x, float y) {
         ++active->positions;
         auto* target = active->clips.at(clip);
-        hud::Point before{}, after{};
-        const auto movie = Fixture::get<uintptr_t>(clip, 0x30);
-        hud::affine_to(clip, 0, movie, {0, 0}, before);
         Fixture::put(reinterpret_cast<uintptr_t>(target->transform.data()), 0x14, x);
         Fixture::put(reinterpret_cast<uintptr_t>(target->transform.data()), 0x18, y);
-        hud::affine_to(clip, 0, movie, {0, 0}, after);
-        active->shift_bounds(clip, after.x - before.x, after.y - before.y);
     };
     hud::swf.color = [](uintptr_t, int) {};
     hud::swf.material = [](uintptr_t clip, uintptr_t material, int, int, unsigned) {
         ++active->materials;
+        active->last_material_clip = clip;
         Fixture::put(clip, 0x60, material);
+        Fixture::put(clip, 0x68, uint16_t{16});
+        Fixture::put(clip, 0x6a, uint16_t{16});
     };
-    hud::swf.find_material = [](uintptr_t, const char*, int) -> uintptr_t { return 9; };
+    hud::swf.find_material = [](uintptr_t, const char* name, int) -> uintptr_t {
+        active->material_name = name;
+        return 9;
+    };
     hud::graphics_ready = true;
     hud::keycap_ready = false;
 
     struct Scene {
         alignas(8) std::array<uint8_t, 0x300> element{};
-        alignas(8) std::array<uint8_t, 0x220> crucible{}, hammer{}, quickuse{}, secondary{}, flame{};
-        uintptr_t parent = 0, primary = 0, adjacent = 0, flame_root = 0, ammo_panel = 0;
+        alignas(8) std::array<uint8_t, 0x220> crucible{}, hammer{}, quickuse{}, flame{}, bfg{};
+        uintptr_t parent = 0, primary = 0, flame_root = 0, bfg_root = 0, ammo_panel = 0;
         uintptr_t address() { return reinterpret_cast<uintptr_t>(element.data()); }
     } first{}, rebuilt{};
     const auto build = [&](Scene& scene, uintptr_t movie) {
@@ -206,11 +236,12 @@ bool test_hud_owner_path() {
         Fixture::put(e, 0x170, int32_t{3});
         scene.parent = fixture.make(0, movie);
         scene.primary = fixture.make(scene.parent, movie, 100, 100);
-        scene.adjacent = fixture.make(scene.parent, movie, 80, 100);
-        fixture.set_bounds(scene.primary, 16, 16);
-        fixture.set_bounds(scene.adjacent, 16, 16);
         scene.flame_root = fixture.make(scene.parent, movie, 80, 100);
+        fixture.set_bounds(scene.primary, 16, 16);
         fixture.set_bounds(scene.flame_root, 16, 16);
+        fixture.set_bounds(fixture.add(scene.flame_root, movie, "icon"), 12, 12);
+        scene.bfg_root = fixture.make(scene.parent, movie);
+        fixture.set_bounds(scene.bfg_root, 0, 0);
         scene.ammo_panel = fixture.make(scene.parent, movie, 100, 130);
         fixture.set_bounds(scene.ammo_panel, 100, 12);
         const auto source = fixture.add(scene.parent, movie, "crucible_source", 60, 100);
@@ -218,6 +249,7 @@ bool test_hud_owner_path() {
         for (const auto root : {source, other}) {
             fixture.set_bounds(root, 16, 16);
             const auto icon = fixture.add(root, movie, "icon");
+            fixture.set_bounds(icon, 12, 12);
             fixture.add(icon, movie, "cta");
             const auto static_icon = fixture.add(icon, movie, "iconStatic");
             Fixture::put(static_icon, 0x58, static_cast<uint16_t>(root == source ? 3 : 5));
@@ -229,6 +261,12 @@ bool test_hud_owner_path() {
             fixture.add(three, movie, "innerFill");
         }
         const auto swap = fixture.add(scene.parent, movie, "swapEquipment", 120, 100);
+        const auto equipped_weapon = fixture.add(scene.parent, movie, "equippedWeapon");
+        const auto ammo_icon = fixture.add(fixture.add(equipped_weapon, movie, "ammoIcon"), movie, "image");
+        Fixture::put(e, 0x258, equipped_weapon);
+        Fixture::put(ammo_icon, 0x20, int32_t{-831019681});
+        Fixture::put(ammo_icon, 0x60, uintptr_t{13});
+        fixture.set_bounds(ammo_icon, 10, 10);
         const auto backer = fixture.add(swap, movie, "backer");
         const auto swap_cta = fixture.add(swap, movie, "cta");
         const auto swap_arrow = fixture.add(swap, movie, "arrow");
@@ -248,16 +286,40 @@ bool test_hud_owner_path() {
         Fixture::put(reinterpret_cast<uintptr_t>(scene.hammer.data()), 0x18, other);
         Fixture::put(reinterpret_cast<uintptr_t>(scene.quickuse.data()), 0x18, scene.primary);
         Fixture::put(reinterpret_cast<uintptr_t>(scene.quickuse.data()), 0x1f0, donor);
-        Fixture::put(reinterpret_cast<uintptr_t>(scene.secondary.data()), 0x18, scene.adjacent);
         Fixture::put(reinterpret_cast<uintptr_t>(scene.flame.data()), 0x18, scene.flame_root);
+        Fixture::put(reinterpret_cast<uintptr_t>(scene.bfg.data()), 0x18, scene.bfg_root);
         Fixture::put(e, 0x1e8, reinterpret_cast<uintptr_t>(scene.crucible.data()));
         Fixture::put(e, 0x1f8, reinterpret_cast<uintptr_t>(scene.hammer.data()));
         Fixture::put(e, 0x1d0, reinterpret_cast<uintptr_t>(scene.quickuse.data()));
-        Fixture::put(e, 0x1d8, reinterpret_cast<uintptr_t>(scene.secondary.data()));
-        Fixture::put(e, 0x1f0, reinterpret_cast<uintptr_t>(scene.flame.data()));
+        Fixture::put(e, 0x1d8, reinterpret_cast<uintptr_t>(scene.flame.data()));
+        Fixture::put(e, 0x1f0, reinterpret_cast<uintptr_t>(scene.bfg.data()));
     };
     build(first, 1);
     build(rebuilt, 2);
+    const auto scaled_parent = fixture.make(0, 4);
+    const auto scaled_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(scaled_parent)->transform.data());
+    Fixture::put(scaled_transform, 0x4, 0.001f);
+    Fixture::put(scaled_transform, 0x8, 0.001f);
+    hud::Point scaled_stage{}, scaled_local{};
+    const bool scaled_inverse = hud::affine_to(scaled_parent, 0, 4, {10, 20}, scaled_stage) &&
+        hud::from_space(scaled_parent, 0, 4, scaled_stage, scaled_local) &&
+        std::fabs(scaled_local.x - 10) < 0.001f &&
+        std::fabs(scaled_local.y - 20) < 0.001f;
+    const auto local_parent = fixture.make(0, 5);
+    const auto local_root = fixture.make(local_parent, 5, 2700, 1150);
+    fixture.set_bounds(local_root, 147.8618f, 120.246f);
+    const auto local_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(local_root)->transform.data());
+    Fixture::put(local_transform, 0x4, 0.001f);
+    Fixture::put(local_transform, 0x8, 0.001f);
+    hud::NativePosition local_saved{};
+    hud::Point local_center{};
+    hud::Rect local_stage_bounds{};
+    const bool local_projection = hud::remember_native(local_saved, local_root, 5, 1) &&
+        hud::native_center(local_saved, 0, local_center) &&
+        hud::bounds(local_root, 0, local_stage_bounds) &&
+        std::fabs(local_center.x - 2700) < 0.01f &&
+        std::fabs(local_center.y - 1150) < 0.01f &&
+        std::fabs(hud::center(local_stage_bounds).x - 2700) < 0.01f;
     const auto first_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(first.primary)->transform.data());
     Fixture::put(first_transform, 0x4, 2.0f);
     Fixture::put(first_transform, 0x8, 1.5f);
@@ -277,7 +339,7 @@ bool test_hud_owner_path() {
     Fixture::put(rebuilt_parent_transform, 0x8, 0.8f);
     Fixture::put(rebuilt_parent_transform, 0xc, 0.2f);
     Fixture::put(rebuilt_parent_transform, 0x10, 0.1f);
-    for (const auto root : {rebuilt.primary, rebuilt.adjacent, rebuilt.flame_root,
+    for (const auto root : {rebuilt.primary, rebuilt.flame_root,
             Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.crucible.data()), 0x18),
             Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.hammer.data()), 0x18)})
         fixture.set_bounds(root, 16, 16);
@@ -340,10 +402,19 @@ bool test_hud_owner_path() {
         auto result = initial(request); execute(request, result, model);
         return result.outcome == SC_SPECIAL_OUTCOME_OK;
     };
+    const auto observe_selected = [&](uint32_t selected) {
+        model_facts.native_selected = static_cast<uint8_t>(selected);
+        request.kind = SC_SPECIAL_OBSERVE;
+        auto result = initial(request); execute(request, result, model);
+        return result.outcome == SC_SPECIAL_OUTCOME_OK;
+    };
     constexpr uint32_t known = SC_SPECIAL_REFILL_CONNECTED | SC_SPECIAL_REFILL_AUTHORITATIVE |
         SC_SPECIAL_REFILL_BALANCE_KNOWN;
-    bool ok = affine_ok && old_guard_blocks_b && warmup_refused &&
-        response.outcome == SC_SPECIAL_OUTCOME_OK && publish(3, known);
+    hud::Rect bfg_bounds{};
+    bool ok = affine_ok && scaled_inverse && local_projection &&
+         !hud::raw_bounds(first.bfg_root, bfg_bounds) &&
+         old_guard_blocks_b && warmup_refused &&
+         response.outcome == SC_SPECIAL_OUTCOME_OK && publish(3, known);
     hud_element_setup_detour(a);
     ok &= challenge_element.load() == a;
     const auto before_invalid = fixture.lookups;
@@ -364,16 +435,21 @@ bool test_hud_owner_path() {
     ok &= hud_thread != route_thread.load() && fixture.find(first.parent, "apAmmoRefill") != 0;
     weapon_hud_update_detour(b, 0);
     const auto refill = fixture.find(first.parent, "apAmmoRefill");
+    const auto ammo_glyph = fixture.find(first.parent, "apAmmoGlyph");
     const auto arrow = fixture.find(first.parent, "apSpecialSwitch");
     const auto pips = fixture.find(refill, "pips");
     const auto three = fixture.find(pips, "pips3");
-    ok &= refill && arrow && fixture.clips.at(refill)->visible &&
+    ok &= refill && ammo_glyph && arrow && fixture.clips.at(refill)->visible &&
+        fixture.clips.at(ammo_glyph)->visible &&
         Fixture::get<uint16_t>(three, 0x58) == 4 &&
         Fixture::get<uint16_t>(refill, 0x58) == 1 &&
+        Fixture::get<uintptr_t>(ammo_glyph, 0x60) == 9 &&
+        fixture.last_material_clip == ammo_glyph &&
+        fixture.material_name == "art/ui/icons/ammo/bullets" &&
         fixture.find(first.parent, "apAmmoRefillBind") == 0;
     const auto stage_center = [&](uintptr_t clip) {
         hud::Rect rect{};
-        hud::bounds(clip, rect);
+        hud::bounds(clip, 0, rect);
         return hud::center(rect);
     };
     const auto close_to = [](float a, float b) { return std::fabs(a - b) < 0.02f; };
@@ -382,15 +458,24 @@ bool test_hud_owner_path() {
     const auto arrow_leaf = fixture.find(arrow, "arrow");
     const auto arrow_backer = fixture.find(arrow, "backer");
     const auto native_arrow = fixture.find(first_swap, "arrow");
-    ok &= close_to(stage_center(crucible_source).x, 40) &&
-        close_to(stage_center(hammer_source).x, 40) &&
-        close_to(stage_center(arrow_leaf).x, 60) &&
+    ok &= close_to(stage_center(crucible_source).x, 49.76f) &&
+        close_to(stage_center(hammer_source).x, 49.76f) &&
+        close_to(stage_center(arrow_leaf).x, 64.88f) &&
         close_to(stage_center(first.flame_root).x, 80) &&
         close_to(stage_center(first.primary).x, 100) &&
         close_to(stage_center(native_arrow).x, 120) &&
-        close_to(stage_center(refill).x, 140) &&
+        close_to(stage_center(refill).x, 135.12f) &&
+        close_to(stage_center(ammo_glyph).x, 135.12f) &&
         !fixture.clips.at(arrow_backer)->visible &&
         fixture.clips.at(arrow_leaf)->visible && fixture.clips.at(native_arrow)->visible;
+    fixture.set_bounds(hammer_source, 0, 16);
+    update_on_hud(b);
+    ok &= fixture.clips.at(arrow)->visible &&
+        close_to(stage_center(crucible_source).x, 49.76f) &&
+        close_to(stage_center(arrow_leaf).x, 64.88f);
+    fixture.set_bounds(hammer_source, 16, 16);
+    update_on_hud(b);
+    ok &= close_to(stage_center(hammer_source).x, 49.76f);
     ok &= weapon_info_element.load() == b && challenge_element.load() == a;
     const auto clips_before = fixture.clones;
     hud::keycap_ready = true;
@@ -400,24 +485,30 @@ bool test_hud_owner_path() {
     ok &= refill_bind && toggle_bind && fixture.clones > clips_before;
     ok &= fixture.clips.at(fixture.find(fixture.find(refill_bind, "kbm"), "txtVal"))->text == "F9";
     ok &= fixture.clips.at(fixture.find(fixture.find(toggle_bind, "kbm"), "txtVal"))->text == "F10";
-    ok &= close_to(stage_center(refill_bind).x, 142.5f) &&
-        close_to(stage_center(toggle_bind).x, 62.5f) &&
-        stage_center(refill_bind).y < stage_center(refill).y &&
-        stage_center(toggle_bind).y < stage_center(arrow_leaf).y;
-    hud::Rect special_rect{}, ap_arrow_rect{}, f10_rect{}, flame_rect{}, ammo_rect{},
+    const auto f9_kbm = fixture.find(refill_bind, "kbm");
+    const auto f10_kbm = fixture.find(toggle_bind, "kbm");
+    ok &= close_to(stage_center(f9_kbm).x, stage_center(refill).x) &&
+        close_to(stage_center(f10_kbm).x, stage_center(arrow_leaf).x) &&
+        stage_center(f9_kbm).y < stage_center(refill).y &&
+        stage_center(f10_kbm).y < stage_center(arrow_leaf).y;
+    hud::Rect special_rect{}, ap_arrow_rect{}, f10_rect{}, flame_rect{}, ammo_rect{}, refill_rect{},
               native_arrow_rect{}, f9_rect{};
-    hud::bounds(crucible_source, special_rect);
-    hud::bounds(arrow_leaf, ap_arrow_rect);
-    hud::bounds(toggle_bind, f10_rect);
-    hud::bounds(first.flame_root, flame_rect);
-    hud::bounds(first.ammo_panel, ammo_rect);
-    hud::bounds(native_arrow, native_arrow_rect);
-    hud::bounds(refill_bind, f9_rect);
+    hud::bounds(crucible_source, 0, special_rect);
+    hud::bounds(arrow_leaf, 0, ap_arrow_rect);
+    hud::bounds(f10_kbm, 0, f10_rect);
+    hud::bounds(first.flame_root, 0, flame_rect);
+    hud::bounds(first.ammo_panel, 0, ammo_rect);
+    hud::bounds(refill, 0, refill_rect);
+    hud::bounds(native_arrow, 0, native_arrow_rect);
+    hud::bounds(f9_kbm, 0, f9_rect);
     ok &= special_rect.br.x < ap_arrow_rect.tl.x &&
         ap_arrow_rect.br.x < flame_rect.tl.x &&
-        f10_rect.br.x < flame_rect.tl.x &&
+        f10_rect.br.y < flame_rect.tl.y &&
         f10_rect.br.y < ammo_rect.tl.y &&
-        native_arrow_rect.br.x < f9_rect.tl.x;
+        native_arrow_rect.br.x < f9_rect.tl.x &&
+        close_to(refill_rect.tl.x - native_arrow_rect.br.x, 4.0f) &&
+        close_to(f10_rect.br.x - f10_rect.tl.x, 28.0f) &&
+        close_to(f9_rect.br.x - f9_rect.tl.x, 22.0f);
     const auto f9_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(refill_bind)->transform.data());
     const auto f10_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(toggle_bind)->transform.data());
     const auto arrow_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(arrow)->transform.data());
@@ -434,6 +525,8 @@ bool test_hud_owner_path() {
     const auto clones_stable = fixture.clones, frames_stable = fixture.frames;
     const auto visibility_stable = fixture.visibility, positions_stable = fixture.positions;
     const auto text_stable = fixture.text_writes, material_stable = fixture.materials;
+    const auto layout_sequence = hud_trace.snapshot().stages[
+        static_cast<size_t>(save::BStage::profile_prepare)].sequence;
     std::atomic<int> next_worker{0};
     DWORD hud_thread_one = 0, hud_thread_two = 0;
     std::thread hud_one([&] {
@@ -455,18 +548,49 @@ bool test_hud_owner_path() {
     ok &= fixture.clones == clones_stable && fixture.frames == frames_stable &&
         fixture.visibility == visibility_stable && fixture.positions == positions_stable &&
         fixture.text_writes == text_stable && fixture.materials == material_stable &&
-        close_to(stage_center(crucible_source).x, 40) && close_to(stage_center(hammer_source).x, 40);
+        close_to(stage_center(crucible_source).x, 49.76f) && close_to(stage_center(hammer_source).x, 49.76f) &&
+        hud_trace.snapshot().stages[
+            static_cast<size_t>(save::BStage::profile_prepare)].sequence == layout_sequence;
+    fixture.set_bounds(crucible_source, 0, 16);
+    ok &= observe_selected(SC_SPECIAL_WEAPON_HAMMER);
+    update_on_hud(b);
+    ok &= fixture.clips.at(arrow)->visible && fixture.clips.at(toggle_bind)->visible &&
+        close_to(stage_center(arrow_leaf).x, 64.88f) &&
+        close_to(stage_center(fixture.find(toggle_bind, "kbm")).x, 64.88f) &&
+        close_to(stage_center(hammer_source).x, 49.76f) &&
+        Fixture::get<uintptr_t>(ammo_glyph, 0x60) == 9;
+    fixture.set_bounds(crucible_source, 16, 16);
+    ok &= observe_selected(SC_SPECIAL_WEAPON_CRUCIBLE);
+    update_on_hud(b);
+    ok &= close_to(stage_center(crucible_source).x, 49.76f) &&
+        close_to(stage_center(arrow_leaf).x, 64.88f) &&
+        Fixture::get<uintptr_t>(ammo_glyph, 0x60) == 9;
+    fixture.set_bounds(crucible_source, 0, 16);
+    update_on_hud(b);
+    const auto missing_active_layout = hud_trace.snapshot().stages[
+        static_cast<size_t>(save::BStage::profile_prepare)];
+    ok &= !fixture.clips.at(arrow)->visible && !fixture.clips.at(toggle_bind)->visible;
+    ok &= std::strcmp(missing_active_layout.predicate,
+        "switch_active_special_bounds_missing") == 0;
+    fixture.set_bounds(crucible_source, 16, 16);
+    update_on_hud(b);
+    ok &= fixture.clips.at(arrow)->visible && fixture.clips.at(toggle_bind)->visible;
+    const auto donor_kbm = fixture.find(first_donor, "kbm");
+    fixture.set_bounds(donor_kbm, 0, 4);
+    update_on_hud(b);
+    ok &= !fixture.clips.at(refill_bind)->visible && !fixture.clips.at(toggle_bind)->visible;
+    fixture.set_bounds(donor_kbm, 22, 4, 6, -22);
+    update_on_hud(b);
+    ok &= fixture.clips.at(refill_bind)->visible && fixture.clips.at(toggle_bind)->visible;
     const auto refill_icon = fixture.find(fixture.find(refill, "icon"), "iconStatic");
     const auto arrow_cta = fixture.find(arrow, "cta");
     const auto nested_arrow_cta = fixture.find(fixture.find(arrow, "icon"), "cta");
-    const auto f9_kbm = fixture.find(refill_bind, "kbm");
-    const auto f10_kbm = fixture.find(toggle_bind, "kbm");
     Fixture::put(refill, 0x5c, uint16_t{7});
     Fixture::put(pips, 0x58, uint16_t{2});
     Fixture::put(three, 0x5c, uint16_t{8});
     Fixture::put(arrow, 0x50, uint8_t{1});
     Fixture::put(f9_kbm, 0x50, uint8_t{1});
-    Fixture::put(refill_icon, 0x60, uintptr_t{11});
+    Fixture::put(ammo_glyph, 0x60, uintptr_t{11});
     Fixture::put(refill_icon, 0x58, uint16_t{7});
     const auto refill_small = fixture.find(fixture.find(refill, "icon"), "iconSmall");
     fixture.set_visible(refill_small, true);
@@ -478,8 +602,9 @@ bool test_hud_owner_path() {
         Fixture::get<uint16_t>(three, 0x5c) == 0 &&
         Fixture::get<uint8_t>(arrow, 0x50) == 0 &&
         Fixture::get<uint8_t>(f9_kbm, 0x50) == 0 &&
-        Fixture::get<uintptr_t>(refill_icon, 0x60) == 9 &&
-        Fixture::get<uint16_t>(refill_icon, 0x58) == 1 &&
+        Fixture::get<uintptr_t>(ammo_glyph, 0x60) == 9 &&
+        Fixture::get<uint16_t>(refill_icon, 0x58) == 7 &&
+        !fixture.clips.at(refill_icon)->visible &&
         !fixture.clips.at(refill_small)->visible &&
         !fixture.clips.at(arrow_cta)->visible &&
         !fixture.clips.at(nested_arrow_cta)->visible && fixture.clips.at(refill)->visible;
@@ -536,7 +661,8 @@ bool test_hud_owner_path() {
     const auto clones_before_partial = fixture.clones;
     fixture.children.erase({refill_icon_parent, "iconStatic"});
     update_on_hud(b);
-    ok &= !fixture.clips.at(refill)->visible && !fixture.clips.at(refill_bind)->visible;
+    ok &= fixture.clips.at(refill)->visible && fixture.clips.at(refill_bind)->visible &&
+        fixture.clips.at(ammo_glyph)->visible;
     fixture.children[{refill_icon_parent, "iconStatic"}] = refill_icon;
     update_on_hud(b);
     ok &= fixture.clips.at(refill)->visible && fixture.clips.at(refill_bind)->visible &&
@@ -553,7 +679,7 @@ bool test_hud_owner_path() {
     fixture.children[{hammer_source, "icon"}] = hammer_icon;
     update_on_hud(b);
     ok &= fixture.clips.at(refill)->visible && fixture.clips.at(arrow)->visible &&
-        close_to(stage_center(crucible_source).x, 40) && close_to(stage_center(hammer_source).x, 40);
+        close_to(stage_center(crucible_source).x, 49.76f) && close_to(stage_center(hammer_source).x, 49.76f);
     Fixture::put(b, 0x209, uint8_t{0});
     update_on_hud(b);
     fixture.set_visible(refill, true);
@@ -563,7 +689,7 @@ bool test_hud_owner_path() {
     Fixture::put(b, 0x209, uint8_t{1});
     update_on_hud(b);
     ok &= fixture.clips.at(refill)->visible && fixture.clips.at(refill_bind)->visible &&
-        close_to(stage_center(crucible_source).x, 40) && close_to(stage_center(hammer_source).x, 40);
+        close_to(stage_center(crucible_source).x, 49.76f) && close_to(stage_center(hammer_source).x, 49.76f);
     test_selection_read = [](uintptr_t, SnapshotFacts& facts) { facts = model_facts; return true; };
     test_earnings_append = [](uintptr_t owner, const char*, const char*, uint32_t, uint64_t, uint32_t) {
         ++active->earnings; active->earnings_owner = owner;
@@ -594,7 +720,7 @@ bool test_hud_owner_path() {
     update_on_hud(missing.address());
     const auto missing_output = hud_trace.snapshot().stages[static_cast<size_t>(save::BStage::profile_output)];
     ok &= std::strcmp(missing_output.predicate, "switch_source_missing") == 0 &&
-        fixture.find(missing.parent, "apAmmoRefillBind") != 0 &&
+        fixture.find(missing.parent, "apAmmoRefillBind") == 0 &&
         fixture.find(missing.parent, "apSpecialSwitch") == 0 &&
         fixture.find(missing.parent, "apSpecialToggleBind") == 0;
     update_on_hud(b2);
@@ -605,13 +731,13 @@ bool test_hud_owner_path() {
     ok &= weapon_info_element.load() == b2 && fixture.find(rebuilt.parent, "apAmmoRefill") != 0 &&
         fixture.find(rebuilt.parent, "apAmmoRefillBind") != 0 &&
         fixture.find(first.parent, "apAmmoRefill") == refill &&
-        close_to(stage_center(rebuilt_crucible).x, 68) &&
-        close_to(stage_center(rebuilt_hammer).x, 68) &&
-        close_to(stage_center(fixture.find(rebuilt_arrow, "arrow")).x, 92) &&
+        close_to(stage_center(rebuilt_crucible).x, 80.0f) &&
+        close_to(stage_center(rebuilt_hammer).x, 80.0f) &&
+        close_to(stage_center(fixture.find(rebuilt_arrow, "arrow")).x, 98.0f) &&
         close_to(stage_center(rebuilt.flame_root).x, 116) &&
         close_to(stage_center(rebuilt.primary).x, 140) &&
         close_to(stage_center(fixture.find(rebuilt_swap, "arrow")).x, 164) &&
-        close_to(stage_center(rebuilt_refill).x, 188);
+        close_to(stage_center(rebuilt_refill).x, 182.0f);
     const auto rebuilt_clones = fixture.clones, rebuilt_frames = fixture.frames;
     update_on_hud(b2);
     ok &= fixture.clones == rebuilt_clones && fixture.frames == rebuilt_frames;
@@ -623,6 +749,119 @@ bool test_hud_owner_path() {
     ok &= Fixture::get<uint16_t>(pending_refill, 0x58) == 2 &&
         Fixture::get<uint16_t>(pending_three, 0x58) == 3 &&
         fixture.clips.at(pending_pips)->visible;
+    Scene foreign{};
+    build(foreign, 6);
+    const auto foreign_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(foreign.parent)->transform.data());
+    Fixture::put(foreign_transform, 0x4, 2.0f);
+    Fixture::put(foreign_transform, 0x8, 1.5f);
+    Fixture::put(foreign_transform, 0x14, 1600.0f);
+    Fixture::put(foreign_transform, 0x18, 500.0f);
+    Fixture::put(reinterpret_cast<uintptr_t>(fixture.clips.at(foreign.primary)->transform.data()),
+                 0x14, 94.0f); // Native adjacent equipment bounds can overlap.
+    const auto foreign_crucible = fixture.find(foreign.parent, "crucible_source");
+    const auto foreign_hammer = fixture.find(foreign.parent, "hammer_source");
+    const auto foreign_swap = fixture.find(foreign.parent, "swapEquipment");
+    Fixture::put(reinterpret_cast<uintptr_t>(fixture.clips.at(foreign_swap)->transform.data()),
+                 0x18, 106.0f);
+    fixture.set_bounds(foreign_hammer, 18, 16, 3, 0);
+    fixture.render(foreign.parent);
+    const auto foreign_ancestor = fixture.make(0, 7);
+    Fixture::put(foreign.parent, 0x40, foreign_ancestor);
+    const auto foreign_native_arrow = fixture.find(foreign_swap, "arrow");
+    hud::Rect foreign_raw{}, foreign_arrow_bounds{}, foreign_refill_bounds{};
+    hud::Point rejected_stage{};
+    ok &= hud::raw_bounds(foreign_native_arrow, foreign_raw) &&
+        !hud::affine_to(foreign_native_arrow, 0, 6, {0, 0}, rejected_stage) &&
+        hud::bounds(foreign_native_arrow, foreign.parent, foreign_arrow_bounds);
+    configured_keys.store(VK_F9 | (VK_F10 << 8));
+    fixture.unrendered_clones = true;
+    update_on_hud(foreign.address());
+    fixture.render(foreign.parent);
+    update_on_hud(foreign.address());
+    const auto foreign_refill = fixture.find(foreign.parent, "apAmmoRefill");
+    const auto foreign_arrow = fixture.find(foreign.parent, "apSpecialSwitch");
+    const auto foreign_f9 = fixture.find(foreign.parent, "apAmmoRefillBind");
+    const auto foreign_f10 = fixture.find(foreign.parent, "apSpecialToggleBind");
+    ok &= foreign_refill && foreign_arrow && foreign_f9 && foreign_f10 &&
+        fixture.clips.at(foreign_refill)->visible && fixture.clips.at(foreign_arrow)->visible &&
+        fixture.clips.at(foreign_f9)->visible && fixture.clips.at(foreign_f10)->visible &&
+        hud::bounds(foreign_refill, foreign.parent, foreign_refill_bounds) &&
+        close_to(foreign_refill_bounds.tl.x - foreign_arrow_bounds.br.x, 3.0f) &&
+        fixture.clips.at(fixture.find(fixture.find(foreign_f9, "kbm"), "txtVal"))->text == "F9" &&
+        fixture.clips.at(fixture.find(fixture.find(foreign_f10, "kbm"), "txtVal"))->text == "F10";
+    const auto rendered_center = [&](uintptr_t clip) {
+        const auto lo = Fixture::get<hud::Point>(clip, 0xa8), hi = Fixture::get<hud::Point>(clip, 0xb0);
+        return hud::Point{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f};
+    };
+    bool retail_cache_ok = true;
+    const auto foreign_glyph = fixture.find(foreign.parent, "apAmmoGlyph");
+    hud::Rect glyph_before{};
+    fixture.render(foreign.parent);
+    ok &= hud::raw_bounds(foreign_glyph, glyph_before);
+    fixture.set_bounds(foreign_crucible, 28, 16);
+    fixture.set_bounds(foreign_hammer, 28, 16, 3, 0);
+    fixture.set_bounds(foreign.flame_root, 28, 16);
+    fixture.render(foreign.parent);
+    for (unsigned toggle = 0; toggle < 6; ++toggle) {
+        if (toggle == 3) {
+            fixture.set_bounds(foreign_hammer, 28, 16, -2, 0);
+            fixture.render(foreign.parent);
+        }
+        retail_cache_ok &= observe_selected(toggle % 2 ? SC_SPECIAL_WEAPON_CRUCIBLE : SC_SPECIAL_WEAPON_HAMMER);
+        update_on_hud(foreign.address()); // Cache still describes the preceding render.
+        fixture.render(foreign.parent);
+        update_on_hud(foreign.address());
+        fixture.render(foreign.parent);
+        const auto selected = toggle % 2 ? foreign_crucible : foreign_hammer;
+        hud::Rect glyph_after{};
+        retail_cache_ok &= hud::raw_bounds(foreign_glyph, glyph_after) &&
+            close_to(glyph_after.br.x - glyph_after.tl.x, glyph_before.br.x - glyph_before.tl.x) &&
+            close_to(glyph_after.br.y - glyph_after.tl.y, glyph_before.br.y - glyph_before.tl.y) &&
+            Fixture::get<uintptr_t>(foreign_glyph, 0x60) == 9;
+        retail_cache_ok &= close_to(rendered_center(selected).x, 1688) &&
+            close_to(rendered_center(selected).y, 650) &&
+            close_to(rendered_center(fixture.find(foreign_arrow, "arrow")).x, 1724) &&
+            close_to(rendered_center(foreign_refill).x, 1876) &&
+            close_to(rendered_center(fixture.find(foreign_f9, "kbm")).x, 1876) &&
+            close_to(rendered_center(fixture.find(foreign_f10, "kbm")).x, 1724) &&
+            close_to(rendered_center(fixture.find(foreign_f9, "kbm")).y,
+                     rendered_center(fixture.find(foreign_f10, "kbm")).y) &&
+            fixture.clips.at(foreign_refill)->visible && fixture.clips.at(foreign_f9)->visible &&
+            fixture.clips.at(foreign_f10)->visible &&
+            fixture.clips.at(fixture.find(foreign.parent, "apAmmoGlyph"))->visible;
+    }
+    fixture.set_bounds(fixture.find(foreign.flame_root, "icon"), 32, 12);
+    fixture.render(foreign.parent);
+    update_on_hud(foreign.address());
+    retail_cache_ok &= fixture.clips.at(foreign_arrow)->visible &&
+        fixture.clips.at(foreign_refill)->visible &&
+        fixture.clips.at(foreign_f9)->visible && fixture.clips.at(foreign_f10)->visible;
+    if (!retail_cache_ok) std::fprintf(stderr, "HUD rendered-cache / F10 fixed-slot regression failed\n");
+    ok &= retail_cache_ok;
+    Scene hammer_start{};
+    build(hammer_start, 8);
+    const auto dormant_crucible = fixture.find(hammer_start.parent, "crucible_source");
+    const auto starting_hammer = fixture.find(hammer_start.parent, "hammer_source");
+    fixture.set_bounds(dormant_crucible, 0, 0);
+    fixture.set_bounds(fixture.find(dormant_crucible, "icon"), 0, 0);
+    fixture.children.erase({starting_hammer, "pips"});
+    fixture.render(hammer_start.parent);
+    ok &= observe_selected(SC_SPECIAL_WEAPON_HAMMER);
+    update_on_hud(hammer_start.address());
+    fixture.render(hammer_start.parent);
+    update_on_hud(hammer_start.address());
+    const auto startup_refill = fixture.find(hammer_start.parent, "apAmmoRefill");
+    const auto startup_glyph = fixture.find(hammer_start.parent, "apAmmoGlyph");
+    bool startup_ok = startup_refill && startup_glyph &&
+        fixture.find(fixture.find(startup_refill, "pips"), "pips3") &&
+        Fixture::get<uintptr_t>(startup_glyph, 0x60) == 9;
+    for (const auto name : {"apAmmoRefill", "apAmmoGlyph", "apSpecialSwitch",
+                            "apAmmoRefillBind", "apSpecialToggleBind"}) {
+        const auto clip = fixture.find(hammer_start.parent, name);
+        startup_ok &= clip && fixture.clips.at(clip)->visible;
+    }
+    if (!startup_ok) std::fprintf(stderr, "HUD Hammer startup / unrendered Crucible regression failed\n");
+    ok &= startup_ok;
     hud_element_setup_detour(b);
     present_selection(42);
     ok &= challenge_element.load() == 0 && fixture.earnings == 1;
@@ -639,7 +878,7 @@ bool test_hud_owner_path() {
         admission.facts[12].value == 1;
     ok &= std::strcmp(clips.predicate, "hud_native_keycaps_applied") == 0 &&
         clips.status == save::BStatus::succeeded &&
-        std::strcmp(clips.facts[13].key, "pixels_observed") == 0 && clips.facts[13].value == 0;
+        std::strcmp(clips.facts[15].key, "pixels_observed") == 0 && clips.facts[15].value == 0;
     ok &= std::strcmp(presentations.predicate, "hud_projection_clips_applied") == 0 &&
         presentations.status == save::BStatus::succeeded && presentations.facts[5].value >= 1 &&
         presentations.facts[11].value == 0;
