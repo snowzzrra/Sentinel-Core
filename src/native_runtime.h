@@ -9,6 +9,9 @@ sc_automap_result automap_request(const sc_automap_request&);
 void prepare(const Snapshot& identity);
 void start(const engine::Binding& binding, const Snapshot& identity, HANDLE stop);
 uint64_t observation_stamp();
+#ifdef SC_NATIVE_TESTING
+void test_observation_epoch(uint64_t value);
+#endif
 void publish_context(const sc_context_snapshot& snapshot, uint64_t before);
 sc_native_snapshot inspect(uint64_t after_event = 0);
 sc_diagnostic_result submit(const sc_diagnostic_request& request, sc_diagnostic_detail* detail = nullptr);

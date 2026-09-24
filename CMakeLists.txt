@@ -123,7 +123,7 @@ add_executable(sentinel_campaign_tests tests/save_campaign.cpp tests/save_profil
 target_include_directories(sentinel_campaign_tests PRIVATE tests)
 target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)
 target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_native_model sentinel_minhook sentinel_save_session sentinel_protocol)
-foreach(case hud_source mastery_masks)
+foreach(case hud_source hud_owner mastery_masks)
   add_test(NAME phase8_${case}_fixture COMMAND sentinel_campaign_tests create "${CMAKE_BINARY_DIR}/campaign-fixtures" 1 ${case})
 endforeach()
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures")

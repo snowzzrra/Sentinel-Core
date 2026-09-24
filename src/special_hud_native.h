@@ -151,18 +151,25 @@ GraphicsSource graphics_source(uintptr_t element) {
     return s;
 }
 
-bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsigned keys, uint64_t epoch) {
+bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSource& context,
+             unsigned keys, uint64_t epoch) {
     if (!graphics_ready) {
         refuse("hud_graphics_unavailable", element, 0, epoch);
         return false;
     }
-    if (!valid) return false;
-    const auto context = graphics_source(element);
     const auto source = context.source, parent = context.parent, movie = context.movie;
     const auto primary_root = context.primary_root, secondary_root = context.secondary_root;
     const auto crucible_root = context.crucible_root, quickuse = context.quickuse;
     const auto widget = context.widget, hammer = context.hammer;
     if (!source) {
+        struct Refusal { uintptr_t element, widget, hammer, primary, secondary, parent, movie; uint64_t epoch; };
+        static thread_local Refusal last{};
+        const Refusal current{element, widget, hammer, primary_root, secondary_root, parent, movie, epoch};
+        if (last.element == current.element && last.widget == current.widget &&
+            last.hammer == current.hammer && last.primary == current.primary &&
+            last.secondary == current.secondary && last.parent == current.parent &&
+            last.movie == current.movie && last.epoch == current.epoch) return false;
+        last = current;
         hud_trace.record(save::BStage::profile_output, save::BStatus::refused,
             "hud_graphics_source_unavailable", 0,
             {{"owner", element}, {"widget", widget}, {"hammer", hammer},
@@ -174,6 +181,41 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
              {"hammer_movie_match", context.hammer_movie_match}, {"generation", epoch}});
         return false;
     }
+    struct RenderState {
+        uintptr_t element = 0, parent = 0, movie = 0, source = 0, primary = 0, secondary = 0;
+        uint64_t epoch = 0, revision = 0, request_revision = 0;
+        uint32_t balance = UINT32_MAX, flags = 0, request_state = 0, selected = 0;
+        uint32_t owns_crucible = 0, owns_hammer = 0;
+        unsigned keys = 0;
+        bool namespace_valid = false, keycaps = false, element_visible = false, presented = false;
+        bool graphics_applied = false, fully_applied = false;
+        uint64_t retry_at = 0;
+    };
+    static thread_local RenderState rendered{};
+    const RenderState current{element, parent, movie, source, primary_root, secondary_root,
+        epoch, owner.revision, owner.request_revision, owner.refill_balance, owner.refill_flags,
+        owner.refill_request_state, owner.selected, owner.owns_crucible, owner.owns_hammer,
+        keys, owner.namespace_valid, keycap_ready,
+        *reinterpret_cast<uint8_t*>(element + 0x209) != 0};
+    const bool same = rendered.element == current.element && rendered.parent == current.parent &&
+        rendered.movie == current.movie && rendered.source == current.source &&
+        rendered.primary == current.primary && rendered.secondary == current.secondary &&
+        rendered.epoch == current.epoch && rendered.revision == current.revision &&
+        rendered.request_revision == current.request_revision && rendered.balance == current.balance &&
+        rendered.flags == current.flags && rendered.request_state == current.request_state &&
+        rendered.selected == current.selected && rendered.owns_crucible == current.owns_crucible &&
+        rendered.owns_hammer == current.owns_hammer && rendered.namespace_valid == current.namespace_valid &&
+        rendered.keys == current.keys &&
+        rendered.keycaps == current.keycaps && rendered.element_visible == current.element_visible;
+    const bool switch_expected = owner.owns_crucible && owner.owns_hammer &&
+        route_ready.load(std::memory_order_acquire) && ((keys >> 8) & 0xff);
+    const bool clips_present = child(parent, "apAmmoRefill") &&
+        (!switch_expected || child(parent, "apSpecialSwitch")) &&
+        (!keycap_ready || !rendered.fully_applied || (child(parent, "apAmmoRefillBind") &&
+                           (!switch_expected || child(parent, "apSpecialToggleBind"))));
+    if (same && rendered.presented &&
+        clips_present && (!keycap_ready || rendered.fully_applied || GetTickCount64() < rendered.retry_at))
+        return rendered.graphics_applied;
     Point anchor{}, adjacent{};
     if (!position(primary_root, anchor) || !position(secondary_root, adjacent)) {
         refuse("hud_swf_context_unavailable", element, source, epoch); return false;
@@ -191,7 +233,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     if (!visible) {
         hud_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
             "hud_invalidated", 0, {{"owner", element}, {"parent", parent}, {"generation", epoch},
-                                   {"snapshot_valid", owner.namespace_valid}, {"context_valid", valid}});
+                                   {"snapshot_valid", owner.namespace_valid}, {"context_valid", 1}});
         return false;
     }
     const Point step{anchor.x - adjacent.x, anchor.y - adjacent.y};
@@ -217,8 +259,6 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
         "hud_bound", 0, {{"owner", element}, {"parent", parent}, {"layout_source", source},
                          {"generation", epoch}, {"created", created}, {"refill", refill}});
     const bool known = owner.refill_balance <= 3;
-    const bool pending = owner.refill_request_state == SC_SPECIAL_REFILL_PENDING;
-    const bool connected = (owner.refill_flags & SC_SPECIAL_REFILL_CONNECTED) != 0;
     swf.frame(refill, owner.refill_enabled ? 1 : 2);
     // The equipment clone carries its donor CTA; the AP labels are separate clips.
     if (const auto cta = child(child(refill, "icon"), "cta")) swf.visible(cta, false, true);
@@ -269,6 +309,9 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     swf.visible(refill, true, true);
     const bool graphics_applied = known && *reinterpret_cast<uint16_t*>(three + 0x58) == desired;
     if (!keycap_ready) {
+        rendered = current;
+        rendered.presented = true;
+        rendered.graphics_applied = graphics_applied;
         hud_trace.record(save::BStage::profile_output, save::BStatus::pending,
             "hud_graphics_applied_keycaps_unavailable", 0,
             {{"owner", element}, {"parent", parent}, {"graphics_ready", graphics_ready},
@@ -281,6 +324,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     if (!donor_root || *reinterpret_cast<uintptr_t*>(donor_root + 0x40) != parent ||
         !donor || !key_offset(donor, donor_root, movie, donor_offset) ||
         !child(donor, "kbm") || !child(donor, "joy")) {
+        rendered = current;
+        rendered.presented = true;
+        rendered.graphics_applied = graphics_applied;
+        rendered.retry_at = GetTickCount64() + 1000;
         refuse("hud_native_keycap_donor_unavailable", element, donor, epoch);
         return graphics_applied;
     }
@@ -315,20 +362,27 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, bool valid, unsig
     if (!bind_key(refill_bind, "apAmmoRefillBind", ammo_key, refill_at, binds.ammo_key) ||
         !bind_key(special_bind, "apSpecialToggleBind", toggle_key,
                   {anchor.x + offset.x, anchor.y + offset.y}, binds.toggle_key)) {
+        rendered = current;
+        rendered.presented = true;
+        rendered.graphics_applied = graphics_applied;
+        rendered.retry_at = GetTickCount64() + 1000;
         refuse("hud_native_keycap_bind_failed", element, donor, epoch);
         return graphics_applied;
     }
     binds.refill = refill_bind;
     binds.special = special_bind;
+    rendered = current;
+    rendered.presented = true;
+    rendered.graphics_applied = graphics_applied;
+    rendered.fully_applied = true;
     hud_trace.record(save::BStage::profile_output, save::BStatus::pending,
         "hud_native_keycaps_applied", 0,
         {{"owner", element}, {"parent", parent}, {"generation", epoch}, {"created", created},
-         {"snapshot_valid", owner.namespace_valid}, {"policy", owner.selected}, {"balance", owner.refill_balance},
-         {"pending", pending}, {"connected", connected}, {"binds", keys},
-         {"snapshot_revision", owner.revision}, {"request_revision", owner.request_revision},
+         {"policy", owner.selected}, {"balance", owner.refill_balance}, {"binds", keys},
+         {"snapshot_revision", owner.revision},
          {"pip_frame_before", frame_before}, {"pip_frame_after", *reinterpret_cast<uint16_t*>(three + 0x58)},
-         {"native_crucible_170", *reinterpret_cast<int32_t*>(element + 0x170)}, {"pixels_observed", 0},
-         {"switch_source", arrow_source}, {"switch_clip", special_arrow}});
+         {"refill_clip", refill}, {"switch_clip", special_arrow},
+         {"refill_bind_clip", refill_bind}, {"toggle_bind_clip", special_bind}});
     return graphics_applied;
 }
 } // namespace hud

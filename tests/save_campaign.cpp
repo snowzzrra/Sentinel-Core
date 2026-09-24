@@ -239,9 +239,11 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
-    if (defect==L"hud_source" || defect==L"mastery_masks") {
-        CHECK(defect==L"hud_source" ? sentinel::special::test_hud_source() : sentinel::arsenal::test_mastery_masks());
-        std::puts("PASS native HUD source / Q3 mask fixture"); return 0;
+    if (defect==L"hud_source" || defect==L"hud_owner" || defect==L"mastery_masks") {
+        CHECK(defect==L"hud_source" ? sentinel::special::test_hud_source() :
+              defect==L"hud_owner" ? sentinel::special::test_hud_owner_path() :
+              sentinel::arsenal::test_mastery_masks());
+        std::puts("PASS native HUD / Q3 fixture"); return 0;
     }
     const bool profile_lifecycle=defect==L"profile_lifecycle";
     const bool native_read=defect.rfind(L"native_read",0)==0;

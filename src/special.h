@@ -91,6 +91,7 @@ void reset_session(const char* namespace_id);
 
 #ifdef SC_NATIVE_TESTING
 bool test_hud_source();
+bool test_hud_owner_path();
 void use_fixture(Calls, const char* namespace_id);
 #endif
 }

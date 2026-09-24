@@ -12,6 +12,12 @@
 #include <intrin.h>
 #include <cmath>
 #include <type_traits>
+#ifdef SC_NATIVE_TESTING
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+#endif
 
 namespace sentinel::special {
 namespace {
@@ -105,6 +111,8 @@ constexpr uint32_t rva_perk_typeinfo = 0x1631f90;        // returns idDeclTypeIn
 constexpr uint32_t rva_current_weapon = 0xbd7740;        // current idWeapon of the player
 constexpr uint32_t rva_hud_earnings = 0xeea070;          // idHUD_MissionChallenge earnings append
 constexpr uint32_t rva_hud_element_setup = 0xeeac40;     // idHUD_MissionChallenge construction
+constexpr uint32_t rva_mission_challenge_vtable = 0x2cff930;
+constexpr uint32_t rva_weapon_info_vtable = 0x2d03798;
 constexpr uint32_t rva_fast_travel_checkpoint_render = 0xf4a100;
 constexpr uint32_t rva_fast_travel_widget_resolve = 0x1599920;
 constexpr uint32_t rva_player = 0x69af70;
@@ -191,9 +199,24 @@ WeaponHudUpdate original_weapon_hud_update = nullptr;
 WeaponHudProject project_crucible_hud = nullptr, project_hammer_hud = nullptr;
 std::atomic<unsigned> configured_keys{VK_F9};
 #include "special_hud_native.h"
-std::atomic<uintptr_t> hud_element{0};
-std::atomic<uintptr_t> hud_element_vtable{0};
-std::atomic<uintptr_t> hud_player{0};
+std::atomic<uintptr_t> challenge_element{0};
+std::atomic<uintptr_t> challenge_player{0};
+std::atomic<uintptr_t> weapon_info_element{0};
+std::atomic<uintptr_t> weapon_info_player{0};
+std::atomic<uint64_t> weapon_info_epoch{0};
+uintptr_t player(void*);
+#ifdef SC_NATIVE_TESTING
+uintptr_t test_hud_player = 0;
+EarningsAppend test_earnings_append = nullptr;
+bool (*test_selection_read)(uintptr_t, SnapshotFacts&) = nullptr;
+#endif
+
+uintptr_t current_hud_player() {
+#ifdef SC_NATIVE_TESTING
+    if (test_hud_player) return test_hud_player;
+#endif
+    return player(nullptr);
+}
 
 void project_special_hud(uintptr_t element) {
     const auto epoch = route_epoch.load(std::memory_order_acquire);
@@ -210,11 +233,47 @@ void project_special_hud(uintptr_t element) {
     __try {
         const bool valid = context_valid && epoch == native::observation_stamp();
         const auto current_player = route_player.load(std::memory_order_acquire);
+        const auto observed_vtable = element ? *reinterpret_cast<uintptr_t*>(element) : 0;
         const bool hud_valid = valid && element && current_player &&
-            element == hud_element.load(std::memory_order_acquire) &&
-            hud_player.load(std::memory_order_acquire) == current_player &&
-            *reinterpret_cast<uintptr_t*>(element) == hud_element_vtable.load(std::memory_order_acquire);
-        hud::project(element, owner, hud_valid, configured_keys.load(std::memory_order_relaxed), epoch);
+            route_thread == GetCurrentThreadId() && current_hud_player() == current_player &&
+            observed_vtable == image_base + rva_weapon_info_vtable;
+        hud::GraphicsSource graphics{};
+        if (hud_valid) graphics = hud::graphics_source(element);
+        const unsigned keys = configured_keys.load(std::memory_order_relaxed);
+        const uint32_t refusal = !valid ? 1 : !current_player || current_hud_player() != current_player ? 2 :
+            route_thread != GetCurrentThreadId() ? 3 :
+            observed_vtable != image_base + rva_weapon_info_vtable ? 4 : 0;
+        static thread_local std::array<uint64_t, 12> previous_context{};
+        const std::array<uint64_t, 12> context{element, observed_vtable, current_player, epoch,
+            graphics.parent, graphics.movie, owner.revision, owner.request_revision, keys,
+            refusal, hud::graphics_ready, hud::keycap_ready};
+        if (context != previous_context) {
+            previous_context = context;
+            hud_trace.record(save::BStage::profile_output,
+                refusal ? save::BStatus::refused : save::BStatus::entered,
+                "hud_weapon_info_update_context", 0,
+                {{"expected_vtable", image_base + rva_weapon_info_vtable},
+                 {"observed_vtable", observed_vtable}, {"weapon_info_owner", element},
+                 {"mission_challenge_owner", challenge_element.load(std::memory_order_acquire)},
+                 {"player", current_player}, {"parent", graphics.parent}, {"movie", graphics.movie},
+                 {"observation_epoch", epoch},
+                 {"lifecycle_generation", native::inspect(0).scope.lifecycle_generation},
+                 {"graphics_ready", hud::graphics_ready}, {"keycap_ready", hud::keycap_ready},
+                 {"balance_known", owner.refill_balance <= 3}, {"balance", owner.refill_balance},
+                 {"revision", owner.revision}, {"keys", keys}, {"refusal", refusal}});
+        }
+        if (hud_valid) {
+            weapon_info_element.store(element, std::memory_order_release);
+            weapon_info_player.store(current_player, std::memory_order_release);
+            weapon_info_epoch.store(epoch, std::memory_order_release);
+            hud::project(element, owner, graphics, keys, epoch);
+        }
+        else {
+            weapon_info_element.store(0, std::memory_order_release);
+            weapon_info_player.store(0, std::memory_order_release);
+            weapon_info_epoch.store(0, std::memory_order_release);
+        }
+        if (observed_vtable != image_base + rva_weapon_info_vtable) return;
         if (!*reinterpret_cast<uintptr_t*>(element + 0x1e8) ||
             !*reinterpret_cast<uintptr_t*>(element + 0x1f8)) return;
         if (!valid || (!crucible && !hammer)) {
@@ -505,17 +564,25 @@ bool equip_item(uintptr_t p, uintptr_t item) {
 }
 
 char hud_element_setup_detour(uintptr_t element) {
-    hud_player.store(player(nullptr), std::memory_order_release);
+    const char result = original_hud_element_setup ? original_hud_element_setup(element) : 0;
     if (element) {
         __try {
             const auto vtable = *reinterpret_cast<uintptr_t*>(element);
-            if (vtable) {
-                hud_element_vtable.store(vtable, std::memory_order_release);
-                hud_element.store(element, std::memory_order_release);
+            if (vtable == image_base + rva_mission_challenge_vtable) {
+                challenge_player.store(current_hud_player(), std::memory_order_release);
+                challenge_element.store(element, std::memory_order_release);
+                hud_trace.record(save::BStage::profile_output, save::BStatus::entered,
+                    "hud_earnings_setup", 0,
+                    {{"mission_challenge_owner", element}, {"expected_vtable", image_base + rva_mission_challenge_vtable},
+                     {"observed_vtable", vtable}, {"player", challenge_player.load(std::memory_order_acquire)}});
+            }
+            else {
+                challenge_element.store(0, std::memory_order_release);
+                challenge_player.store(0, std::memory_order_release);
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
-    return original_hud_element_setup ? original_hud_element_setup(element) : 0;
+    return result;
 }
 
 // The weapon actually in hands before a physical acquisition; separate from the
@@ -886,31 +953,45 @@ __declspec(noinline) void hammer_attack_detour(uintptr_t p) {
 }
 }
 
-bool present(void*, uintptr_t player, uint32_t, uint32_t, uint32_t) {
+bool present(void*, uintptr_t p, uint32_t, uint32_t, uint32_t) {
+    // WeaponInfo Update owns the SWF tree; a publish is visible there on its next callback.
     const auto epoch = route_epoch.load(std::memory_order_acquire);
-    if (!player || !epoch || epoch != native::observation_stamp() ||
-        route_player.load(std::memory_order_acquire) != player ||
-        hud_player.load(std::memory_order_acquire) != player) return false;
-    const auto element = hud_element.load(std::memory_order_acquire);
-    if (!element) return false;
-    char namespace_id[65];
-    AcquireSRWLockShared(&route_namespace_lock);
-    std::memcpy(namespace_id, route_namespace, sizeof(namespace_id));
-    ReleaseSRWLockShared(&route_namespace_lock);
-    const auto owner = hud_owner_snapshot(namespace_id);
-    __try {
-        if (*reinterpret_cast<uintptr_t*>(element) != hud_element_vtable.load(std::memory_order_acquire))
-            return false;
-        return hud::project(element, owner, true, configured_keys.load(std::memory_order_relaxed), epoch);
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    if (p && p == route_player.load(std::memory_order_acquire) && epoch == native::observation_stamp()) {
+        static thread_local uint64_t last_revision = UINT64_MAX, last_epoch = 0;
+        static thread_local uintptr_t last_player = 0;
+        char namespace_id[65];
+        AcquireSRWLockShared(&route_namespace_lock);
+        std::memcpy(namespace_id, route_namespace, sizeof(namespace_id));
+        ReleaseSRWLockShared(&route_namespace_lock);
+        const auto owner = hud_owner_snapshot(namespace_id);
+        if (owner.revision != last_revision || epoch != last_epoch || p != last_player) {
+            last_revision = owner.revision;
+            last_epoch = epoch;
+            last_player = p;
+            hud_trace.record(save::BStage::profile_output, save::BStatus::pending,
+                "hud_presentation_request", 0,
+                {{"weapon_info_owner", weapon_info_element.load(std::memory_order_acquire)},
+                 {"mission_challenge_owner", challenge_element.load(std::memory_order_acquire)},
+                 {"player", p}, {"observation_epoch", epoch},
+                 {"lifecycle_generation", native::inspect(0).scope.lifecycle_generation},
+                 {"graphics_ready", hud::graphics_ready}, {"keycap_ready", hud::keycap_ready},
+                 {"balance_known", owner.refill_balance <= 3}, {"balance", owner.refill_balance},
+                 {"revision", owner.revision}, {"keys", configured_keys.load(std::memory_order_relaxed)}});
+        }
+    }
+    return false;
 }
 
 void present_selection(uintptr_t p) {
     SnapshotFacts facts{};
-    if (!read(nullptr, p, facts) || !facts.selection_policy || !facts.native_selected) return;
-    const auto element = hud_element.load(std::memory_order_acquire);
-    const auto table = hud_element_vtable.load(std::memory_order_acquire);
-    if (!element || !table || hud_player.load(std::memory_order_acquire) != p) return;
+#ifdef SC_NATIVE_TESTING
+    const bool observed = test_selection_read ? test_selection_read(p, facts) : read(nullptr, p, facts);
+#else
+    const bool observed = read(nullptr, p, facts);
+#endif
+    if (!observed || !facts.selection_policy || !facts.native_selected) return;
+    const auto element = challenge_element.load(std::memory_order_acquire);
+    if (!element || challenge_player.load(std::memory_order_acquire) != p) return;
     char text[96]{}, resource[32] = "RESOURCE UNKNOWN", key[32]{};
     const auto vk = static_cast<int>((configured_keys.load(std::memory_order_relaxed) >> 8) & 0xff);
     if (facts.native_crucible && facts.native_hammer && vk) {
@@ -924,7 +1005,7 @@ void present_selection(uintptr_t p) {
     if (facts.native_selected == SC_SPECIAL_WEAPON_CRUCIBLE && (facts.known & SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE))
         std::snprintf(resource, sizeof(resource), "%u CHARGES", facts.crucible_charge);
     __try {
-        if (*reinterpret_cast<uintptr_t*>(element) != table) return;
+        if (*reinterpret_cast<uintptr_t*>(element) != image_base + rva_mission_challenge_vtable) return;
         if (facts.native_selected == SC_SPECIAL_WEAPON_HAMMER &&
             *reinterpret_cast<uintptr_t*>(p + equipment_upgrade_offset + 0x2b8)) {
             const auto meter = reinterpret_cast<float(*)(uintptr_t)>(image_base + 0x1643260)(p + equipment_upgrade_offset);
@@ -932,7 +1013,11 @@ void present_selection(uintptr_t p) {
                 std::snprintf(resource, sizeof(resource), "%.0f%% METER", static_cast<double>(meter * 100));
         }
         std::snprintf(text, sizeof(text), "%s%s", resource, key);
-        reinterpret_cast<EarningsAppend>(image_base + rva_hud_earnings)(element,
+        auto append = reinterpret_cast<EarningsAppend>(image_base + rva_hud_earnings);
+#ifdef SC_NATIVE_TESTING
+        if (test_earnings_append) append = test_earnings_append;
+#endif
+        append(element,
             facts.native_selected == SC_SPECIAL_WEAPON_CRUCIBLE ? "CRUCIBLE SELECTED" : "HAMMER SELECTED", text, 3000, 0, 0);
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -1001,9 +1086,11 @@ void refresh_input_config() {
 void poll_input(uintptr_t p, bool safe_gameplay) {
     sample_use_attempt(p, safe_gameplay);
     if (!safe_gameplay || !p) {
-        hud_element.store(0, std::memory_order_release);
-        hud_element_vtable.store(0, std::memory_order_release);
-        hud_player.store(0, std::memory_order_release);
+        challenge_element.store(0, std::memory_order_release);
+        challenge_player.store(0, std::memory_order_release);
+        weapon_info_element.store(0, std::memory_order_release);
+        weapon_info_player.store(0, std::memory_order_release);
+        weapon_info_epoch.store(0, std::memory_order_release);
     }
     route_epoch.store(0, std::memory_order_release);
     AcquireSRWLockExclusive(&route_namespace_lock);
@@ -1560,6 +1647,7 @@ bool test_hud_source() {
     hud::swf = original;
     return a && b && c && d && e && f;
 }
+#include "special_hud_owner_fixture.h"
 #endif
 
 } // namespace sentinel::special
