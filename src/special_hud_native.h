@@ -522,6 +522,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const auto inactive_root = owner.selected == SC_SPECIAL_WEAPON_HAMMER ? context.crucible_root : context.hammer_root;
     Rect equipment_bounds{}, arrow_bounds{}, source_bounds{}, flame_bounds{}, active_bounds{};
     Rect source_icon_bounds{}, flame_icon_bounds{}, active_icon_bounds{};
+    Rect flame_plate_bounds{}, active_plate_bounds{};
     const auto source_icon = child(layout_source, "icon");
     const auto flame_icon = child(flame_root, "icon");
     const auto active_icon = child(active_root, "icon");
@@ -542,6 +543,14 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     Point original_special{};
     const bool active_stage_forward = active_cached && active_icon_visual &&
         native_visual_center(active_position, active_icon, parent, original_special);
+    const auto flame_plate = child(flame_root, "background");
+    const bool flame_plate_visual = bounds(flame_plate, parent, flame_plate_bounds);
+    const auto active_plate = owner.selected == SC_SPECIAL_WEAPON_CRUCIBLE ?
+        child(active_root, "background") : uintptr_t{0};
+    Point original_plate{};
+    const bool crucible_plate_visual = flame_plate_visual &&
+        bounds(active_plate, parent, active_plate_bounds) && active_cached &&
+        native_visual_center(active_position, active_plate, parent, original_plate);
     auto& source_position = layout_source == context.hammer_root ? hammer_position : crucible_position;
     Point original_source{};
     const bool source_cached = source_visual &&
@@ -550,12 +559,24 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const float arrow_width = arrow_bounds.br.x - arrow_bounds.tl.x;
     const float native_gap = std::max(1.0f, arrow_width * 0.12f);
     const float icon_baseline_y = center(flame_icon_bounds).y;
+    const auto render_matrix = reinterpret_cast<const float*>(parent + 0x90);
+    const float render_yy = render_matrix[1];
+    const float render_yx = render_matrix[3];
+    const float render_row_slope = std::isfinite(render_yy) && std::isfinite(render_yx) &&
+        std::fabs(render_yy) > 0.000001f ? render_yx / render_yy : 0.0f;
     const float arrow_right = flame_icon_bounds.tl.x - native_gap;
     const float arrow_left = arrow_right - arrow_width;
-    const Point toggle_target{(arrow_left + arrow_right) * 0.5f, icon_baseline_y};
+    const auto native_arrow_center = center(arrow_bounds);
+    const float toggle_x = (arrow_left + arrow_right) * 0.5f;
+    const Point toggle_target{toggle_x, native_arrow_center.y +
+        (native_arrow_center.x - toggle_x) * render_row_slope};
     const float active_icon_width = active_icon_bounds.br.x - active_icon_bounds.tl.x;
-    const Point special_target{arrow_left - native_gap - active_icon_width * 0.5f,
-                               icon_baseline_y};
+    const float special_x = arrow_left - native_gap - active_icon_width * 0.5f;
+    const Point special_target{special_x,
+        crucible_plate_visual ? original_special.y + center(flame_plate_bounds).y -
+            original_plate.y + (center(flame_plate_bounds).x -
+            (special_x + original_plate.x - original_special.x)) * render_row_slope :
+            icon_baseline_y};
     const float source_icon_width = source_icon_bounds.br.x - source_icon_bounds.tl.x;
     const Point refill_icon_target{arrow_bounds.br.x + native_gap + source_icon_width * 0.5f,
                                    icon_baseline_y};
@@ -565,7 +586,16 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         visual_offset(layout_source, source_icon, parent, movie, source_icon_offset);
     if (refill_offsets)
         refill_target = {refill_icon_target.x + refill_offset.x - source_icon_offset.x,
-                         refill_icon_target.y + refill_offset.y - source_icon_offset.y};
+                          refill_icon_target.y + refill_offset.y - source_icon_offset.y};
+    Rect refill_plate_bounds{};
+    Point refill_plate_offset{};
+    const auto refill_plate = child(layout_source, "background");
+    const bool visible_plate = bounds(refill_plate, parent, refill_plate_bounds) &&
+        visual_offset(layout_source, refill_plate, parent, movie, refill_plate_offset);
+    if (!visible_plate) {
+        refill_plate_bounds = source_icon_bounds;
+        refill_plate_offset = source_icon_offset;
+    }
     const bool native_layout = native_arrow_visual && flame_visual &&
         flame_icon_visual && active_stage_forward && source_cached && source_icon_visual &&
         std::isfinite(native_gap) && native_gap > 0;
@@ -637,10 +667,22 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                 if (bounds(inactive_icon, parent, inactive_bounds) &&
                     remember_native(inactive_position, inactive_root, movie, epoch) &&
                     native_visual_center(inactive_position, inactive_icon, parent, inactive_center)) {
-                    const Point inactive_target{
-                        arrow_left - native_gap -
-                            (inactive_bounds.br.x - inactive_bounds.tl.x) * 0.5f,
-                        icon_baseline_y};
+                    Rect inactive_plate_bounds{};
+                    Point inactive_plate_center{};
+                    const auto inactive_plate = inactive_root == context.crucible_root ?
+                        child(inactive_root, "background") : uintptr_t{0};
+                    const bool inactive_crucible_plate = flame_plate_visual &&
+                        bounds(inactive_plate, parent, inactive_plate_bounds) &&
+                        native_visual_center(inactive_position, inactive_plate, parent,
+                                             inactive_plate_center);
+                    const float inactive_x = arrow_left - native_gap -
+                        (inactive_bounds.br.x - inactive_bounds.tl.x) * 0.5f;
+                    const Point inactive_target{inactive_x,
+                        inactive_crucible_plate ? inactive_center.y +
+                            center(flame_plate_bounds).y - inactive_plate_center.y +
+                            (center(flame_plate_bounds).x - (inactive_x +
+                            inactive_plate_center.x - inactive_center.x)) * render_row_slope :
+                            icon_baseline_y};
                     if (!move_native(inactive_position, parent,
                             {inactive_target.x - inactive_center.x,
                              inactive_target.y - inactive_center.y}))
@@ -744,20 +786,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     if (*reinterpret_cast<uintptr_t*>(native_ammo + 0x30) != movie)
         return fail_refill("hud_ammo_leaf_movie_mismatch", native_ammo);
     const auto ammo_icon_path_hash = *reinterpret_cast<int32_t*>(native_ammo + 0x20);
-    Rect native_ammo_bounds{};
-    if (!bounds(native_ammo, parent, native_ammo_bounds) || !source_icon_visual)
-        return fail_refill("hud_ammo_leaf_bounds_missing", native_ammo);
     if (!ammo_glyph) ammo_glyph = clone(native_ammo, parent, "apAmmoGlyph", created);
     if (!ammo_glyph) return fail_refill("hud_ammo_leaf_clone_failed", native_ammo);
-    const float glyph_width = native_ammo_bounds.br.x - native_ammo_bounds.tl.x;
-    const float glyph_height = native_ammo_bounds.br.y - native_ammo_bounds.tl.y;
-    const float icon_width = source_icon_width;
-    const float icon_height = source_icon_bounds.br.y - source_icon_bounds.tl.y;
-    const float width_scale = icon_width / glyph_width;
-    const float height_scale = icon_height / glyph_height;
-    const float glyph_scale = std::min(width_scale, height_scale) * 0.8f;
-    if (!std::isfinite(glyph_scale) || glyph_scale <= 0)
-        return fail_refill("hud_ammo_leaf_scale_invalid", native_ammo);
     struct MaterialAttempt {
         uintptr_t owner, parent, clip, icon, material;
         uint64_t epoch, retry_at;
@@ -794,6 +824,42 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     if (!attempt.applied) {
         return fail_refill("hud_ammo_material_unavailable", ammo_glyph);
     }
+    Point ammo_origin{}, ammo_right{}, ammo_down{};
+    if (!affine_to(native_ammo, parent, movie, {0, 0}, ammo_origin) ||
+        !affine_to(native_ammo, parent, movie, {1, 0}, ammo_right) ||
+        !affine_to(native_ammo, parent, movie, {0, 1}, ammo_down))
+        return fail_refill("hud_ammo_leaf_transform_failed", native_ammo);
+    const Point ammo_x{ammo_right.x - ammo_origin.x, ammo_right.y - ammo_origin.y};
+    const Point ammo_y{ammo_down.x - ammo_origin.x, ammo_down.y - ammo_origin.y};
+    const float material_width = static_cast<float>(*reinterpret_cast<uint16_t*>(ammo_glyph + 0x68));
+    const float material_height = static_cast<float>(*reinterpret_cast<uint16_t*>(ammo_glyph + 0x6a));
+    const float projected_width = std::fabs(ammo_x.x) * material_width +
+        std::fabs(ammo_y.x) * material_height;
+    const float projected_height = std::fabs(ammo_x.y) * material_width +
+        std::fabs(ammo_y.y) * material_height;
+    if (!(projected_width > 0 && projected_height > 0))
+        return fail_refill("hud_ammo_leaf_scale_invalid", ammo_glyph);
+    const float plate_width = refill_plate_bounds.br.x - refill_plate_bounds.tl.x;
+    const float plate_height = refill_plate_bounds.br.y - refill_plate_bounds.tl.y;
+    float glyph_scale = std::min({1.0f, 0.6f * plate_width / projected_width,
+                                  0.6f * plate_height / projected_height});
+    Rect rendered_plate{};
+    if (raw_bounds(visible_plate ? refill_plate : source_icon, rendered_plate)) {
+        const Point stage_x{render_matrix[0] * ammo_x.x + render_matrix[2] * ammo_x.y,
+                            render_matrix[3] * ammo_x.x + render_matrix[1] * ammo_x.y};
+        const Point stage_y{render_matrix[0] * ammo_y.x + render_matrix[2] * ammo_y.y,
+                            render_matrix[3] * ammo_y.x + render_matrix[1] * ammo_y.y};
+        const float stage_width = std::fabs(stage_x.x) * material_width +
+            std::fabs(stage_y.x) * material_height;
+        const float stage_height = std::fabs(stage_x.y) * material_width +
+            std::fabs(stage_y.y) * material_height;
+        if (stage_width > 0 && stage_height > 0)
+            glyph_scale = std::min({glyph_scale,
+                0.6f * (rendered_plate.br.x - rendered_plate.tl.x) / stage_width,
+                0.6f * (rendered_plate.br.y - rendered_plate.tl.y) / stage_height});
+    }
+    if (!std::isfinite(glyph_scale) || glyph_scale <= 0)
+        return fail_refill("hud_ammo_leaf_scale_invalid", ammo_glyph);
     const auto pips = child(refill, "pips");
     if (!pips) return fail_refill("hud_pips_absent", refill);
     hold_frame(pips, 3);
@@ -807,10 +873,17 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     if (const auto fill = child(three, "innerFill")) swf.color(fill, palette);
     if (!place_visual(refill, layout_source, parent, movie, refill_target, refill_offset))
         return fail_refill("hud_refill_place_failed", refill);
-    Point glyph_offset{};
-    if (!visual_offset(native_ammo, native_ammo, parent, movie, glyph_offset))
-        return fail_refill("hud_ammo_leaf_transform_failed", native_ammo);
-    const Point glyph_target = refill_target;
+    Rect rendered_glyph{};
+    Point glyph_local_center{};
+    if (raw_bounds(ammo_glyph, rendered_glyph) &&
+        !unrender(ammo_glyph, center(rendered_glyph), glyph_local_center))
+        glyph_local_center = {};
+    const Point glyph_offset{ammo_x.x * glyph_local_center.x +
+                                 ammo_y.x * glyph_local_center.y,
+                             ammo_x.y * glyph_local_center.x +
+                                 ammo_y.y * glyph_local_center.y};
+    const Point glyph_target{refill_target.x - refill_offset.x + refill_plate_offset.x,
+                             refill_target.y - refill_offset.y + refill_plate_offset.y};
     if (!place_visual(ammo_glyph, native_ammo, parent, movie,
                       glyph_target, glyph_offset, glyph_scale))
         return fail_refill("hud_ammo_leaf_place_failed", ammo_glyph);
@@ -951,6 +1024,46 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     Rect f9_bounds{}, f10_bounds{};
     bounds(child(refill_bind, "kbm"), parent, f9_bounds);
     if (arrow_ready) bounds(child(special_bind, "kbm"), parent, f10_bounds);
+    Rect observed_special{}, observed_native_arrow{}, observed_ap_arrow{},
+         observed_refill{}, observed_glyph{}, observed_f9{}, observed_f10{};
+    if (raw_bounds(child(active_root, "background"), observed_special) &&
+        raw_bounds(native_arrow, observed_native_arrow) &&
+        raw_bounds(child(special_arrow, "arrow"), observed_ap_arrow) &&
+        raw_bounds(child(refill, "background"), observed_refill) &&
+        raw_bounds(ammo_glyph, observed_glyph) &&
+        raw_bounds(child(refill_bind, "kbm"), observed_f9) &&
+        raw_bounds(child(special_bind, "kbm"), observed_f10)) {
+        const int64_t readback[16]{
+            static_cast<int64_t>(element), static_cast<int64_t>(owner.selected),
+            trace_point(observed_special.tl), trace_point(observed_special.br),
+            trace_point(observed_native_arrow.tl), trace_point(observed_native_arrow.br),
+            trace_point(observed_ap_arrow.tl), trace_point(observed_ap_arrow.br),
+            trace_point(observed_refill.tl), trace_point(observed_refill.br),
+            trace_point(observed_glyph.tl), trace_point(observed_glyph.br),
+            trace_point(observed_f9.tl), trace_point(observed_f9.br),
+            trace_point(observed_f10.tl), trace_point(observed_f10.br)};
+        static int64_t last_readback[16]{};
+        static bool readback_recorded = false;
+        bool changed = false;
+        {
+            std::lock_guard lock(state_mutex);
+            changed = !readback_recorded || std::memcmp(last_readback, readback, sizeof(readback));
+            if (changed) {
+                std::memcpy(last_readback, readback, sizeof(readback));
+                readback_recorded = true;
+            }
+        }
+        if (changed) hud_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
+            "hud_visual_render_cache_readback", epoch,
+            {{"owner", readback[0]}, {"selected", readback[1]},
+             {"special_plate_tl", readback[2]}, {"special_plate_br", readback[3]},
+             {"native_arrow_tl", readback[4]}, {"native_arrow_br", readback[5]},
+             {"ap_arrow_tl", readback[6]}, {"ap_arrow_br", readback[7]},
+             {"refill_plate_tl", readback[8]}, {"refill_plate_br", readback[9]},
+             {"glyph_tl", readback[10]}, {"glyph_br", readback[11]},
+             {"f9_tl", readback[12]}, {"f9_br", readback[13]},
+             {"f10_tl", readback[14]}, {"f10_br", readback[15]}}, element);
+    }
     hud_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
         "hud_native_keycaps_applied", 0,
         {{"owner", element}, {"parent", parent}, {"generation", epoch},
