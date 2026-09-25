@@ -105,10 +105,9 @@ constexpr uint32_t rva_find_item = 0x1690660;            // idInventoryCollectio
 constexpr uint32_t rva_give_item = 0x1691cd0;            // idInventoryCollection::GiveItem(...)
 constexpr uint32_t rva_item_count = 0x398510;            // idInventoryCollection::Num()
 constexpr uint32_t rva_item_at = 0x1691450;              // idInventoryCollection::GetItem(index)
+constexpr uint32_t rva_unlock_perk = 0xfe2500;           // exact perk registration
+constexpr uint32_t rva_activate_perk = 0xfe19b0;         // exact perk activation
 constexpr uint32_t rva_active_perk = 0xfe37f0;           // exact active-perk reader
-constexpr uint32_t rva_loot_unwind_owner = 0xaa457a;      // unwind fragment of the 0xaa44f0 loot consumer
-constexpr uint32_t rva_loot_have_return = 0xaa46be;
-constexpr uint32_t rva_loot_not_return = 0xaa46de;
 constexpr uint32_t rva_perk_typeinfo = 0x1631f90;        // returns idDeclTypeInfo for perks
 constexpr uint32_t rva_current_weapon = 0xbd7740;        // current idWeapon of the player
 constexpr uint32_t rva_hud_earnings = 0xeea070;          // idHUD_MissionChallenge earnings append
@@ -129,8 +128,7 @@ using InputDown = bool(*)(uintptr_t, uint64_t);
 CrucibleResolver original_crucible_resolver = nullptr;
 InputDown original_input_down = nullptr;
 std::atomic<bool> route_ready{false};
-std::atomic<bool> native_perk_reader_ready{false};
-std::atomic<bool> hammer_loot_ready{false};
+std::atomic<bool> native_upgrade_ready{false};
 std::atomic<DWORD> route_thread{0};
 std::atomic<uintptr_t> route_player{0};
 char route_namespace[65]{};
@@ -188,8 +186,9 @@ using FindItem = uintptr_t(*)(uintptr_t, uintptr_t);
 using GiveItem = uintptr_t(*)(uintptr_t, uintptr_t, uintptr_t, int, uint8_t, uint8_t, uint8_t, uint8_t);
 using ItemCount = uint32_t(*)(uintptr_t);
 using ItemAt = uintptr_t(*)(uintptr_t, int);
+using UnlockPerk = void(*)(uintptr_t, uintptr_t, uint8_t, uint8_t, uintptr_t, uint8_t);
+using ActivatePerk = void(*)(uintptr_t, uintptr_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 using ActivePerk = uint8_t(*)(uintptr_t, uintptr_t);
-ActivePerk original_active_perk = nullptr;
 using CurrentWeapon = uintptr_t(*)(uintptr_t);
 using EarningsAppend = void(*)(uintptr_t, const char*, const char*, uint32_t, uint64_t, uint32_t);
 using HudElementSetup = char(*)(uintptr_t);
@@ -477,24 +476,6 @@ uint32_t policy_snapshot(uintptr_t p, PolicySnapshot& snapshot) {
     return snapshot.known ? 0 : 8;
 }
 
-__declspec(noinline) uint8_t active_perk_detour(uintptr_t component, uintptr_t perk_decl) {
-    const auto native = original_active_perk(component, perk_decl);
-    if (native || !hammer_loot_ready.load(std::memory_order_acquire)) return native;
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
-    if (caller != image_base + rva_loot_have_return && caller != image_base + rva_loot_not_return)
-        return native;
-    const auto path = decl_path(perk_decl);
-    if (!path || (std::strcmp(path, HAMMER_PERK_PATHS[0]) && std::strcmp(path, HAMMER_PERK_PATHS[1])))
-        return native;
-    if (component < perk_component_offset) return native;
-    const auto p = component - perk_component_offset;
-    PolicySnapshot snapshot{};
-    if (policy_snapshot(p, snapshot) || !snapshot.hammer) return native;
-    const auto owner = hud_owner_snapshot(snapshot.namespace_id);
-    return owner.namespace_valid && owner.owns_hammer &&
-        owner.hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED;
-}
-
 __declspec(noinline) bool crucible_resolver_detour(uintptr_t p) {
     const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
     PolicySnapshot snapshot{};
@@ -674,17 +655,10 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         }
         uintptr_t perk_decls[2]{};
         uint8_t effective_perks = 0;
-        if (native_perk_reader_ready.load(std::memory_order_acquire) &&
+        if (native_upgrade_ready.load(std::memory_order_acquire) &&
             hammer_perks(p, perk_decls, effective_perks)) {
             facts.known |= SC_SPECIAL_KNOWN_HAMMER_PERKS;
             facts.native_hammer_perks = effective_perks;
-        }
-        PolicySnapshot loot_policy{};
-        if (facts.native_hammer && hammer_loot_ready.load(std::memory_order_acquire) &&
-            !policy_snapshot(p, loot_policy) && loot_policy.hammer) {
-            const auto owner = hud_owner_snapshot(loot_policy.namespace_id);
-            facts.hammer_loot_projected = owner.namespace_valid && owner.owns_hammer &&
-                owner.hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED;
         }
 
         facts.held_weapon_decl = current_weapon_decl(p);
@@ -719,7 +693,10 @@ uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, 
         const auto inv = inventory_of(p);
         if (!inv) return 2;
         const bool upgraded = own_hammer && hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED;
-        if (upgraded && !hammer_loot_ready.load(std::memory_order_acquire)) return ERROR_NOT_SUPPORTED;
+        uintptr_t perk_decls[2]{};
+        uint8_t effective_perks = 0;
+        if (upgraded && (!native_upgrade_ready.load(std::memory_order_acquire) ||
+            !hammer_perks(p, perk_decls, effective_perks))) return ERROR_NOT_SUPPORTED;
         const auto before = held_weapon_snapshot(p, inv);
 
         uintptr_t decl = 0, item = 0;
@@ -727,11 +704,25 @@ uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, 
         if (own_crucible && !ensure_item(inv, p, CRUCIBLE_PATH, decl, item, mutated)) return 3;
         if (own_hammer && !ensure_item(inv, p, HAMMER_PATH, decl, item, mutated)) return 4;
 
+        bool perk_requested = false;
+        if (upgraded) {
+            const auto component = p + perk_component_offset;
+            const auto active = reinterpret_cast<ActivePerk>(image_base + rva_active_perk);
+            const auto unlock = reinterpret_cast<UnlockPerk>(image_base + rva_unlock_perk);
+            const auto activate = reinterpret_cast<ActivatePerk>(image_base + rva_activate_perk);
+            for (const auto perk_decl : perk_decls) {
+                if (active(component, perk_decl)) continue;
+                perk_requested = true;
+                unlock(component, perk_decl, 0, 0, 0, 0);
+                activate(component, perk_decl, 1, 0, 0, 0, 1);
+            }
+        }
+
         // An acquisition may intrinsically switch the active weapon. Restore the
         // exact prior weapon in hands, ordinary or Special, instead of inheriting
         // the acquisition; a prior item that cannot be freshly validated fails
         // closed instead of guessing.
-        if (mutated) {
+        if (mutated || perk_requested) {
             const auto decision = acquisition_restore(before.decl, before.item, current_weapon_decl(p));
             if (decision == AcquisitionRestore::fail_closed) return 6;
             if (decision == AcquisitionRestore::equip_prior && !equip_item(p, before.item)) return 6;
@@ -1465,17 +1456,14 @@ void install(const engine::Binding& binding, HANDLE stop) {
             "joint_route_install", 0, {{"created", created}, {"queued", queued}, {"status", status}, {"ready", installed}});
     }
 
-    // The loot consumer is optional; its signatures and hook cannot disable Special routing.
-    const Site loot_sites[] = {
+    // Upgrade writers and reader are qualified together; base Special routing stays independent.
+    const Site upgrade_sites[] = {
+        {rva_unlock_perk, "4885d20f84c903000044884c2420448844241848894c24085356415441564883"},
+        {rva_activate_perk, "44884c24204488442418488954241048894c2408555357415541564157488d6c"},
         {rva_active_perk, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
-        {0xaa46a6, "488b95600100004885d27414488d8e403b0000e832f1530084c00f840a030000"},
-        {0xaa46c6, "488b95680100004885d27414488d8e403b0000e812f1530084c00f85ea020000"},
     };
-    bool loot_valid = route_ready.load(std::memory_order_acquire);
-    if (!loot_valid)
-        installation_trace.record(save::BStage::special_toggle, save::BStatus::refused,
-            "hammer_loot_route_unavailable");
-    for (const auto& site : loot_sites) {
+    bool upgrade_valid = true;
+    for (const auto& site : upgrade_sites) {
         native::Target target{};
         target.address = image_base + site.offset;
         const auto hex = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
@@ -1486,37 +1474,15 @@ void install(const engine::Binding& binding, HANDLE stop) {
             IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0);
         const auto sample = section ? memory.copy(target.address, actual.data(), actual.size()) :
             engine::ReadResult{SC_REASON_READ_FAILED, ERROR_NOACCESS};
-        bool valid = section && !sample.reason && actual == target.bytes;
-        uint32_t owner_rva = 0;
-        if (valid && site.offset != rva_active_perk) {
-            DWORD64 unwind_base = 0;
-            const auto entry = RtlLookupFunctionEntry(target.address, &unwind_base, nullptr);
-            if (entry && unwind_base == image_base) owner_rva = entry->BeginAddress;
-            valid = owner_rva == rva_loot_unwind_owner;
-        }
-        if (site.offset == rva_active_perk)
-            native_perk_reader_ready.store(valid, std::memory_order_release);
+        const bool valid = section && !sample.reason && actual == target.bytes;
         installation_trace.record(save::BStage::special_toggle,
             valid ? save::BStatus::entered : save::BStatus::refused,
-            valid ? "hammer_loot_site_validated" : "hammer_loot_site_refused", 0,
+            valid ? "hammer_upgrade_site_validated" : "hammer_upgrade_site_refused", 0,
             {{"rva", site.offset}, {"section", section}, {"read_reason", sample.reason},
-             {"read_error", sample.error}, {"bytes_match", actual == target.bytes},
-              {"owner_rva", owner_rva}, {"expected_owner_rva", site.offset == rva_active_perk ? 0 : rva_loot_unwind_owner}});
-        loot_valid &= valid;
+             {"read_error", sample.error}, {"bytes_match", actual == target.bytes}});
+        upgrade_valid &= valid;
     }
-    if (loot_valid) {
-        const auto target = reinterpret_cast<void*>(image_base + rva_active_perk);
-        const auto created = MH_CreateHook(target, reinterpret_cast<void*>(active_perk_detour),
-            reinterpret_cast<void**>(&original_active_perk));
-        const auto enabled = created == MH_OK ? MH_EnableHook(target) : MH_UNKNOWN;
-        if (created == MH_OK && enabled != MH_OK) MH_RemoveHook(target);
-        hammer_loot_ready.store(enabled == MH_OK, std::memory_order_release);
-        installation_trace.record(save::BStage::special_toggle,
-            enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
-            "hammer_loot_install", 0,
-            {{"create_status", created}, {"enable_status", enabled},
-             {"route_ready", route_ready.load(std::memory_order_acquire)}});
-    }
+    native_upgrade_ready.store(upgrade_valid, std::memory_order_release);
 
     // Optional MissionChallenge toast capture is independent of gameplay hooks.
     const auto deadline = GetTickCount64() + 10000;

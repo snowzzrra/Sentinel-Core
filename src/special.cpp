@@ -51,6 +51,10 @@ uint32_t tier_for(uint32_t native_hammer, uint32_t native_perks) {
     return native_perks >= 2 ? SC_SPECIAL_HAMMER_TIER_UPGRADED : SC_SPECIAL_HAMMER_TIER_BASE;
 }
 
+bool upgraded_effective(const SnapshotFacts& facts) {
+    return (facts.known & SC_SPECIAL_KNOWN_HAMMER_PERKS) && facts.native_hammer_perks == 2;
+}
+
 void adopt_native_locked(const SnapshotFacts& facts) {
     if (facts.known & SC_SPECIAL_KNOWN_CRUCIBLE)
         shared_state.owns_crucible |= (facts.native_crucible != 0);
@@ -74,8 +78,6 @@ void fill_facts(const SnapshotFacts& before, const State& state, sc_special_resu
     out.native_crucible = before.native_crucible;
     out.native_hammer = before.native_hammer;
     out.native_hammer_perks = before.native_hammer_perks;
-    out.flags &= ~SC_SPECIAL_FLAG_HAMMER_LOOT_PROJECTED;
-    if (before.hammer_loot_projected) out.flags |= SC_SPECIAL_FLAG_HAMMER_LOOT_PROJECTED;
     out.native_selected = before.native_selected;
     if (before.selection_policy) out.flags |= SC_SPECIAL_FLAG_SELECTION_POLICY;
     out.native_state_known = before.known;
@@ -233,7 +235,7 @@ void bind_run_state_if_needed(uintptr_t player, uint64_t generation) {
         (desired.owns_crucible && (!(after.known & SC_SPECIAL_KNOWN_CRUCIBLE) || !after.native_crucible)) ||
         (desired.owns_hammer && (!(after.known & SC_SPECIAL_KNOWN_HAMMER) || !after.native_hammer)) ||
         (desired.hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED &&
-         !after.hammer_loot_projected)) return;
+         !upgraded_effective(after))) return;
     AcquireSRWLockExclusive(&state_lock);
     last_bound_player = player;
     last_bound_generation = generation;
@@ -273,7 +275,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
         const bool native_satisfied =
             (!desired_crucible || ((before.known & SC_SPECIAL_KNOWN_CRUCIBLE) && before.native_crucible)) &&
             (!desired_hammer || ((before.known & SC_SPECIAL_KNOWN_HAMMER) && before.native_hammer &&
-             (desired_tier < SC_SPECIAL_HAMMER_TIER_UPGRADED || before.hammer_loot_projected)));
+             (desired_tier < SC_SPECIAL_HAMMER_TIER_UPGRADED || upgraded_effective(before))));
         if (native_satisfied) {
             fill_facts(before, shared_state, out);
             ReleaseSRWLockExclusive(&state_lock);
@@ -316,7 +318,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             (desired_crucible && (!(after.known & SC_SPECIAL_KNOWN_CRUCIBLE) || !after.native_crucible)) ||
             (desired_hammer && (!(after.known & SC_SPECIAL_KNOWN_HAMMER) || !after.native_hammer)) ||
             (desired_hammer && desired_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED &&
-             !after.hammer_loot_projected)) {
+             !upgraded_effective(after))) {
             out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return;
         }
         out.outcome = SC_SPECIAL_OUTCOME_OK;
