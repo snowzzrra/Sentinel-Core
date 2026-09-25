@@ -108,6 +108,7 @@ constexpr uint32_t rva_item_at = 0x1691450;              // idInventoryCollectio
 constexpr uint32_t rva_unlock_perk = 0xfe2500;           // exact perk registration
 constexpr uint32_t rva_activate_perk = 0xfe19b0;         // exact perk activation
 constexpr uint32_t rva_active_perk = 0xfe37f0;           // exact active-perk reader
+constexpr uint32_t rva_loot_spawn_amount = 0xaa44f0;     // Hammer loot amount terminal
 constexpr uint32_t rva_perk_typeinfo = 0x1631f90;        // returns idDeclTypeInfo for perks
 constexpr uint32_t rva_current_weapon = 0xbd7740;        // current idWeapon of the player
 constexpr uint32_t rva_hud_earnings = 0xeea070;          // idHUD_MissionChallenge earnings append
@@ -172,6 +173,25 @@ constexpr uint32_t rva_equipment_upgrade_vtable = 0x2e04ba0;
 constexpr uintptr_t perk_component_offset = 0x3b40;
 constexpr uintptr_t equipment_upgrade_offset = 0x26568;
 constexpr uintptr_t hammer_loot_modifier_offset = 0x2d0;
+using LootSpawnAmount = uint64_t(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+                                    float*, float*, uint32_t, uint32_t, uint32_t);
+LootSpawnAmount original_loot_spawn_amount = nullptr;
+bool hammer_loot_modifier(uintptr_t p, bool& effective);
+
+uint64_t loot_spawn_amount_detour(uintptr_t loot, uintptr_t declaration, uintptr_t player,
+                                  uintptr_t target, float* amount, float* scale,
+                                  uint32_t arg7, uint32_t trigger, uint32_t mode) {
+    const auto result = original_loot_spawn_amount(
+        loot, declaration, player, target, amount, scale, arg7, trigger, mode);
+    if (trigger >= 0x18 && trigger <= 0x1a && player && player == route_player.load(std::memory_order_relaxed)) {
+        bool modifier = false;
+        const bool qualified = hammer_loot_modifier(player, modifier);
+        record_use("hammer_loot_amount", result ? save::BStatus::succeeded : save::BStatus::refused,
+                   {{"trigger", trigger}, {"amount", result}, {"arg7", arg7},
+                    {"target", target != 0}, {"modifier_known", qualified}, {"modifier", modifier}});
+    }
+    return result;
+}
 
 const char* const CRUCIBLE_PATH = "weapon/player/crucible";
 const char* const HAMMER_PATH = "weapon/player/hammer";
@@ -1483,6 +1503,29 @@ void install(const engine::Binding& binding, HANDLE stop) {
         upgrade_valid &= valid;
     }
     native_upgrade_ready.store(upgrade_valid, std::memory_order_release);
+
+    // Optional terminal observation of the three Hammer loot drop types.
+    native::Target loot_target{};
+    loot_target.address = image_base + rva_loot_spawn_amount;
+    const char* loot_bytes = "488954241048894c24085556574881ecf0000000498bf9498bf0488bea4885d2";
+    const auto loot_digit = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
+    for (size_t n = 0; n < loot_target.bytes.size(); ++n)
+        loot_target.bytes[n] = static_cast<uint8_t>(loot_digit(loot_bytes[n * 2]) * 16 + loot_digit(loot_bytes[n * 2 + 1]));
+    const auto loot_validation = native::validate_target(memory, binding.image, loot_target,
+                                                          stop, GetTickCount64() + 10000);
+    const auto loot_created = loot_validation ? MH_UNKNOWN :
+        MH_CreateHook(reinterpret_cast<void*>(loot_target.address),
+                      reinterpret_cast<void*>(loot_spawn_amount_detour),
+                      reinterpret_cast<void**>(&original_loot_spawn_amount));
+    const auto loot_enabled = loot_created == MH_OK ?
+        MH_EnableHook(reinterpret_cast<void*>(loot_target.address)) : MH_UNKNOWN;
+    if (loot_created == MH_OK && loot_enabled != MH_OK)
+        MH_RemoveHook(reinterpret_cast<void*>(loot_target.address));
+    installation_trace.record(save::BStage::special_toggle,
+        loot_enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
+        "hammer_loot_terminal_install", 0,
+        {{"rva", rva_loot_spawn_amount}, {"validation", loot_validation},
+         {"create_status", loot_created}, {"enable_status", loot_enabled}});
 
     // Optional MissionChallenge toast capture is independent of gameplay hooks.
     const auto deadline = GetTickCount64() + 10000;
