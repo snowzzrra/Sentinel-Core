@@ -16,21 +16,24 @@ save::BTrace installation_trace;
 uintptr_t image_base = 0, engine_root = 0;
 uint32_t image_size = 0;
 
-constexpr const char* mastery_perks[13] = {
-    "perk/player/weapons/shotgun/pop_rocket_more_bombs",
-    "perk/player/weapons/shotgun/secondary_full_auto_ammo_giveback",
-    "perk/player/weapons/heavy_cannon/bolt_action_mastery_upgrades",
-    "perk/player/weapons/heavy_cannon/burst_detonate_mastery",
-    "perk/player/weapons/plasma_rifle/secondary_aoe_mastery",
-    "perk/player/weapons/plasma_rifle/secondary_microwave_mastery",
-    "perk/player/weapons/rocket_launcher/detonate_explosive_array_horizontal",
-    "perk/player/weapons/rocket_launcher/lockon_mastery",
-    "perk/player/weapons/double_barrel/meat_hook_mastery",
-    "perk/player/weapons/gauss_cannon/ballista_mastery",
-    "perk/player/weapons/gauss_cannon/destroyer_charge_levels",
-    "perk/player/weapons/chaingun/turret_mastery",
-    "perk/player/weapons/chaingun/energy_shell_mastery",
+struct MasteryFamily { const char* mastery; const char* base; };
+constexpr MasteryFamily mastery_families[13] = {
+    {"perk/player/weapons/shotgun/pop_rocket_more_bombs", "perk/player/weapons/shotgun/pop_rocket"},
+    {"perk/player/weapons/shotgun/secondary_full_auto_ammo_giveback", "perk/player/weapons/shotgun/secondary_full_auto"},
+    {"perk/player/weapons/heavy_cannon/bolt_action_mastery_upgrades", "perk/player/weapons/heavy_cannon/bolt_action"},
+    {"perk/player/weapons/heavy_cannon/burst_detonate_mastery", "perk/player/weapons/heavy_cannon/burst_detonate"},
+    {"perk/player/weapons/plasma_rifle/secondary_aoe_mastery", "perk/player/weapons/plasma_rifle/secondary_aoe"},
+    {"perk/player/weapons/plasma_rifle/secondary_microwave_mastery", "perk/player/weapons/plasma_rifle/secondary_microwave"},
+    {"perk/player/weapons/rocket_launcher/detonate_explosive_array_horizontal", "perk/player/weapons/rocket_launcher/detonate"},
+    {"perk/player/weapons/rocket_launcher/lockon_mastery", "perk/player/weapons/rocket_launcher/lock_on"},
+    {"perk/player/weapons/double_barrel/meat_hook_mastery", "perk/player/weapons/double_barrel/meat_hook"},
+    {"perk/player/weapons/gauss_cannon/ballista_mastery", "perk/player/weapons/gauss_cannon/ballista"},
+    {"perk/player/weapons/gauss_cannon/destroyer_charge_levels", "perk/player/weapons/gauss_cannon/destroyer"},
+    {"perk/player/weapons/chaingun/turret_mastery", "perk/player/weapons/chaingun/turret"},
+    {"perk/player/weapons/chaingun/energy_shell_mastery", "perk/player/weapons/chaingun/energy_shell"},
 };
+
+enum class TargetStatus { ready, host_missing, mod_missing, unresolved };
 
 struct MasteryState {
     char namespace_id[65]{};
@@ -39,6 +42,8 @@ struct MasteryState {
     uint16_t desired = 0;
     uint16_t applied = 0;
     uint16_t target_unavailable = 0;
+    uint16_t host_missing = 0;
+    uint16_t mod_missing = 0;
     uint16_t apply_failed = 0;
     uintptr_t components[13]{};
     uint64_t next_check_ms = 0;
@@ -129,24 +134,43 @@ uintptr_t player(void*) {
 
 // Resolve one authored upgrade without giving a perk, creating an inventory
 // item, or inserting anything into the normal active-upgrade list.
-bool mastery_target(uintptr_t p, unsigned index, uintptr_t& component, uintptr_t& upgrade) {
+TargetStatus mastery_target(uintptr_t p, unsigned index, uintptr_t& component, uintptr_t& upgrade) {
     __try {
         const auto type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631f90)();
-        const auto perk = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(image_base + 0x17aa5d0)(type, mastery_perks[index], 1);
-        if (!perk || std::strcmp(*reinterpret_cast<const char* const*>(perk + 8), mastery_perks[index])) return false;
+        const auto find = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(image_base + 0x17aa5d0);
+        const auto perk = find(type, mastery_families[index].mastery, 1);
+        const auto base = find(type, mastery_families[index].base, 1);
+        if (!perk || !base ||
+            std::strcmp(*reinterpret_cast<const char* const*>(perk + 8), mastery_families[index].mastery) ||
+            std::strcmp(*reinterpret_cast<const char* const*>(base + 8), mastery_families[index].base))
+            return TargetStatus::unresolved;
         const auto item_decl = *reinterpret_cast<uintptr_t*>(perk + 0x108);
         const auto upgrades = *reinterpret_cast<uintptr_t*>(perk + 0x118);
-        if (!item_decl || !upgrades || *reinterpret_cast<int32_t*>(perk + 0x120) != 1) return false;
+        if (!item_decl || !upgrades || *reinterpret_cast<int32_t*>(perk + 0x120) != 1)
+            return TargetStatus::unresolved;
         upgrade = *reinterpret_cast<uintptr_t*>(upgrades);
         const auto inv = reinterpret_cast<uintptr_t(*)(uintptr_t)>(image_base + 0x763080)(p);
         const auto item = inv ? reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(image_base + 0x1690660)(inv, item_decl) : 0;
-        if (!item || !upgrade) return false;
+        if (!inv || !upgrade) return TargetStatus::unresolved;
+        if (!item) return TargetStatus::host_missing;
+        const auto base_owned = reinterpret_cast<bool(*)(uintptr_t, uintptr_t)>(image_base + 0xfe3830)(p + 0x3b40, base);
+        if (!base_owned && !(index == 8 && (shared_mods() & SC_ARSENAL_ATTACHMENT_MEAT_HOOK)))
+            return TargetStatus::mod_missing;
         const auto item_vtable = *reinterpret_cast<uintptr_t*>(item);
         component = reinterpret_cast<uintptr_t(*)(uintptr_t)>(*reinterpret_cast<uintptr_t*>(item_vtable + 0x1c8))(item);
-        if (!component || !*reinterpret_cast<uintptr_t*>(component + 0x28)) return false;
+        if (!component || !*reinterpret_cast<uintptr_t*>(component + 0x28)) return TargetStatus::unresolved;
         const auto component_vtable = *reinterpret_cast<uintptr_t*>(component);
-        return *reinterpret_cast<uintptr_t*>(component_vtable + 0x20) == image_base + 0x164fc20;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+        return *reinterpret_cast<uintptr_t*>(component_vtable + 0x20) == image_base + 0x164fc20 ?
+            TargetStatus::ready : TargetStatus::unresolved;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return TargetStatus::unresolved; }
+}
+
+void target_status(unsigned index, TargetStatus status) {
+    const auto bit = static_cast<uint16_t>(1u << index);
+    mastery_state.host_missing = (mastery_state.host_missing & ~bit) |
+        (status == TargetStatus::host_missing ? bit : 0);
+    mastery_state.mod_missing = (mastery_state.mod_missing & ~bit) |
+        (status == TargetStatus::mod_missing ? bit : 0);
 }
 
 bool apply_mastery(uintptr_t component, uintptr_t upgrade) {
@@ -179,7 +203,10 @@ void reapply_masteries(uintptr_t component) {
         const auto bit = static_cast<uint16_t>(1u << i);
         if (!(mastery_state.desired & bit)) continue;
         uintptr_t owned_component = 0, upgrade = 0;
-        if (mastery_target(p, i, owned_component, upgrade) && owned_component == component) {
+        const auto status = mastery_target(p, i, owned_component, upgrade);
+        target_status(i, status);
+        if (status != TargetStatus::ready) mastery_result(i, 0, false, false);
+        else if (owned_component == component) {
             mastery_result(i, component, true, apply_mastery(component, upgrade));
         }
     }
@@ -238,6 +265,8 @@ void tick_masteries(uint64_t generation, uintptr_t p) {
         mastery_state.player = p;
         mastery_state.applied = 0;
         mastery_state.target_unavailable = 0;
+        mastery_state.host_missing = 0;
+        mastery_state.mod_missing = 0;
         mastery_state.apply_failed = 0;
         std::fill_n(mastery_state.components, 13, uintptr_t{0});
         mastery_state.next_check_ms = 0;
@@ -249,7 +278,9 @@ void tick_masteries(uint64_t generation, uintptr_t p) {
         const auto bit = static_cast<uint16_t>(1u << i);
         if (!(mastery_state.desired & bit)) continue;
         uintptr_t component = 0, upgrade = 0;
-        if (!mastery_target(p, i, component, upgrade)) {
+        const auto status = mastery_target(p, i, component, upgrade);
+        target_status(i, status);
+        if (status != TargetStatus::ready) {
             mastery_result(i, 0, false, false);
             continue;
         }
@@ -323,6 +354,7 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
             "mastery_projection_state", 0,
             {{"requested", request.masteries}, {"desired", mastery_state.desired},
              {"applied", mastery_state.applied}, {"target_unavailable", mastery_state.target_unavailable},
+             {"host_missing", mastery_state.host_missing}, {"mod_missing", mastery_state.mod_missing},
              {"apply_failed", mastery_state.apply_failed}, {"player", mastery_state.player},
              {"generation", mastery_state.generation}});
         return;
@@ -423,6 +455,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
     const auto mastery_deadline = GetTickCount64() + 10000;
     const Site mastery_sites[] = {
         {0x1631f90, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc", nullptr, nullptr},
+        {0xfe3830, "4c8bc24885d2742b4863515833c085d27e21488b49504c8bca8bd00f1f440000", nullptr, nullptr},
         {0x164fc20, "488bc44889480855488d68a14881ecf000000048895820488970f0488978e84c", nullptr, nullptr},
         {0x164e9b0, "488bc44889480855488d68e84881ec10010000488958f0488970e8488978e04c", reinterpret_cast<void*>(upgrade_replay_hook), reinterpret_cast<void**>(&original_upgrade_replay)},
         {0x1651040, "4885d20f8450030000448844241853415541574883ec4048896c2460450fb6e9", reinterpret_cast<void*>(upgrade_activate_hook), reinterpret_cast<void**>(&original_upgrade_activate)},
@@ -435,6 +468,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
                 make_target(image_base, s.offset, s.bytes), stop, mastery_deadline);
         if (reason) {
             const char* diagnostic = s.offset == 0x1631f90 ? "mastery_typeinfo_leaf_refused" :
+                s.offset == 0xfe3830 ? "mastery_base_reader_refused" :
                 s.offset == 0x164fc20 ? "mastery_apply_target_refused" :
                 s.offset == 0x164e9b0 ? "mastery_replay_hook_refused" : "mastery_activation_hook_refused";
             installation_trace.record(save::BStage::native_start, save::BStatus::refused,

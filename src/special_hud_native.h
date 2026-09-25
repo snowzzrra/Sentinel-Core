@@ -603,8 +603,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         from_space(parent, *reinterpret_cast<uintptr_t*>(parent + 0x40),
                    movie, {0, -4.0f}, refill_lift, true);
     if (refill_offsets) refill_target = refill_icon_target;
-    const Point refill_visual_target{refill_target.x + refill_lift.x,
-                                     refill_target.y + refill_lift.y};
+    const float refill_x = refill_target.x + refill_lift.x;
+    const Point refill_visual_target{refill_x, flame_plate_visual ?
+        center(flame_plate_bounds).y + (refill_x - center(flame_plate_bounds).x) * render_row_slope :
+        refill_target.y + refill_lift.y};
     Rect refill_plate_bounds{};
     Point refill_plate_offset{};
     const bool visible_plate = bounds(refill_plate, parent, refill_plate_bounds) &&
@@ -729,10 +731,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                                 toggle_target.y + switch_bounds.br.y - native_arrow_center.y}};
     const float refill_half_width = source_icon_width * 0.5f;
     const float refill_half_height = (source_icon_bounds.br.y - source_icon_bounds.tl.y) * 0.5f;
-    const Rect intended_refill_bounds{{refill_icon_target.x + refill_lift.x - refill_half_width,
-                                       refill_icon_target.y + refill_lift.y - refill_half_height},
-                                      {refill_icon_target.x + refill_lift.x + refill_half_width,
-                                       refill_icon_target.y + refill_lift.y + refill_half_height}};
+    const Rect intended_refill_bounds{{refill_visual_target.x - refill_half_width,
+                                       refill_visual_target.y - refill_half_height},
+                                      {refill_visual_target.x + refill_half_width,
+                                       refill_visual_target.y + refill_half_height}};
     hud_trace.record(save::BStage::profile_prepare,
         switch_failure || !refill_visual ? save::BStatus::refused : save::BStatus::succeeded,
         switch_failure ? switch_failure :

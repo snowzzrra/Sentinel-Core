@@ -54,7 +54,11 @@ int arsenal_command(int argc, wchar_t** argv) {
         ars.mastery_challenges_active_before, ars.mastery_challenges_active_after,
         ars.mastery_challenges_completed_before, ars.mastery_challenges_completed_after,
         ars.masteries_effective_before, ars.masteries_effective_after,
-        (ars.flags & SC_ARSENAL_FLAG_EFFECTIVE_UNOBSERVED) ? "false" : "true",
+        e.state == SC_DIAGNOSTIC_EXECUTED && ars.kind == SC_ARSENAL_OBSERVE &&
+        (ars.outcome == SC_ARSENAL_OUTCOME_OK || ars.outcome == SC_ARSENAL_OUTCOME_NOOP) &&
+        (ars.flags & (SC_ARSENAL_FLAG_BEFORE_VALID | SC_ARSENAL_FLAG_AFTER_VALID)) ==
+            (SC_ARSENAL_FLAG_BEFORE_VALID | SC_ARSENAL_FLAG_AFTER_VALID) &&
+        !(ars.flags & SC_ARSENAL_FLAG_EFFECTIVE_UNOBSERVED) ? "true" : "false",
         ars.mission_challenges_active_before, ars.mission_challenges_active_after,
         ars.mission_challenges_completed_before, ars.mission_challenges_completed_after,
         ars.operations_applied);
