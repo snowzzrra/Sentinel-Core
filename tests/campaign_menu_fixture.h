@@ -267,10 +267,17 @@ void exercise() {
     const auto before_hidden=hidden;
     at<int>(list,0x150)=2; test_focus(screen); test_load(screen,2);
     CHECK(hidden==before_hidden+1 && !loads && focuses==1 && statistics==1);
+    CHECK(std::strcmp(save::session().btrace.snapshot().stages[static_cast<size_t>(save::BStage::checkpoint_factory)].predicate,
+        "mission_load_row_blocked")==0);
     CHECK(at<uint8_t>(details_sprite,0x51)==0);
     test_meter_update(combat_meter);
     CHECK(unrelated_meter_ticks==1 && at<int>(combat_meter,0x15c)==0);
     test_load(screen,1); CHECK(loads==1);
+    CHECK(std::strcmp(save::session().btrace.snapshot().stages[static_cast<size_t>(save::BStage::checkpoint_factory)].predicate,
+        "mission_native_load_returned")==0);
+    test_load(screen,1); CHECK(loads==1);
+    CHECK(std::strcmp(save::session().btrace.snapshot().stages[static_cast<size_t>(save::BStage::checkpoint_factory)].predicate,
+        "mission_native_entry_pending")==0);
     const auto retained=at<uintptr_t>(screen,0x870);
     std::array<unsigned char,0xc0> mission{};
     auto mission_address=reinterpret_cast<uintptr_t>(mission.data());

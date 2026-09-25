@@ -46,6 +46,7 @@ public:
     bool begin_create(bool clean_native_history, const std::string& slot, int32_t index, bool prospective);
     bool begin_resume(const std::string& mission_destination = {});
     bool prepare_menu_save(const CampaignTransition&);
+    void cancel_menu_save();
     bool restoring_mission_checkpoint() const;
     bool start_internal(uint32_t difficulty, bool extra_life);
     bool allow_difficulty(uint32_t difficulty);
@@ -66,7 +67,7 @@ public:
     CampaignSnapshot snapshot() const;
     bool backup_continuity(const SdkWriteObservation&, storage::TransportMetadata&) const;
 private:
-    enum class MenuSaveSource { none, cold_catalog, persisted_gameplay };
+    enum class MenuSaveSource { none, cold_catalog, persisted_gameplay, active_fortress };
     bool reject(const char*,std::initializer_list<BFact> facts={});
     bool save_record(const std::string&, bool create);
     void persist_checkpoint(const SdkWriteObservation&,engine::Memory&);

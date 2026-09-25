@@ -129,20 +129,35 @@ bool Campaign::begin_create(bool clean,const std::string& slot,int32_t index,boo
 bool Campaign::prepare_menu_save(const CampaignTransition& boundary) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled) return true;
-    // Called only after the native menu accepted a visible, unlocked selection.
-    // Initial catalog metadata or an owned persisted shell checkpoint supplies
-    // the source; selecting a mission never fabricates a gameplay transition.
+    // The visible, unlocked native selection supplies the request; the current
+    // catalog, menu checkpoint, or active Fortress supplies its save source.
     const bool catalog=state_.resumed && !initiated_ && catalog_hydrated_;
     const bool persisted=menu_active_ && state_.continuity_persisted;
-    if (!owner_->accepts_requests() || (!catalog && !persisted) || !checkpoint_exists_ || expected_.empty() ||
+    const bool fortress=state_.map_active && state_.map=="game/hub/hub" &&
+        boundary.generation_after==state_.generation_after;
+    if (!owner_->accepts_requests() || (!catalog && !persisted && !fortress) || !checkpoint_exists_ || expected_.empty() ||
         map_pending_ || state_.phase=="native_save_pending" || !boundary.observed || boundary.observation_reason ||
-        boundary.depth || (!catalog && !boundary.generation_after)) return false;
-    initiated_=true; menu_active_=true; menu_save_pending_=true;
-    menu_save_source_=catalog ? MenuSaveSource::cold_catalog : MenuSaveSource::persisted_gameplay;
+        boundary.depth || (!catalog && !boundary.generation_after) || menu_save_pending_) return false;
+    initiated_=true; if (!fortress) menu_active_=true; menu_save_pending_=true;
+    menu_save_source_=fortress ? MenuSaveSource::active_fortress :
+        catalog ? MenuSaveSource::cold_catalog : MenuSaveSource::persisted_gameplay;
     menu_save_generation_=boundary.generation_after;
     owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"native_mission_presave_reserved",state_.operation,
-        {{"generation",menu_save_generation_},{"checkpoint",state_.checkpoint},{"catalog",catalog}});
+        {{"generation",menu_save_generation_},{"checkpoint",state_.checkpoint},{"catalog",catalog},{"fortress",fortress}});
     return true;
+}
+void Campaign::cancel_menu_save() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!menu_save_pending_) return;
+    if (menu_save_source_!=MenuSaveSource::active_fortress) state_.save_ready=false;
+    if (menu_save_source_==MenuSaveSource::cold_catalog) {
+        initiated_=false;
+        menu_active_=false;
+    }
+    menu_save_pending_=false;
+    menu_save_source_=MenuSaveSource::none;
+    menu_save_generation_=0;
+    owner_->btrace.record(BStage::checkpoint_factory,BStatus::pending,"native_mission_presave_cancelled",state_.operation);
 }
 bool Campaign::begin_resume(const std::string& mission_destination) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -152,7 +167,12 @@ bool Campaign::begin_resume(const std::string& mission_destination) {
         {{"accepting",owner_->accepts_requests()},{"resumed",state_.resumed},{"initiated",initiated_},
          {"checkpoint_exists",checkpoint_exists_},{"expected_files",expected_.size()}});
     const bool first_resume=state_.resumed && !initiated_;
-    const bool menu_resume=menu_active_ && state_.continuity_persisted && !map_pending_;
+    if (menu_save_source_==MenuSaveSource::active_fortress && mission_destination.empty()) {
+        owner_->btrace.record(diagnostic_stage_,BStatus::blocked,"mission_destination_missing",state_.operation);
+        return false;
+    }
+    const bool menu_resume=(menu_active_ || (menu_save_source_==MenuSaveSource::active_fortress &&
+        state_.map_active && !menu_save_pending_)) && state_.continuity_persisted && !map_pending_;
     if (!owner_->accepts_requests() || (!first_resume && !menu_resume) || !checkpoint_exists_ || expected_.empty())
         return reject("explicit_resume_source_required",{{"accepting",owner_->accepts_requests()},{"resumed",state_.resumed},
             {"initiated",initiated_},{"checkpoint_exists",checkpoint_exists_},{"expected_files",expected_.size()}});
@@ -162,7 +182,11 @@ bool Campaign::begin_resume(const std::string& mission_destination) {
         {{"choice_valid",choice_valid},{"slot_equal",choice.name.data()==state_.slot},{"index",choice.index}});
     initiated_=true; menu_active_=false; state_.resumed=true; state_.phase="resume_requested";
     menu_save_pending_=false;
-    menu_save_source_=MenuSaveSource::none;
+    if (menu_save_source_!=MenuSaveSource::active_fortress) menu_save_source_=MenuSaveSource::none;
+    if (menu_save_source_==MenuSaveSource::active_fortress) {
+        state_.map_active=false;
+        state_.save_ready=false;
+    }
     state_.source_checkpoint=state_.checkpoint;
     load_data_=0; state_.source_verified=false; state_.parser_completed=false;
     metadata_data_=0; metadata_verified_=false; catalog_hydrated_=false;
@@ -254,7 +278,7 @@ bool Campaign::write_started(uint64_t operation,const std::string& directory,boo
     if (!save_record(contract_+"state=native_save_pending\n",!checkpoint_exists_)) return false;
     state_.operation=operation; state_.native_factory_matched=true; state_.native_saved=false; state_.readback_verified=false;
     menu_save_pending_=false;
-    menu_save_source_=MenuSaveSource::none;
+    if (menu_save_source_!=MenuSaveSource::active_fortress) menu_save_source_=MenuSaveSource::none;
     state_.continuity_persisted=false; state_.phase="native_save_pending";
     owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"checkpoint_write_associated",operation,
         {{"native_factory_matched",native_factory_matched},{"generation",state_.generation_after},{"checkpoint",state_.checkpoint}}); return true;
@@ -545,7 +569,10 @@ bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,u
     // Create/Continue constrain the first gameplay entry in this process.
     // Later native travel belongs to the completed active generation, not to
     // the original NewGame phase or the original Continue map/parser payload.
-    const bool continuing=state_.map_active;
+    const bool mission_launch=menu_save_source_==MenuSaveSource::active_fortress && !mission_destination_.empty();
+    const bool continuing=state_.map_active && !mission_launch;
+    if (mission_launch && generation!=state_.generation_after) return reject("lifecycle_mission_generation_mismatch",
+        {{"generation",generation},{"expected_generation",state_.generation_after}});
     if (continuing) {
         if (generation!=state_.generation_after) return reject("lifecycle_continuation_generation_mismatch",
             {{"generation",generation},{"expected_generation",state_.generation_after}});
@@ -567,6 +594,7 @@ bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,u
     state_.map=std::move(map); state_.generation_before=generation; map_pending_=true;
     state_.native_subtype=native_subtype;
     mission_destination_.clear();
+    menu_save_source_=MenuSaveSource::none;
     state_.transition.event_id=event_id; state_.transition.generation_before=generation;
     state_.transition.generation_after=generation+1; state_.map_active=false; state_.save_ready=false;
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"native_map_admitted",state_.operation,
@@ -644,10 +672,14 @@ bool Campaign::checkpoint_ready(const CampaignTransition& result) {
             {{"session_state",owner_->state()},{"session_fault",owner_->fault()}}); return false;
     }
     if (menu_save_pending_) {
-        if (!menu_active_ || !initiated_ || menu_save_source_==MenuSaveSource::none ||
+        const bool fortress=menu_save_source_==MenuSaveSource::active_fortress;
+        if ((!menu_active_ && !fortress) || !initiated_ || menu_save_source_==MenuSaveSource::none ||
             (menu_save_source_==MenuSaveSource::persisted_gameplay && !result.generation_after) ||
             !result.observed || result.observation_reason || result.depth ||
-            result.generation_after!=menu_save_generation_ || !result.state_read || result.game!=SC_GAME_MAIN_MENU)
+            result.generation_after!=menu_save_generation_ || !result.state_read ||
+            result.game!=static_cast<uint32_t>(fortress ? SC_GAME_IN_GAME : SC_GAME_MAIN_MENU) ||
+            (fortress && (!result.map_read || state_.map!=result.map.data() ||
+                !result.difficulty_read || result.difficulty!=options_.difficulty)))
             return reject("native_mission_presave_boundary_mismatch");
         state_.save_ready=true;
         owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"native_mission_presave_ready",state_.operation,

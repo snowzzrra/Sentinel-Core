@@ -114,6 +114,7 @@ void compact_root(uintptr_t screen) {
 }
 void root_navigation(uintptr_t screen,uint8_t reset) {
     retire_ap_meter();
+    if (active()) save::session().campaign_run.cancel_menu_save();
     shown_screen=0;
     if (active()) {
         // State 0 is the native hidden state. Root navigation skips it when
@@ -129,6 +130,7 @@ void root_navigation(uintptr_t screen,uint8_t reset) {
 }
 void root_campaign(uintptr_t screen,uintptr_t declaration) {
     retire_ap_meter();
+    if (active()) save::session().campaign_run.cancel_menu_save();
     shown_screen=0;
     if (active()) {
         const auto definitions=campaign_definitions();
@@ -301,20 +303,43 @@ void populate(uintptr_t screen,uintptr_t list) {
 }
 void load(uintptr_t screen,int index) {
     if (!active()) { original_load(screen,index); return; }
-    if (!save::session().accepts_requests() || screen!=shown_screen || index<0 ||
-        static_cast<uint32_t>(index)>=shown.count || !(shown.rows[index].flags&SC_CAMPAIGN_UNLOCKED)) return;
+    auto& session=save::session();
+    const bool row_valid=index>=0 && static_cast<uint32_t>(index)<shown.count;
+    const bool unlocked=row_valid && (shown.rows[index].flags&SC_CAMPAIGN_UNLOCKED);
+    if (!session.accepts_requests() || screen!=shown_screen || !unlocked) {
+        session.btrace.record(save::BStage::checkpoint_factory,save::BStatus::blocked,"mission_load_row_blocked",0,
+            {{"accepting",session.accepts_requests()},{"screen_equal",screen==shown_screen},
+             {"index",static_cast<uint64_t>(index)},{"row_valid",row_valid},{"unlocked",unlocked}},screen);
+        return;
+    }
     // Permission/save/checkpoint/loading remain in LoadMission/LaunchMission.
     uintptr_t pending=0;
     const auto boundary=native::checkpoint_transition();
-    if (!read(screen,0x870,pending) || pending ||
-        !save::session().campaign_run.prepare_menu_save(boundary)) return;
+    if (!read(screen,0x870,pending) || pending) {
+        session.btrace.record(save::BStage::checkpoint_factory,save::BStatus::blocked,"mission_native_entry_pending",0,
+            {{"pending_entry",pending!=0}},screen);
+        return;
+    }
+    session.campaign_run.cancel_menu_save();
+    if (!session.campaign_run.prepare_menu_save(boundary)) {
+        session.btrace.record(save::BStage::checkpoint_factory,save::BStatus::blocked,"mission_presave_unavailable",0,
+            {{"generation",boundary.generation_after},{"observed",boundary.observed},
+             {"observation_reason",boundary.observation_reason},{"depth",boundary.depth}},screen);
+        return;
+    }
     bool completion_known=false,completed=false;
     __try { completed=native_completed(screen,reinterpret_cast<uintptr_t>(&entries[index])); completion_known=true; }
     __except(EXCEPTION_EXECUTE_HANDLER) {}
-    const auto& namespace_id=save::session().namespace_id();
+    const auto& namespace_id=session.namespace_id();
     fast_travel::entry_policy().selected(namespace_id.c_str(),shown.rows[index].map,
         boundary.generation_after,completion_known,completed);
-    menu().selected(shown.rows[index].id); original_load(screen,index);
+    menu().selected(shown.rows[index].id);
+    session.btrace.record(save::BStage::checkpoint_factory,save::BStatus::entered,"mission_native_load_invoked",0,
+        {{"index",static_cast<uint64_t>(index)},{"row_id",shown.rows[index].id},
+         {"generation",boundary.generation_after}},screen);
+    original_load(screen,index);
+    session.btrace.record(save::BStage::checkpoint_factory,save::BStatus::succeeded,"mission_native_load_returned",0,
+        {{"index",static_cast<uint64_t>(index)},{"row_id",shown.rows[index].id}},screen);
 }
 bool is_available(uintptr_t screen) {
     if (!active()) return original_available(screen);

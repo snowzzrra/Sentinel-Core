@@ -168,6 +168,8 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
     binding.image.base=reinterpret_cast<uintptr_t>(&setting)-0x45f8590;
     test_campaign_binding(binding.image.base,binding.root);
     native::test_events(binding,native_load);
+    if (defect==L"native_read_c_active_mission")
+        for (uint64_t i=1;i<session().campaign_run.snapshot().generation_after;++i) native::test_generation_gap();
     menu_transition=[&] {
         request[0x1960]=0x10;
         CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==1);
@@ -217,8 +219,8 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
             CHECK(diagnostic_fact(trace.first_failure,"actual_difficulty")!=diagnostic_fact(trace.first_failure,"expected_difficulty"));
         }
     }
-    else CHECK(result.map_active || defect==L"menu_pending_save");
-    if (result.continuity_persisted && result.map_active) {
+    else CHECK(result.map_active || defect==L"menu_pending_save" || defect==L"native_read_c_active_mission");
+    if (result.continuity_persisted && result.map_active && defect!=L"native_read_c_active_mission") {
         menu_transition();
         const auto menu=session().campaign_run.snapshot();
         CHECK(session().accepts_requests() && menu.continuity_persisted && menu.checkpoint==result.checkpoint);
@@ -248,7 +250,9 @@ int wmain(int argc,wchar_t** argv) {
     const bool profile_lifecycle=defect==L"profile_lifecycle";
     const bool native_read=defect.rfind(L"native_read",0)==0;
     const bool profile_overlap=defect.rfind(L"cross_map_profile_overlap",0)==0;
-    const bool recovery_case=defect.rfind(L"native_read_c",0)==0 || defect.rfind(L"native_read_delta",0)==0;
+    const bool recovery_case=defect.rfind(L"native_read_c",0)==0 || defect.rfind(L"native_read_delta",0)==0 ||
+        defect.rfind(L"native_read_shell",0)==0 || defect==L"native_read_hash" ||
+        defect==L"native_read_mission_wrong_map" || defect.rfind(L"native_read_menu_cycle",0)==0;
     const auto retail_marker=std::filesystem::path(argv[2])/"retail-pair.fixture";
     const bool retail_pair=defect==L"native_read_c_retail_pair" || std::filesystem::exists(retail_marker);
     if(retail_pair && !resume && !recover) { std::filesystem::create_directories(argv[2]); std::ofstream(retail_marker)<<"primary operation; preserved rotation pair\n"; }
@@ -411,9 +415,11 @@ int wmain(int argc,wchar_t** argv) {
         return travel_fixture::run(difficulty,defect,save_with_profile);
     }
     if (resume) {
-            CHECK(owner.campaign_run.snapshot().source_checkpoint==(profile_lifecycle || defect==L"native_read_delta_resume" || defect==L"native_read_checkpoint_resume"?2u:1u));
+            if (defect==L"native_read_c_active_mission") CHECK(owner.campaign_run.snapshot().source_checkpoint>=1);
+            else CHECK(owner.campaign_run.snapshot().source_checkpoint==(profile_lifecycle || defect==L"native_read_delta_resume" || defect==L"native_read_checkpoint_resume"?2u:1u));
         if (native_read) {
-            if (defect==L"native_read_menu_cold") {
+            const bool cold_menu=defect==L"native_read_menu_cold" || defect==L"native_read_c_menu_cold";
+            if (cold_menu) {
                 CampaignTransition unhydrated{};
                 unhydrated.observed=true;
                 CHECK(!owner.campaign_run.prepare_menu_save(unhydrated));
@@ -436,7 +442,7 @@ int wmain(int argc,wchar_t** argv) {
                 std::puts("PASS precise ordinary-read/parser refusal without invented checkpoint completion"); return 0;
             }
             CHECK(owner.campaign_run.snapshot().phase=="armed");
-            if (defect==L"native_read_menu_cold") {
+            if (cold_menu) {
                 std::array<unsigned char,0x1000> native_root{};
                 store(native_root,0x44,uint32_t{SC_GAME_MAIN_MENU});
                 engine::Binding binding{};
@@ -451,6 +457,9 @@ int wmain(int argc,wchar_t** argv) {
                 invalid=boundary; invalid.observation_reason=SC_NATIVE_WRONG_THREAD;
                 CHECK(!owner.campaign_run.prepare_menu_save(invalid));
                 CHECK(owner.campaign_run.prepare_menu_save(boundary));
+                CHECK(!owner.campaign_run.prepare_menu_save(boundary));
+                owner.campaign_run.cancel_menu_save();
+                CHECK(owner.campaign_run.prepare_menu_save(boundary));
                 payload += " / native cold MissionSelect shell rewrite";
                 store(file,0x150,uint64_t(payload.size())); store(file,0x158,uint64_t(payload.size()));
                 store(file,0x168,reinterpret_cast<uintptr_t>(payload.data()));
@@ -459,7 +468,12 @@ int wmain(int argc,wchar_t** argv) {
                 const auto rewritten=owner.campaign_run.snapshot();
                 CHECK(rewritten.checkpoint==2 && rewritten.continuity_persisted && rewritten.readback_verified &&
                       !rewritten.map_active && !rewritten.save_ready);
-                std::puts("PASS cold Mission Select native save without Continue"); return 0;
+                CHECK(owner.campaign_run.begin_resume("game/dlc2/e5m1_spear/e5m1_spear"));
+                CHECK(writer_fixture::load(presave,false,L"native_read"));
+                CHECK(owner.campaign_run.allow_difficulty(difficulty));
+                CHECK(native_transition(difficulty,L"",{},{},{},"game/dlc2/e5m1_spear/e5m1_spear")==0);
+                CHECK(owner.campaign_run.snapshot().map=="game/dlc2/e5m1_spear/e5m1_spear");
+                std::puts("PASS cold Mission Select generation-zero presave, source, parser and destination"); return 0;
             }
             navigation_fixture::continue_files();
             const std::string destination=defect.rfind(L"native_read_mission",0)==0?"game/dlc2/e5m1_spear/e5m1_spear":"";
@@ -520,8 +534,9 @@ int wmain(int argc,wchar_t** argv) {
             payload="new primary checkpoint after native Continue";
             store(file,0x150,uint64_t(payload.size())); store(file,0x158,uint64_t(payload.size()));
             store(file,0x168,reinterpret_cast<uintptr_t>(payload.data()));
-            CHECK(native_transition(difficulty,L"",[&] {
+            CHECK(native_transition(difficulty,defect==L"native_read_c_active_mission"?defect:L"",[&] {
                 CHECK(owner.campaign_run.snapshot().phase=="reopened");
+                if (defect==L"native_read_c_active_mission") return;
                 const auto next_backup=defect==L"native_read_c_backup_next"?
                     std::make_shared<BackupJob>(GetCurrentProcessId(),1,GetTickCount64()+30000,steam_owner):std::shared_ptr<BackupJob>{};
                 writer_fixture::save(reader,L"queued_checkpoint",next_backup);
@@ -530,7 +545,27 @@ int wmain(int argc,wchar_t** argv) {
                     std::ofstream selected(std::filesystem::path(argv[2])/"selected-backup.txt");
                     selected<<std::filesystem::path(progress.output.path).filename().string()<<'\n';
                 }
-            },{},{},destination,[&] {
+            },[&] {
+                if (defect!=L"native_read_c_active_mission") return;
+                const auto active=owner.campaign_run.snapshot();
+                const auto boundary=native::checkpoint_transition();
+                CHECK(active.map_active && !active.continuity_persisted &&
+                    boundary.generation_after==active.generation_after);
+                CHECK(owner.campaign_run.prepare_menu_save(boundary));
+                CHECK(!owner.campaign_run.prepare_menu_save(boundary));
+                owner.campaign_run.cancel_menu_save();
+                CHECK(owner.campaign_run.prepare_menu_save(boundary));
+                payload += " / active Fortress Mission Select rewrite";
+                store(file,0x150,uint64_t(payload.size())); store(file,0x158,uint64_t(payload.size()));
+                store(file,0x168,reinterpret_cast<uintptr_t>(payload.data()));
+                writer_fixture::Model presave{remote,source,files,payload,directory};
+                writer_fixture::save(presave,L"queued_checkpoint");
+                const auto rewritten=owner.campaign_run.snapshot();
+                CHECK(rewritten.checkpoint>active.checkpoint && rewritten.continuity_persisted &&
+                    rewritten.readback_verified && rewritten.map_active && rewritten.map=="game/hub/hub");
+                CHECK(owner.campaign_run.begin_resume("game/dlc2/e5m1_spear/e5m1_spear"));
+                CHECK(writer_fixture::load(presave,false,L"native_read"));
+            },{},destination,[&] {
                 if (defect.rfind(L"native_read_shell",0)!=0) return;
                 const auto boundary=native::checkpoint_transition();
                 CHECK(boundary.generation_after);
@@ -561,6 +596,14 @@ int wmain(int argc,wchar_t** argv) {
                 CHECK(writer_fixture::load(presave,false,L"native_read"));
                 CHECK(owner.campaign_run.snapshot().source_checkpoint==3);
             })==0);
+            if (defect==L"native_read_c_active_mission") {
+                const auto active=owner.campaign_run.snapshot();
+                CHECK(!active.map_active && active.source_checkpoint==active.checkpoint && active.parser_completed);
+                CHECK(owner.campaign_run.allow_difficulty(difficulty));
+                CHECK(native_transition(difficulty,defect,{},{},{},"game/dlc2/e5m1_spear/e5m1_spear")==0);
+                CHECK(owner.campaign_run.snapshot().map=="game/dlc2/e5m1_spear/e5m1_spear");
+                std::puts("PASS active Fortress Mission Select presave, source, parser and destination"); return 0;
+            }
             if (defect.rfind(L"native_read_shell",0)==0) {
                 if (defect==L"native_read_shell") {
                     CHECK(owner.campaign_run.allow_difficulty(difficulty));

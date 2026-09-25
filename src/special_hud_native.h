@@ -580,13 +580,17 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const float source_icon_width = source_icon_bounds.br.x - source_icon_bounds.tl.x;
     const Point refill_icon_target{arrow_bounds.br.x + native_gap + source_icon_width * 0.5f,
                                    icon_baseline_y};
-    Point refill_offset{}, source_icon_offset{}, arrow_offset{}, refill_target{};
+    Point refill_offset{}, source_icon_offset{}, arrow_offset{}, refill_target{}, refill_lift{};
     const bool refill_offsets = source_icon_visual &&
         visual_offset(layout_source, layout_source, parent, movie, refill_offset) &&
-        visual_offset(layout_source, source_icon, parent, movie, source_icon_offset);
+        visual_offset(layout_source, source_icon, parent, movie, source_icon_offset) &&
+        from_space(parent, *reinterpret_cast<uintptr_t*>(parent + 0x40),
+                   movie, {0, -4.0f}, refill_lift, true);
     if (refill_offsets)
         refill_target = {refill_icon_target.x + refill_offset.x - source_icon_offset.x,
-                          refill_icon_target.y + refill_offset.y - source_icon_offset.y};
+                         refill_icon_target.y + refill_offset.y - source_icon_offset.y};
+    const Point refill_visual_target{refill_target.x + refill_lift.x,
+                                     refill_target.y + refill_lift.y};
     Rect refill_plate_bounds{};
     Point refill_plate_offset{};
     const auto refill_plate = child(layout_source, "background");
@@ -711,10 +715,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                                 toggle_target.y + arrow_half_height}};
     const float refill_half_width = source_icon_width * 0.5f;
     const float refill_half_height = (source_icon_bounds.br.y - source_icon_bounds.tl.y) * 0.5f;
-    const Rect intended_refill_bounds{{refill_icon_target.x - refill_half_width,
-                                       refill_icon_target.y - refill_half_height},
-                                      {refill_icon_target.x + refill_half_width,
-                                       refill_icon_target.y + refill_half_height}};
+    const Rect intended_refill_bounds{{refill_icon_target.x + refill_lift.x - refill_half_width,
+                                       refill_icon_target.y + refill_lift.y - refill_half_height},
+                                      {refill_icon_target.x + refill_lift.x + refill_half_width,
+                                       refill_icon_target.y + refill_lift.y + refill_half_height}};
     hud_trace.record(save::BStage::profile_prepare,
         switch_failure || !refill_visual ? save::BStatus::refused : save::BStatus::succeeded,
         switch_failure ? switch_failure :
@@ -871,7 +875,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const auto palette = *reinterpret_cast<int32_t*>((source == crucible_root ? widget : hammer) + 0x1ec);
     if (const auto fill = child(three, "fill")) swf.color(fill, palette);
     if (const auto fill = child(three, "innerFill")) swf.color(fill, palette);
-    if (!place_visual(refill, layout_source, parent, movie, refill_target, refill_offset))
+    if (!place_visual(refill, layout_source, parent, movie, refill_visual_target, refill_offset))
         return fail_refill("hud_refill_place_failed", refill);
     Rect rendered_glyph{};
     Point glyph_local_center{};
@@ -882,8 +886,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                                  ammo_y.x * glyph_local_center.y,
                              ammo_x.y * glyph_local_center.x +
                                  ammo_y.y * glyph_local_center.y};
-    const Point glyph_target{refill_target.x - refill_offset.x + refill_plate_offset.x,
-                             refill_target.y - refill_offset.y + refill_plate_offset.y};
+    const Point glyph_target{refill_visual_target.x - refill_offset.x + refill_plate_offset.x,
+                             refill_visual_target.y - refill_offset.y + refill_plate_offset.y};
     if (!place_visual(ammo_glyph, native_ammo, parent, movie,
                       glyph_target, glyph_offset, glyph_scale))
         return fail_refill("hud_ammo_leaf_place_failed", ammo_glyph);
