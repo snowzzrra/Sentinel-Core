@@ -1459,7 +1459,7 @@ template<class Codec> bool special_values(Codec& c, sc_special_result& v) {
         (v.flags & ~SC_SPECIAL_FLAGS_SUPPORTED)) return false;
     if (v.owns_crucible > 1 || v.owns_hammer > 1 || v.hammer_tier > SC_SPECIAL_HAMMER_TIER_UPGRADED ||
         v.selected > SC_SPECIAL_WEAPON_HAMMER || v.native_crucible > 1 || v.native_hammer > 1 ||
-        v.native_hammer_perks > 2 || v.native_selected > SC_SPECIAL_WEAPON_HAMMER ||
+        v.native_hammer_perks > 3 || v.native_selected > SC_SPECIAL_WEAPON_HAMMER ||
         (v.native_state_known & ~31u) || (v.refill_flags & ~7u) ||
         v.refill_request_state > SC_SPECIAL_REFILL_EXPIRED || v.refill_executed > 1 || v.reserved0) return false;
     return true;

@@ -245,6 +245,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"deathlink\":"+flag(deathlink::available())+"}"+
                 ",\"special_installation\":"+b_trace(special::installation_diagnostics())+
                 ",\"arsenal_installation\":"+b_trace(arsenal::installation_diagnostics())+
+                ",\"heat_blast_ui\":"+b_trace(arsenal::heat_blast_ui_diagnostics())+
                 ",\"special_input\":"+b_trace(special::input_diagnostics())+
                 ",\"special_route\":"+b_trace(special::route_diagnostics())+
                 ",\"special_hud\":"+b_trace(special::hud_diagnostics())+

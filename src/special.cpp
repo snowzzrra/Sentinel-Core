@@ -48,11 +48,11 @@ uint64_t next_request_id_locked() {
 
 uint32_t tier_for(uint32_t native_hammer, uint32_t native_perks) {
     if (!native_hammer) return SC_SPECIAL_HAMMER_TIER_NONE;
-    return native_perks >= 2 ? SC_SPECIAL_HAMMER_TIER_UPGRADED : SC_SPECIAL_HAMMER_TIER_BASE;
+    return native_perks >= 3 ? SC_SPECIAL_HAMMER_TIER_UPGRADED : SC_SPECIAL_HAMMER_TIER_BASE;
 }
 
 bool upgraded_effective(const SnapshotFacts& facts) {
-    return (facts.known & SC_SPECIAL_KNOWN_HAMMER_PERKS) && facts.native_hammer_perks == 2;
+    return (facts.known & SC_SPECIAL_KNOWN_HAMMER_PERKS) && facts.native_hammer_perks == 3;
 }
 
 void adopt_native_locked(const SnapshotFacts& facts) {

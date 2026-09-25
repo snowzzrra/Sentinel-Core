@@ -15,7 +15,7 @@ sc_special_result initial(const sc_special_request&);
 struct SnapshotFacts {
     uint8_t native_crucible = 0;
     uint8_t native_hammer = 0;
-    uint8_t native_hammer_perks = 0;   /* 0..2 permanent upgrade perks present */
+    uint8_t native_hammer_perks = 0;   /* 0..3 permanent upgrade perks present */
     uint8_t native_selected = SC_SPECIAL_WEAPON_NONE;
     uint32_t known = 0;                /* SC_SPECIAL_KNOWN_* */
     uint32_t crucible_charge = 0;

@@ -13,6 +13,7 @@ namespace {
 
 std::atomic<bool> ready{false};
 save::BTrace installation_trace;
+save::BTrace heat_blast_ui_trace;
 uintptr_t image_base = 0, engine_root = 0;
 uint32_t image_size = 0;
 
@@ -56,6 +57,8 @@ using UpgradeReplay = void(*)(uintptr_t);
 using UpgradeActivate = void(*)(uintptr_t, uintptr_t, uint8_t, uint8_t);
 UpgradeReplay original_upgrade_replay = nullptr;
 UpgradeActivate original_upgrade_activate = nullptr;
+using ArsenalUi = uintptr_t(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+ArsenalUi original_arsenal_ui = nullptr;
 
 
 #ifdef SC_NATIVE_TESTING
@@ -222,6 +225,57 @@ void upgrade_activate_hook(uintptr_t component, uintptr_t upgrade, uint8_t a, ui
     if (original_upgrade_activate) original_upgrade_activate(component, upgrade, a, b);
     --activation_depth;
     if (!activation_depth) reapply_masteries(component);
+}
+
+uintptr_t arsenal_ui_hook(uintptr_t out, uintptr_t weapon, uintptr_t family, uintptr_t p) {
+    const auto result = original_arsenal_ui(out, weapon, family, p);
+    if (!active() || !native::gameplay_admitted() || !result || !family || !p) return result;
+    __try {
+        const auto base = *reinterpret_cast<uintptr_t*>(family);
+        if (!base || std::strcmp(*reinterpret_cast<const char* const*>(base + 8),
+                                  mastery_families[4].base)) return result;
+        const auto count = *reinterpret_cast<const int32_t*>(family + 0x18);
+        const auto upgrades = *reinterpret_cast<const uintptr_t*>(family + 0x10);
+        const auto first = count == 2 && upgrades ?
+            *reinterpret_cast<const char* const*>(*reinterpret_cast<const uintptr_t*>(upgrades) + 8) : nullptr;
+        const auto second = first ?
+            *reinterpret_cast<const char* const*>(*reinterpret_cast<const uintptr_t*>(upgrades + 8) + 8) : nullptr;
+        const bool delay_first = first && second &&
+            !std::strcmp(first, "perk/player/weapons/plasma_rifle/secondary_aoe_no_primary_delay") &&
+            !std::strcmp(second, "perk/player/weapons/plasma_rifle/secondary_aoe_faster_charge");
+        const bool charge_first = first && second &&
+            !std::strcmp(first, "perk/player/weapons/plasma_rifle/secondary_aoe_faster_charge") &&
+            !std::strcmp(second, "perk/player/weapons/plasma_rifle/secondary_aoe_no_primary_delay");
+        const auto mastery = *reinterpret_cast<const uintptr_t*>(family + 0x28);
+        const bool identity = (delay_first || charge_first) && mastery &&
+            !std::strcmp(*reinterpret_cast<const char* const*>(mastery + 8),
+                         mastery_families[4].mastery);
+        const bool namespace_match = mastery_state.namespace_id[0] &&
+            !std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65);
+        const bool player_match = mastery_state.player == p;
+        if (!identity || !namespace_match || !player_match || !mastery_state.generation) {
+            heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::blocked,
+                "heat_blast_ui_unqualified", 0,
+                {{"family_identity", identity}, {"namespace_match", namespace_match},
+                 {"player_match", player_match}, {"generation", mastery_state.generation}}, p);
+            return result;
+        }
+        heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::succeeded,
+            "heat_blast_ui_facts", 0,
+            {{"generation", mastery_state.generation}, {"player", p},
+             {"base_available", *reinterpret_cast<const uint8_t*>(result + 0x10)},
+             {"base_active", *reinterpret_cast<const uint8_t*>(result + 0x11)},
+             {"normal_delay", *reinterpret_cast<const uint16_t*>(result + (delay_first ? 0x12 : 0x14))},
+             {"normal_charge", *reinterpret_cast<const uint16_t*>(result + (delay_first ? 0x14 : 0x12))},
+             {"mastery_available", *reinterpret_cast<const uint8_t*>(result + 0x1c)},
+             {"challenge_decl_present", *reinterpret_cast<const uintptr_t*>(family + 0x30) != 0},
+             {"challenge_field", *reinterpret_cast<const uint32_t*>(result + 0x18)},
+             {"ap_mastery_requested", (mastery_state.desired & (1u << 4)) != 0}}, p);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::blocked,
+            "heat_blast_ui_read_fault", 0, {}, p);
+    }
+    return result;
 }
 
 // Other native Arsenal primitives remain quarantined.
@@ -448,6 +502,25 @@ void install(const engine::Binding& binding, HANDLE stop) {
     ready.store(true, std::memory_order_release);
     installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "installed", 0, {{"hooks", 3}});
 
+    auto ui_target = make_target(image_base, 0xf1f420,
+        "48895c240848896c241048897424184c894c24205741544155415641574883ec");
+    ui_target.signature_offset = 0x20;
+    ui_target.signature = make_target(image_base, 0,
+        "20488911498da9403b00004c8941084c8bf9498b10488bcd4d8bf0e8d0430c00").bytes;
+    const auto ui_reason = native::validate_target(memory, binding.image, ui_target, stop, GetTickCount64() + 10000);
+    if (ui_reason) {
+        heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::refused,
+            "heat_blast_ui_site_refused", 0, {{"reason", ui_reason}});
+    } else {
+        const auto created = MH_CreateHook(reinterpret_cast<void*>(ui_target.address),
+            reinterpret_cast<void*>(arsenal_ui_hook), reinterpret_cast<void**>(&original_arsenal_ui));
+        const auto enabled = created == MH_OK ? MH_EnableHook(reinterpret_cast<void*>(ui_target.address)) : created;
+        heat_blast_ui_trace.record(save::BStage::native_start,
+            enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
+            enabled == MH_OK ? "heat_blast_ui_observer_installed" : "heat_blast_ui_hook_refused", 0,
+            {{"native_error", enabled}});
+    }
+
     // Q3 is independent: a changed mastery site must never disable the three
     // retail-qualified Meat Hook detours above.
     mastery_ready.store(false, std::memory_order_release);
@@ -461,9 +534,10 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {0x1651040, "4885d20f8450030000448844241853415541574883ec4048896c2460450fb6e9", reinterpret_cast<void*>(upgrade_activate_hook), reinterpret_cast<void**>(&original_upgrade_activate)},
     };
     for (const auto& s : mastery_sites) {
-        const auto reason = s.offset == 0x1631f90 ?
+        const auto reason = s.offset == 0x1631f90 || s.offset == 0xfe3830 ?
             native::validate_leaf_target(memory, binding.image,
-                make_target(image_base, s.offset, s.bytes), 8, stop, mastery_deadline) :
+                make_target(image_base, s.offset, s.bytes),
+                s.offset == 0x1631f90 ? 8 : 63, stop, mastery_deadline) :
             native::validate_target(memory, binding.image,
                 make_target(image_base, s.offset, s.bytes), stop, mastery_deadline);
         if (reason) {
@@ -501,5 +575,6 @@ void install(const engine::Binding& binding, HANDLE stop) {
 }
 
 save::BSnapshot installation_diagnostics() { return installation_trace.snapshot(); }
+save::BSnapshot heat_blast_ui_diagnostics() { return heat_blast_ui_trace.snapshot(); }
 
 } // namespace sentinel::arsenal

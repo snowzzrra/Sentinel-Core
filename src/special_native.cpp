@@ -196,9 +196,10 @@ uint64_t loot_spawn_amount_detour(uintptr_t loot, uintptr_t declaration, uintptr
 const char* const CRUCIBLE_PATH = "weapon/player/crucible";
 const char* const HAMMER_PATH = "weapon/player/hammer";
 const char* const CRUCIBLE_AMMO_PATH = "ammo/sharedammopool/crucible";
-const char* const HAMMER_PERK_PATHS[2] = {
+const char* const HAMMER_PERK_PATHS[3] = {
     "perk/player/weapons/hammer/ammo_drops_upgraded",
-    "perk/player/weapons/hammer/armor_and_health_drops_upgraded"
+    "perk/player/weapons/hammer/armor_and_health_drops_upgraded",
+    "perk/player/weapons/hammer/debuff_duration_increase"
 };
 
 using FindDecl = uintptr_t(*)(uintptr_t, const char*, int);
@@ -410,8 +411,8 @@ bool hammer_loot_modifier(uintptr_t p, bool& effective) {
     return true;
 }
 
-bool hammer_perks(uintptr_t p, uintptr_t (&decls)[2], uint8_t& effective_count) {
-    for (size_t i = 0; i < 2; ++i) {
+bool hammer_perks(uintptr_t p, uintptr_t (&decls)[3], uint8_t& effective_count) {
+    for (size_t i = 0; i < 3; ++i) {
         decls[i] = find_perk_decl(HAMMER_PERK_PATHS[i]);
         if (!decls[i]) return false;
     }
@@ -673,7 +674,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
             facts.known |= SC_SPECIAL_KNOWN_HAMMER;
             facts.native_hammer = find_item(inv, hammer_decl) ? 1 : 0;
         }
-        uintptr_t perk_decls[2]{};
+        uintptr_t perk_decls[3]{};
         uint8_t effective_perks = 0;
         if (native_upgrade_ready.load(std::memory_order_acquire) &&
             hammer_perks(p, perk_decls, effective_perks)) {
@@ -713,7 +714,7 @@ uint32_t ensure(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, 
         const auto inv = inventory_of(p);
         if (!inv) return 2;
         const bool upgraded = own_hammer && hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED;
-        uintptr_t perk_decls[2]{};
+        uintptr_t perk_decls[3]{};
         uint8_t effective_perks = 0;
         if (upgraded && (!native_upgrade_ready.load(std::memory_order_acquire) ||
             !hammer_perks(p, perk_decls, effective_perks))) return ERROR_NOT_SUPPORTED;

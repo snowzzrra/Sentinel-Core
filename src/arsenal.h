@@ -51,6 +51,7 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
 void install(const engine::Binding& binding, HANDLE stop);
 bool available();
 save::BSnapshot installation_diagnostics();
+save::BSnapshot heat_blast_ui_diagnostics();
 bool admitted(const char* id);
 void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out);
 void reset_session();
