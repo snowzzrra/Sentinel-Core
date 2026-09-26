@@ -105,6 +105,9 @@ constexpr uint32_t rva_find_item = 0x1690660;            // idInventoryCollectio
 constexpr uint32_t rva_give_item = 0x1691cd0;            // idInventoryCollection::GiveItem(...)
 constexpr uint32_t rva_item_count = 0x398510;            // idInventoryCollection::Num()
 constexpr uint32_t rva_item_at = 0x1691450;              // idInventoryCollection::GetItem(index)
+constexpr uint32_t rva_meter_set = 0x128c3b0;
+constexpr uint32_t rva_judgement_meter_vtable = 0x2d6cf18;
+constexpr uintptr_t judgement_meter_offset = 0x177a0;
 constexpr uint32_t rva_unlock_perk = 0xfe2500;           // exact perk registration
 constexpr uint32_t rva_activate_perk = 0xfe19b0;         // exact perk activation
 constexpr uint32_t rva_active_perk = 0xfe37f0;           // exact active-perk reader
@@ -800,10 +803,8 @@ uint32_t refill(void*, uintptr_t p) {
         uint32_t attempted = 0, confirmed = 0;
         const auto inventory_count = count_fn(inv);
         if (inventory_count > 4096) return 3;
-        // Same ordinary-ammo contract as the established "give ammo" action:
-        // every owned weapon's ammo pools are topped up, except the special
-        // weapons whose spendable resources are explicitly excluded. Ammo items
-        // use the native item writer; capacity clamping still requires retail proof.
+        // Ordinary pools use the inventory writer; Crucible charges use their
+        // native judgement meter. Hammer resources are not ammo pools.
         for (int i = 0; i < static_cast<int>(inventory_count); ++i) {
             const auto item = at_fn(inv, i);
             if (!item) continue;
@@ -837,6 +838,20 @@ uint32_t refill(void*, uintptr_t p) {
             if (nested) give_list(nested);
         }
         if (!attempted || confirmed != attempted) return 4;
+        const auto crucible = find_decl(CRUCIBLE_PATH);
+        if (crucible && find_item(inv, crucible)) {
+            const auto meter = p + judgement_meter_offset;
+            const auto table = *reinterpret_cast<uintptr_t*>(meter);
+            if (table != image_base + rva_judgement_meter_vtable) return ERROR_NOT_SUPPORTED;
+            using MeterRead = float(*)(uintptr_t);
+            const auto capacity = reinterpret_cast<MeterRead>(
+                *reinterpret_cast<uintptr_t*>(table + 0x28))(meter);
+            if (!std::isfinite(capacity) || capacity <= 0) return ERROR_INVALID_DATA;
+            reinterpret_cast<void(*)(uintptr_t, float)>(image_base + rva_meter_set)(meter, capacity);
+            const auto amount = reinterpret_cast<MeterRead>(
+                *reinterpret_cast<uintptr_t*>(table + 0x20))(meter);
+            if (amount != capacity) return ERROR_WRITE_FAULT;
+        }
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
     return error;
 }
@@ -1291,6 +1306,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {rva_give_item, "40555356574154415541564157488d6c24f94881ecb8000000488b05e8ccb102"},
         {rva_item_at, "4883ec2885d2784f3b51087d4a48895c24204863da48c1e3054803198b03488d"},
         {rva_item_count, "8b4108c3cccccccccccccccccccccccc48896c2418574883ec204863790833ed"},
+        {rva_meter_set, "40534883ec308b4108488bd989410c488b010f297424200f28f1ff5028488b03"},
         {rva_perk_typeinfo, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc"},
         {rva_current_weapon, "40534883ec20488b01488bd9ff90b0000000488b13488bcb4885c07412ff92b0"},
         {rva_hud_earnings, "48895c240848896c2410488974241848897c242041564883ec20488db9700600"},

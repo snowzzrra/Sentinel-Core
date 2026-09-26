@@ -47,7 +47,7 @@ inline const char* suppression_mismatch(const ScopeFacts& scope, const CallFacts
     if (!scope.record_mission) return "record_mission";
     if (!scope.canonical_group) return "canonical_group";
     if (!scope.epoch) return "epoch";
-    if (!scope.thread || scope.owner_thread != scope.thread) return "thread_owner";
+    if (!scope.thread) return "scope_thread";
     if (!scope.player || !scope.map) return "scope_player_map";
     if (!call.admitted || !call.session_admitted) return "call_admission";
     if (call.thread != scope.thread || call.epoch != scope.epoch ||

@@ -82,8 +82,7 @@ void capture_scope(uintptr_t manager, uintptr_t record) {
     next.epoch = native::observation_stamp();
     next.admitted = admitted;
     next.owner_thread = snapshot.native_owner_thread_id;
-    next.map_qualified = admitted && next.epoch != 0 && next.thread == next.owner_thread &&
-        next.owner_thread != 0 && snapshot.context_generation != 0 &&
+    next.map_qualified = admitted && next.epoch != 0 && snapshot.context_generation != 0 &&
         snapshot.game_state == SC_GAME_IN_GAME && campaign_map(snapshot);
     next.active = true;
     scope = next;
