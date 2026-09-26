@@ -20,7 +20,7 @@ enum {
 
 enum {
     SC_DEATHLINK_MODE_SOFT = 0,
-    SC_DEATHLINK_MODE_HARDCORE = 1
+    SC_DEATHLINK_MODE_HARDCORE = 1 // one direct native death; no protection retries
 };
 
 /* Remote logical event lifecycle. */
@@ -30,7 +30,7 @@ enum {
     SC_DEATHLINK_REMOTE_WAITING_SAFE = 2,
     SC_DEATHLINK_REMOTE_APPLYING = 3,
     SC_DEATHLINK_REMOTE_APPLIED = 4,
-    SC_DEATHLINK_REMOTE_WAITING_PROTECTION_END = 5,
+    SC_DEATHLINK_REMOTE_WAITING_PROTECTION_END = 5, // reserved wire value; not emitted
     SC_DEATHLINK_REMOTE_RESOLVED_DEATH = 6,
     SC_DEATHLINK_REMOTE_RESOLVED_PROTECTED = 7,
     SC_DEATHLINK_REMOTE_FAILED = 8,
@@ -39,7 +39,7 @@ enum {
 };
 
 /* Positive protection evidence for the last application. Survival alone is
-   a native failure, not proof of protection. OTHER remains reserved. */
+   a native failure, not proof of protection. */
 enum {
     SC_DEATHLINK_PROTECTION_NONE = 0,
     SC_DEATHLINK_PROTECTION_EXTRA_LIFE = 1,

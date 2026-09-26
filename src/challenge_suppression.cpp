@@ -3,6 +3,7 @@
 #include "native_target.h"
 #include "native_runtime.h"
 #include "save_session.h"
+#include "weapon_points.h"
 #include "MinHook.h"
 #include <algorithm>
 #include <array>
@@ -165,7 +166,7 @@ bool evaluate(uintptr_t player, uint32_t currency, int32_t delta, uint8_t notify
     call.epoch = native::observation_stamp();
     call.player = player;
     call.map = current_map();
-    call.return_site = return_site;
+    call.return_site = weapon_points::currency_origin(return_site);
     call.expected_return_site = image_base + 0x147546e;
     call.currency = currency;
     call.delta = delta;
@@ -189,6 +190,11 @@ bool evaluate(uintptr_t player, uint32_t currency, int32_t delta, uint8_t notify
             {"expected_return_site", call.expected_return_site}, {"currency", call.currency},
             {"delta", call.delta}, {"notify", call.notify}});
     }
+    if (!mismatch)
+        save::session().btrace.record(save::BStage::challenge_suppression, save::BStatus::succeeded,
+            "aggregate_battery_suppressed", 0,
+            {{"epoch", call.epoch}, {"player", call.player}, {"return_site", call.return_site},
+             {"currency", call.currency}, {"delta", call.delta}, {"members", canonical_group_members}});
     return mismatch == nullptr;
 }
 
@@ -268,10 +274,6 @@ void install(const engine::Binding& binding, HANDLE stop) {
             "48895c24185556574154415541564157488dac2400faffff4881ec0007000048"), stop, deadline)) return;
     if (!unique_leaf(memory, binding.image, image_base + 0x14703b0,
             "4c8bd24c8bc94885d20f8485000000488b4a084533c00fb60184c074180f1f00", stop, deadline)) return;
-    // The WUP owner is installed first and has already replaced the first five
-    // entry bytes with its relative jump. Qualify the currency writer by
-    // supported-image membership and unwind ownership plus the untouched seam
-    // and continuation windows; a pristine entry prefix cannot be required.
     if (!binding.image.contains(seam::currency_entry_rva, seam::wup_entry_patch_bytes,
             IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE)) return;
     if (!native::function_window(memory, binding.image, image_base + seam::currency_entry_rva,

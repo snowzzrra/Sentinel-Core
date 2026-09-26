@@ -278,6 +278,204 @@ uintptr_t arsenal_ui_hook(uintptr_t out, uintptr_t weapon, uintptr_t family, uin
     return result;
 }
 
+// Arsenal clip corrections preserve native ownership and challenge state.
+namespace menu {
+struct Value { uint32_t type, reserved; uintptr_t payload; };
+struct Calls {
+    Value* (*lookup)(uintptr_t, Value*, const char*) = nullptr;
+    uintptr_t (*sprite)(const Value*) = nullptr;
+    uintptr_t (*text)(const Value*) = nullptr;
+    void (*release)(Value*) = nullptr;
+    void (*frame)(uintptr_t, int) = nullptr;
+    void (*visible)(uintptr_t, bool, bool) = nullptr;
+    void (*set_text)(uintptr_t, const char*) = nullptr;
+    const char* (*localize)(uintptr_t) = nullptr;
+    const char* (*format)(char*, const char*, ...) = nullptr;
+    void (*material)(uintptr_t, uintptr_t, int) = nullptr;
+} swf;
+using Update = void(*)(uintptr_t);
+Update original_mod = nullptr, original_mastery = nullptr;
+bool (*original_bypass)(uintptr_t) = nullptr;
+std::atomic<bool> installed{false};
+
+bool admitted() {
+    return installed.load(std::memory_order_acquire) && active() && native::gameplay_admitted();
+}
+
+int mastery_index(uintptr_t perk) {
+    if (!perk) return -1;
+    const auto name = *reinterpret_cast<const char* const*>(perk + 8);
+    if (!name) return -1;
+    for (int i = 0; i < 13; ++i)
+        if (!std::strcmp(name, mastery_families[i].mastery)) return i;
+    return -1;
+}
+
+uintptr_t child(uintptr_t parent, const char* name, bool text = false) {
+    if (!parent) return 0;
+    Value value{};
+    const auto found = swf.lookup(parent, &value, name);
+    const auto result = text ? swf.text(found) : swf.sprite(found);
+    if (value.type == 2 || value.type == 8) swf.release(&value);
+    return result;
+}
+
+uintptr_t root(uintptr_t widget) {
+    const auto vtable = *reinterpret_cast<const uintptr_t*>(widget);
+    return reinterpret_cast<uintptr_t(*)(uintptr_t)>(
+        *reinterpret_cast<const uintptr_t*>(vtable + 0xe0))(widget);
+}
+
+void show(uintptr_t clip, bool visible) {
+    if (clip) swf.visible(clip, visible, true);
+}
+
+void correct_mod(uintptr_t widget) {
+    const auto family = *reinterpret_cast<const uintptr_t*>(widget + 0x2b8);
+    if (!family) return;
+    const auto index = mastery_index(*reinterpret_cast<const uintptr_t*>(family + 0x28));
+    const auto base = *reinterpret_cast<const uintptr_t*>(family);
+    if (index < 0 || !base || std::strcmp(*reinterpret_cast<const char* const*>(base + 8),
+                                        mastery_families[index].base)) return;
+    if (!*reinterpret_cast<const uint8_t*>(widget + 0x2cc)) return;
+    const auto pips = child(root(widget), "pips");
+    unsigned corrected = 0;
+    for (unsigned i = 0; pips && i < 3; ++i) {
+        // Native frame 3 denotes mastery; zero is an independently unowned upgrade.
+        if (*reinterpret_cast<const int16_t*>(widget + 0x2c2 + i * 2) != 0) continue;
+        char name[] = "pip0";
+        name[3] += static_cast<char>(i);
+        if (const auto pip = child(pips, name)) { swf.frame(pip, 1); corrected |= 1u << i; }
+    }
+    if (index == 4) heat_blast_ui_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
+        "heat_blast_pips_rendered", 0, {{"generation", native::inspect().scope.lifecycle_generation},
+        {"player", player(nullptr)}, {"corrected_zero_slots", corrected}}, widget);
+}
+
+bool canonical_mastery(uintptr_t widget) {
+    return mastery_index(*reinterpret_cast<const uintptr_t*>(widget + 0x2b0)) >= 0;
+}
+
+void correct_mastery(uintptr_t widget) {
+    if (!canonical_mastery(widget)) return;
+    const auto clip = root(widget);
+    show(child(clip, "purchaseInfo"), false);
+    show(child(clip, "lockedPurchaseInfo"), false);
+
+    const auto decl = *reinterpret_cast<const uintptr_t*>(widget + 0x2d8);
+    const auto progress = *reinterpret_cast<const int32_t*>(widget + 0x2e0);
+    if (!decl || progress < 0) return;
+    const auto conditions = *reinterpret_cast<const uintptr_t*>(decl + 0x158);
+    if (!conditions) return;
+    const auto goal = *reinterpret_cast<const int32_t*>(conditions + 8);
+    if (goal <= 0) return;
+    const auto challenge = child(clip, "challenge");
+    const auto description = child(child(challenge, "desc"), "txtVal", true);
+    const auto bar = child(child(challenge, "info"), "progress");
+    const auto count = child(child(bar, "count"), "txtVal", true);
+    if (!challenge || !description || !bar || !count) return;
+
+    // Use the same localized description and authored arguments as 0xf94ac0.
+    char buffer[0x4010]{};
+    const auto text = swf.localize(decl + 0x94);
+    const auto counter = *reinterpret_cast<const uintptr_t*>(decl + 0x110);
+    const auto amount = counter ? *reinterpret_cast<const int32_t*>(counter + 0x220) : 0;
+    swf.set_text(description, amount >= 2 ? swf.format(buffer, text, amount, goal) :
+                                           swf.format(buffer, text, goal));
+    swf.set_text(count, swf.format(buffer, "%d/%d", progress, goal));
+    swf.frame(bar, 1 + static_cast<int>(100.0f * std::min(progress, goal) / goal));
+    const auto icon = child(challenge, "icon");
+    const auto material = *reinterpret_cast<const uintptr_t*>(decl + 0xf8);
+    if (icon && material) swf.material(icon, material, 0);
+    show(child(clip, "warning"), false);
+    show(challenge, true);
+    if (mastery_index(*reinterpret_cast<const uintptr_t*>(widget + 0x2b0)) == 4)
+        heat_blast_ui_trace.record(save::BStage::profile_capture, save::BStatus::succeeded,
+            "heat_blast_challenge_rendered", 0, {{"generation", native::inspect().scope.lifecycle_generation},
+            {"player", player(nullptr)}, {"progress", progress}, {"goal", goal}}, widget);
+}
+
+void mod_hook(uintptr_t widget) {
+    original_mod(widget);
+    if (!admitted()) return;
+    __try { correct_mod(widget); }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        installation_trace.record(save::BStage::profile_output, save::BStatus::blocked,
+                                  "arsenal_mod_presentation_fault");
+    }
+}
+
+void mastery_hook(uintptr_t widget) {
+    original_mastery(widget);
+    if (!admitted()) return;
+    __try { correct_mastery(widget); }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        installation_trace.record(save::BStage::profile_output, save::BStatus::blocked,
+                                  "arsenal_challenge_presentation_fault");
+    }
+}
+
+bool bypass_hook(uintptr_t widget) {
+    if (admitted()) {
+        __try { if (canonical_mastery(widget)) return false; }
+        __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return original_bypass(widget);
+}
+
+void install(const engine::Binding& binding, HANDLE stop) {
+    engine::LocalMemory memory;
+    const auto deadline = GetTickCount64() + 10000;
+    struct Site { uint32_t rva; const char* bytes; size_t leaf; void* hook; void** target; };
+    const Site sites[] = {
+        {0xf937a0, "405553488dac2408c0ffffb8f8400000e8eb858d01482be0488b0519b2210348", 0, reinterpret_cast<void*>(mod_hook), reinterpret_cast<void**>(&original_mod)},
+        {0xf94ac0, "4055534155488dac2440c0ffffb8c0400000e8c9728d01482be0488b05f79e21", 0, reinterpret_cast<void*>(mastery_hook), reinterpret_cast<void**>(&original_mastery)},
+        {0xf94590, "8b81e40200003981e80200000f94c0c3488991d8020000448981e0020000c3cc", 16, reinterpret_cast<void*>(bypass_hook), reinterpret_cast<void**>(&original_bypass)},
+        {0x185c150, "40534883ec20488b4928488bda488b01ff5028488bc34883c4205bc3cccccccc", 0, nullptr, reinterpret_cast<void**>(&swf.lookup)},
+        {0x184e470, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b150f5c06", 0, nullptr, reinterpret_cast<void**>(&swf.sprite)},
+        {0x184e4b0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b15d75b06", 0, nullptr, reinterpret_cast<void**>(&swf.text)},
+        {0x184e3b0, "4883ec288b0183f8027527488b4908b8fffffffff00fc1413083f80175544885", 0, nullptr, reinterpret_cast<void**>(&swf.release)},
+        {0x1865280, "48895c2408574883ec200fb74158bf010000003bd7488bd90f4ffa3bf8742c7d", 0, nullptr, reinterpret_cast<void**>(&swf.frame)},
+        {0x1864430, "440fb6d23851517457807952007551488b41104c6349088851514d03c9488b10", 97, nullptr, reinterpret_cast<void**>(&swf.visible)},
+        {0x186db00, "40534883ec20488bd94883c140e8ded4b8fe488bcb4883c4205be9e1cbffffcc", 0, nullptr, reinterpret_cast<void**>(&swf.set_text)},
+        {0x360bb0, "4883ec58488b150d10f103488d0526c76e0248894424604c8d4c24208b01488d", 0, nullptr, reinterpret_cast<void**>(&swf.localize)},
+        {0x362bc0, "48895424104c894424184c894c2420534883ec204c8bc24c8d4c2440ba004000", 0, nullptr, reinterpret_cast<void**>(&swf.format)},
+        {0x1863b00, "48895c24084889742410574883ec20488bd9418bf0488b4960488bfa483bca0f", 0, nullptr, reinterpret_cast<void**>(&swf.material)},
+    };
+    for (const auto& site : sites) {
+        const auto target = make_target(image_base, site.rva, site.bytes);
+        const auto reason = site.leaf ? native::validate_leaf_target(memory, binding.image, target, site.leaf, stop, deadline) :
+                                        native::validate_target(memory, binding.image, target, stop, deadline);
+        if (reason) {
+            installation_trace.record(save::BStage::profile_prepare, save::BStatus::refused,
+                "arsenal_menu_site_refused", 0, {{"rva", site.rva}, {"reason", reason}});
+            return;
+        }
+    }
+    for (const auto& site : sites) {
+        if (!site.hook) { *site.target = reinterpret_cast<void*>(image_base + site.rva); continue; }
+        const auto status = MH_CreateHook(reinterpret_cast<void*>(image_base + site.rva), site.hook, site.target);
+        if (status != MH_OK) {
+            installation_trace.record(save::BStage::profile_prepare, save::BStatus::refused,
+                "arsenal_menu_hook_refused", 0, {{"rva", site.rva}, {"native_error", status}});
+            return;
+        }
+    }
+    for (const auto& site : sites) {
+        if (!site.hook) continue;
+        const auto status = MH_EnableHook(reinterpret_cast<void*>(image_base + site.rva));
+        if (status != MH_OK) {
+            installation_trace.record(save::BStage::profile_prepare, save::BStatus::refused,
+                "arsenal_menu_enable_refused", 0, {{"rva", site.rva}, {"native_error", status}});
+            return;
+        }
+    }
+    installed.store(true, std::memory_order_release);
+    installation_trace.record(save::BStage::profile_prepare, save::BStatus::succeeded,
+                              "arsenal_menu_installed", 0, {{"hooks", 3}});
+}
+} // namespace menu
+
 // Other native Arsenal primitives remain quarantined.
 bool read(void*, uintptr_t, SnapshotFacts&) { return false; }
 uint32_t ensure_mods(void*, uintptr_t, uint32_t) { return 1; }
@@ -521,8 +719,8 @@ void install(const engine::Binding& binding, HANDLE stop) {
             {{"native_error", enabled}});
     }
 
-    // Q3 is independent: a changed mastery site must never disable the three
-    // retail-qualified Meat Hook detours above.
+    menu::install(binding, stop);
+
     mastery_ready.store(false, std::memory_order_release);
     if (!inventory::available()) return;
     const auto mastery_deadline = GetTickCount64() + 10000;

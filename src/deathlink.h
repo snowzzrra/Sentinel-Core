@@ -13,6 +13,7 @@ sc_deathlink_result initial(const sc_deathlink_request&);
 struct ApplicationOutcome {
     uint32_t true_death = 0;
     uint32_t extra_life = 0;
+    uint32_t protection = SC_DEATHLINK_PROTECTION_NONE;
 };
 
 // Internal production seam; never externally supplied or serialized.
@@ -23,9 +24,10 @@ struct Calls {
     // Positive outcome counters are measured around the call by the native
     // module; a native exception is returned as the error code.
     uint32_t (*apply_lethal)(void* context, uintptr_t player_ptr, ApplicationOutcome& outcome) = nullptr;
-    // Native proof that the player is currently inside a death-prevention /
-    // invulnerability window. Used only as a Hardcore retry gate.
+    // Optional fixture reader; production never gates Hardcore on protection.
     bool (*protection_active)(void* context, uintptr_t player_ptr) = nullptr;
+    // One direct native death transition, outside the damage/protection pipeline.
+    uint32_t (*force_death)(void* context, uintptr_t player_ptr, ApplicationOutcome& outcome) = nullptr;
 };
 
 extern Calls calls;

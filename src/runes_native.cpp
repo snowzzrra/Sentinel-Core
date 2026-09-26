@@ -54,17 +54,12 @@ uintptr_t player(void*) {
 uintptr_t find_perk(uintptr_t p, const char* target_name) {
     if (!p || !target_name) return 0;
     __try {
-        const auto perk_list = *reinterpret_cast<const uintptr_t**>(p + 0x3b90);
-        const auto perk_count = *reinterpret_cast<const int*>(p + 0x3b98);
-        if (!perk_list || perk_count <= 0 || perk_count > 4000) return 0;
-        for (int i = 0; i < perk_count; ++i) {
-            const auto perk = perk_list[i];
-            if (!perk) continue;
-            const auto name = *reinterpret_cast<const char**>(perk + 8);
-            if (name && std::strcmp(name, target_name) == 0) {
-                return perk;
-            }
-        }
+        const auto type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631f90)();
+        if (!type) return 0;
+        const auto perk = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(image_base + 0x17aa5d0)(type, target_name, 0);
+        if (!perk) return 0;
+        const auto name = *reinterpret_cast<const char**>(perk + 8);
+        if (name && std::strcmp(name, target_name) == 0) return perk;
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
     return 0;
 }
@@ -419,6 +414,8 @@ void install(const engine::Binding& binding, HANDLE stop) {
     engine::LocalMemory memory;
     struct Site { uint32_t rva; const char* bytes; };
     const Site sites[] = {
+        {0x1631f90, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc"},
+        {0x17aa5d0, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448"},
         {0x357040, "803d1903f203004c8bc9740f448b410c41ffc0418bd0e9650000000fbf491041"},
         {0xfe2500, "4885d20f84c903000044884c2420448844241848894c24085356415441564883"},
         {0xfe19b0, "44884c24204488442418488954241048894c2408555357415541564157488d6c"},

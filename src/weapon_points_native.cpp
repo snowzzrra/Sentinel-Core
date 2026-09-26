@@ -24,6 +24,7 @@ Append original_append = nullptr;
 Notify original_notify = nullptr;
 Exchange original_exchange = nullptr;
 thread_local Source pair_source = Source::unknown;
+thread_local uintptr_t add_origin = 0;
 // Once AP routing owns the process, a later session fault must not turn vanilla
 // minting back on. New AP execution still requires admitted/accepting below.
 bool active() { return ready.load(std::memory_order_acquire) && save::session().routed(); }
@@ -32,12 +33,16 @@ uint32_t rva(void* address) {
     return p >= image_base && p-image_base < image_size ? static_cast<uint32_t>(p-image_base) : UINT32_MAX;
 }
 void add_hook(uintptr_t player, uint32_t currency, int32_t amount, uint8_t silent) {
-    const auto caller = rva(_ReturnAddress());
+    const auto return_site = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const auto caller = rva(reinterpret_cast<void*>(return_site));
     const auto source = caller == 0x13ce4b8 ? pair_source : direct_source(caller);
     if (suppress(active(), source, currency, amount, false)) {
         suppressed.fetch_add(1, std::memory_order_relaxed); return;
     }
-    original_add(player, currency, amount, silent);
+    const auto prior = add_origin;
+    add_origin = return_site;
+    __try { original_add(player, currency, amount, silent); }
+    __finally { add_origin = prior; }
 }
 void pair_hook(uintptr_t player, const int32_t* pair, uint8_t silent, uint32_t source) {
     const auto prior = pair_source; pair_source = wrapper_source(rva(_ReturnAddress()));
@@ -119,6 +124,9 @@ char fixture_namespace[65]{};
 #endif
 }
 bool available() { return ready.load(std::memory_order_acquire); }
+uintptr_t currency_origin(uintptr_t direct_return_site) {
+    return add_origin ? add_origin : direct_return_site;
+}
 bool admitted(const char* id) {
 #ifdef SC_NATIVE_TESTING
     if (fixture_namespace[0]) return available() && !std::memcmp(id, fixture_namespace, 65);

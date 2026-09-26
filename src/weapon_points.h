@@ -23,6 +23,8 @@ void execute(const sc_weapon_points_request&, sc_weapon_points_result&, const Ca
 void install(const engine::Binding&, HANDLE stop);
 bool available();
 bool admitted(const char* namespace_id);
+// Original native caller while the currency entry detour invokes its trampoline.
+uintptr_t currency_origin(uintptr_t direct_return_site);
 void execute_native(const sc_weapon_points_request&, sc_weapon_points_result&);
 #ifdef SC_NATIVE_TESTING
 void use_fixture(Calls, const char* namespace_id);

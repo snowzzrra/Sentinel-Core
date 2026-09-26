@@ -7,9 +7,8 @@ namespace {
 constexpr uint32_t max_pending = 8;
 constexpr uint32_t seen_capacity = 64;
 constexpr uint32_t local_capacity = 16;
-constexpr uint32_t max_attempts = 8;
 constexpr uint64_t max_lifetime_ms = 120000;
-constexpr uint64_t retry_settle_ms = 500;
+constexpr uint64_t application_settle_ms = 500;
 constexpr uint64_t post_death_settle_ms = 2000;
 SRWLOCK state_lock = SRWLOCK_INIT;
 
@@ -23,6 +22,7 @@ struct RemoteEvent {
     uint64_t last_applied_at = 0;
     uint32_t outcome = SC_DEATHLINK_OUTCOME_OK;
     uint32_t flags = 0;
+    uint32_t native_error = 0;
 };
 
 struct LocalEvent {
@@ -143,6 +143,7 @@ void fill(const State& state, sc_deathlink_result& out) {
         out.remote_event_id = head->id;
         out.flags |= head->flags;
         out.outcome = head->outcome;
+        out.native_exception = head->native_error;
     } else {
         out.remote_state = SC_DEATHLINK_REMOTE_IDLE;
     }
@@ -214,19 +215,6 @@ void reset_session(const char* namespace_id) {
 void record_native_death(uint32_t cause, uint32_t protection, uint64_t now_ms) {
     const uint32_t flags = cause == SC_DEATHLINK_CAUSE_REMOTE ? SC_DEATHLINK_FLAG_SUPPRESSED : 0;
     append_local(cause, protection, flags, now_ms);
-    if (cause != SC_DEATHLINK_CAUSE_LOCAL) return;
-    AcquireSRWLockExclusive(&state_lock);
-    if (shared_state.enabled && shared_state.mode == SC_DEATHLINK_MODE_HARDCORE &&
-        shared_state.pending_count && shared_state.pending[0].attempts) {
-        auto& head = shared_state.pending[0];
-        head.state = SC_DEATHLINK_REMOTE_RESOLVED_DEATH;
-        head.flags = SC_DEATHLINK_FLAG_TRUE_DEATH;
-        const auto id = head.id;
-        pop_head_locked();
-        seen_add_locked(id);
-        shared_state.next_apply_allowed_at = now_ms + post_death_settle_ms;
-    }
-    ReleaseSRWLockExclusive(&state_lock);
 }
 
 void bind_run_state_if_needed(uintptr_t player) {
@@ -235,8 +223,7 @@ void bind_run_state_if_needed(uintptr_t player) {
     (void)player;
 }
 
-// Executes at most one application step. The native call happens with the state
-// lock released so hooks can record telemetry without deadlocking.
+// Requests manage the queue; tick owns native application.
 void execute(const sc_deathlink_request& r, sc_deathlink_result& out, const Calls& c) {
     const auto now = GetTickCount64();
 
@@ -378,7 +365,8 @@ void execute(const sc_deathlink_request& r, sc_deathlink_result& out, const Call
 
 void expire_pending(uint64_t now) {
     AcquireSRWLockExclusive(&state_lock);
-    while (shared_state.pending_count && now - shared_state.pending[0].received_at >= max_lifetime_ms) {
+    while (shared_state.pending_count &&
+           now - shared_state.pending[0].received_at >= max_lifetime_ms) {
         auto& head = shared_state.pending[0];
         head.state = SC_DEATHLINK_REMOTE_EXPIRED;
         head.outcome = SC_DEATHLINK_OUTCOME_EXPIRED;
@@ -403,20 +391,18 @@ void tick(const Calls& c) {
     if (const auto* current = head_locked()) {
         head = *current;
         if (head.state == SC_DEATHLINK_REMOTE_RECEIVED || head.state == SC_DEATHLINK_REMOTE_WAITING_SAFE) step = 1;
-        else if (head.state == SC_DEATHLINK_REMOTE_WAITING_PROTECTION_END) step = 2;
     }
     if (step) {
         const bool expired = now - head.received_at > max_lifetime_ms;
-        const bool exhausted = head.attempts >= max_attempts;
-        if (expired || exhausted) {
-            shared_state.pending[0].outcome = expired ? SC_DEATHLINK_OUTCOME_EXPIRED : SC_DEATHLINK_OUTCOME_REJECTED;
-            shared_state.pending[0].state = expired ? SC_DEATHLINK_REMOTE_EXPIRED : SC_DEATHLINK_REMOTE_FAILED;
+        if (expired) {
+            shared_state.pending[0].outcome = SC_DEATHLINK_OUTCOME_EXPIRED;
+            shared_state.pending[0].state = SC_DEATHLINK_REMOTE_EXPIRED;
             pop_head_locked();
             seen_add_locked(head.id);
             fill(shared_state, out);
             ReleaseSRWLockExclusive(&state_lock);
             out.flags |= SC_DEATHLINK_FLAG_AFTER_VALID | SC_DEATHLINK_FLAG_MUTATED;
-            out.outcome = expired ? SC_DEATHLINK_OUTCOME_EXPIRED : SC_DEATHLINK_OUTCOME_REJECTED;
+            out.outcome = SC_DEATHLINK_OUTCOME_EXPIRED;
             return;
         }
     }
@@ -435,23 +421,13 @@ void tick(const Calls& c) {
         out.outcome = SC_DEATHLINK_OUTCOME_NOOP;
         return;
     }
-    if (step && head.attempts > 0) {
-        // Missing/unreadable protection never authorizes lethal retry.
-        if (!c.protection_active || c.protection_active(c.context, player)) {
-            shared_state.pending[0].state = SC_DEATHLINK_REMOTE_WAITING_PROTECTION_END;
-            fill(shared_state, out);
-            ReleaseSRWLockExclusive(&state_lock);
-            out.flags |= SC_DEATHLINK_FLAG_AFTER_VALID;
-            out.outcome = SC_DEATHLINK_OUTCOME_NOOP;
-            return;
-        }
-    }
     if (step) {
         shared_state.pending[0].state = SC_DEATHLINK_REMOTE_APPLYING;
         shared_state.pending[0].last_applied_at = now;
         ++shared_state.pending[0].attempts;
         head = shared_state.pending[0];
     }
+    const bool hardcore = shared_state.mode == SC_DEATHLINK_MODE_HARDCORE;
     ReleaseSRWLockExclusive(&state_lock);
 
     if (!step) {
@@ -464,7 +440,8 @@ void tick(const Calls& c) {
     }
 
     ApplicationOutcome result{};
-    out.native_exception = c.apply_lethal ? c.apply_lethal(c.context, player, result) : 1;
+    const auto apply = hardcore ? c.force_death : c.apply_lethal;
+    out.native_exception = apply ? apply(c.context, player, result) : 1;
 
     AcquireSRWLockExclusive(&state_lock);
     ++shared_state.operations;
@@ -474,13 +451,14 @@ void tick(const Calls& c) {
         auto& slot = shared_state.pending[0];
         slot.attempts = head.attempts;
         if (out.native_exception) {
+            slot.native_error = out.native_exception;
             slot.state = SC_DEATHLINK_REMOTE_FAILED;
             slot.outcome = SC_DEATHLINK_OUTCOME_NATIVE_FAILED;
             pop_head_locked();
             seen_add_locked(head.id);
             resolved = true;
             out.outcome = SC_DEATHLINK_OUTCOME_NATIVE_FAILED;
-            shared_state.next_apply_allowed_at = now + retry_settle_ms;
+            shared_state.next_apply_allowed_at = now + application_settle_ms;
         } else if (result.true_death) {
             slot.state = SC_DEATHLINK_REMOTE_RESOLVED_DEATH;
             slot.flags = SC_DEATHLINK_FLAG_APPLIED | SC_DEATHLINK_FLAG_TRUE_DEATH;
@@ -491,27 +469,21 @@ void tick(const Calls& c) {
             out.flags |= SC_DEATHLINK_FLAG_TRUE_DEATH;
             shared_state.next_apply_allowed_at = now + post_death_settle_ms;
             out.outcome = SC_DEATHLINK_OUTCOME_OK;
-        } else if (!result.extra_life) {
+        } else if (hardcore || (!result.extra_life && result.protection == SC_DEATHLINK_PROTECTION_NONE)) {
             slot.state = SC_DEATHLINK_REMOTE_FAILED;
             slot.outcome = SC_DEATHLINK_OUTCOME_NATIVE_FAILED;
             pop_head_locked();
             seen_add_locked(head.id);
         } else {
             slot.protection = result.extra_life ? SC_DEATHLINK_PROTECTION_EXTRA_LIFE
-                                                : SC_DEATHLINK_PROTECTION_OTHER;
-            if (shared_state.mode == SC_DEATHLINK_MODE_HARDCORE) {
-                slot.state = SC_DEATHLINK_REMOTE_WAITING_PROTECTION_END;
-                shared_state.next_apply_allowed_at = now + retry_settle_ms;
-                out.outcome = SC_DEATHLINK_OUTCOME_OK;
-            } else {
-                slot.state = SC_DEATHLINK_REMOTE_RESOLVED_PROTECTED;
-                slot.flags = SC_DEATHLINK_FLAG_APPLIED | SC_DEATHLINK_FLAG_PROTECTED;
-                pop_head_locked();
-                seen_add_locked(head.id);
-                resolved = true;
-                shared_state.next_apply_allowed_at = now + retry_settle_ms;
-                out.outcome = SC_DEATHLINK_OUTCOME_OK;
-            }
+                                                : result.protection;
+            slot.state = SC_DEATHLINK_REMOTE_RESOLVED_PROTECTED;
+            slot.flags = SC_DEATHLINK_FLAG_APPLIED | SC_DEATHLINK_FLAG_PROTECTED;
+            pop_head_locked();
+            seen_add_locked(head.id);
+            resolved = true;
+            shared_state.next_apply_allowed_at = now + application_settle_ms;
+            out.outcome = SC_DEATHLINK_OUTCOME_OK;
             out.flags |= SC_DEATHLINK_FLAG_PROTECTED;
         }
     } else {
