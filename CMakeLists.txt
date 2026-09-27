@@ -48,7 +48,7 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   tools/weapon_points_probe.cpp
   src/challenge_match.h src/challenge_seam_layout.h src/challenge_suppression.h src/challenge_suppression.cpp
   include/sentinel_campaign_menu.h src/campaign_menu.h src/campaign_menu.cpp tools/campaign_menu_probe.cpp
-  src/campaign_menu_native.h src/campaign_menu_native.cpp
+  src/campaign_menu_native.h src/campaign_menu_native.cpp src/physical_contact_observer.h
   include/sentinel_inventory.h src/inventory.h src/inventory.cpp src/inventory_native.cpp
   tools/inventory_probe.cpp
   include/sentinel_arsenal.h src/arsenal.h src/arsenal.cpp src/arsenal_native.cpp

@@ -12,13 +12,21 @@ enum class BStage : size_t { session, profile_read, profile_output, profile_choi
     provider, sdk_prepare, sdk_submit, sdk_callback, sdk_result, readback_create, readback_prepare,
     readback_verify, continuity, resume, parser, startup_gate, native_start, bootstrap, root_layout,
     special_input, special_toggle, challenge_suppression, deathlink,
-    start_logo, main_logo, mission_details, count };
+    start_logo, main_logo, mission_details, mission_counts, mission_rating, mission_challenges,
+    dossier_counts, dossier_challenges, end_counts, boss_presentation, hud_challenges, end_challenges,
+    mission_count_fields, end_count_fields, mission_count_rewrite,
+    flame_physics, crystal_physics, flame_touch, crystal_touch, flame_filter, crystal_filter,
+    flame_dispatch, crystal_dispatch, contact_observer, flame_start_touch, crystal_start_touch, flame_gate, crystal_gate, dossier_points, count };
 inline constexpr const char* b_stage_names[]{"session", "profile_read", "profile_output", "profile_choice", "profile_capture",
     "profile_prepare", "profile_publish", "catalog", "creation", "difficulty", "transition", "checkpoint_factory",
     "provider", "sdk_prepare", "sdk_submit", "sdk_callback", "sdk_result", "readback_create", "readback_prepare",
     "readback_verify", "continuity", "resume", "parser", "startup_gate", "native_start", "bootstrap", "root_layout",
     "special_input", "special_toggle", "challenge_suppression", "deathlink",
-    "start_logo", "main_logo", "mission_details"};
+    "start_logo", "main_logo", "mission_details", "mission_counts", "mission_rating", "mission_challenges",
+    "dossier_counts", "dossier_challenges", "end_counts", "boss_presentation", "hud_challenges", "end_challenges",
+    "mission_count_fields", "end_count_fields", "mission_count_rewrite",
+    "flame_physics", "crystal_physics", "flame_touch", "crystal_touch", "flame_filter", "crystal_filter",
+    "flame_dispatch", "crystal_dispatch", "contact_observer", "flame_start_touch", "crystal_start_touch", "flame_gate", "crystal_gate", "dossier_points"};
 static_assert(std::size(b_stage_names)==static_cast<size_t>(BStage::count));
 enum class BStatus : uint32_t { entered=1, pending=2, succeeded=3, refused=4, blocked=5 };
 struct BFact {
