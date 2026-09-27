@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(SentinelCore VERSION 0.8.0 LANGUAGES C CXX)
+project(SentinelCore VERSION 0.9.0 LANGUAGES C CXX)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Sentinel Core currently requires Windows x64 and MSVC.")
 endif()

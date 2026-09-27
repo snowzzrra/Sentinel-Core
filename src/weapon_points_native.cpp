@@ -1,6 +1,7 @@
 #include "weapon_points.h"
 #include "native_target.h"
 #include "save_session.h"
+#include "challenge_suppression.h"
 #include "MinHook.h"
 #include <intrin.h>
 #include <atomic>
@@ -56,6 +57,11 @@ void append_hook(uintptr_t self, const char* title, const char* reward, uint32_t
     original_append(self, title, reward, time, icon, color);
 }
 void notify_hook(uintptr_t self, uint32_t code, uintptr_t data) {
+    // The qualified aggregate's writer continues past the frozen currency seam
+    // and reaches this exact notification call before its completion scope ends.
+    if (active() && code == 0xd && rva(_ReturnAddress()) == 0x13ce5b1 &&
+        rva(reinterpret_cast<void*>(add_origin)) == 0x147546e &&
+        challenge::consume_qualified_battery_toast()) return;
     if (active() && code == 0x39) code = 0x3a; // Native Slayer Gate completion without points.
     original_notify(self, code, data);
 }
@@ -171,6 +177,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
     for (auto site : direct) if (!call_site(memory,image_base,site,0x13ce4c0)) return;
     for (auto site : pairs) if (!call_site(memory,image_base,site,0x13ce4a0)) return;
     if (!call_site(memory,image_base,0xeeaa0a,0xeea070)) return;
+    if (!call_site(memory,image_base,0x13ce5b1,0x1273710)) return;
     for (const auto& s : sites) if (s.detour) {
         if (MH_CreateHook(reinterpret_cast<void*>(image_base+s.offset),s.detour,s.original) != MH_OK) return;
     }

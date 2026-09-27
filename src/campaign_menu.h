@@ -9,10 +9,12 @@ struct Projection {
     uint32_t count=0;
     uint32_t focus_id=0;
     std::array<sc_campaign_row,SC_CAMPAIGN_MENU_MAX_ROWS> rows{};
+    std::array<sc_campaign_summary,SC_CAMPAIGN_MENU_MAX_ROWS> summaries{};
 };
 class Menu {
 public:
-    sc_campaign_result request(uint16_t operation,const sc_campaign_request&,bool admitted);
+    sc_campaign_result request(uint16_t operation,const sc_campaign_request&,bool admitted,
+                               const sc_campaign_summary* = nullptr);
     Projection projection();
     void rendered(uint64_t revision);
     void selected(uint32_t id);

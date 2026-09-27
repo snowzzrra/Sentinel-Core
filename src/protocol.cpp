@@ -64,7 +64,7 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
                           sc_save_backup_request* backup, sc_weapon_points_request* points, sc_campaign_request* campaign,
                           sc_inventory_request* inventory, sc_arsenal_request* arsenal,
                           sc_runes_request* runes, sc_special_request* special,
-                          sc_deathlink_request* deathlink, sc_automap_request* automap) {
+                          sc_deathlink_request* deathlink, sc_automap_request* automap, sc_campaign_summary* summary) {
     if (operation) *operation = inspect_operation;
     if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
@@ -236,8 +236,10 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
         return r.valid && r.pos == size ? WireResult::ok : WireResult::malformed;
     }
     if (op>=campaign_row_operation) {
-        if (length!=453) return WireResult::malformed;
-        if (r.number(8)!=campaign_menu_capability) return WireResult::capability_unavailable;
+        const auto capability=r.number(8);
+        const bool presentation=capability==campaign_presentation_capability;
+        if (!presentation && capability!=campaign_menu_capability) return WireResult::capability_unavailable;
+        if (length!=(presentation ? 745u : 453u)) return WireResult::malformed;
         sc_campaign_request value{};
         auto& e=value.execution;
         r.u32(e.expected.pid); r.u64(e.expected.process_created);
@@ -255,6 +257,30 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
         r.u32(value.row.id); r.u32(value.row.flags); r.u32(value.row.native_index);
         for (auto& c:value.row.map) c=static_cast<char>(r.number(1));
         for (auto& c:value.row.title) c=static_cast<char>(r.number(1));
+        sc_campaign_summary fields{};
+        if (presentation) {
+            r.u32(fields.known); r.u32(fields.found); r.u32(fields.total); r.u32(fields.band);
+            if (fields.known>2 || fields.found>fields.total || (fields.band&255)>5 ||
+                (fields.band>>8)>10001 ||
+                ((fields.band>>8) && (!(fields.band&255) || (fields.band&255)>4)) ||
+                (!fields.known && fields.band) ||
+                (fields.known!=1 && (fields.found || fields.total)) ||
+                (!(value.row.flags&SC_CAMPAIGN_REVEALED) && (fields.known==1 || fields.band))) return WireResult::malformed;
+            for (auto& challenge:fields.challenges) {
+                for (auto& c:challenge.unlockable) c=static_cast<char>(r.number(1));
+                r.u32(challenge.found); r.u32(challenge.required); r.u32(challenge.checked);
+                if (challenge.unlockable[79] || challenge.found>challenge.required || challenge.checked>1 ||
+                    (bool(challenge.unlockable[0])!=bool(challenge.required)) ||
+                    (fields.known!=1 && challenge.required) ||
+                    (challenge.checked && !challenge.required)) return WireResult::malformed;
+                for (auto c:challenge.unlockable)
+                    if (c && !((c>='a' && c<='z') || (c>='0' && c<='9') || c=='_' || c=='/'))
+                        return WireResult::malformed;
+            }
+            for (size_t i=0;i<3;++i) for (size_t j=0;j<i;++j)
+                if (fields.challenges[i].required && !std::strcmp(fields.challenges[i].unlockable,
+                    fields.challenges[j].unlockable)) return WireResult::malformed;
+        }
         if (value.namespace_id[64] || value.row.map[191] || value.row.title[95]) return WireResult::malformed;
         for (size_t i=0;i<64;++i) {
             const auto c=value.namespace_id[i];
@@ -273,6 +299,7 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
             for (auto c:value.row.title) if (c && (c<32 || c>126)) return WireResult::malformed;
         }
         if (campaign) *campaign=value;
+        if (summary) *summary=fields;
         return r.valid && r.pos==size ? WireResult::ok : WireResult::malformed;
     }
     if (op >= weapon_points_submit_operation) {
@@ -1241,16 +1268,24 @@ template<class C> bool campaign_values(C& c,sc_campaign_result& v) {
         v.rendered_revision<=v.committed_revision;
 }
 }
-size_t encode_campaign_request(Message& out,uint16_t op,const sc_campaign_request& request) {
+size_t encode_campaign_request(Message& out,uint16_t op,const sc_campaign_request& request,const sc_campaign_summary* summary) {
     if (op<campaign_row_operation || op>campaign_inspect_operation) return 0;
     const auto end=encode_native_request(out,diagnostic_submit_operation,request.execution);
-    Writer h{out}; header(h,wire_version,op,453,WireResult::ok); h.number(campaign_menu_capability,8);
+    Writer h{out}; header(h,wire_version,op,summary ? 745 : 453,WireResult::ok);
+    h.number(summary ? campaign_presentation_capability : campaign_menu_capability,8);
     Writer w{out,end};
     for (auto ch:request.namespace_id) w.number(static_cast<uint8_t>(ch),1);
     w.number(request.revision,8); w.number(request.index,4); w.number(request.count,4);
     w.number(request.row.id,4); w.number(request.row.flags,4); w.number(request.row.native_index,4);
     for (auto ch:request.row.map) w.number(static_cast<uint8_t>(ch),1);
     for (auto ch:request.row.title) w.number(static_cast<uint8_t>(ch),1);
+    if (summary) {
+        w.number(summary->known,4); w.number(summary->found,4); w.number(summary->total,4); w.number(summary->band,4);
+        for (const auto& challenge:summary->challenges) {
+            for (auto ch:challenge.unlockable) w.number(static_cast<uint8_t>(ch),1);
+            w.number(challenge.found,4); w.number(challenge.required,4); w.number(challenge.checked,4);
+        }
+    }
     return w.valid ? w.pos : 0;
 }
 size_t encode_campaign_response(Message& out,WireResult result,uint16_t op,const Snapshot& s,const sc_campaign_result& value) {

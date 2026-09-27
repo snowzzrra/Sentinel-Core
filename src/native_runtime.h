@@ -19,7 +19,7 @@ sc_diagnostic_result result(const sc_diagnostic_request& request, bool cancel, s
 sc_save_backup_snapshot submit_backup(const sc_save_backup_request&);
 sc_save_backup_snapshot backup_result(const sc_save_backup_request&, bool cancel);
 sc_weapon_points_result submit_weapon_points(const sc_weapon_points_request&);
-sc_campaign_result campaign_request(uint16_t,const sc_campaign_request&);
+sc_campaign_result campaign_request(uint16_t,const sc_campaign_request&,const sc_campaign_summary* = nullptr);
 sc_weapon_points_result weapon_points_result(const sc_weapon_points_request&, bool cancel, bool release = false);
 sc_inventory_result submit_inventory(const sc_inventory_request&);
 sc_inventory_result inventory_result(const sc_inventory_request&, bool cancel, bool release = false);

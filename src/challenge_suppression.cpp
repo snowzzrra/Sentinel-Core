@@ -28,6 +28,7 @@ struct Scope {
     bool admitted = false;
     bool map_qualified = false;
     bool record_mission = false;
+    bool battery_toast_pending = false;
     uint64_t epoch = 0;
     uint32_t thread = 0;
     uint32_t owner_thread = 0;
@@ -189,11 +190,13 @@ bool evaluate(uintptr_t player, uint32_t currency, int32_t delta, uint8_t notify
             {"expected_return_site", call.expected_return_site}, {"currency", call.currency},
             {"delta", call.delta}, {"notify", call.notify}});
     }
-    if (!mismatch)
+    if (!mismatch) {
+        scope.battery_toast_pending = true;
         save::session().btrace.record(save::BStage::challenge_suppression, save::BStatus::succeeded,
             "aggregate_battery_suppressed", 0,
             {{"epoch", call.epoch}, {"player", call.player}, {"return_site", call.return_site},
              {"currency", call.currency}, {"delta", call.delta}, {"members", canonical_group_members}});
+    }
     return mismatch == nullptr;
 }
 
@@ -261,6 +264,11 @@ bool call_site(engine::Memory& memory, uintptr_t base, uint32_t after, uint32_t 
 } // namespace
 
 bool available() { return ready.load(std::memory_order_acquire); }
+bool consume_qualified_battery_toast() {
+    if (!scope.active || !scope.battery_toast_pending) return false;
+    scope.battery_toast_pending = false;
+    return true;
+}
 
 void install(const engine::Binding& binding, HANDLE stop) {
     if (install_attempted.exchange(true, std::memory_order_acq_rel)) return;

@@ -73,13 +73,14 @@ DWORD serve(void*) {
             sc_save_backup_request backup{};
             sc_weapon_points_request points{};
             sc_campaign_request campaign{};
+            sc_campaign_summary summary{};
             sc_inventory_request inventory{};
             sc_arsenal_request arsenal{};
             sc_runes_request runes{};
             sc_special_request special{};
             sc_deathlink_request deathlink{};
             sc_automap_request automap{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink, &automap);
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink, &automap, &summary);
             sc_automap_result automap_result{};
             if (result == WireResult::ok && operation == automap_operation) automap_result = native::automap_request(automap);
             sc_deathlink_result deathlink_result{};
@@ -114,7 +115,7 @@ DWORD serve(void*) {
             }
             sc_campaign_result campaign_result{};
             if (result==WireResult::ok && operation>=campaign_row_operation && operation<=campaign_inspect_operation)
-                campaign_result=native::campaign_request(operation,campaign);
+                campaign_result=native::campaign_request(operation,campaign,&summary);
             sc_weapon_points_result points_result{};
             if (result == WireResult::ok && operation >= weapon_points_submit_operation && operation<=weapon_points_release_operation) {
                 points_result = operation == weapon_points_submit_operation ? native::submit_weapon_points(points) :

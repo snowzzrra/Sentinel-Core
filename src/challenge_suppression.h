@@ -8,4 +8,5 @@ namespace sentinel::challenge {
 // false and no hook is reachable unless every documented target qualified.
 void install(const engine::Binding&, HANDLE stop);
 bool available();
+bool consume_qualified_battery_toast();
 }

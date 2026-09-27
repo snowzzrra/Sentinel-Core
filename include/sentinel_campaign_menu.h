@@ -16,6 +16,19 @@ typedef struct sc_campaign_row {
     uint32_t native_index; // Entry in the room-authored native mission roster.
     char map[192], title[96];
 } sc_campaign_row;
+// sentinel.campaign_presentation.v1 accompanies a row at the same revision.
+// known: zero for legacy callers, one for facts, two for unavailable facts.
+// Native consumers own all UI objects.
+typedef struct sc_physical_challenge {
+    char unlockable[80];
+    uint32_t found, required, checked;
+} sc_physical_challenge;
+typedef struct sc_campaign_summary {
+    // band: tier 1..4 in low byte; high bytes hold centi-CR + 1 when known.
+    // Zero keeps legacy/unknown presentation and the wire layout unchanged.
+    uint32_t known, found, total, band;
+    sc_physical_challenge challenges[3];
+} sc_campaign_summary;
 typedef struct sc_campaign_request {
     sc_diagnostic_request execution;
     char namespace_id[65];

@@ -52,6 +52,7 @@ constexpr uint16_t weapon_points_release_operation = 21;
 constexpr uint64_t weapon_points_capability = 2048;
 constexpr uint16_t campaign_row_operation=22, campaign_commit_operation=23, campaign_inspect_operation=24;
 constexpr uint64_t campaign_menu_capability=4096;
+constexpr uint64_t campaign_presentation_capability=524288;
 constexpr uint16_t inventory_submit_operation = 25, inventory_result_operation = 26,
     inventory_cancel_operation = 27, inventory_release_operation = 28;
 constexpr uint64_t inventory_capability = 8192;
@@ -69,7 +70,7 @@ constexpr uint16_t deathlink_submit_operation = 41, deathlink_result_operation =
 constexpr uint64_t deathlink_capability = 131072;
 constexpr uint16_t automap_operation = 45;
 constexpr uint64_t automap_capability = 262144;
-constexpr size_t max_request = 512, max_message = 1024;
+constexpr size_t max_request = 1024, max_message = 1024;
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
 enum class WireResult : uint32_t { ok, incompatible_protocol, capability_unavailable,
     unsupported_operation, malformed };
@@ -124,7 +125,8 @@ Inspection query_save_installation(uint32_t pid, uint32_t timeout_ms);
 Inspection query_save_write(uint32_t pid, uint32_t timeout_ms, uint64_t operation_id = 0);
 Inspection query_save_backup(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_save_backup_request&);
 Inspection query_weapon_points(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_weapon_points_request&);
-Inspection query_campaign(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_campaign_request&);
+Inspection query_campaign(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_campaign_request&,
+                          const sc_campaign_summary* = nullptr);
 Inspection query_inventory(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_inventory_request&);
 Inspection query_arsenal(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_arsenal_request&);
 Inspection query_runes(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_runes_request&);

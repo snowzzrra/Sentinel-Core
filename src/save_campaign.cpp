@@ -591,6 +591,7 @@ bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,u
         state_.native_saved=false; state_.readback_verified=false; state_.continuity_persisted=false;
         state_.native_factory_matched=false;
     }
+    prior_map_=state_.map;
     state_.map=std::move(map); state_.generation_before=generation; map_pending_=true;
     state_.native_subtype=native_subtype;
     mission_destination_.clear();
@@ -646,6 +647,10 @@ void Campaign::map_end(const CampaignTransition& result) {
 }
 void Campaign::complete_map() {
     map_pending_=false; state_.map_active=true; state_.save_ready=true;
+    if (state_.map=="game/hub/hub" && !prior_map_.empty() && prior_map_!="game/hub/hub")
+        state_.end_summary_map=prior_map_;
+    else if (state_.map!="game/hub/hub") state_.end_summary_map.clear();
+    prior_map_.clear();
     if (!state_.operation) state_.phase=state_.resumed ? "reopened" : "native_created";
     owner_->btrace.record(BStage::transition,BStatus::succeeded,"native_map_ready",state_.operation,
         {{"resumed",state_.resumed},{"map_active",state_.map_active},{"save_ready",state_.save_ready},{"generation",state_.generation_after},

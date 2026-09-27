@@ -30,7 +30,7 @@ struct CampaignSnapshot {
     bool native_saved = false, readback_verified = false, continuity_persisted = false, map_active = false, native_factory_matched = false;
     uint32_t difficulty = 4, effective_difficulty = 4, loaded_difficulty = 4, changes_blocked = 0, parser_result = 0;
     uint64_t operation = 0, checkpoint = 0, source_checkpoint = 0, generation_before = 0, generation_after = 0;
-    std::string phase = "disabled", reason = "none", slot, map;
+    std::string phase = "disabled", reason = "none", slot, map, end_summary_map;
     CampaignTransition transition, checkpoint_boundary;
     uint64_t failure_at_ms=0;
     bool save_ready=false;
@@ -79,7 +79,7 @@ private:
     storage::CampaignOptions options_;
     CampaignSnapshot state_;
     BStage diagnostic_stage_=BStage::creation;
-    std::string contract_, directory_, mission_destination_;
+    std::string contract_, directory_, mission_destination_, prior_map_;
     std::vector<SdkFileWrite> expected_;
     uintptr_t load_data_ = 0;
     uintptr_t metadata_data_ = 0;

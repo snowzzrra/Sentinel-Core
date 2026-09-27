@@ -12,7 +12,8 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation = 
                           sc_weapon_points_request* points = nullptr, sc_campaign_request* campaign = nullptr,
                           sc_inventory_request* inventory = nullptr, sc_arsenal_request* arsenal = nullptr,
                           sc_runes_request* runes = nullptr, sc_special_request* special = nullptr,
-                          sc_deathlink_request* deathlink = nullptr, sc_automap_request* automap = nullptr);
+                          sc_deathlink_request* deathlink = nullptr, sc_automap_request* automap = nullptr,
+                          sc_campaign_summary* summary = nullptr);
 size_t encode_runes_request(Message&, uint16_t, const sc_runes_request&);
 size_t encode_runes_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_runes_result&);
 bool decode_runes_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_runes_result&);
@@ -22,7 +23,7 @@ bool decode_special_response(const Message&, size_t, WireResult&, uint16_t, Snap
 size_t encode_deathlink_request(Message&, uint16_t, const sc_deathlink_request&);
 size_t encode_deathlink_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_deathlink_result&);
 bool decode_deathlink_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_deathlink_result&);
-size_t encode_campaign_request(Message&, uint16_t, const sc_campaign_request&);
+size_t encode_campaign_request(Message&, uint16_t, const sc_campaign_request&, const sc_campaign_summary* = nullptr);
 size_t encode_campaign_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_campaign_result&);
 bool decode_campaign_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_campaign_result&);
 size_t encode_arsenal_request(Message&, uint16_t, const sc_arsenal_request&);

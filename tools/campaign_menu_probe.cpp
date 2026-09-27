@@ -12,11 +12,13 @@ int campaign_menu_command(int argc,wchar_t** argv) {
     sentinel::Message message{};
     const auto count=std::fread(message.data(),1,message.size(),stdin);
     uint16_t op=0; sc_campaign_request request{};
-    if (sentinel::decode_request(message,count,&op,nullptr,nullptr,nullptr,nullptr,nullptr,&request)!=sentinel::WireResult::ok ||
+    sc_campaign_summary summary{};
+    if (sentinel::decode_request(message,count,&op,nullptr,nullptr,nullptr,nullptr,nullptr,&request,
+        nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&summary)!=sentinel::WireResult::ok ||
         op<sentinel::campaign_row_operation || op>sentinel::campaign_inspect_operation) {
         std::puts("{\"result\":\"malformed_request\"}"); return 2;
     }
-    const auto r=sentinel::query_campaign(request.execution.expected.pid,2000,op,request);
+    const auto r=sentinel::query_campaign(request.execution.expected.pid,2000,op,request,count==761 ? &summary : nullptr);
     if (r.result!=sentinel::ProbeResult::ok) {
         std::printf("{\"result\":\"%s\",\"win32_error\":%u}\n",sentinel::result_name(r.result),r.win32_error);
         return static_cast<int>(r.result);

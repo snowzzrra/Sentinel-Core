@@ -4,13 +4,15 @@
 
 namespace sentinel::campaign_menu {
 Menu& menu() { static Menu value; return value; }
-sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r,bool admitted) {
+sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r,bool admitted,
+                                const sc_campaign_summary* summary) {
     std::lock_guard<std::mutex> guard(mutex_);
     sc_campaign_result out{}; out.size=sizeof(out); out.abi_version=SC_CAMPAIGN_MENU_ABI_VERSION;
     out.scope=r.execution.expected; out.request_id=r.execution.request_id;
     std::memcpy(out.nonce,r.execution.nonce,sizeof(out.nonce));
     std::memcpy(out.namespace_id,r.namespace_id,sizeof(out.namespace_id));
     const auto refuse=[&](uint32_t reason) { out.status=SC_CAMPAIGN_REFUSED; out.reason=reason; };
+    const sc_campaign_summary presentation=summary ? *summary : sc_campaign_summary{};
     if (!admitted) refuse(SC_CAMPAIGN_SCOPE);
     else if (operation!=campaign_inspect_operation) {
         if (!r.revision || r.revision<committed_.revision || r.revision<staged_.revision)
@@ -19,16 +21,18 @@ sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r
             refuse(SC_CAMPAIGN_ROWS);
         else if (r.revision==committed_.revision) {
             if (r.count!=committed_.count || (operation==campaign_row_operation &&
-                std::memcmp(&committed_.rows[r.index],&r.row,sizeof(r.row)))) refuse(SC_CAMPAIGN_REVISION);
+                (std::memcmp(&committed_.rows[r.index],&r.row,sizeof(r.row)) ||
+                 std::memcmp(&committed_.summaries[r.index],&presentation,sizeof(presentation))))) refuse(SC_CAMPAIGN_REVISION);
         } else {
             if (r.revision!=staged_.revision) {
                 staged_={}; staged_.revision=r.revision; staged_.count=r.count; received_={};
             }
             if (staged_.count!=r.count) refuse(SC_CAMPAIGN_REVISION);
             else if (operation==campaign_row_operation) {
-                if (received_[r.index] && std::memcmp(&staged_.rows[r.index],&r.row,sizeof(r.row)))
+                if (received_[r.index] && (std::memcmp(&staged_.rows[r.index],&r.row,sizeof(r.row)) ||
+                    std::memcmp(&staged_.summaries[r.index],&presentation,sizeof(presentation))))
                     refuse(SC_CAMPAIGN_REVISION);
-                else { staged_.rows[r.index]=r.row; received_[r.index]=true; }
+                else { staged_.rows[r.index]=r.row; staged_.summaries[r.index]=presentation; received_[r.index]=true; }
             } else {
                 unsigned hubs=0;
                 for (uint32_t i=0;i<staged_.count;++i) {
