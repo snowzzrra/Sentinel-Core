@@ -649,25 +649,24 @@ void present_details(uintptr_t details) {
     const auto icon=swf_child(details_root,"apDifficulty");
     const auto tier=summary.band&255;
     static constexpr const char* donor[]={"",
-        "textures/swf_images/difficulty/too_young.png",
-        "textures/swf_images/difficulty/hurt_me_plenty.png",
-        "textures/swf_images/difficulty/ultra_violence.png",
-        "textures/swf_images/difficulty/nightmare.png"};
-    const auto material=tier>=1 && tier<=4 ? find_material(material_manager,donor[tier],0) : 0;
-    const bool rating_bound=icon && material && swf_sized_material;
-    if (rating_bound) swf_sized_material(icon,material,150,150,0);
+        "textures/swf_images/difficulty/Too_Young.png",
+        "textures/swf_images/difficulty/Hurt_Me_Plenty.png",
+        "textures/swf_images/difficulty/Ultra_Violence.png",
+        "textures/swf_images/difficulty/Nightmare.png"};
+    const auto material=tier>=1 && tier<=4 ? find_material(material_manager,donor[tier],1) : 0;
+    const bool rating_bound=icon && material;
+    if (rating_bound) swf_set_material(icon,material,0);
     if (icon) original_sprite_visibility(icon,rating_bound,1);
     if (const auto item_list=swf_child(root,"itemsFound")) original_sprite_visibility(item_list,0,1);
     if (root) original_sprite_visibility(root,counts,1);
     uintptr_t applied_material=0;
-    uint16_t width=0,height=0;
-    read(icon,0x60,applied_material); read(icon,0x68,width); read(icon,0x6a,height);
-    const bool applied=rating_bound && applied_material==material && width==150 && height==150;
+    read(icon,0x60,applied_material);
+    const bool applied=rating_bound && applied_material==material;
     save::session().btrace.record(save::BStage::mission_rating,
-        applied?save::BStatus::succeeded:save::BStatus::pending,
-        applied?"preview_skull_material_readback":"preview_skull_pending",shown.revision,
+        save::BStatus::pending,
+        applied?"preview_skull_binding_only":"preview_skull_pending",shown.revision,
         {{"index",static_cast<uint64_t>(index)},{"tier",tier},{"icon",icon!=0},
-         {"material",material!=0},{"readback",material!=0 && applied_material==material},{"width",width},{"height",height}},details);
+          {"material",material!=0},{"readback",material!=0 && applied_material==material}},details);
     const auto challenge_root=swf_child(swf_child(details_root,"challenges"),"list");
     if (summary.known!=1) return;
     unsigned requested=0,bound=0;
