@@ -653,7 +653,7 @@ void present_details(uintptr_t details) {
         "textures/swf_images/difficulty/hurt_me_plenty.png",
         "textures/swf_images/difficulty/ultra_violence.png",
         "textures/swf_images/difficulty/nightmare.png"};
-    const auto material=tier>=1 && tier<=4 ? find_material(material_manager,donor[tier],1) : 0;
+    const auto material=tier>=1 && tier<=4 ? find_material(material_manager,donor[tier],0) : 0;
     const bool rating_bound=icon && material && swf_sized_material;
     if (rating_bound) swf_sized_material(icon,material,150,150,0);
     if (icon) original_sprite_visibility(icon,rating_bound,1);
