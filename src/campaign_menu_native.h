@@ -5,9 +5,9 @@
 
 namespace sentinel::campaign_menu {
 bool install(const engine::Binding&,HANDLE stop);
-std::array<native::Target,47> native_targets(uintptr_t base);
+std::array<native::Target,43> native_targets(uintptr_t base);
 bool validate_native_targets(save::Installation&,engine::Memory&,const engine::Image&,
-                             HANDLE,const std::array<native::Target,47>&);
+                             HANDLE,const std::array<native::Target,43>&);
 bool available();
 void present_campaign_actions(uintptr_t screen, bool entered);
 bool mission_request(uintptr_t request, std::string& destination);

@@ -256,11 +256,29 @@ void present_save_preview(uintptr_t screen,const save::CampaignSnapshot& snapsho
     }
     const auto bar=swf_child(preview,"saveInfoBar");
     if (bar) original_sprite_visibility(bar,1,1);
-    const auto name=swf_child(bar,"mapName",true);
-    uint32_t title_id=0;
-    const auto title=read(declaration,0x88,title_id) && title_id
-        ? localize(reinterpret_cast<const uint32_t*>(declaration+0x88)) : "";
-    if (name) swf_set_text(name,title ? title : "");
+    const auto name=swf_child(swf_child(bar,"mapName"),"txtVal",true);
+    const auto row_projection=menu().projection();
+    const char* title=nullptr;
+    for (uint32_t i=0;i<row_projection.count;++i) {
+        if (!std::strcmp(row_projection.rows[i].map,snapshot.map.c_str())) {
+            title=row_projection.rows[i].title;
+            break;
+        }
+    }
+    if (name && title && *title) {
+        swf_set_text(name,title);
+        save::NativeString actual{};
+        const bool verified=read(name,0x40,actual) && actual.data &&
+            actual.length==static_cast<int32_t>(std::strlen(title)) &&
+            !std::memcmp(actual.data,title,static_cast<size_t>(actual.length));
+        save::session().btrace.record(save::BStage::profile_output,
+            verified?save::BStatus::succeeded:save::BStatus::pending,
+            verified?"checkpoint_title_bound":"checkpoint_title_readback_pending",0,
+            {{"title",name!=0},{"row",title!=nullptr},{"readback",verified}},screen);
+    } else {
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::pending,
+            "checkpoint_title_binding_pending",0,{{"title",name!=0},{"row",title!=nullptr}},screen);
+    }
 }
 void safe_present_save_preview(uintptr_t screen,const save::CampaignSnapshot& snapshot) {
     __try { present_save_preview(screen,snapshot); }
@@ -283,7 +301,7 @@ void present_dossier_map(uintptr_t screen) {
         uintptr_t widget=0,content=0;
         read(screen,0x138,widget);
         read(widget,0x18,content);
-        const auto title=swf_child(content,"txtVal",true);
+        const auto title=swf_child(swf_child(content,"apItemsTitle"),"txtVal",true);
         const auto items=swf_child(content,"items");
         if (!content || !title || !items) {
             save::session().btrace.record(save::BStage::dossier_counts,save::BStatus::pending,
@@ -617,10 +635,8 @@ void present_details(uintptr_t details) {
         save::session().btrace.record(save::BStage::mission_details,save::BStatus::blocked,
                                       "details_root_unavailable",0,{{"index",static_cast<uint64_t>(index)}}); return;
     }
-    uint64_t timestamp=0;
-    if (read(details,0x1c8,timestamp))
-        if (const auto date=swf_child(swf_child(details_root,"completionInfo"),"date"))
-            original_sprite_visibility(date,timestamp!=0,1);
+    if (const auto completion=swf_child(details_root,"completionInfo"))
+        original_sprite_visibility(completion,0,1);
     uintptr_t category=0,root=0,vtable=0;
     if (read(details,0x1b8,category) && category && read(category,0,vtable) &&
         vtable==end_items_category_vtable) read(category,0x18,root);
@@ -651,7 +667,7 @@ void present_details(uintptr_t details) {
         applied?save::BStatus::succeeded:save::BStatus::pending,
         applied?"preview_skull_material_readback":"preview_skull_pending",shown.revision,
         {{"index",static_cast<uint64_t>(index)},{"tier",tier},{"icon",icon!=0},
-         {"material",material!=0},{"readback",applied_material==material},{"width",width},{"height",height}},details);
+         {"material",material!=0},{"readback",material!=0 && applied_material==material},{"width",width},{"height",height}},details);
     const auto challenge_root=swf_child(swf_child(details_root,"challenges"),"list");
     if (summary.known!=1) return;
     unsigned requested=0,bound=0;
@@ -1002,13 +1018,13 @@ void test_meter_update(uintptr_t meter) { meter_update_detour(meter); }
 #endif
 #include "physical_contact_observer.h"
 
-std::array<native::Target,47> native_targets(uintptr_t base) {
+std::array<native::Target,43> native_targets(uintptr_t base) {
     constexpr uint32_t rvas[]={0x10d2c00,0x10d42f0,0x10d27b0,0x10d1c50,0x10d3140,
         0x3fa8e0,0x3faff0,0x10d1cf0,0x43c070,0x1116c50,0x159c280,
         0x10e08f0,0x10dc420,0x18071d0,0x1857110,0x0f9bd70,0x1864430,
         0x0f9c000,0x185c150,0x184e470,0x184e4b0,0x184e3b0,0x186db00,
         0x17a9660,0x1d69e00,0x360bb0,0x1863b00,0x15b2680,0x0effea0,0x0f5cfe0,0x0f59270,
-        0x0f489c0,0x0f4f990,0x17aa5d0,0x10ef3e0,0x0f30810,0x1859e20,0x1865280,0xf98fc0,0xf62bc0,0x1863c30,0xfaa270,0xda0100,0xd9fe60,0xd9d930,0xd9d010,0xd9c190};
+        0x0f489c0,0x0f4f990,0x17aa5d0,0x10ef3e0,0x0f30810,0x1859e20,0x1865280,0xf98fc0,0xf62bc0,0x1863c30,0xfaa270,0xd9d010};
     constexpr const char* bytes[]={
         "4053565741554881ec98000000488b05c4bd0d034833c4488944247033db488d",
         "40574883ec60488b05dba60d034833c44889442450488bf9488d4c2420e8ce65",
@@ -1052,12 +1068,8 @@ std::array<native::Target,47> native_targets(uintptr_t base) {
         "40555356574154488bec4881ec800000004533e4488bf9418bf4448965304839",
         "48895c240848896c24104889742418574883ec20488bd9418bf1488b4960418b",
         "4053b8a0400000e8241b8c01482be0488b05524720034833c448898424804000",
-        "48895c24084889742410574883ec2080b99f0b000000498bf0488bda488bf975",
-        "48895c24084889742410574883ec2080b99f0b000000498bf0488bda488bf974",
-        "48895c240848896c2410488974241857415641574883ec20f681d80500000248",
-        "40534883ec20488b01488bd9ff90480d000084c00f8582000000488b03488bcb",
-        "48895c2420574883ec40488b05372841034833c44889442438488bd9e8bff3e2"};
-    std::array<native::Target,47> targets{};
+        "40534883ec20488b01488bd9ff90480d000084c00f8582000000488b03488bcb"};
+    std::array<native::Target,43> targets{};
     const auto digit=[](char c) { return c<='9' ? c-'0' : c-'a'+10; };
     for (unsigned i=0;i<targets.size();++i) {
         targets[i].address=base+rvas[i];
@@ -1071,7 +1083,7 @@ std::array<native::Target,47> native_targets(uintptr_t base) {
     return targets;
 }
 bool validate_native_targets(save::Installation& record,engine::Memory& source_memory,
-                              const engine::Image& image,HANDLE stop,const std::array<native::Target,47>& targets) {
+                              const engine::Image& image,HANDLE stop,const std::array<native::Target,43>& targets) {
     if (!image.contains(0x5e05200,sizeof(uintptr_t),IMAGE_SCN_MEM_READ,IMAGE_SCN_MEM_EXECUTE)) return false;
     // Populate's actual CALL owns this list-copy contract. Record failures here
     // as well as in the target validator so startup refusal remains actionable.
@@ -1118,11 +1130,10 @@ bool install(const engine::Binding& binding,HANDLE stop) {
         reinterpret_cast<void*>(dossier_map),reinterpret_cast<void*>(challenge_card_update),
         reinterpret_cast<void*>(start_show),reinterpret_cast<void*>(boss_update),
         reinterpret_cast<void*>(hud_challenge_update),reinterpret_cast<void*>(eol_challenge_update),reinterpret_cast<void*>(category_counts),
-        reinterpret_cast<void*>(start_touch),reinterpret_cast<void*>(trigger_touch),reinterpret_cast<void*>(trigger_filter),
-        reinterpret_cast<void*>(trigger_gate),reinterpret_cast<void*>(trigger_dispatch)};
-    constexpr unsigned hooked[]={0,1,2,3,4,11,12,9,15,16,17,27,28,29,30,31,32,34,35,38,39,41,42,43,44,45,46};
-    void* originals[27]{};
-    for (unsigned i=0;i<27;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
+        reinterpret_cast<void*>(trigger_gate)};
+    constexpr unsigned hooked[]={0,1,2,3,4,11,12,9,15,16,17,27,28,29,30,31,32,34,35,38,39,41,42};
+    void* originals[23]{};
+    for (unsigned i=0;i<23;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
         return MH_CreateHook(reinterpret_cast<void*>(targets[hooked[i]].address),detours[i],&originals[i]); })!=MH_OK) return false;
     original_populate=reinterpret_cast<Populate>(originals[0]); original_focus=reinterpret_cast<Update>(originals[1]);
     original_load=reinterpret_cast<Load>(originals[2]); original_available=reinterpret_cast<Available>(originals[3]);
@@ -1163,15 +1174,9 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     original_hud_challenge_update=reinterpret_cast<Update>(originals[19]);
     original_eol_challenge_update=reinterpret_cast<Update>(originals[20]);
     original_category_counts=reinterpret_cast<Update>(originals[21]);
-    original_start_touch=reinterpret_cast<TriggerEvent>(originals[22]);
-    original_trigger_touch=reinterpret_cast<TriggerEvent>(originals[23]);
-    original_trigger_filter=reinterpret_cast<TriggerFilter>(originals[24]);
-    original_trigger_gate=reinterpret_cast<Available>(originals[25]);
-    original_trigger_dispatch=reinterpret_cast<Populate>(originals[26]);
-    invalid_physics_body_address=binding.image.base+0x3890ac8;
-    contact_image_base=binding.image.base;
+    original_trigger_gate=reinterpret_cast<Available>(originals[22]);
     end_items_category_vtable=binding.image.base+0x2d10d78;
-    for (unsigned i=0;i<27;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
+    for (unsigned i=0;i<23;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
         return MH_EnableHook(reinterpret_cast<void*>(targets[hooked[i]].address)); })!=MH_OK) return false;
     ready.store(true,std::memory_order_release); return true;
 }
