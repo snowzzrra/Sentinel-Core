@@ -201,12 +201,26 @@ uintptr_t swf_child(uintptr_t parent,const char* name,bool text=false) {
     return child;
 }
 void present_logo(uintptr_t screen,bool start) {
+    const auto stage=start?save::BStage::start_logo:save::BStage::main_logo;
     uintptr_t table=0,method=0;
-    if (!read(screen,0,table) || !read(table,0x70,method) || !method) return;
+    if (!read(screen,0,table) || !read(table,0x70,method) || !method) {
+        save::session().btrace.record(stage,save::BStatus::blocked,"logo_root_method_unavailable"); return;
+    }
     const auto root=reinterpret_cast<uintptr_t(*)(uintptr_t)>(method)(screen);
-    const auto logo=swf_child(root,start?"Logo_Base_Gradient":"doom_logo_base");
-    if (!logo) return;
+    if (!root) {
+        save::session().btrace.record(stage,save::BStatus::blocked,"logo_root_unavailable"); return;
+    }
+    const auto group=swf_child(root,"logo");
+    const auto parent=group?group:root;
+    const auto base_name=start?"Logo_Base_Gradient":"doom_logo_base";
+    auto logo=swf_child(parent,base_name);
+    if (!logo && parent!=root) logo=swf_child(root,base_name);
+    if (!logo) {
+        save::session().btrace.record(stage,save::BStatus::blocked,"logo_base_unavailable",0,
+                                      {{"group_found",group!=0}}); return;
+    }
     original_sprite_visibility(logo,1,1);
+    unsigned hidden=0;
     const char* const start_layers[]={"Logo_Base_Glow","Logo_Base_Scanlines_A",
         "Logo_Base_Scanlines_B","Logo_Base_White","eternal"};
     const char* const main_layers[]={"doom_outer_glow","doom_scan_lines","eternal",
@@ -214,28 +228,51 @@ void present_logo(uintptr_t screen,bool start) {
         "eternal_backplate_outer_glow","eternal_backplate_scanlines",
         "eternal_font_base","eternal_font_glow"};
     if (start) {
-        for (const auto name:start_layers)
-            if (const auto layer=swf_child(root,name)) original_sprite_visibility(layer,0,1);
+        for (const auto name:start_layers) {
+            if (const auto layer=swf_child(parent,name)) { original_sprite_visibility(layer,0,1); ++hidden; }
+            if (parent!=root)
+                if (const auto layer=swf_child(root,name)) { original_sprite_visibility(layer,0,1); ++hidden; }
+        }
     } else {
-        for (const auto name:main_layers)
-            if (const auto layer=swf_child(root,name)) original_sprite_visibility(layer,0,1);
+        for (const auto name:main_layers) {
+            if (const auto layer=swf_child(parent,name)) { original_sprite_visibility(layer,0,1); ++hidden; }
+            if (parent!=root)
+                if (const auto layer=swf_child(root,name)) { original_sprite_visibility(layer,0,1); ++hidden; }
+        }
     }
     static uintptr_t adjusted_start=0,adjusted_main=0;
     auto& adjusted=start?adjusted_start:adjusted_main;
-    if (adjusted==logo) return;
+    if (adjusted==logo) {
+        save::session().btrace.record(stage,save::BStatus::succeeded,"logo_already_adjusted",0,
+                                      {{"group_found",group!=0},{"layers_hidden",hidden}}); return;
+    }
     int32_t slot=-1; uintptr_t context=0,transforms=0;
     if (!read(logo,0xc,slot) || slot<0 || !read(logo,0x10,context) || !context ||
-        !read(context,0x80,transforms) || !transforms) return;
+        !read(context,0x80,transforms) || !transforms) {
+        save::session().btrace.record(stage,save::BStatus::blocked,"logo_transform_unavailable",0,
+                                      {{"group_found",group!=0},{"layers_hidden",hidden}}); return;
+    }
     const auto matrix=transforms+static_cast<uintptr_t>(slot)*0x40;
-    float xx=0,yy=0,tx=0,min_x=0,max_x=0;
+    float xx=0,yy=0,tx=0,ty=0,min_x=0,max_x=0,min_y=0,max_y=0;
     if (!read(matrix,0x4,xx) || !read(matrix,0x8,yy) || !read(matrix,0x14,tx) ||
-        !read(logo,0xa8,min_x) || !read(logo,0xb0,max_x) ||
-        !std::isfinite(xx) || !std::isfinite(yy) || !std::isfinite(tx) ||
-        !std::isfinite(min_x) || !std::isfinite(max_x) || xx<=0 || yy<=0 || max_x<=min_x) return;
-    const float correction=start?(1080.f/550.f)/(2000.f/980.f):(724.f/1360.f);
-    *reinterpret_cast<float*>(matrix+0x4)=xx*correction;
-    *reinterpret_cast<float*>(matrix+0x14)=tx+xx*(1.f-correction)*(min_x+max_x)*0.5f;
+        !read(matrix,0x18,ty) || !read(logo,0xa8,min_x) || !read(logo,0xac,min_y) ||
+        !read(logo,0xb0,max_x) || !read(logo,0xb4,max_y) ||
+        !std::isfinite(xx) || !std::isfinite(yy) || !std::isfinite(tx) || !std::isfinite(ty) ||
+        !std::isfinite(min_x) || !std::isfinite(max_x) || !std::isfinite(min_y) || !std::isfinite(max_y) ||
+        xx<=0 || yy<=0 || max_x<=min_x || max_y<=min_y) {
+        save::session().btrace.record(stage,save::BStatus::blocked,"logo_transform_invalid",0,
+                                      {{"group_found",group!=0},{"layers_hidden",hidden}}); return;
+    }
+    const float x_correction=start?(1080.f/550.f)/(2000.f/980.f):(724.f/1360.f)*1.125f;
+    const float y_correction=start?1.f:1.8f;
+    *reinterpret_cast<float*>(matrix+0x4)=xx*x_correction;
+    *reinterpret_cast<float*>(matrix+0x8)=yy*y_correction;
+    *reinterpret_cast<float*>(matrix+0x14)=tx+xx*(1.f-x_correction)*(min_x+max_x)*0.5f;
+    *reinterpret_cast<float*>(matrix+0x18)=ty+yy*(1.f-y_correction)*(min_y+max_y)*0.5f;
+    sprite_changed(logo);
     adjusted=logo;
+    save::session().btrace.record(stage,save::BStatus::succeeded,"logo_transform_applied",0,
+                                  {{"group_found",group!=0},{"layers_hidden",hidden}});
 }
 void start_show(uintptr_t screen) {
     original_start_show(screen);
@@ -474,11 +511,21 @@ void present_details(uintptr_t details) {
     const auto list=list_for(shown_screen);
     int32_t index=-1;
     if (!list || !read(list,0x150,index) || index<0 || static_cast<uint32_t>(index)>=shown.count ||
-        !(shown.rows[index].flags&SC_CAMPAIGN_DETAILS)) return;
+        !(shown.rows[index].flags&SC_CAMPAIGN_DETAILS)) {
+        save::session().btrace.record(save::BStage::mission_details,save::BStatus::blocked,
+                                      "details_focus_unavailable",0,{{"index",static_cast<uint64_t>(index)},
+                                                                       {"rows",shown.count}}); return;
+    }
     const auto& summary=shown.summaries[index];
-    if (!summary.known) return;
+    if (!summary.known) {
+        save::session().btrace.record(save::BStage::mission_details,save::BStatus::blocked,
+                                      "details_summary_unknown",0,{{"index",static_cast<uint64_t>(index)}}); return;
+    }
     uintptr_t details_root=0;
-    if (!read(details,0x18,details_root) || !details_root) return;
+    if (!read(details,0x18,details_root) || !details_root) {
+        save::session().btrace.record(save::BStage::mission_details,save::BStatus::blocked,
+                                      "details_root_unavailable",0,{{"index",static_cast<uint64_t>(index)}}); return;
+    }
     const auto challenge_root=swf_child(details_root,"challenges");
     if (const auto title=swf_child(swf_child(challenge_root,"_Hheader"),"txtVal",true)) {
         const uint32_t encoded=summary.band>>8;
@@ -493,11 +540,13 @@ void present_details(uintptr_t details) {
         swf_set_text(title,label);
     }
     uintptr_t category=0,root=0; uint32_t kind=0;
+    bool rating_found=false,icon_found=false,found_header=false,found_values=false;
     if (read(details,0x1b8,category) && category && read(category,0x188,kind) && kind==6 &&
         read(category,0x18,root) && root) {
         original_sprite_visibility(root,summary.known==1 || (summary.band&255)!=0,1);
         {
             if (const auto rating=swf_child(swf_child(root,"itemList"),"itemsFound")) {
+                rating_found=true;
                 const uint32_t tier=summary.band&255;
                 static constexpr const char* donor[]={"",
                     "textures/swf_images/difficulty/too_young.png",
@@ -506,6 +555,7 @@ void present_details(uintptr_t details) {
                     "textures/swf_images/difficulty/nightmare.png"};
                 const auto icon=tier && tier<=4 && find_material ?
                     find_material(material_manager,donor[tier],0) : 0;
+                icon_found=icon!=0;
                 original_sprite_visibility(rating,icon!=0,1);
                 if (icon) {
                     if (const auto sprite=swf_child(rating,"itemIcon"))
@@ -524,8 +574,19 @@ void present_details(uintptr_t details) {
                 }
             }
             present_found_counts(root,summary);
+            const auto header=swf_child(root,"header");
+            found_header=header!=0;
+            found_values=header && swf_child(swf_child(header,"headerValueCurrent"),"txtVal",true) &&
+                         swf_child(swf_child(header,"headerValueMax"),"txtVal",true);
         }
     }
+    save::session().btrace.record(save::BStage::mission_details,save::BStatus::succeeded,
+                                  "details_presentation_attempted",0,
+                                  {{"index",static_cast<uint64_t>(index)},{"known",summary.known},
+                                   {"band",summary.band},{"category_kind",kind},{"category_root",root!=0},
+                                   {"challenge_root",challenge_root!=0},{"rating_sprite",rating_found},
+                                   {"rating_material",icon_found},{"found_header",found_header},
+                                   {"found_values",found_values}});
     if (summary.known!=1) return;
     for (const auto& challenge:summary.challenges) {
         const auto suffix=std::strrchr(challenge.unlockable,'_');
@@ -579,16 +640,15 @@ void sprite_visibility_detour(uintptr_t sprite,uint32_t visible,uint32_t flag) {
 }
 void render_details(uintptr_t details) {
     if (!ap_details(details)) {
+        if (active() && shown_screen)
+            save::session().btrace.record(save::BStage::mission_details,save::BStatus::blocked,
+                                          "details_owner_mismatch");
         retire_ap_meter();
         details_update(details); return;
     }
     uintptr_t meter=0;
     if (read(details,0x6f8,meter) && meter) {
         ap_meter_published.store(meter,std::memory_order_release);
-    }
-    int32_t map_length=0;
-    if (read(details,0x190,map_length) && map_length==0) {
-        details_update(details); return;
     }
     current_ap_details=details;
     __try { details_update(details); }
