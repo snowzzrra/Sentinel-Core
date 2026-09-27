@@ -649,10 +649,10 @@ void present_details(uintptr_t details) {
     const auto icon=swf_child(details_root,"apDifficulty");
     const auto tier=summary.band&255;
     static constexpr const char* donor[]={"",
-        "textures/swf_images/difficulty/Too_Young.png",
-        "textures/swf_images/difficulty/Hurt_Me_Plenty.png",
-        "textures/swf_images/difficulty/Ultra_Violence.png",
-        "textures/swf_images/difficulty/Nightmare.png"};
+        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Too_Young_",
+        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Hurt_Me_Plenty_",
+        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Ultra_Violence_",
+        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Nightmare_"};
     const auto material=tier>=1 && tier<=4 ? find_material(material_manager,donor[tier],1) : 0;
     const bool rating_bound=icon && material;
     if (rating_bound) swf_set_material(icon,material,0);
