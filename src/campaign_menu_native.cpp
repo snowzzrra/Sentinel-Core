@@ -51,8 +51,6 @@ using SwfLookup=SwfValue*(*)(uintptr_t,SwfValue*,const char*);
 using SwfGet=uintptr_t(*)(const SwfValue*);
 using SwfRelease=void(*)(SwfValue*);
 using SwfText=void(*)(uintptr_t,const char*);
-using SwfSizedMaterial=void(*)(uintptr_t,uintptr_t,int,int,uint32_t);
-SwfSizedMaterial swf_sized_material=nullptr;
 using SwfMaterial=void(*)(uintptr_t,uintptr_t,uint32_t);
 using SwfLabel=uint32_t(*)(uintptr_t,const char*,uint32_t);
 using SwfFrame=void(*)(uintptr_t,uint32_t);
@@ -655,12 +653,9 @@ void present_details(uintptr_t details) {
         "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Nightmare_"};
     const auto material=tier>=1 && tier<=4 ? find_material(material_manager,donor[tier],1) : 0;
     const bool rating_bound=icon && material;
-    constexpr int sizes[][2]={{429,528},{251,309},{196,241},{174,214}};
-    int width=0,height=0;
     if (rating_bound) {
-        width=sizes[tier-1][0];
-        height=sizes[tier-1][1];
-        swf_sized_material(icon,material,width,height,0);
+        swf_frame(icon,tier);
+        swf_set_material(icon,material,0);
     }
     if (icon) original_sprite_visibility(icon,rating_bound,1);
     if (const auto item_list=swf_child(root,"itemsFound")) original_sprite_visibility(item_list,0,1);
@@ -669,7 +664,7 @@ void present_details(uintptr_t details) {
     read(icon,0x60,applied_material);
     uint16_t applied_width=0,applied_height=0;
     const bool sized=read(icon,0x68,applied_width) && read(icon,0x6a,applied_height) &&
-        applied_width==width && applied_height==height;
+        applied_width==150 && applied_height==150;
     const bool applied=rating_bound && applied_material==material && sized;
     save::session().btrace.record(save::BStage::mission_rating,
         applied?save::BStatus::succeeded:save::BStatus::pending,
@@ -1168,7 +1163,6 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     swf_set_material=reinterpret_cast<SwfMaterial>(targets[26].address);
     swf_label=reinterpret_cast<SwfLabel>(targets[36].address);
     swf_frame=reinterpret_cast<SwfFrame>(targets[37].address);
-    swf_sized_material=reinterpret_cast<SwfSizedMaterial>(targets[40].address);
     find_material=reinterpret_cast<FindMaterial>(targets[33].address);
     material_manager=binding.image.base+0x5e05200;
     original_meter_update=reinterpret_cast<MeterUpdate>(originals[10]);
