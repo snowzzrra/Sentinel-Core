@@ -95,7 +95,7 @@ bool valid_facts(const SnapshotFacts& f) {
         return value == SC_INVENTORY_UNKNOWN_TIER || value <= SC_INVENTORY_MAX_CAPACITY_TIER;
     };
     return mask(f.weapons, SC_INV_ALL_WEAPONS) && mask(f.equipment, SC_INV_ALL_EQUIPMENT) &&
-        !f.special_weapons && !f.persistent_upgrades && !f.reserved &&
+        !f.special_weapons && mask(f.persistent_upgrades, SC_INV_BLOOD_PUNCH_MASK) && !f.reserved &&
         tier(f.health_tier) && tier(f.armor_tier) && tier(f.ammo_tier);
 }
 

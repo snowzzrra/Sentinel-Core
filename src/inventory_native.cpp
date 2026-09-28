@@ -23,6 +23,7 @@ uintptr_t player(void*) {
 bool read(void*, uintptr_t p, SnapshotFacts& facts) {
     __try {
         facts = {};
+        facts.persistent_upgrades = SC_INVENTORY_UNKNOWN_MASK;
         const auto inv = reinterpret_cast<uintptr_t(*)(uintptr_t)>(image_base + 0x763080)(p);
         if (!inv) return false;
         const auto count = *reinterpret_cast<int*>(inv + 8);
@@ -47,6 +48,22 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
                 weapons |= 1u << i;
         }
         facts.weapons = weapons;
+        const auto perk_type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631f90)();
+        if (!perk_type) return true;
+        const char* const blood_punch[] = {
+            "perk/player/blood_punch/base", "perk/player/blood_punch/area_of_effect",
+            "perk/player/blood_punch/ai_charge_rate", "perk/player/blood_punch/max_charges"};
+        uint32_t perks = 0;
+        for (unsigned i = 0; i < _countof(blood_punch); ++i) {
+            const auto decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
+                image_base + 0x17aa5d0)(perk_type, blood_punch[i], 1);
+            if (!decl) return true;
+            const auto path = *reinterpret_cast<const char**>(decl + 8);
+            if (!path || std::strncmp(path, blood_punch[i], std::strlen(blood_punch[i]) + 1)) return true;
+            if (reinterpret_cast<uint8_t(*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0)(p + 0x3b40, decl))
+                perks |= 1u << (SC_INV_BLOOD_PUNCH_SHIFT + i);
+        }
+        facts.persistent_upgrades = perks;
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -115,6 +132,8 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {0x1617cd0, "488d0569210803c3cccccccccccccccc4883ec28ba33000000b9d8000000e84d"},
         {0x17aa5d0, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448"},
         {0x1690660, "48895c240848896c2410488974241848897c242041564883ec2033ff488bea4c"},
+        {0x1631f90, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc"},
+        {0xfe37f0, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
     };
     for (const auto& site : sites) {
         std::array<uint8_t, 32> expected{}, actual{};

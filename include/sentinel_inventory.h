@@ -4,7 +4,7 @@
 
 /* Ordinary inventory observations and AP intent. UNKNOWN values are not ownership
    or capacity facts. Special weapons, Runes and map-local keys have other owners. */
-#define SC_INVENTORY_ABI_VERSION 2u
+#define SC_INVENTORY_ABI_VERSION 3u
 #define SC_INVENTORY_MAX_CAPACITY_TIER 4u
 #define SC_INVENTORY_UNKNOWN_MASK UINT32_MAX
 #define SC_INVENTORY_UNKNOWN_TIER UINT8_MAX
@@ -62,6 +62,9 @@ enum {
     SC_INV_UPGRADE_KEY_HOLT       = 1u << 10  /* 7770149 Slayer Key The Holt */
 };
 #define SC_INV_ALL_UPGRADES 0x7FFu
+/* Observed native Blood Punch perks; requests keep persistent_upgrades zero. */
+#define SC_INV_BLOOD_PUNCH_SHIFT 11u
+#define SC_INV_BLOOD_PUNCH_MASK (0xFu << SC_INV_BLOOD_PUNCH_SHIFT)
 
 typedef struct sc_inventory_request {
     sc_diagnostic_request execution;

@@ -3,7 +3,7 @@
 #include "engine_observer.h"
 
 namespace sentinel::context {
-// Uptime timestamps keep their historical epoch. Only elapsed acceptance uses QPC.
+// Uptime timestamps record absolute samples; elapsed acceptance uses QPC.
 // Explicit clock injection is an internal test seam, never an IPC control.
 struct Clock {
     bool (*counter)(int64_t&);

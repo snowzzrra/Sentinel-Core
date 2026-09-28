@@ -90,7 +90,11 @@ void new_game(uintptr_t menu,uint32_t requested,uint8_t extra_life) {
     }
     auto& owner=session(); ProfileChoice choice{}; NativeCampaignCatalog catalog; uintptr_t remote=0; std::string prefix;
     const auto lifetime=native::inspect();
-    const bool lifetime_clean=!prior_campaign && !extra_life && lifetime.lifecycle==SC_LIFETIME_MENU && !lifetime.depth &&
+    uint32_t menu_state=UINT32_MAX;
+    const bool menu_observed=read(root,0x44,menu_state) && menu_state==SC_GAME_MAIN_MENU;
+    const bool menu_lifetime=lifetime.lifecycle==SC_LIFETIME_MENU ||
+        (lifetime.lifecycle==SC_LIFETIME_UNOBSERVED && menu_observed);
+    const bool lifetime_clean=!prior_campaign && !extra_life && menu_lifetime && !lifetime.depth &&
         !lifetime.event_gap_count && !lifetime.history_overwritten && lifetime.game_state==0 &&
         (owner.inspect().flags&SC_SAVE_SESSION_STARTUP_QUALIFIED);
     const bool prefix_read=lifetime_clean && read_campaign_prefix(memory,image,prefix);
@@ -98,7 +102,8 @@ void new_game(uintptr_t menu,uint32_t requested,uint8_t extra_life) {
     const bool clean=catalog_read && catalog.slots.empty();
     owner.btrace.record(BStage::creation,BStatus::entered,"native_creation_history_observed",0,
         {{"prior_campaign",prior_campaign},{"lifecycle",lifetime.lifecycle},{"depth",lifetime.depth},{"event_gap_count",lifetime.event_gap_count},
-         {"history_overwritten",lifetime.history_overwritten},{"game_state",lifetime.game_state},{"lifetime_clean",lifetime_clean},
+         {"history_overwritten",lifetime.history_overwritten},{"game_state",lifetime.game_state},{"menu_observed",menu_observed},
+         {"lifetime_clean",lifetime_clean},
          {"prefix_read",prefix_read},{"prefix_equal",prefix=="GAME-"},{"catalog_read",catalog_read},{"slot_count",catalog.slots.size()},{"clean",clean}},menu);
     if (!owner.profile_choice(choice)) {
         owner.btrace.record(BStage::creation,BStatus::refused,"new_game_profile_choice_unavailable",0,
@@ -106,7 +111,8 @@ void new_game(uintptr_t menu,uint32_t requested,uint8_t extra_life) {
     }
     // Preserve exact native history inputs before Campaign's narrower selection checks.
     if (!clean) owner.btrace.record(BStage::creation,BStatus::refused,"native_creation_history_not_clean",0,
-        {{"prior_campaign",prior_campaign},{"lifecycle",lifetime.lifecycle},{"depth",lifetime.depth},{"event_gap_count",lifetime.event_gap_count},
+        {{"prior_campaign",prior_campaign},{"lifecycle",lifetime.lifecycle},{"menu_observed",menu_observed},
+         {"depth",lifetime.depth},{"event_gap_count",lifetime.event_gap_count},
          {"history_overwritten",lifetime.history_overwritten},{"game_state",lifetime.game_state},{"lifetime_clean",lifetime_clean},
          {"prefix_read",prefix_read},{"prefix_equal",prefix=="GAME-"},{"catalog_read",catalog_read},{"slot_count",catalog.slots.size()}},menu);
     if (!owner.campaign_run.begin_create(clean,choice.name.data(),choice.index,catalog.slots.empty())) return;

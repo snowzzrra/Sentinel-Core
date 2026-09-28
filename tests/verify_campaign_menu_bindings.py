@@ -19,7 +19,7 @@ def verify(executable):
         r'0x[0-9a-f]+', re.search(r'rvas\[\]=\{(.*?)\};', install, re.S)[1])]
     signatures = [bytes.fromhex(value) for value in re.findall(
         r'"([0-9a-f]+)"', re.search(r'bytes\[\]=\{(.*?)\};', install, re.S)[1])]
-    assert len(rvas) == len(signatures) == 15
+    assert len(rvas) == len(signatures) == 44
     with pefile.PE(str(executable), fast_load=True) as pe:
         for rva, signature in zip(rvas, signatures):
             assert pe.get_data(rva, len(signature)) == signature, f'prologue mismatch: {rva:x}'
@@ -36,7 +36,7 @@ def verify(executable):
         assert pe.get_data(callee + 48, 32) == signature
         assert sum(section.get_data().count(signature) for section in pe.sections
                    if section.Characteristics & 0x20000000) == 1
-    print(f'PASS 15 retail prologues; Populate CALL -> RVA {callee:#x}; former binding rejected')
+    print(f'PASS 44 retail prologues; Populate CALL -> RVA {callee:#x}; former binding rejected')
 
 
 if __name__ == '__main__':

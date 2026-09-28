@@ -1209,7 +1209,8 @@ template<class Codec> bool inventory_values(Codec& c, sc_inventory_result& v) {
         !tier(v.health_tier_before) || !tier(v.health_tier_after) ||
         !tier(v.armor_tier_before) || !tier(v.armor_tier_after) ||
         !tier(v.ammo_tier_before) || !tier(v.ammo_tier_after) ||
-        v.special_before || v.special_after || v.upgrades_before || v.upgrades_after ||
+        v.special_before || v.special_after ||
+        !mask(v.upgrades_before, SC_INV_BLOOD_PUNCH_MASK) || !mask(v.upgrades_after, SC_INV_BLOOD_PUNCH_MASK) ||
         v.reserved_before || v.reserved_after) return false;
     return true;
 }

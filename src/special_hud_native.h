@@ -567,13 +567,14 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         remember_native(source_position, layout_source, movie, epoch) &&
         native_center(source_position, parent, original_source);
     const float arrow_width = arrow_bounds.br.x - arrow_bounds.tl.x;
-    const float native_gap = std::max(1.0f, arrow_width * 0.12f);
+    const float native_gap = std::max(1.0f, (native_arrow_visual ? arrow_width :
+        active_icon_bounds.br.x - active_icon_bounds.tl.x) * 0.12f);
     const Rect switch_bounds = native_backer_visual ?
         Rect{{std::min(arrow_bounds.tl.x, backer_bounds.tl.x),
               std::min(arrow_bounds.tl.y, backer_bounds.tl.y)},
              {std::max(arrow_bounds.br.x, backer_bounds.br.x),
               std::max(arrow_bounds.br.y, backer_bounds.br.y)}} : arrow_bounds;
-    const float icon_baseline_y = center(flame_icon_bounds).y;
+    const float icon_baseline_y = center(flame_icon_visual ? flame_icon_bounds : active_icon_bounds).y;
     const auto render_matrix = reinterpret_cast<const float*>(parent + 0x90);
     const float render_yy = render_matrix[1];
     const float render_yx = render_matrix[3];
@@ -593,7 +594,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
             (special_x + original_plate.x - original_special.x)) * render_row_slope :
             icon_baseline_y};
     const float source_icon_width = source_icon_bounds.br.x - source_icon_bounds.tl.x;
-    const Point refill_icon_target{arrow_bounds.br.x + native_gap + source_icon_width * 0.5f,
+    const Point refill_icon_target{(native_arrow_visual ? arrow_bounds.br.x : active_icon_bounds.br.x) +
+                                   native_gap + source_icon_width * 0.5f,
                                    icon_baseline_y};
     Point refill_offset{}, arrow_offset{}, refill_target{}, refill_lift{};
     const auto refill_plate = child(refill_geometry, "background");
@@ -618,8 +620,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool native_layout = native_arrow_visual && flame_visual &&
         flame_icon_visual && active_stage_forward && source_cached && source_icon_visual &&
         std::isfinite(native_gap) && native_gap > 0;
-    const bool refill_visual = equipment_visual && native_arrow_visual &&
-        flame_visual && flame_icon_visual && active_visual && source_cached && refill_offsets &&
+    const bool refill_visual = equipment_visual && active_visual && source_cached && refill_offsets &&
+        ((native_arrow_visual && flame_icon_visual) || active_icon_visual) &&
         std::isfinite(native_gap) && native_gap > 0;
     const bool arrow_visual = native_layout &&
         visual_offset(arrow_source, native_arrow, parent, movie, arrow_offset);
