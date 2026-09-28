@@ -1196,6 +1196,7 @@ template<class Codec> bool inventory_values(Codec& c, sc_inventory_result& v) {
     c.byte(v.ammo_tier_before); c.byte(v.ammo_tier_after);
     c.byte(v.reserved_before); c.byte(v.reserved_after);
     c.u64(v.operations_applied);
+    c.byte(v.ice_bomb_before); c.byte(v.ice_bomb_after);
     if (v.abi_version != SC_INVENTORY_ABI_VERSION || v.namespace_id[64] ||
         v.outcome > SC_INV_UNAVAILABLE || (v.flags & ~31u)) return false;
     const auto mask = [](uint32_t value, uint32_t allowed) {
@@ -1211,7 +1212,9 @@ template<class Codec> bool inventory_values(Codec& c, sc_inventory_result& v) {
         !tier(v.ammo_tier_before) || !tier(v.ammo_tier_after) ||
         v.special_before || v.special_after ||
         !mask(v.upgrades_before, SC_INV_BLOOD_PUNCH_MASK) || !mask(v.upgrades_after, SC_INV_BLOOD_PUNCH_MASK) ||
-        v.reserved_before || v.reserved_after) return false;
+        v.reserved_before || v.reserved_after ||
+        (v.ice_bomb_before > 1 && v.ice_bomb_before != SC_INVENTORY_UNKNOWN_ITEM) ||
+        (v.ice_bomb_after > 1 && v.ice_bomb_after != SC_INVENTORY_UNKNOWN_ITEM)) return false;
     return true;
 }
 }

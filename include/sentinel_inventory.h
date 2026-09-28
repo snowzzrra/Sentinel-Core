@@ -4,10 +4,11 @@
 
 /* Ordinary inventory observations and AP intent. UNKNOWN values are not ownership
    or capacity facts. Special weapons, Runes and map-local keys have other owners. */
-#define SC_INVENTORY_ABI_VERSION 3u
+#define SC_INVENTORY_ABI_VERSION 4u
 #define SC_INVENTORY_MAX_CAPACITY_TIER 4u
 #define SC_INVENTORY_UNKNOWN_MASK UINT32_MAX
 #define SC_INVENTORY_UNKNOWN_TIER UINT8_MAX
+#define SC_INVENTORY_UNKNOWN_ITEM UINT8_MAX
 
 enum {
     SC_INV_OBSERVE = 0,
@@ -117,6 +118,8 @@ typedef struct sc_inventory_result {
     uint8_t ammo_tier_before, ammo_tier_after;
     uint8_t reserved_before, reserved_after;
     uint64_t operations_applied;
+    /* Ice is independently observable; the remaining equipment mask stays UNKNOWN. */
+    uint8_t ice_bomb_before, ice_bomb_after;
 } sc_inventory_result;
 
 #endif

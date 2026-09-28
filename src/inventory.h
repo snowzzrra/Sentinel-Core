@@ -17,6 +17,7 @@ struct SnapshotFacts {
     uint8_t armor_tier = SC_INVENTORY_UNKNOWN_TIER;
     uint8_t ammo_tier = SC_INVENTORY_UNKNOWN_TIER;
     uint8_t reserved = 0;
+    uint8_t ice_bomb = SC_INVENTORY_UNKNOWN_ITEM;
 };
 
 // Internal production seam; never externally supplied or serialized.

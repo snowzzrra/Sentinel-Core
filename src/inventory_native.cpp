@@ -48,6 +48,15 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
                 weapons |= 1u << i;
         }
         facts.weapons = weapons;
+        const char* ice = "throwable/player/ice_bomb";
+        const auto ice_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
+            image_base + 0x17aa5d0)(type, ice, 1);
+        if (ice_decl) {
+            const auto ice_path = *reinterpret_cast<const char**>(ice_decl + 8);
+            if (ice_path && !std::strcmp(ice_path, ice))
+                facts.ice_bomb = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
+                    image_base + 0x1690660)(inv, ice_decl) ? 1 : 0;
+        }
         const auto perk_type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631f90)();
         if (!perk_type) return true;
         const char* const blood_punch[] = {
