@@ -53,8 +53,6 @@ using SwfRelease=void(*)(SwfValue*);
 using SwfText=void(*)(uintptr_t,const char*);
 using SwfSizedMaterial=void(*)(uintptr_t,uintptr_t,int,int,uint32_t);
 SwfSizedMaterial swf_sized_material=nullptr;
-using SwfPosition=void(*)(uintptr_t,float,float);
-SwfPosition swf_position=nullptr;
 using SwfMaterial=void(*)(uintptr_t,uintptr_t,uint32_t);
 using SwfLabel=uint32_t(*)(uintptr_t,const char*,uint32_t);
 using SwfFrame=void(*)(uintptr_t,uint32_t);
@@ -111,15 +109,6 @@ bool initialized=false;
 thread_local bool building=false;
 template<class T> bool read(uintptr_t base,size_t offset,T& out) {
     uintptr_t address=0; return engine::add(base,offset,sizeof(out),address) && !memory.copy(address,&out,sizeof(out)).reason;
-}
-bool sprite_position(uintptr_t sprite,std::array<float,2>& out) {
-    uintptr_t owner=0,renderer=0,transforms=0,translation=0;
-    int32_t index=-1;
-    return sprite && read(sprite,0x40,owner) && owner && read(sprite,0xc,index) && index>=0 &&
-        read(sprite,0x10,renderer) && renderer && read(renderer,0x80,transforms) && transforms &&
-        engine::add(transforms,size_t(index)*0x40+0x14,sizeof(out),translation) &&
-        !memory.copy(translation,out.data(),sizeof(out)).reason &&
-        std::isfinite(out[0]) && std::isfinite(out[1]);
 }
 bool active() { return save::session().campaign_run.enabled(); }
 void fault(const char* reason);
@@ -666,22 +655,12 @@ void present_details(uintptr_t details) {
         "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Nightmare_"};
     const auto material=tier>=1 && tier<=4 ? find_material(material_manager,donor[tier],1) : 0;
     const bool rating_bound=icon && material;
-    constexpr float art[][6]={{2680,3300,1000,1136,1688,2160},
-        {1340,1650,356,472,992,1348},{1340,1650,108,336,1236,1460},
-        {1340,1650,48,220,1292,1484}};
-    constexpr float photo_top=45.f,label_top=701.05f,text_left=85.f;
-    constexpr float photo_height=label_top-photo_top;
+    constexpr int sizes[][2]={{429,528},{251,309},{196,241},{174,214}};
     int width=0,height=0;
-    std::array<float,2> target{};
     if (rating_bound) {
-        const auto& bounds=art[tier-1];
-        const float scale=photo_height*.25f/(bounds[5]-bounds[3]);
-        width=static_cast<int>(std::lround(bounds[0]*scale));
-        height=static_cast<int>(std::lround(bounds[1]*scale));
-        target={text_left-bounds[2]*width/bounds[0],
-            label_top-photo_height*.04f-bounds[5]*height/bounds[1]};
+        width=sizes[tier-1][0];
+        height=sizes[tier-1][1];
         swf_sized_material(icon,material,width,height,0);
-        swf_position(icon,target[0],target[1]);
     }
     if (icon) original_sprite_visibility(icon,rating_bound,1);
     if (const auto item_list=swf_child(root,"itemsFound")) original_sprite_visibility(item_list,0,1);
@@ -689,18 +668,15 @@ void present_details(uintptr_t details) {
     uintptr_t applied_material=0;
     read(icon,0x60,applied_material);
     uint16_t applied_width=0,applied_height=0;
-    std::array<float,2> actual{};
-    const bool positioned=sprite_position(icon,actual) &&
-        std::fabs(actual[0]-target[0])<.5f && std::fabs(actual[1]-target[1])<.5f;
     const bool sized=read(icon,0x68,applied_width) && read(icon,0x6a,applied_height) &&
         applied_width==width && applied_height==height;
-    const bool applied=rating_bound && applied_material==material && sized && positioned;
+    const bool applied=rating_bound && applied_material==material && sized;
     save::session().btrace.record(save::BStage::mission_rating,
         applied?save::BStatus::succeeded:save::BStatus::pending,
         applied?"preview_skull_bound":"preview_skull_pending",shown.revision,
         {{"index",static_cast<uint64_t>(index)},{"tier",tier},{"icon",icon!=0},
           {"material",material!=0},{"readback",material!=0 && applied_material==material},
-          {"sized",sized},{"positioned",positioned}},details);
+          {"sized",sized}},details);
     const auto challenge_root=swf_child(swf_child(details_root,"challenges"),"list");
     if (summary.known!=1) return;
     unsigned requested=0,bound=0;
@@ -1051,13 +1027,13 @@ void test_meter_update(uintptr_t meter) { meter_update_detour(meter); }
 #endif
 #include "physical_contact_observer.h"
 
-std::array<native::Target,44> native_targets(uintptr_t base) {
+std::array<native::Target,43> native_targets(uintptr_t base) {
     constexpr uint32_t rvas[]={0x10d2c00,0x10d42f0,0x10d27b0,0x10d1c50,0x10d3140,
         0x3fa8e0,0x3faff0,0x10d1cf0,0x43c070,0x1116c50,0x159c280,
         0x10e08f0,0x10dc420,0x18071d0,0x1857110,0x0f9bd70,0x1864430,
         0x0f9c000,0x185c150,0x184e470,0x184e4b0,0x184e3b0,0x186db00,
         0x17a9660,0x1d69e00,0x360bb0,0x1863b00,0x15b2680,0x0effea0,0x0f5cfe0,0x0f59270,
-        0x0f489c0,0x0f4f990,0x17aa5d0,0x10ef3e0,0x0f30810,0x1859e20,0x1865280,0xf98fc0,0xf62bc0,0x1863c30,0xfaa270,0xd9d010,0x1863ec0};
+        0x0f489c0,0x0f4f990,0x17aa5d0,0x10ef3e0,0x0f30810,0x1859e20,0x1865280,0xf98fc0,0xf62bc0,0x1863c30,0xfaa270,0xd9d010};
     constexpr const char* bytes[]={
         "4053565741554881ec98000000488b05c4bd0d034833c4488944247033db488d",
         "40574883ec60488b05dba60d034833c44889442450488bf9488d4c2420e8ce65",
@@ -1101,9 +1077,8 @@ std::array<native::Target,44> native_targets(uintptr_t base) {
         "40555356574154488bec4881ec800000004533e4488bf9418bf4448965304839",
         "48895c240848896c24104889742418574883ec20488bd9418bf1488b4960418b",
         "4053b8a0400000e8241b8c01482be0488b05524720034833c448898424804000",
-        "40534883ec20488b01488bd9ff90480d000084c00f8582000000488b03488bcb",
-        "48837940004c8bc9743b488b41104c63410c49c1e006488b9080000000f3410f"};
-    std::array<native::Target,44> targets{};
+        "40534883ec20488b01488bd9ff90480d000084c00f8582000000488b03488bcb"};
+    std::array<native::Target,43> targets{};
     const auto digit=[](char c) { return c<='9' ? c-'0' : c-'a'+10; };
     for (unsigned i=0;i<targets.size();++i) {
         targets[i].address=base+rvas[i];
@@ -1117,7 +1092,7 @@ std::array<native::Target,44> native_targets(uintptr_t base) {
     return targets;
 }
 bool validate_native_targets(save::Installation& record,engine::Memory& source_memory,
-                              const engine::Image& image,HANDLE stop,const std::array<native::Target,44>& targets) {
+                              const engine::Image& image,HANDLE stop,const std::array<native::Target,43>& targets) {
     if (!image.contains(0x5e05200,sizeof(uintptr_t),IMAGE_SCN_MEM_READ,IMAGE_SCN_MEM_EXECUTE)) return false;
     // Populate's actual CALL owns this list-copy contract. Record failures here
     // as well as in the target validator so startup refusal remains actionable.
@@ -1194,7 +1169,6 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     swf_label=reinterpret_cast<SwfLabel>(targets[36].address);
     swf_frame=reinterpret_cast<SwfFrame>(targets[37].address);
     swf_sized_material=reinterpret_cast<SwfSizedMaterial>(targets[40].address);
-    swf_position=reinterpret_cast<SwfPosition>(targets[43].address);
     find_material=reinterpret_cast<FindMaterial>(targets[33].address);
     material_manager=binding.image.base+0x5e05200;
     original_meter_update=reinterpret_cast<MeterUpdate>(originals[10]);

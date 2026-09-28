@@ -148,7 +148,7 @@ int wmain(int argc,wchar_t** argv) {
    CHECK(unreadable.inspect().primary_failure.read_reason==77);
    CHECK(!unreadable.inspect().created && !unreadable.inspect().enabled);
   }
-  std::puts("PASS all18 production menu bindings, shared-prologue correction, wrong callee/signature/read refusals; PE data only, no game execution");
+  std::printf("PASS all%zu production menu bindings, shared-prologue correction, wrong callee/signature/read refusals; PE data only, no game execution\n",targets.size());
   memory.fail=0;
   save::Installation campaign;
   for(const auto& target:save::campaign_targets(image.base)) {
