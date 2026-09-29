@@ -693,6 +693,13 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             if (mh == MH_OK) installation.hook(SC_INSTALL_UNINITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Uninitialize(); });
         }
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
+        // Qualify menu callees before domain hooks patch shared SWF entries.
+        if (!why && !stopping.load(std::memory_order_acquire) && save::session().campaign_run.enabled() &&
+            !campaign_menu::validate_native_targets(installation, memory, binding.image, stop_event,
+                                                   campaign_menu::native_targets(binding.image.base))) {
+            save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
+            why=SC_NATIVE_EXCEPTION;
+        }
         // Special qualifies the shared HUD earnings entry before WUP owns its detour.
         if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
         // The WUP owner validates and patches the 13ce4c0 entry first; the

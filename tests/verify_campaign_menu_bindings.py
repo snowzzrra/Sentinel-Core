@@ -12,7 +12,12 @@ import pefile
 
 
 def verify(executable):
-    source = (Path(__file__).resolve().parents[1] / 'src/campaign_menu_native.cpp').read_text()
+    root = Path(__file__).resolve().parents[1]
+    source = (root / 'src/campaign_menu_native.cpp').read_text()
+    runtime = (root / 'src/native_runtime.cpp').read_text()
+    assert runtime.index('campaign_menu::validate_native_targets(') < runtime.index('special::install(binding, stop_event)')
+    assert runtime.index('special::install(binding, stop_event)') < runtime.index('campaign_menu::install(binding,stop_event)')
+    assert 'validate_native_targets(' not in source.split('bool install(const engine::Binding& binding,HANDLE)', 1)[1]
     install = source.split('native_targets(uintptr_t base)', 1)[1]
     rvas = [int(value, 16) for value in re.findall(
         r'0x[0-9a-f]+', re.search(r'rvas\[\]=\{(.*?)\};', install, re.S)[1])]

@@ -18,6 +18,8 @@ struct Calls {
     void (*dirty)(uintptr_t) = nullptr;
     void (*start)(uintptr_t, int) = nullptr;
     void (*frame)(uintptr_t, int) = nullptr;
+    uint64_t (*label)(uintptr_t, const char*, bool) = nullptr;
+    uintptr_t (*keycap)(uintptr_t) = nullptr;
     void (*visible)(uintptr_t, bool, bool) = nullptr;
     void (*set_text)(uintptr_t, const char*) = nullptr;
     void (*position)(uintptr_t, float, float) = nullptr;
@@ -97,6 +99,12 @@ bool hold_frame(uintptr_t clip, uint16_t frame) {
         return true;
     }
     return false;
+}
+
+bool hold_ice_frame(uintptr_t parent, bool cursed) {
+    const auto frame = swf.label(parent, cursed ? "cursed" : "normal", false);
+    const auto empty = swf.label(parent, "noEquipment", false);
+    return frame > 0 && frame != empty && hold_frame(parent, static_cast<uint16_t>(frame));
 }
 
 bool key_offset(uintptr_t clip, uintptr_t source, uintptr_t movie, Point& out) {
@@ -600,8 +608,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     Point refill_offset{}, arrow_offset{}, refill_target{}, refill_lift{};
     const auto refill_plate = child(refill_geometry, "background");
     const auto geometry_anchor = refill_plate ? refill_plate : child(refill_geometry, "icon");
-    const bool refill_offsets = authored_refill || (source_icon_visual &&
-        visual_offset(refill_geometry, geometry_anchor, parent, movie, refill_offset) &&
+    const bool refill_offsets = visual_offset(refill_geometry, geometry_anchor, parent, movie,
+        refill_offset) && (authored_refill ||
         from_space(parent, *reinterpret_cast<uintptr_t*>(parent + 0x40),
                    movie, {0, -4.0f}, refill_lift, true));
     if (refill_offsets) refill_target = refill_icon_target;
@@ -614,15 +622,13 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     Point refill_plate_offset{};
     const bool visible_plate = bounds(refill_plate, parent, refill_plate_bounds) &&
         visual_offset(refill_geometry, refill_plate, parent, movie, refill_plate_offset);
-    if (!visible_plate) {
-        refill_plate_bounds = source_icon_visual ? source_icon_bounds : Rect{{0, 0}, {24, 24}};
-        refill_plate_offset = refill_offset;
-    }
+    if (!visible_plate && source_icon_visual) refill_plate_bounds = source_icon_bounds;
     const bool native_layout = native_arrow_visual && flame_visual &&
         flame_icon_visual && active_stage_forward && source_cached && source_icon_visual &&
         std::isfinite(native_gap) && native_gap > 0;
-    const bool refill_visual = authored_refill || (source_cached && refill_offsets &&
-        equipment_visual && active_visual && std::isfinite(native_gap) && native_gap > 0);
+    const bool refill_visual = refill_offsets && (visible_plate || source_icon_visual) &&
+        (authored_refill || (source_cached &&
+        equipment_visual && active_visual && std::isfinite(native_gap) && native_gap > 0));
     const bool arrow_visual = native_layout &&
         visual_offset(arrow_source, native_arrow, parent, movie, arrow_offset);
     const char* switch_failure = nullptr;
@@ -731,8 +737,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                                 toggle_target.y + switch_bounds.tl.y - native_arrow_center.y},
                                {toggle_target.x + switch_bounds.br.x - native_arrow_center.x,
                                 toggle_target.y + switch_bounds.br.y - native_arrow_center.y}};
-    const float refill_half_width = source_icon_width * 0.5f;
-    const float refill_half_height = (source_icon_bounds.br.y - source_icon_bounds.tl.y) * 0.5f;
+    const float refill_half_width = (refill_plate_bounds.br.x - refill_plate_bounds.tl.x) * 0.5f;
+    const float refill_half_height = (refill_plate_bounds.br.y - refill_plate_bounds.tl.y) * 0.5f;
     const Rect intended_refill_bounds{{refill_visual_target.x - refill_half_width,
                                        refill_visual_target.y - refill_half_height},
                                       {refill_visual_target.x + refill_half_width,
@@ -757,6 +763,21 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                 {"f9_center", trace_point(refill_target)},
                 {"f10_center", trace_point(toggle_target)}}, element);
     if (!refill_visual) {
+        if (authored_refill && !refill_offsets && child(refill, "background")) {
+            if (!match_linear(refill, source, parent, movie)) {
+                show(refill, false);
+                refuse("hud_refill_transform_failed", element, source, epoch);
+                return false;
+            }
+            place(refill, refill_visual_target);
+            show(refill, true);
+            swf.dirty(refill);
+            if (ammo_glyph) show(ammo_glyph, false);
+            if (refill_bind) show(refill_bind, false);
+            if (special_bind) show(special_bind, false);
+            refuse("hud_refill_geometry_pending", element, refill, epoch);
+            return false;
+        }
         show(refill, !refill_geometry && source != layout_source);
         if (ammo_glyph) show(ammo_glyph, false);
         if (refill_bind) show(refill_bind, false);
@@ -797,10 +818,9 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const auto icon_group = child(refill, "icon");
     if (const auto small = child(icon_group, "iconSmall")) show(small, false);
     if (const auto static_icon = child(icon_group, "iconStatic")) show(static_icon, false);
-    // WeaponInfo::Setup binds +0x248 to equippedWeapon; +0x10 is its resolved sprite.
-    const auto equipped_weapon = *reinterpret_cast<uintptr_t*>(element + 0x258);
+    const auto equipped_weapon = child(parent, "equippedWeapon");
     const auto native_ammo = child(child(equipped_weapon, "ammoIcon"), "image");
-    const auto ammo_donor = native_ammo ? native_ammo : ammo_glyph;
+    const auto ammo_donor = ammo_glyph ? ammo_glyph : native_ammo;
     if (!ammo_donor) return fail_refill("hud_ammo_leaf_missing", equipped_weapon);
     if (*reinterpret_cast<uintptr_t*>(ammo_donor + 0x30) != movie)
         return fail_refill("hud_ammo_leaf_movie_mismatch", native_ammo);
@@ -894,7 +914,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         return fail_refill("hud_refill_place_failed", refill);
     Rect cloned_plate_bounds{};
     const auto cloned_plate = child(refill, "background");
-    const Point refill_anchor = !refill_frame_changed && bounds(cloned_plate, parent, cloned_plate_bounds) ?
+    const Point refill_anchor = authored_refill ? refill_visual_target :
+        !refill_frame_changed && bounds(cloned_plate, parent, cloned_plate_bounds) ?
         center(cloned_plate_bounds) :
         Point{refill_visual_target.x - refill_offset.x + refill_plate_offset.x,
               refill_visual_target.y - refill_offset.y + refill_plate_offset.y};
@@ -907,7 +928,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                                  ammo_y.x * glyph_local_center.y,
                              ammo_x.y * glyph_local_center.x +
                                  ammo_y.y * glyph_local_center.y};
-    if (!place_visual(ammo_glyph, native_ammo, parent, movie,
+    if (!place_visual(ammo_glyph, ammo_donor, parent, movie,
                       refill_anchor, glyph_offset, glyph_scale))
         return fail_refill("hud_ammo_leaf_place_failed", ammo_glyph);
     Rect glyph_bounds{};
@@ -929,7 +950,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         return graphics_applied;
     }
     const auto donor_root = primary_root;
-    const auto donor = quickuse ? *reinterpret_cast<uintptr_t*>(quickuse + 0x1f0) : 0;
+    const auto donor = quickuse ? swf.keycap(quickuse) : 0;
     if (!donor_root || *reinterpret_cast<uintptr_t*>(donor_root + 0x40) != parent ||
         !donor ||
         !child(donor, "kbm") || !child(donor, "joy")) {
@@ -951,9 +972,21 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         refuse("hud_keycap_donor_bounds_missing", element, donor, epoch);
         return graphics_applied;
     }
-    const float keycap_baseline_y = donor_bounds.tl.y;
-    const Point refill_key_target{refill_anchor.x, keycap_baseline_y};
-    const Point toggle_key_target{toggle_target.x, keycap_baseline_y};
+    const auto donor_center = center(donor_bounds);
+    const auto keycap_stage = reinterpret_cast<const float*>(parent + 0x90);
+    if (!std::isfinite(keycap_stage[3]) || !std::isfinite(keycap_stage[1]) ||
+        std::fabs(keycap_stage[1]) < 1e-6f) {
+        if (refill_bind) show(refill_bind, false);
+        if (special_bind) show(special_bind, false);
+        refuse("hud_keycap_stage_transform_failed", element, parent, epoch);
+        return graphics_applied;
+    }
+    const float keycap_row_slope = keycap_stage[3] / keycap_stage[1];
+    const float keycap_baseline_y = donor_center.y;
+    const Point refill_key_target{refill_anchor.x, keycap_baseline_y +
+        (donor_center.x - refill_anchor.x) * keycap_row_slope};
+    const Point toggle_key_target{toggle_target.x, keycap_baseline_y +
+        (donor_center.x - toggle_target.x) * keycap_row_slope};
     const char* bind_failure = nullptr;
     const auto bind_key = [&](uintptr_t& clip, const char* name, unsigned vk,
                                Point visual_at,
@@ -985,20 +1018,24 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         }
         show(joy, false);
         show(kbm, true);
-        if (!match_linear(clip, donor, parent, movie)) {
+        if (!match_linear(clip, donor, parent, movie) ||
+            !match_linear(kbm, child(donor, "kbm"), donor, movie)) {
             show(clip, false);
             bind_failure = "hud_keycap_transform_failed";
             return false;
         }
         Point visible_offset{};
         Rect keycap_bounds{};
-        const float keycap_height = bounds(kbm, parent, keycap_bounds) ?
-            keycap_bounds.br.y - keycap_bounds.tl.y :
-            donor_bounds.br.y - donor_bounds.tl.y;
-        const Point keycap_center{visual_at.x, visual_at.y + keycap_height * 0.5f};
-        if ((!visual_offset(clip, kbm, parent, movie, visible_offset) &&
-             !visual_offset(donor, child(donor, "kbm"), parent, movie, visible_offset)) ||
-            !place_visual(clip, donor, parent, movie, keycap_center, visible_offset)) {
+        if (!bounds(kbm, parent, keycap_bounds) ||
+            !visual_offset(clip, kbm, parent, movie, visible_offset)) {
+            place(clip, visual_at);
+            show(clip, true);
+            swf.dirty(clip);
+            bind_failure = "hud_keycap_geometry_pending";
+            return false;
+        }
+        const Point keycap_center = visual_at;
+        if (!place_visual(clip, clip, parent, movie, keycap_center, visible_offset)) {
             show(clip, false);
             bind_failure = "hud_keycap_visual_bounds_missing";
             return false;

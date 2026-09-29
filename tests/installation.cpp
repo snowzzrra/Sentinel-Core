@@ -12,10 +12,15 @@
 using namespace sentinel;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"FAIL installation.cpp:%d %s win32=%lu\n",__LINE__,#x,GetLastError()); std::exit(1); } } while(0)
 struct Memory final : engine::Memory {
- engine::LocalMemory local; uintptr_t fail = 0, zero = 0;
+ engine::LocalMemory local; uintptr_t fail = 0, zero = 0, redirect = 0;
  engine::ReadResult copy(uintptr_t address, void* out, size_t count) override {
   if (address == zero) { std::memset(out,0,count); return {}; }
-  return address == fail ? engine::ReadResult{77,ERROR_PARTIAL_COPY} : local.copy(address,out,count);
+  const auto result=address == fail ? engine::ReadResult{77,ERROR_PARTIAL_COPY} : local.copy(address,out,count);
+  if (!result.reason && address==redirect && count>=5) {
+   const uint8_t jump[]={0xe9,0xae,0x64,0x79,0xfe};
+   std::memcpy(out,jump,sizeof(jump));
+  }
+  return result;
  }
 };
 void contract() {
@@ -136,6 +141,13 @@ int wmain(int argc,wchar_t** argv) {
   save::Installation menu;
   CHECK(campaign_menu::validate_native_targets(menu,memory,image,stop,targets));
   CHECK(!menu.inspect().primary_failure.sequence && !menu.inspect().created && !menu.inspect().enabled);
+  memory.redirect=targets[36].address;
+  save::Installation patched_label;
+  CHECK(!campaign_menu::validate_native_targets(patched_label,memory,image,stop,targets));
+  CHECK(patched_label.inspect().primary_failure.target_index==36);
+  CHECK(patched_label.inspect().primary_failure.rva==0x1859e20);
+  memory.redirect=0;
+  std::puts("PASS pristine menu qualification; reproduced Phase9C target36 refusal after shared label patch");
   auto wrong=targets; wrong[8].address=image.base+0x143c070;
   save::Installation wrong_call;
   CHECK(!campaign_menu::validate_native_targets(wrong_call,memory,image,stop,wrong));

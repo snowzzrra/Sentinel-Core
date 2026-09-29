@@ -1118,10 +1118,9 @@ bool validate_native_targets(save::Installation& record,engine::Memory& source_m
     }
     return true;
 }
-bool install(const engine::Binding& binding,HANDLE stop) {
+bool install(const engine::Binding& binding,HANDLE) {
     if (!save::session().campaign_run.enabled()) return true;
     const auto targets=native_targets(binding.image.base);
-    if (!validate_native_targets(save::session().installation,memory,binding.image,stop,targets)) return false;
     meter_visibility_return=binding.image.base+0x1116e07;
     void* detours[]={reinterpret_cast<void*>(populate),reinterpret_cast<void*>(focus),reinterpret_cast<void*>(load),
         reinterpret_cast<void*>(is_available),reinterpret_cast<void*>(update),

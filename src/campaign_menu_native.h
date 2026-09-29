@@ -4,6 +4,7 @@
 #include <string>
 
 namespace sentinel::campaign_menu {
+// Native runtime qualifies the bindings before domain hooks patch shared callees.
 bool install(const engine::Binding&,HANDLE stop);
 std::array<native::Target,43> native_targets(uintptr_t base);
 bool validate_native_targets(save::Installation&,engine::Memory&,const engine::Image&,

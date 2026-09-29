@@ -223,6 +223,8 @@ using WeaponHudUpdate = void(*)(uintptr_t, uintptr_t);
 using WeaponHudProject = void(*)(uintptr_t);
 WeaponHudUpdate original_weapon_hud_update = nullptr;
 WeaponHudProject project_crucible_hud = nullptr, project_hammer_hud = nullptr;
+using WeaponInfoLabel = uint64_t(*)(uintptr_t, const char*, bool);
+WeaponInfoLabel original_weapon_info_label = nullptr;
 std::atomic<unsigned> configured_keys{VK_F9};
 #include "special_hud_native.h"
 std::atomic<uintptr_t> challenge_element{0};
@@ -256,6 +258,44 @@ uintptr_t current_hud_player() {
     return player(nullptr);
 }
 
+uint64_t weapon_info_label_detour(uintptr_t parent, const char* label, bool warn) {
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress()) - image_base;
+    // Only the native WeaponInfo visibility and QuickUse presenters use this projection.
+    if ((caller == 0xf0cb96 || caller == 0xf0c314 || caller == 0xf0c34a) &&
+        !std::strcmp(label, "noEquipment")) {
+        __try {
+            const auto element = weapon_info_element.load(std::memory_order_acquire);
+            const auto epoch = route_epoch.load(std::memory_order_acquire);
+            const auto current_player = route_player.load(std::memory_order_acquire);
+            char namespace_id[65];
+            AcquireSRWLockShared(&route_namespace_lock);
+            std::memcpy(namespace_id, route_namespace, sizeof(namespace_id));
+            ReleaseSRWLockShared(&route_namespace_lock);
+            if (element && epoch && epoch == native::observation_stamp() &&
+                epoch == weapon_info_epoch.load(std::memory_order_acquire) && current_player &&
+                current_player == weapon_info_player.load(std::memory_order_acquire) &&
+                current_player == current_hud_player() &&
+                *reinterpret_cast<uintptr_t*>(element) == image_base + rva_weapon_info_vtable &&
+                *reinterpret_cast<uint8_t*>(element + 0x209) &&
+                hud_owner_snapshot(namespace_id).namespace_valid && inventory::admitted(namespace_id) &&
+                inventory::grenade_indicator_mask(current_player) == 2 &&
+                hud::graphics_source(element).parent == parent) {
+                const auto desired = original_weapon_info_label(parent,
+                    *reinterpret_cast<uint8_t*>(element + 0x2a9) ? "cursed" : "normal", warn);
+                const auto absent = original_weapon_info_label(parent, label, false);
+                if (desired > 0 && desired != absent) {
+                    hud_trace.record(save::BStage::root_layout, save::BStatus::succeeded,
+                        "hud_ice_only_timeline_preserved", epoch,
+                        {{"owner", element}, {"parent", parent}, {"native_frame", absent},
+                         {"projected_frame", desired}, {"grenade_mask", 2}}, element);
+                    return desired;
+                }
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return original_weapon_info_label(parent, label, warn);
+}
+
 void project_special_hud(uintptr_t element) {
     const auto epoch = route_epoch.load(std::memory_order_acquire);
     const bool context_valid = epoch && epoch == native::observation_stamp();
@@ -273,8 +313,8 @@ void project_special_hud(uintptr_t element) {
         const auto current_player = route_player.load(std::memory_order_acquire);
         const auto native_player = current_hud_player();
         const auto observed_vtable = element ? *reinterpret_cast<uintptr_t*>(element) : 0;
-        const auto counts = observed_vtable == image_base + rva_weapon_info_vtable ?
-            note_hud_update(element, epoch, false) : HudCounts{};
+        if (observed_vtable == image_base + rva_weapon_info_vtable)
+            note_hud_update(element, epoch, false);
         const bool hud_valid = valid && weapon_info_update_phase && element && current_player &&
             native_player == current_player && owner.namespace_valid &&
             observed_vtable == image_base + rva_weapon_info_vtable;
@@ -286,54 +326,71 @@ void project_special_hud(uintptr_t element) {
             !current_player || native_player != current_player ? 2 :
             !owner.namespace_valid ? 5 :
             observed_vtable != image_base + rva_weapon_info_vtable ? 4 : 0;
-        static thread_local std::array<uint64_t, 14> previous_context{};
-        const std::array<uint64_t, 14> context{element, observed_vtable, current_player, epoch,
+        const auto primary_icon = graphics.primary_root ? hud::child(graphics.primary_root, "icon") : 0;
+        const auto grenade_mask = hud_valid && inventory::admitted(namespace_id) ?
+            inventory::grenade_indicator_mask(current_player) : uint8_t{255};
+        const auto quickuse_selected = hud_valid ? *reinterpret_cast<uintptr_t*>(element + 0x178) : 0;
+        const auto primary_visible = graphics.primary_root ?
+            *reinterpret_cast<uint8_t*>(graphics.primary_root + 0x51) : uint8_t{255};
+        const auto icon_visible = primary_icon ? *reinterpret_cast<uint8_t*>(primary_icon + 0x51) : uint8_t{255};
+        const auto primary_frame = graphics.primary_root ?
+            *reinterpret_cast<uint16_t*>(graphics.primary_root + 0x58) : uint16_t{0};
+        const auto icon_frame = primary_icon ? *reinterpret_cast<uint16_t*>(primary_icon + 0x58) : uint16_t{0};
+        const auto parent_visible = graphics.parent ?
+            *reinterpret_cast<uint8_t*>(graphics.parent + 0x51) : uint8_t{255};
+        const auto parent_frame = graphics.parent ? *reinterpret_cast<uint16_t*>(graphics.parent + 0x58) : uint16_t{0};
+        static thread_local std::array<uint64_t, 25> previous_context{};
+        const std::array<uint64_t, 25> context{element, observed_vtable, current_player, epoch,
             owner.revision, owner.request_revision, keys, refusal, hud::graphics_ready,
             hud::keycap_ready, source_evaluated, owner.namespace_valid,
-            GetCurrentThreadId(), route_thread.load(std::memory_order_acquire)};
+            GetCurrentThreadId(), route_thread.load(std::memory_order_acquire),
+            grenade_mask, quickuse_selected, primary_visible, icon_visible,
+            graphics.primary_root, primary_icon, graphics.parent, primary_frame, icon_frame, parent_visible, parent_frame};
         if (context != previous_context) {
             previous_context = context;
             hud_trace.record(refusal ? save::BStage::profile_choice : save::BStage::profile_read,
                 refusal ? save::BStatus::refused : save::BStatus::entered,
                 "hud_weapon_info_update_context", 0,
-                {{"expected_vtable", image_base + rva_weapon_info_vtable},
-                 {"observed_vtable", observed_vtable}, {"weapon_info_owner", element},
-                 {"mission_challenge_owner", challenge_element.load(std::memory_order_acquire)},
-                 {"player", current_player}, {"callback_thread", GetCurrentThreadId()},
-                 {"publisher_thread", route_thread.load(std::memory_order_acquire)},
-                 {"observation_epoch", epoch},
-                 {"lifecycle_generation", native::inspect(0).scope.lifecycle_generation},
-                 {"graphics_ready", hud::graphics_ready}, {"keycap_ready", hud::keycap_ready},
-                 {"namespace_valid", owner.namespace_valid}, {"source_evaluated", source_evaluated},
-                 {"revision", owner.revision}, {"attempts", counts.attempts}, {"refusal", refusal}});
+                {{"weapon_info_owner", element}, {"player", current_player},
+                  {"observation_epoch", epoch}, {"refusal", refusal},
+                  {"grenade_mask", grenade_mask}, {"quickuse_selected", quickuse_selected},
+                  {"primary_visible", primary_visible}, {"icon_visible", icon_visible},
+                  {"primary", graphics.primary_root}, {"icon", primary_icon}, {"parent", graphics.parent},
+                  {"primary_frame", primary_frame}, {"icon_frame", icon_frame},
+                  {"parent_visible", parent_visible}, {"parent_frame", parent_frame}});
         }
         if (hud_valid) {
             weapon_info_element.store(element, std::memory_order_release);
             weapon_info_player.store(current_player, std::memory_order_release);
             weapon_info_epoch.store(epoch, std::memory_order_release);
-            const auto primary_icon = graphics.primary_root ? hud::child(graphics.primary_root, "icon") : 0;
             if (inventory::admitted(namespace_id) && hud::graphics_ready && graphics.primary_root &&
                 graphics.movie && *reinterpret_cast<uintptr_t*>(graphics.primary_root + 0x30) == graphics.movie &&
                 *reinterpret_cast<uintptr_t*>(graphics.primary_root + 0x40) == graphics.parent &&
-                inventory::grenade_indicator_mask(current_player) == 2 &&
-                (!*reinterpret_cast<uint8_t*>(graphics.primary_root + 0x51) ||
-                 (primary_icon && !*reinterpret_cast<uint8_t*>(primary_icon + 0x51)))) {
+                grenade_mask == 2 && *reinterpret_cast<uint8_t*>(element + 0x209)) {
+                // Native WeaponInfo chooses noEquipment from Frag ownership alone.
+                // Ice-only needs the equipment timeline before AP clips are placed.
+                const bool frame_changed = hud::hold_ice_frame(graphics.parent,
+                    *reinterpret_cast<uint8_t*>(element + 0x2a9) != 0);
+                const bool visibility_changed = !*reinterpret_cast<uint8_t*>(graphics.primary_root + 0x51) ||
+                    (primary_icon && !*reinterpret_cast<uint8_t*>(primary_icon + 0x51));
                 hud::show(graphics.primary_root, true);
                 if (primary_icon) hud::show(primary_icon, true);
-                hud_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
+                if (frame_changed || visibility_changed) hud_trace.record(save::BStage::root_layout, save::BStatus::succeeded,
                     "hud_ice_only_indicator_restored", epoch,
                     {{"owner", element}, {"primary", graphics.primary_root},
-                     {"icon", primary_icon}}, element);
+                     {"icon", primary_icon}, {"parent", graphics.parent}, {"parent_frame_before", parent_frame},
+                     {"parent_frame_after", *reinterpret_cast<uint16_t*>(graphics.parent + 0x58)},
+                     {"grenade_mask", grenade_mask}, {"quickuse_selected", quickuse_selected}}, element);
+                if (frame_changed) graphics = hud::graphics_source(element);
             }
             bool clips_applied = false;
             hud::project(element, owner, graphics, keys, epoch, clips_applied);
             if (clips_applied) {
-                const auto updated = note_hud_update(element, epoch, true);
+                note_hud_update(element, epoch, true);
                 hud_trace.record(save::BStage::profile_capture, save::BStatus::succeeded,
                     "hud_projection_clips_applied", 0,
                     {{"weapon_info_owner", element}, {"parent", graphics.parent},
                      {"movie", graphics.movie}, {"observation_epoch", epoch},
-                     {"attempts", updated.attempts}, {"presentations", updated.presentations},
                      {"callback_thread", GetCurrentThreadId()},
                      {"publisher_thread", route_thread.load(std::memory_order_acquire)},
                      {"snapshot_revision", owner.revision}, {"balance", owner.refill_balance},
@@ -347,31 +404,54 @@ void project_special_hud(uintptr_t element) {
         }
         if (!weapon_info_update_phase) return;
         if (observed_vtable != image_base + rva_weapon_info_vtable) return;
-        if (!*reinterpret_cast<uintptr_t*>(element + 0x1e8) ||
-            !*reinterpret_cast<uintptr_t*>(element + 0x1f8)) return;
-        if (!valid || (!crucible && !hammer)) {
+        const bool native_special_widgets = *reinterpret_cast<uintptr_t*>(element + 0x1e8) &&
+            *reinterpret_cast<uintptr_t*>(element + 0x1f8);
+        if (native_special_widgets && (!valid || (!crucible && !hammer))) {
             project_crucible_hud(element);
             project_hammer_hud(element);
-            return;
         }
-        auto& visible_c = *reinterpret_cast<uint8_t*>(element + 0x169);
-        auto& visible_h = *reinterpret_cast<uint8_t*>(element + 0x1b9);
-        const auto original_c = visible_c, original_h = visible_h;
-        const bool show_c = crucible && *reinterpret_cast<int32_t*>(element + 0x170) > 0;
-        const bool show_h = hammer && original_h;
-        __try {
-            visible_c = show_c;
-            visible_h = show_h;
-            project_crucible_hud(element);
-            project_hammer_hud(element);
-        } __finally {
-            visible_c = original_c;
-            visible_h = original_h;
+        else if (native_special_widgets) {
+            auto& visible_c = *reinterpret_cast<uint8_t*>(element + 0x169);
+            auto& visible_h = *reinterpret_cast<uint8_t*>(element + 0x1b9);
+            const auto original_c = visible_c, original_h = visible_h;
+            const bool show_c = crucible && *reinterpret_cast<int32_t*>(element + 0x170) > 0;
+            const bool show_h = hammer && original_h;
+            __try {
+                visible_c = show_c;
+                visible_h = show_h;
+                project_crucible_hud(element);
+                project_hammer_hud(element);
+            } __finally {
+                visible_c = original_c;
+                visible_h = original_h;
+            }
+            installation_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
+                "special_hud_projection_submitted", 0,
+                {{"policy", owner.selected}, {"crucible_visible", show_c},
+                 {"hammer_visible", show_h}, {"pixels_observed", 0}});
         }
-        installation_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
-            "special_hud_projection_submitted", 0,
-            {{"policy", owner.selected}, {"crucible_visible", show_c},
-             {"hammer_visible", show_h}, {"pixels_observed", 0}});
+        if (source_evaluated) {
+            const auto final_graphics = hud::graphics_source(element);
+            const auto final_icon = final_graphics.primary_root ? hud::child(final_graphics.primary_root, "icon") : 0;
+            const uintptr_t clips[3]{final_graphics.primary_root, final_icon, final_graphics.parent};
+            std::array<uint64_t, 13> final_context{element, epoch, grenade_mask,
+                *reinterpret_cast<uintptr_t*>(element + 0x178)};
+            for (unsigned i = 0; i < 3; ++i) {
+                final_context[4 + i * 3] = clips[i];
+                final_context[5 + i * 3] = clips[i] ? *reinterpret_cast<uint8_t*>(clips[i] + 0x51) : 255;
+                final_context[6 + i * 3] = clips[i] ? *reinterpret_cast<uint16_t*>(clips[i] + 0x58) : 0;
+            }
+            static thread_local std::array<uint64_t, 13> previous_final{};
+            if (final_context != previous_final) {
+                previous_final = final_context;
+                hud_trace.record(save::BStage::profile_publish, save::BStatus::entered,
+                    "hud_weapon_info_after_presenters", epoch,
+                    {{"owner", element}, {"grenade_mask", grenade_mask}, {"quickuse_selected", final_context[3]},
+                     {"primary", final_context[4]}, {"primary_visible", final_context[5]}, {"primary_frame", final_context[6]},
+                     {"icon", final_context[7]}, {"icon_visible", final_context[8]}, {"icon_frame", final_context[9]},
+                     {"parent", final_context[10]}, {"parent_visible", final_context[11]}, {"parent_frame", final_context[12]}}, element);
+            }
+        }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         installation_trace.record(save::BStage::profile_output, save::BStatus::refused,
             "special_hud_projection_fault", 0, {{"exception", GetExceptionCode()}});
@@ -1649,6 +1729,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
             bind_hud(hud::swf.dirty, "dirty", 0x1857110, 0, "4c8bdc574883ec70488b05b97895024833c448894424584863410c488bf983f8") &&
             bind_hud(hud::swf.start, "start", 0x18610d0, 0, "48895c2408574883ec200fb741588bfa488bd93bd074447d0de8928effff488b") &&
             bind_hud(hud::swf.frame, "frame", 0x1865280, 0, "48895c2408574883ec200fb74158bf010000003bd7488bd90f4ffa3bf8742c7d") &&
+            bind_hud(hud::swf.label, "label", 0x1859e20, 0, "48895c2420555641564883ec60488b05a44b95024833c448894424580fb60245") &&
             bind_hud(hud::swf.visible, "visible", 0x1864430, 97, "440fb6d23851517457807952007551488b41104c6349088851514d03c9488b10") &&
             bind_hud(hud::swf.position, "position", 0x1863ec0, 70, "48837940004c8bc9743b488b41104c63410c49c1e006488b9080000000f3410f") &&
             bind_hud(hud::swf.color, "color", 0x1863d90, 0, "48896c24104889742418574883ec308bf2488bf981fa0d0100000f87f7000000") &&
@@ -1658,18 +1739,35 @@ void install(const engine::Binding& binding, HANDLE stop) {
         hud::keycap_ready = hud::graphics_ready &&
             bind_hud(hud::swf.text, "text", 0x184e4b0, 0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b15d75b06") &&
             bind_hud(hud::swf.set_text, "set_text", 0x186db00, 0, "40534883ec20488bd94883c140e8ded4b8fe488bcb4883c4205be9e1cbffffcc");
+        hud::keycap_ready = hud::keycap_ready &&
+            bind_hud(hud::swf.keycap, "keycap", 0xfb4ae0, 0,
+                "40534883ec50488b491833c0894424604885c9743e48894424384c8d0d1b62d4");
         hud_trace.record(save::BStage::profile_prepare, save::BStatus::entered,
             "hud_adapters_ready", 0, {{"graphics_ready", hud::graphics_ready}, {"keycap_ready", hud::keycap_ready}});
         project_crucible_hud = reinterpret_cast<WeaponHudProject>(image_base + 0xf0c230);
         project_hammer_hud = reinterpret_cast<WeaponHudProject>(image_base + 0xf0c640);
+        const auto label_target = reinterpret_cast<void*>(hud::swf.label);
+        const auto label_created = hud::graphics_ready ? MH_CreateHook(label_target,
+            reinterpret_cast<void*>(weapon_info_label_detour),
+            reinterpret_cast<void**>(&original_weapon_info_label)) : MH_UNKNOWN;
+        const auto label_enabled = label_created == MH_OK ? MH_EnableHook(label_target) : MH_UNKNOWN;
+        if (label_enabled == MH_OK) hud::swf.label = original_weapon_info_label;
+        else if (label_created == MH_OK) MH_RemoveHook(label_target);
         const auto target = reinterpret_cast<void*>(image_base + 0xf0b3b0);
-        const auto created = MH_CreateHook(target, reinterpret_cast<void*>(weapon_hud_update_detour),
-                                           reinterpret_cast<void**>(&original_weapon_hud_update));
+        const auto created = label_enabled == MH_OK ? MH_CreateHook(target,
+            reinterpret_cast<void*>(weapon_hud_update_detour),
+            reinterpret_cast<void**>(&original_weapon_hud_update)) : MH_UNKNOWN;
         const auto enabled = created == MH_OK ? MH_EnableHook(target) : MH_UNKNOWN;
         if (created == MH_OK && enabled != MH_OK) MH_RemoveHook(target);
+        if (enabled != MH_OK && label_enabled == MH_OK) {
+            MH_DisableHook(label_target);
+            MH_RemoveHook(label_target);
+            hud::swf.label = reinterpret_cast<WeaponInfoLabel>(label_target);
+        }
         installation_trace.record(save::BStage::profile_prepare,
             enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
-            "special_hud_install", 0, {{"create_status", created}, {"enable_status", enabled}});
+            "special_hud_install", 0, {{"create_status", created}, {"enable_status", enabled},
+                {"label_create_status", label_created}, {"label_enable_status", label_enabled}});
     }
     ready.store(true, std::memory_order_release);
     installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "ownership_ready", 0,
