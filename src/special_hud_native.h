@@ -530,8 +530,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     Rect flame_plate_bounds{}, active_plate_bounds{};
     Rect clone_plate_bounds{};
     const auto refill_geometry = !refill_frame_changed &&
-        bounds(child(refill, "background"), parent, clone_plate_bounds) ? refill :
-        source == layout_source ? source : uintptr_t{0};
+        bounds(child(refill, "background"), parent, clone_plate_bounds) ? refill : source;
     const auto source_icon = child(layout_source, "icon");
     const auto flame_icon = child(flame_root, "icon");
     const auto active_icon = child(active_root, "icon");
@@ -601,10 +600,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     Point refill_offset{}, arrow_offset{}, refill_target{}, refill_lift{};
     const auto refill_plate = child(refill_geometry, "background");
     const auto geometry_anchor = refill_plate ? refill_plate : child(refill_geometry, "icon");
-    const bool refill_offsets = source_icon_visual &&
+    const bool refill_offsets = authored_refill || (source_icon_visual &&
         visual_offset(refill_geometry, geometry_anchor, parent, movie, refill_offset) &&
         from_space(parent, *reinterpret_cast<uintptr_t*>(parent + 0x40),
-                   movie, {0, -4.0f}, refill_lift, true);
+                   movie, {0, -4.0f}, refill_lift, true));
     if (refill_offsets) refill_target = refill_icon_target;
     const float refill_x = refill_target.x + refill_lift.x;
     const Point refill_visual_target = authored_refill ? Point{97.33f, -23.38f} :
@@ -616,15 +615,14 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool visible_plate = bounds(refill_plate, parent, refill_plate_bounds) &&
         visual_offset(refill_geometry, refill_plate, parent, movie, refill_plate_offset);
     if (!visible_plate) {
-        refill_plate_bounds = source_icon_bounds;
+        refill_plate_bounds = source_icon_visual ? source_icon_bounds : Rect{{0, 0}, {24, 24}};
         refill_plate_offset = refill_offset;
     }
     const bool native_layout = native_arrow_visual && flame_visual &&
         flame_icon_visual && active_stage_forward && source_cached && source_icon_visual &&
         std::isfinite(native_gap) && native_gap > 0;
-    const bool refill_visual = source_cached && refill_offsets &&
-        (authored_refill || (equipment_visual && active_visual &&
-         std::isfinite(native_gap) && native_gap > 0));
+    const bool refill_visual = authored_refill || (source_cached && refill_offsets &&
+        equipment_visual && active_visual && std::isfinite(native_gap) && native_gap > 0);
     const bool arrow_visual = native_layout &&
         visual_offset(arrow_source, native_arrow, parent, movie, arrow_offset);
     const char* switch_failure = nullptr;
