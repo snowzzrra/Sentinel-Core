@@ -594,9 +594,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
             (special_x + original_plate.x - original_special.x)) * render_row_slope :
             icon_baseline_y};
     const float source_icon_width = source_icon_bounds.br.x - source_icon_bounds.tl.x;
-    const Point refill_icon_target{(native_arrow_visual ? arrow_bounds.br.x : active_icon_bounds.br.x) +
-                                   native_gap + source_icon_width * 0.5f,
-                                   icon_baseline_y};
+    // SWF parent coordinates measured from the accepted complete-inventory layout.
+    const bool authored_refill = !native_arrow_visual || !flame_icon_visual || !active_icon_visual;
+    const Point refill_icon_target = authored_refill ? Point{97.33f, -60.93f} :
+        Point{arrow_bounds.br.x + native_gap + source_icon_width * 0.5f, icon_baseline_y};
     Point refill_offset{}, arrow_offset{}, refill_target{}, refill_lift{};
     const auto refill_plate = child(refill_geometry, "background");
     const auto geometry_anchor = refill_plate ? refill_plate : child(refill_geometry, "icon");
@@ -606,9 +607,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                    movie, {0, -4.0f}, refill_lift, true);
     if (refill_offsets) refill_target = refill_icon_target;
     const float refill_x = refill_target.x + refill_lift.x;
-    const Point refill_visual_target{refill_x, flame_plate_visual ?
-        center(flame_plate_bounds).y + (refill_x - center(flame_plate_bounds).x) * render_row_slope :
-        refill_target.y + refill_lift.y};
+    const Point refill_visual_target = authored_refill ? Point{97.33f, -23.38f} :
+        Point{refill_x, flame_plate_visual ?
+            center(flame_plate_bounds).y + (refill_x - center(flame_plate_bounds).x) * render_row_slope :
+            refill_target.y + refill_lift.y};
     Rect refill_plate_bounds{};
     Point refill_plate_offset{};
     const bool visible_plate = bounds(refill_plate, parent, refill_plate_bounds) &&
@@ -620,9 +622,9 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool native_layout = native_arrow_visual && flame_visual &&
         flame_icon_visual && active_stage_forward && source_cached && source_icon_visual &&
         std::isfinite(native_gap) && native_gap > 0;
-    const bool refill_visual = equipment_visual && active_visual && source_cached && refill_offsets &&
-        ((native_arrow_visual && flame_icon_visual) || active_icon_visual) &&
-        std::isfinite(native_gap) && native_gap > 0;
+    const bool refill_visual = source_cached && refill_offsets &&
+        (authored_refill || (equipment_visual && active_visual &&
+         std::isfinite(native_gap) && native_gap > 0));
     const bool arrow_visual = native_layout &&
         visual_offset(arrow_source, native_arrow, parent, movie, arrow_offset);
     const char* switch_failure = nullptr;
@@ -800,11 +802,12 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     // WeaponInfo::Setup binds +0x248 to equippedWeapon; +0x10 is its resolved sprite.
     const auto equipped_weapon = *reinterpret_cast<uintptr_t*>(element + 0x258);
     const auto native_ammo = child(child(equipped_weapon, "ammoIcon"), "image");
-    if (!native_ammo) return fail_refill("hud_ammo_leaf_missing", equipped_weapon);
-    if (*reinterpret_cast<uintptr_t*>(native_ammo + 0x30) != movie)
+    const auto ammo_donor = native_ammo ? native_ammo : ammo_glyph;
+    if (!ammo_donor) return fail_refill("hud_ammo_leaf_missing", equipped_weapon);
+    if (*reinterpret_cast<uintptr_t*>(ammo_donor + 0x30) != movie)
         return fail_refill("hud_ammo_leaf_movie_mismatch", native_ammo);
-    const auto ammo_icon_path_hash = *reinterpret_cast<int32_t*>(native_ammo + 0x20);
-    if (!ammo_glyph) ammo_glyph = clone(native_ammo, parent, "apAmmoGlyph", created);
+    const auto ammo_icon_path_hash = *reinterpret_cast<int32_t*>(ammo_donor + 0x20);
+    if (!ammo_glyph) ammo_glyph = clone(ammo_donor, parent, "apAmmoGlyph", created);
     if (!ammo_glyph) return fail_refill("hud_ammo_leaf_clone_failed", native_ammo);
     struct MaterialAttempt {
         uintptr_t owner, parent, clip, icon, material;
@@ -843,10 +846,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         return fail_refill("hud_ammo_material_unavailable", ammo_glyph);
     }
     Point ammo_origin{}, ammo_right{}, ammo_down{};
-    if (!affine_to(native_ammo, parent, movie, {0, 0}, ammo_origin) ||
-        !affine_to(native_ammo, parent, movie, {1, 0}, ammo_right) ||
-        !affine_to(native_ammo, parent, movie, {0, 1}, ammo_down))
-        return fail_refill("hud_ammo_leaf_transform_failed", native_ammo);
+    if (!affine_to(ammo_donor, parent, movie, {0, 0}, ammo_origin) ||
+        !affine_to(ammo_donor, parent, movie, {1, 0}, ammo_right) ||
+        !affine_to(ammo_donor, parent, movie, {0, 1}, ammo_down))
+        return fail_refill("hud_ammo_leaf_transform_failed", ammo_donor);
     const Point ammo_x{ammo_right.x - ammo_origin.x, ammo_right.y - ammo_origin.y};
     const Point ammo_y{ammo_down.x - ammo_origin.x, ammo_down.y - ammo_origin.y};
     const float material_width = static_cast<float>(*reinterpret_cast<uint16_t*>(ammo_glyph + 0x68));

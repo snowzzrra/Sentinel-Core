@@ -3,6 +3,7 @@
 #include "native_runtime.h"
 #include "local_controls.h"
 #include "save_session.h"
+#include "inventory.h"
 #include "MinHook.h"
 #include "hde/hde64.h"
 #include <atomic>
@@ -310,6 +311,16 @@ void project_special_hud(uintptr_t element) {
             weapon_info_element.store(element, std::memory_order_release);
             weapon_info_player.store(current_player, std::memory_order_release);
             weapon_info_epoch.store(epoch, std::memory_order_release);
+            if (inventory::admitted(namespace_id) && hud::graphics_ready && graphics.primary_root &&
+                graphics.movie && *reinterpret_cast<uintptr_t*>(graphics.primary_root + 0x30) == graphics.movie &&
+                *reinterpret_cast<uintptr_t*>(graphics.primary_root + 0x40) == graphics.parent &&
+                inventory::grenade_indicator_mask(current_player) == 2 &&
+                !*reinterpret_cast<uint8_t*>(graphics.primary_root + 0x51)) {
+                hud::show(graphics.primary_root, true);
+                hud_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
+                    "hud_ice_only_indicator_restored", epoch,
+                    {{"owner", element}, {"primary", graphics.primary_root}}, element);
+            }
             bool clips_applied = false;
             hud::project(element, owner, graphics, keys, epoch, clips_applied);
             if (clips_applied) {

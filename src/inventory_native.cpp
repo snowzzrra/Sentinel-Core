@@ -114,6 +114,27 @@ bool admitted(const char* id) {
         save::session().accepts_requests() && !std::memcmp(id, save::session().namespace_id().c_str(), 65);
 }
 
+uint8_t grenade_indicator_mask(uintptr_t p) {
+    if (!available() || !p) return SC_INVENTORY_UNKNOWN_ITEM;
+    __try {
+        const auto inv = reinterpret_cast<uintptr_t(*)(uintptr_t)>(image_base + 0x763080)(p);
+        const auto type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1617cd0)();
+        if (!inv || !type) return SC_INVENTORY_UNKNOWN_ITEM;
+        const char* paths[] = {"throwable/player/frag_grenade", "throwable/player/ice_bomb"};
+        uint8_t mask = 0;
+        for (unsigned i = 0; i < 2; ++i) {
+            const auto decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
+                image_base + 0x17aa5d0)(type, paths[i], 1);
+            if (!decl) return SC_INVENTORY_UNKNOWN_ITEM;
+            const auto path = *reinterpret_cast<const char**>(decl + 8);
+            if (!path || std::strcmp(path, paths[i])) return SC_INVENTORY_UNKNOWN_ITEM;
+            if (reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(image_base + 0x1690660)(inv, decl))
+                mask |= static_cast<uint8_t>(1u << i);
+        }
+        return mask;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return SC_INVENTORY_UNKNOWN_ITEM; }
+}
+
 void execute_native(const sc_inventory_request& request, sc_inventory_result& out) {
     if (!admitted(request.namespace_id)) { out.outcome = SC_INV_UNAVAILABLE; return; }
     if (request.kind != SC_INV_OBSERVE) { out.outcome = SC_INV_UNAVAILABLE; return; }
