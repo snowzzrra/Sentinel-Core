@@ -1,6 +1,7 @@
 #include "campaign_menu_native.h"
 #include "campaign_menu.h"
 #include "fast_travel.h"
+#include "special.h"
 #include "native_target.h"
 #include "native_runtime.h"
 #include "save_collector.h"
@@ -295,37 +296,12 @@ void userinfo_point(uintptr_t widget,int kind,uintptr_t material,int count,int w
     }
     original_userinfo_point(widget,kind,material,count,width,delta);
 }
+void present_hud_found(uintptr_t meter);
 void present_dossier_map(uintptr_t screen) {
-        uintptr_t widget=0,content=0;
-        read(screen,0x138,widget);
-        read(widget,0x18,content);
-        const auto title=swf_child(swf_child(content,"apItemsTitle"),"txtVal",true);
-        const auto items=swf_child(content,"items");
-        if (!content || !title || !items) {
-            save::session().btrace.record(save::BStage::dossier_counts,save::BStatus::pending,
-                "dossier_items_binding_pending",0,{{"content",content!=0},{"title",title!=0},{"items",items!=0}},screen);
-            return;
-        }
-        const auto campaign=save::session().campaign_run.snapshot();
-        const auto projection=menu().projection();
-        const sc_campaign_summary* summary=nullptr;
-        for (uint32_t i=0;i<projection.count;++i)
-            if ((projection.rows[i].flags&SC_CAMPAIGN_DETAILS) && campaign.map==projection.rows[i].map) {
-                summary=&projection.summaries[i]; break;
-            }
-        if (!summary || summary->known!=1) {
-            original_sprite_visibility(content,0,1);
-            save::session().btrace.record(save::BStage::dossier_counts,save::BStatus::pending,
-                "dossier_items_facts_unknown",0,{},screen);
-            return;
-        }
-        char label[64]{};
-        std::snprintf(label,sizeof(label),"ITEMS FOUND  %u/%u",summary->found,summary->total);
-        swf_set_text(title,label);
-        original_sprite_visibility(items,0,1);
-        original_sprite_visibility(content,1,1);
-        save::session().btrace.record(save::BStage::dossier_counts,save::BStatus::succeeded,
-            "dossier_items_bound",0,{{"found",summary->found},{"total",summary->total}},screen);
+    uintptr_t meter=0,widget=0,content=0;
+    if (read(screen,0x150,meter) && meter) present_hud_found(meter);
+    if (read(screen,0x138,widget) && read(widget,0x18,content) && content)
+        original_sprite_visibility(content,0,1);
 }
 void dossier_map(uintptr_t screen) {
     original_dossier_map(screen);
@@ -353,12 +329,135 @@ sc_physical_challenge challenge_projection(uint32_t id,bool end=false) {
     }
     return {};
 }
+sc_campaign_reward mission_reward(uint32_t id,bool end=false) {
+    if (!active() || !id) return {};
+    const auto campaign=save::session().campaign_run.snapshot();
+    const auto& map=end && campaign.map=="game/hub/hub" && !campaign.end_summary_map.empty() ? campaign.end_summary_map : campaign.map;
+    const auto projection=menu().projection();
+    if (projection.namespace_id!=save::session().namespace_id()) return {};
+    for (uint32_t i=0;i<projection.count;++i) {
+        if (!(projection.rows[i].flags&SC_CAMPAIGN_REVEALED) || map!=projection.rows[i].map) continue;
+        for (const auto& reward:projection.rewards[i]) {
+            uint32_t key=0;
+            for (const auto* p=reward.unlockable;*p;++p) key=key*31+static_cast<uint8_t>(*p);
+            if (reward.kind==SC_REWARD_MISSION && key==id) return reward;
+        }
+    }
+    return {};
+}
+bool reward_represented(uintptr_t screen,const sc_campaign_reward& reward) {
+    for (unsigned i=0;i<3;++i) {
+        uintptr_t widget=0; uint32_t id=0;
+        if (!read(screen,0x640+i*8,widget) || !read(widget,0x2b0,id) || !id) continue;
+        for (unsigned n=1;n<=(reward.kind==SC_REWARD_AGGREGATE ? 3u : 1u);++n) {
+            const auto identity=std::string(reward.unlockable)+(reward.kind==SC_REWARD_AGGREGATE ? "/challenge_"+std::to_string(n) : "");
+            uint32_t key=0;
+            for (const auto c:identity) key=31*key+static_cast<uint8_t>(c);
+            if (key==id) return true;
+        }
+    }
+    return false;
+}
+void mission_hint_intents(uintptr_t screen) {
+    if (!active()) return;
+    const auto campaign=save::session().campaign_run.snapshot();
+    const auto projection=menu().projection();
+    const auto& ns=save::session().namespace_id();
+    if (projection.namespace_id!=ns) return;
+    for (uint32_t i=0;i<projection.count;++i)
+        if ((projection.rows[i].flags&SC_CAMPAIGN_REVEALED) && campaign.map==projection.rows[i].map)
+            for (const auto& reward:projection.rewards[i])
+                if (reward.kind==SC_REWARD_MISSION && reward_represented(screen,reward))
+                    menu().hint_intent(ns.c_str(),reward.location_id);
+}
+void hide_battery_region(uintptr_t battery) {
+    if (active() && battery) original_sprite_visibility(battery,0,1);
+}
+void hide_mission_battery(uintptr_t screen) {
+    uintptr_t widget=0,root=0;
+    if (read(screen,0x638,widget) && read(widget,0x18,root)) {
+        hide_battery_region(swf_child(root,"sentinelBattery"));
+        if (const auto arrow=swf_child(root,"arrow")) original_sprite_visibility(arrow,0,1);
+    }
+}
+Update original_end_challenges_show=nullptr;
+void end_challenges_show(uintptr_t screen) {
+    original_end_challenges_show(screen);
+    if (!active()) return;
+    __try {
+        uintptr_t table=0,method=0;
+        if (!read(screen,0,table) || !read(table,0x70,method) || !method) return;
+        const auto root=reinterpret_cast<uintptr_t(*)(uintptr_t)>(method)(screen);
+        hide_battery_region(swf_child(swf_child(root,"_center"),"sentinelBattery"));
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        save::session().btrace.record(save::BStage::end_challenges,save::BStatus::blocked,"aggregate_reward_fault");
+    }
+}
+Update original_challenges_show=nullptr,original_mission_tab=nullptr;
+using PageAction=uintptr_t(*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
+PageAction original_challenges_action=nullptr;
+thread_local bool explicit_challenges_page=false;
+void publish_mission_page(uintptr_t screen) {
+    if (!active()) return;
+    __try {
+        uintptr_t table=0,widget=0,root=0; uint8_t visible=0;
+        if (!read(screen,0,table) || table!=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))+0x2d0ba68 ||
+            !read(screen,0x638,widget) || !read(widget,0x18,root) || !read(root,0x51,visible) || !visible) return;
+        uintptr_t method=0;
+        if (!read(table,0x70,method) || !method) return;
+        const auto center=swf_child(reinterpret_cast<uintptr_t(*)(uintptr_t)>(method)(screen),"main");
+        if (read(center,0x51,visible) && visible) mission_hint_intents(screen);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+void challenges_show(uintptr_t screen) {
+    const bool previous=explicit_challenges_page;
+    explicit_challenges_page=true;
+    __try { original_challenges_show(screen); }
+    __finally { explicit_challenges_page=previous; }
+    if (!previous) publish_mission_page(screen);
+}
+uintptr_t challenges_action(uintptr_t screen,uintptr_t action,uintptr_t event,uintptr_t source) {
+    const bool previous=explicit_challenges_page;
+    explicit_challenges_page=true;
+    uintptr_t result=0;
+    __try { result=original_challenges_action(screen,action,event,source); }
+    __finally { explicit_challenges_page=previous; }
+    if (!previous) publish_mission_page(screen);
+    return result;
+}
+void mission_tab(uintptr_t screen) {
+    original_mission_tab(screen);
+    __try {
+        hide_mission_battery(screen);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+void present_card_reward(uintptr_t widget,uint32_t id) {
+    if (!active()) return;
+    const auto reward=mission_reward(id);
+    uintptr_t row=0;
+    if (!read(widget,0x18,row)) return;
+    const auto card=swf_child(row,"card");
+    const auto text=swf_child(swf_child(card,"challengeDesc"),"txtVal",true);
+    save::NativeString description{};
+    if (text && reward.location_id && read(widget,0x2f4,description) && description.data &&
+        description.length>=0 && description.length<2048) {
+        const auto value=std::string(description.data,description.length)+"\nREWARD: "+reward.text;
+        swf_set_text(text,value.c_str());
+        reward_scroll(text);
+    }
+    if (const auto token=swf_child(card,"apNativeToken")) original_sprite_visibility(token,0,1);
+}
 void challenge_card_update(uintptr_t widget) {
     uint32_t id=0; read(widget,0x2b0,id);
     const auto challenge=challenge_projection(id);
     uint32_t found=0,required=0; uint8_t checked=0;
     if (!challenge.required || !read(widget,0x448,found) || !read(widget,0x44c,required) ||
-        !read(widget,0x450,checked)) { original_challenge_card_update(widget); return; }
+        !read(widget,0x450,checked)) {
+        original_challenge_card_update(widget);
+        __try { present_card_reward(widget,id); }
+        __except(EXCEPTION_EXECUTE_HANDLER) {}
+        return;
+    }
     // Only the presenter's values are borrowed. Native records and celebration flags remain owned by the game.
     *reinterpret_cast<uint32_t*>(widget+0x448)=challenge.found;
     *reinterpret_cast<uint32_t*>(widget+0x44c)=challenge.required;
@@ -375,22 +474,46 @@ void challenge_card_update(uintptr_t widget) {
     save::session().btrace.record(save::BStage::dossier_challenges,bound?save::BStatus::succeeded:save::BStatus::pending,
         bound?"dossier_native_card_bound":"dossier_native_card_pending",0,{{"slot",static_cast<uint64_t>(challenge_slot(challenge))},
         {"found",challenge.found},{"required",challenge.required},{"checked",challenge.checked}},widget);
+    __try { present_card_reward(widget,id); }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
-bool challenge_icon(uintptr_t icon,bool checked,uintptr_t normal) {
-    // Pinned retail gameresources supplies this native graphic.
-    const auto material=checked ? find_material(material_manager,
-        "textures/swf_images/common/graphics/active_item_checkmark.png",0) : normal;
+bool challenge_icon(uintptr_t icon,uintptr_t material) {
     if (!icon || !material) return false;
     swf_set_material(icon,material,0);
     return true;
+}
+struct CompletionToast { uint32_t id=0; bool seen=false,checked=false; };
+std::array<CompletionToast,3> completion_toasts{};
+std::string completion_scope;
+bool completion_edge(CompletionToast& toast,uint32_t id,bool checked) {
+    if (!toast.seen || toast.id!=id) { toast={id,true,checked}; return false; }
+    return checked && !toast.checked;
+}
+void present_physical_completion(uintptr_t widget,uint32_t id,const sc_physical_challenge& challenge) {
+    const auto scope=save::session().namespace_id()+"/"+save::session().campaign_run.snapshot().map;
+    if (completion_scope!=scope) { completion_scope=scope; completion_toasts={}; }
+    const auto slot=challenge_slot(challenge);
+    if (slot<0) return;
+    auto& toast=completion_toasts[slot];
+    if (!completion_edge(toast,id,challenge.checked!=0)) return;
+    save::NativeString name{};
+    const auto reward=mission_reward(id);
+    if (!reward.location_id || !read(widget,0x1c4,name) || !name.data || name.length<=0 || name.length>=1024) return;
+    const auto title=std::string("CHALLENGE COMPLETED: ")+std::string(name.data,name.length);
+    if (special::present_challenge_completion(widget,title.c_str(),reward.text)) {
+        toast.checked=true;
+        save::session().btrace.record(save::BStage::hud_challenges,save::BStatus::succeeded,
+            "physical_challenge_completion_presented",0,{{"id",id}},widget);
+    }
 }
 void present_hud_challenge(uintptr_t widget) {
     uint32_t id=0; uintptr_t row=0;
     if (!read(widget,0x180,id) || !read(widget,0x18,row) || !row) return;
     const auto challenge=challenge_projection(id);
     if (!challenge.required) return;
+    present_physical_completion(widget,id,challenge);
     uintptr_t normal=0; read(widget,0x310,normal);
-    const bool graphic=challenge_icon(swf_child(row,"icon"),challenge.checked!=0,normal);
+    const bool graphic=challenge_icon(swf_child(row,"icon"),normal);
     const auto counter=swf_child(swf_child(row,"challengeCounter"),"txtVal",true);
     auto indicator=swf_child(row,"point");
     if (!indicator) indicator=swf_child(row,"progress");
@@ -436,7 +559,7 @@ void present_eol_challenge(uintptr_t widget) {
         return;
     }
     uintptr_t normal=0; read(widget,0x310,normal);
-    if (!challenge_icon(swf_child(category,"icon"),challenge.checked!=0,normal)) {
+    if (!challenge_icon(swf_child(category,"icon"),normal)) {
         save::session().btrace.record(save::BStage::end_challenges,save::BStatus::pending,"end_challenge_graphic_pending",0,{},widget);
         return;
     }
@@ -450,22 +573,55 @@ void present_eol_challenge(uintptr_t widget) {
 void eol_challenge_update(uintptr_t widget) {
     original_eol_challenge_update(widget);
     if (!active()) return;
-    __try { present_eol_challenge(widget); }
+    __try {
+        present_eol_challenge(widget);
+        uint32_t id=0; uintptr_t root=0;
+        if (read(widget,0x180,id) && read(widget,0x18,root)) {
+            const auto reward=mission_reward(id,true);
+            const auto region=swf_child(root,"apReward");
+            if (const auto text=swf_child(region,"txtVal",true)) {
+                swf_set_text(text,reward.location_id ? reward.text : "");
+                if (reward.location_id) reward_scroll(text);
+            }
+            if (region) original_sprite_visibility(region,reward.location_id!=0,1);
+        }
+    }
     __except(EXCEPTION_EXECUTE_HANDLER) {
         save::session().btrace.record(save::BStage::end_challenges,save::BStatus::blocked,"end_challenge_fault");
     }
 }
+void present_hud_found(uintptr_t meter);
 void hud_score_init(uintptr_t score) {
     original_hud_score_init(score);
     if (!active()) return;
     __try {
-        uintptr_t widget=0,sprite=0;
-        if (read(score,0xf8,widget) && widget && read(widget,0x18,sprite) && sprite)
-            original_sprite_visibility(sprite,0,1);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
-                                      "hud_corruption_widget_fault",0,{},score);
-    }
+        uintptr_t meter=0;
+        if (read(score,0xf8,meter) && meter) present_hud_found(meter);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+void present_hud_found(uintptr_t meter) {
+    uintptr_t root=0;
+    if (!read(meter,0x18,root) || !root) return;
+    const auto title=swf_child(swf_child(root,"apFoundLabel"),"txtVal",true);
+    if (!title) return;
+    const auto campaign=save::session().campaign_run.snapshot();
+    const auto projection=menu().projection();
+    sc_campaign_summary summary{};
+    if (projection.namespace_id==save::session().namespace_id())
+        for (uint32_t i=0;i<projection.count;++i)
+            if (campaign.map==projection.rows[i].map && (projection.rows[i].flags&SC_CAMPAIGN_REVEALED))
+                summary=projection.summaries[i];
+    if (summary.known!=1) { original_sprite_visibility(root,0,1); return; }
+    const auto point=swf_child(root,"pointCount");
+    const auto count=swf_child(swf_child(point,"apFoundCounter"),"txtVal",true);
+    if (!count) { original_sprite_visibility(root,0,1); return; }
+    for (const auto leaf:{"background","corruption","glow_burst","header"})
+        if (const auto sprite=swf_child(root,leaf)) original_sprite_visibility(sprite,0,1);
+    for (const auto leaf:{"earned","total","apNativeSlash","iconBurst","icon"})
+        if (const auto sprite=swf_child(point,leaf)) original_sprite_visibility(sprite,0,1);
+    char value[32]; std::snprintf(value,sizeof(value),"%u/%u",summary.found,summary.total);
+    swf_set_text(title,"ITEMS FOUND"); swf_set_text(count,value);
+    original_sprite_visibility(root,1,1);
 }
 bool text_matches(uintptr_t field,const char* expected) {
     save::NativeString value{};
@@ -592,6 +748,9 @@ void boss_update(uintptr_t screen,uintptr_t event) {
         const auto root=reinterpret_cast<uintptr_t(*)(uintptr_t)>(method)(screen);
         const auto tier=swf_child(root,"tier1_5");
         const auto reward=swf_child(tier,"reward5count_c");
+        const auto punch=swf_child(root,"tier2_connected");
+        for (const auto leaf:{"info","description","icon_c","combat_icon","cta","bmp_hex_grid_b"})
+            if (const auto sprite=swf_child(punch,leaf)) original_sprite_visibility(sprite,0,1);
         std::array<uintptr_t,40> artwork{}; unsigned leaves=0;
         // The tier and count card visibility drive native completion; only item artwork is hidden.
         for (unsigned i=1;i<=5;++i) {
@@ -632,6 +791,26 @@ void present_details(uintptr_t details) {
     if (!read(details,0x18,details_root) || !details_root) {
         save::session().btrace.record(save::BStage::mission_details,save::BStatus::blocked,
                                       "details_root_unavailable",0,{{"index",static_cast<uint64_t>(index)}}); return;
+    }
+    if (const auto battery=swf_child(details_root,"batteries"))
+        original_sprite_visibility(battery,0,1);
+    const auto challenge_rows=swf_child(swf_child(details_root,"challenges"),"list");
+    for (unsigned slot=0;slot<3;++slot) {
+        char name[]="item0"; name[4]+=static_cast<char>(slot);
+        const auto region=swf_child(swf_child(challenge_rows,name),"apReward");
+        sc_campaign_reward placement{};
+        uint32_t id=0;
+        if (shown.namespace_id==save::session().namespace_id() && read(details,0x1d0+slot*0x1b0,id))
+            for (const auto& reward:shown.rewards[index]) if (reward.kind==SC_REWARD_MISSION) {
+                uint32_t key=0;
+                for (const unsigned char* c=reinterpret_cast<const unsigned char*>(reward.unlockable);*c;++c) key=31*key+*c;
+                if (key==id) placement=reward;
+            }
+        if (const auto text=swf_child(region,"txtVal",true)) {
+            swf_set_text(text,placement.location_id ? placement.text : "");
+            if (placement.location_id) reward_scroll(text);
+        }
+        if (region) original_sprite_visibility(region,placement.location_id!=0,1);
     }
     if (const auto completion=swf_child(details_root,"completionInfo"))
         original_sprite_visibility(completion,0,1);
@@ -690,7 +869,7 @@ void present_details(uintptr_t details) {
         std::snprintf(progress,sizeof(progress),"%u/%u",challenge.found,challenge.required);
         swf_set_text(field,progress);
         uintptr_t normal=0; read(details,0x1d0+slot*0x1b0+0x190,normal);
-        if (!challenge_icon(swf_child(row,"icon"),challenge.checked!=0,normal)) continue;
+        if (!challenge_icon(swf_child(row,"icon"),normal)) continue;
         ++bound;
     }
     save::session().btrace.record(save::BStage::mission_challenges,bound==requested?save::BStatus::succeeded:save::BStatus::pending,
@@ -714,6 +893,10 @@ void meter_update_detour(uintptr_t meter) {
     }
     meter_update_delegated.fetch_add(1,std::memory_order_relaxed);
     if (original_meter_update) original_meter_update(meter);
+    if (active()) {
+        __try { present_hud_found(meter); }
+        __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
 }
 void sprite_visibility_detour(uintptr_t sprite,uint32_t visible,uint32_t flag) {
     if (!sprite) return;
@@ -920,6 +1103,22 @@ void update(uintptr_t screen) {
 }
 }
 bool available() { return ready.load(std::memory_order_acquire); }
+void reward_scroll(uintptr_t text) {
+    // Native TextField.mode stores SWF_TEXT_RENDER_AUTOSCROLL (4) at +0x174.
+    uint32_t mode=0;
+    if (text && read(text,0x174,mode) && mode<=5) *reinterpret_cast<uint32_t*>(text+0x174)=4;
+}
+sc_campaign_reward mastery_reward(const char* perk) {
+    if (!active() || !perk) return {};
+    const auto projection=menu().projection();
+    if (projection.namespace_id!=save::session().namespace_id()) return {};
+    for (uint32_t i=0;i<projection.count;++i) {
+        if (!(projection.rows[i].flags&SC_CAMPAIGN_HUB)) continue;
+        for (const auto& reward:projection.rewards[i])
+            if (reward.kind==SC_REWARD_MASTERY && !std::strcmp(reward.unlockable,perk)) return reward;
+    }
+    return {};
+}
 MeterDiagnostics meter_diagnostics() {
     MeterDiagnostics d{};
     d.update_ticks=meter_update_ticks.load(std::memory_order_relaxed);
@@ -995,6 +1194,17 @@ void present_campaign_actions(uintptr_t screen,bool entered) {
         reinterpret_cast<void(*)(uintptr_t,uintptr_t)>(select)(list,choose);
 }
 #ifdef SC_NATIVE_TESTING
+bool test_physical_completion_edges() {
+    CompletionToast toast{};
+    if (completion_edge(toast,1,true) || completion_edge(toast,1,true)) return false;
+    toast={};
+    if (completion_edge(toast,1,false) || completion_edge(toast,1,false) || !completion_edge(toast,1,true)) return false;
+    if (!completion_edge(toast,1,true)) return false;
+    toast.checked=true;
+    if (completion_edge(toast,1,true) || completion_edge(toast,2,true)) return false;
+    toast={};
+    return !completion_edge(toast,1,true);
+}
 void test_calls(const NativeCalls& c) {
     original_populate=c.populate; original_focus=c.focus; original_load=c.load; original_available=c.available;
     original_update=c.update; string_init=c.string_init; string_assign=c.string_assign;
@@ -1118,7 +1328,7 @@ bool validate_native_targets(save::Installation& record,engine::Memory& source_m
     }
     return true;
 }
-bool install(const engine::Binding& binding,HANDLE) {
+bool install(const engine::Binding& binding,HANDLE stop) {
     if (!save::session().campaign_run.enabled()) return true;
     const auto targets=native_targets(binding.image.base);
     meter_visibility_return=binding.image.base+0x1116e07;
@@ -1180,6 +1390,27 @@ bool install(const engine::Binding& binding,HANDLE) {
     end_items_category_vtable=binding.image.base+0x2d10d78;
     for (unsigned i=0;i<23;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
         return MH_EnableHook(reinterpret_cast<void*>(targets[hooked[i]].address)); })!=MH_OK) return false;
+    struct OptionalPageHook { uint32_t rva; const char* bytes; void* hook; void** original; };
+    const OptionalPageHook pages[]={
+        {0xf42930,"488bc4565741554883ec7048895810488bf14c896020e885a72800488bcee85d",reinterpret_cast<void*>(challenges_show),reinterpret_cast<void**>(&original_challenges_show)},
+        {0xf40bf0,"40535556574881ece8010000488b05d5dd26034833c448898424d0010000488b",reinterpret_cast<void*>(challenges_action),reinterpret_cast<void**>(&original_challenges_action)},
+        {0xf42de0,"405741564157b8b0400000e8b08f9201482be0488b05debb26034833c4488984",reinterpret_cast<void*>(mission_tab),reinterpret_cast<void**>(&original_mission_tab)},
+        {0xf58890,"40574883ec20488bf9e832482700488b07488bcfff50704885c00f84e1000000",reinterpret_cast<void*>(end_challenges_show),reinterpret_cast<void**>(&original_end_challenges_show)}};
+    engine::LocalMemory optional_memory;
+    for (const auto& page:pages) {
+        native::Target target; target.address=binding.image.base+page.rva;
+        for (size_t n=0;n<32;++n) {
+            unsigned value=0; sscanf_s(page.bytes+n*2,"%2x",&value); target.bytes[n]=static_cast<uint8_t>(value);
+        }
+        auto reason=native::validate_target(optional_memory,binding.image,target,stop,GetTickCount64()+3000);
+        if (!reason) {
+            reason=MH_CreateHook(reinterpret_cast<void*>(target.address),page.hook,page.original);
+            if (!reason) reason=MH_EnableHook(reinterpret_cast<void*>(target.address));
+        }
+        save::session().btrace.record(save::BStage::dossier_challenges,
+            reason ? save::BStatus::refused : save::BStatus::succeeded,"phase9d_page_binding",0,
+            {{"rva",page.rva},{"reason",reason}});
+    }
     ready.store(true,std::memory_order_release); return true;
 }
 }

@@ -819,13 +819,14 @@ sc_automap_result automap_request(const sc_automap_request& request) {
     ReleaseSRWLockExclusive(&automap_lock); ReleaseSRWLockShared(&lock);
     return out;
 }
-sc_campaign_result campaign_request(uint16_t operation,const sc_campaign_request& request,const sc_campaign_summary* summary) {
+sc_campaign_result campaign_request(uint16_t operation,const sc_campaign_request& request,const sc_campaign_summary* summary,
+                                    const sc_campaign_rewards* rewards) {
     AcquireSRWLockShared(&lock);
     auto scope=status.scope; scope.lifecycle_generation=lifetime.generation;
     const bool admitted=campaign_menu::available() && same_scope(scope,request.execution.expected) &&
         save::session().state()==save::SessionState::admitted && save::session().accepts_requests() &&
         save::session().namespace_id()==request.namespace_id;
-    const auto out=campaign_menu::menu().request(operation,request,admitted,summary);
+    const auto out=campaign_menu::menu().request(operation,request,admitted,summary,rewards);
     ReleaseSRWLockShared(&lock); return out;
 }
 sc_weapon_points_result submit_weapon_points(const sc_weapon_points_request& request) {

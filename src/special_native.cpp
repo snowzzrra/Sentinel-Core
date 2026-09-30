@@ -228,6 +228,7 @@ WeaponInfoLabel original_weapon_info_label = nullptr;
 std::atomic<unsigned> configured_keys{VK_F9};
 #include "special_hud_native.h"
 std::atomic<uintptr_t> challenge_element{0};
+std::atomic<uintptr_t> completion_owner{0};
 std::atomic<uintptr_t> challenge_player{0};
 std::atomic<uintptr_t> weapon_info_element{0};
 std::atomic<uintptr_t> weapon_info_player{0};
@@ -709,6 +710,7 @@ char hud_element_setup_detour(uintptr_t element) {
             if (vtable == image_base + rva_mission_challenge_vtable) {
                 challenge_player.store(current_hud_player(), std::memory_order_release);
                 challenge_element.store(element, std::memory_order_release);
+                completion_owner.store(element, std::memory_order_release);
                 hud_trace.record(save::BStage::catalog, save::BStatus::entered,
                     "hud_earnings_setup", 0,
                     {{"mission_challenge_owner", element}, {"expected_vtable", image_base + rva_mission_challenge_vtable},
@@ -1142,9 +1144,46 @@ bool present(void*, uintptr_t p, uint32_t, uint32_t, uint32_t) {
     return false;
 }
 
+bool present_challenge_completion(uintptr_t widget,const char* name, const char* reward) {
+    const auto element=completion_owner.load(std::memory_order_acquire);
+    if (!element || !widget) return false;
+    __try {
+        if (*reinterpret_cast<uintptr_t*>(element)!=image_base+rva_mission_challenge_vtable) return false;
+        bool owned=false;
+        for (size_t i=0;i<3;++i)
+            owned |= *reinterpret_cast<uintptr_t*>(element+0x108+i*sizeof(uintptr_t))==widget;
+        if (!owned) return false;
+        auto append=reinterpret_cast<EarningsAppend>(image_base+rva_hud_earnings);
+#ifdef SC_NATIVE_TESTING
+        if (test_earnings_append) append=test_earnings_append;
+#endif
+        append(element,name,reward,5000,0,0);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+#ifdef SC_NATIVE_TESTING
+bool test_physical_completion_owner() {
+    std::array<uintptr_t,0x128/sizeof(uintptr_t)> owner{};
+    const auto element=reinterpret_cast<uintptr_t>(owner.data());
+    owner[0]=image_base+rva_mission_challenge_vtable;
+    owner[0x108/sizeof(uintptr_t)]=123;
+    completion_owner.store(element);
+    static unsigned presented=0;
+    presented=0;
+    test_earnings_append=[](uintptr_t,const char*,const char*,uint32_t,uint64_t,uint32_t) { ++presented; };
+    const bool ok=!present_challenge_completion(456,"name","reward") &&
+        present_challenge_completion(123,"name","reward") && presented==1;
+    owner[0]=0;
+    const bool stale=!present_challenge_completion(123,"name","reward");
+    completion_owner.store(0); test_earnings_append=nullptr;
+    return ok && stale && presented==1;
+}
+#endif
 void present_selection(uintptr_t p) {
     SnapshotFacts facts{};
 #ifdef SC_NATIVE_TESTING
+
     const bool observed = test_selection_read ? test_selection_read(p, facts) : read(nullptr, p, facts);
 #else
     const bool observed = read(nullptr, p, facts);

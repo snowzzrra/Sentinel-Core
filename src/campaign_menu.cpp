@@ -1,18 +1,29 @@
 #include "campaign_menu.h"
 #include "sentinel_inspection.h"
 #include <cstring>
+#include <algorithm>
 
 namespace sentinel::campaign_menu {
 Menu& menu() { static Menu value; return value; }
 sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r,bool admitted,
-                                const sc_campaign_summary* summary) {
+                                const sc_campaign_summary* summary, const sc_campaign_rewards* rewards) {
     std::lock_guard<std::mutex> guard(mutex_);
     sc_campaign_result out{}; out.size=sizeof(out); out.abi_version=SC_CAMPAIGN_MENU_ABI_VERSION;
     out.scope=r.execution.expected; out.request_id=r.execution.request_id;
     std::memcpy(out.nonce,r.execution.nonce,sizeof(out.nonce));
     std::memcpy(out.namespace_id,r.namespace_id,sizeof(out.namespace_id));
     const auto refuse=[&](uint32_t reason) { out.status=SC_CAMPAIGN_REFUSED; out.reason=reason; };
+    if (admitted && namespace_id_!=r.namespace_id) {
+        namespace_id_=r.namespace_id; staged_={}; committed_={}; received_={};
+        rendered_=0; selected_=0; loaded_=0; hint_intents_.clear();
+    }
+    if (r.reward_presentation) out.abi_version=2;
     const sc_campaign_summary presentation=summary ? *summary : sc_campaign_summary{};
+    const auto same_rewards=[&](const Projection& p) {
+        const auto known=rewards ? rewards->known : 0, count=rewards ? rewards->count : 0;
+        return p.rewards_known[r.index]==known && p.rewards[r.index].size()==count &&
+            (!count || !std::memcmp(p.rewards[r.index].data(),rewards->entries,count*sizeof(sc_campaign_reward)));
+    };
     if (!admitted) refuse(SC_CAMPAIGN_SCOPE);
     else if (operation!=campaign_inspect_operation) {
         if (!r.revision || r.revision<committed_.revision || r.revision<staged_.revision)
@@ -22,17 +33,24 @@ sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r
         else if (r.revision==committed_.revision) {
             if (r.count!=committed_.count || (operation==campaign_row_operation &&
                 (std::memcmp(&committed_.rows[r.index],&r.row,sizeof(r.row)) ||
-                 std::memcmp(&committed_.summaries[r.index],&presentation,sizeof(presentation))))) refuse(SC_CAMPAIGN_REVISION);
+                 std::memcmp(&committed_.summaries[r.index],&presentation,sizeof(presentation)) ||
+                 !same_rewards(committed_)))) refuse(SC_CAMPAIGN_REVISION);
         } else {
             if (r.revision!=staged_.revision) {
-                staged_={}; staged_.revision=r.revision; staged_.count=r.count; received_={};
+                    staged_={}; staged_.revision=r.revision; staged_.count=r.count; received_={};
+                    staged_.namespace_id=namespace_id_;
             }
             if (staged_.count!=r.count) refuse(SC_CAMPAIGN_REVISION);
             else if (operation==campaign_row_operation) {
                 if (received_[r.index] && (std::memcmp(&staged_.rows[r.index],&r.row,sizeof(r.row)) ||
-                    std::memcmp(&staged_.summaries[r.index],&presentation,sizeof(presentation))))
+                    std::memcmp(&staged_.summaries[r.index],&presentation,sizeof(presentation)) || !same_rewards(staged_)))
                     refuse(SC_CAMPAIGN_REVISION);
-                else { staged_.rows[r.index]=r.row; staged_.summaries[r.index]=presentation; received_[r.index]=true; }
+                else {
+                    staged_.rows[r.index]=r.row; staged_.summaries[r.index]=presentation;
+                    staged_.rewards_known[r.index]=rewards ? rewards->known : 0;
+                    if (rewards) staged_.rewards[r.index].assign(rewards->entries,rewards->entries+rewards->count);
+                    received_[r.index]=true;
+                }
             } else {
                 unsigned hubs=0;
                 for (uint32_t i=0;i<staged_.count;++i) {
@@ -50,10 +68,23 @@ sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r
     if (admitted) {
         out.committed_revision=committed_.revision; out.rendered_revision=rendered_;
         out.selected_id=selected_; out.loaded_id=loaded_;
+        if (r.reward_presentation) {
+            out.intent_count=static_cast<uint32_t>(hint_intents_.size());
+            std::copy(hint_intents_.begin(),hint_intents_.end(),out.intent_ids);
+        }
     }
     return out;
 }
 Projection Menu::projection() { std::lock_guard<std::mutex> guard(mutex_); return committed_; }
+void Menu::hint_intent(const char* namespace_id,uint32_t location_id) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (namespace_id_!=namespace_id || !location_id) return;
+    for (uint32_t i=0;i<committed_.count;++i)
+        for (const auto& reward:committed_.rewards[i]) if (reward.location_id==location_id) {
+            if (hint_intents_.size()<96) hint_intents_.insert(location_id);
+            return;
+        }
+}
 void Menu::rendered(uint64_t revision) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (revision<=committed_.revision && revision>rendered_) rendered_=revision;

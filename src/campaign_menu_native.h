@@ -1,6 +1,7 @@
 #pragma once
 #include "engine_observer.h"
 #include "native_target.h"
+#include "sentinel_campaign_menu.h"
 #include <string>
 
 namespace sentinel::campaign_menu {
@@ -10,6 +11,8 @@ std::array<native::Target,43> native_targets(uintptr_t base);
 bool validate_native_targets(save::Installation&,engine::Memory&,const engine::Image&,
                              HANDLE,const std::array<native::Target,43>&);
 bool available();
+sc_campaign_reward mastery_reward(const char* perk);
+void reward_scroll(uintptr_t text);
 void present_campaign_actions(uintptr_t screen, bool entered);
 bool mission_request(uintptr_t request, std::string& destination);
 bool request_map(uintptr_t request, const std::string& map);
@@ -22,6 +25,7 @@ struct MeterDiagnostics {
 };
 MeterDiagnostics meter_diagnostics();
 #ifdef SC_NATIVE_TESTING
+bool test_physical_completion_edges();
 struct NativeCalls {
     void (*populate)(uintptr_t,uintptr_t);
     void (*focus)(uintptr_t);

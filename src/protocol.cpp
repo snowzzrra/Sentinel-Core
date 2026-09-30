@@ -64,7 +64,8 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
                           sc_save_backup_request* backup, sc_weapon_points_request* points, sc_campaign_request* campaign,
                           sc_inventory_request* inventory, sc_arsenal_request* arsenal,
                           sc_runes_request* runes, sc_special_request* special,
-                          sc_deathlink_request* deathlink, sc_automap_request* automap, sc_campaign_summary* summary) {
+                          sc_deathlink_request* deathlink, sc_automap_request* automap, sc_campaign_summary* summary,
+                          sc_campaign_rewards* rewards) {
     if (operation) *operation = inspect_operation;
     if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
@@ -237,10 +238,12 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
     }
     if (op>=campaign_row_operation) {
         const auto capability=r.number(8);
-        const bool presentation=capability==campaign_presentation_capability;
+        const bool extended=capability==campaign_rewards_capability;
+        const bool presentation=extended || capability==campaign_presentation_capability;
         if (!presentation && capability!=campaign_menu_capability) return WireResult::capability_unavailable;
-        if (length!=(presentation ? 745u : 453u)) return WireResult::malformed;
+        if (extended ? length<753u : length!=(presentation ? 745u : 453u)) return WireResult::malformed;
         sc_campaign_request value{};
+        value.reward_presentation=extended;
         auto& e=value.execution;
         r.u32(e.expected.pid); r.u64(e.expected.process_created);
         bool instance=false,nonce=false;
@@ -281,6 +284,53 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
                 if (fields.challenges[i].required && !std::strcmp(fields.challenges[i].unlockable,
                     fields.challenges[j].unlockable)) return WireResult::malformed;
         }
+        sc_campaign_rewards reward_fields{};
+        if (extended) {
+            r.u32(reward_fields.known); r.u32(reward_fields.count);
+            if (reward_fields.known>1 || reward_fields.count>17 ||
+                length!=753u+732u*reward_fields.count ||
+                (!(value.row.flags&SC_CAMPAIGN_REVEALED) && (reward_fields.known || reward_fields.count)))
+                return WireResult::malformed;
+            const auto utf8=[](const char* text,size_t size) {
+                if (!text[0] || text[size-1]) return false;
+                for (size_t i=0;i<size && text[i];) {
+                    const auto c=static_cast<uint8_t>(text[i++]);
+                    if (c<32 || c==127) return false;
+                    if (c<128) continue;
+                    const unsigned n=c>=0xc2 && c<=0xdf ? 1 : c>=0xe0 && c<=0xef ? 2 : c>=0xf0 && c<=0xf4 ? 3 : 0;
+                    if (!n || i+n>=size) return false;
+                    uint32_t cp=c&((1u<<(6-n))-1);
+                    for (unsigned j=0;j<n;++j) {
+                        const auto b=static_cast<uint8_t>(text[i++]);
+                        if ((b&0xc0)!=0x80) return false;
+                        cp=(cp<<6)|(b&0x3f);
+                    }
+                    if (cp<(n==1 ? 0x80u : n==2 ? 0x800u : 0x10000u) || cp>0x10ffff ||
+                        (cp>=0xd800 && cp<=0xdfff)) return false;
+                }
+                return true;
+            };
+            for (uint32_t i=0;i<reward_fields.count;++i) {
+                auto& entry=reward_fields.entries[i];
+                r.u32(entry.location_id); r.u32(entry.kind); r.u32(entry.checked);
+                for (auto& c:entry.unlockable) c=static_cast<char>(r.number(1));
+                for (auto& c:entry.name) c=static_cast<char>(r.number(1));
+                for (auto& c:entry.text) c=static_cast<char>(r.number(1));
+                if (!entry.location_id || entry.checked>1 || entry.kind<1 || entry.kind>3 ||
+                    (entry.checked && !reward_fields.known) || entry.unlockable[79] ||
+                    !entry.unlockable[0] ||
+                    (entry.kind==SC_REWARD_AGGREGATE && std::strncmp(entry.unlockable,"mission_challenge/",18)) ||
+                    !utf8(entry.name,sizeof(entry.name)) || !utf8(entry.text,sizeof(entry.text)) ||
+                    ((entry.kind==SC_REWARD_MASTERY)!=bool(value.row.flags&SC_CAMPAIGN_HUB)))
+                    return WireResult::malformed;
+                for (auto c:entry.unlockable)
+                    if (c && !((c>='a' && c<='z') || (c>='0' && c<='9') || c=='_' || c=='/'))
+                        return WireResult::malformed;
+                for (uint32_t j=0;j<i;++j) if (reward_fields.entries[j].location_id==entry.location_id ||
+                    (entry.unlockable[0] && !std::strcmp(reward_fields.entries[j].unlockable,entry.unlockable)))
+                    return WireResult::malformed;
+            }
+        }
         if (value.namespace_id[64] || value.row.map[191] || value.row.title[95]) return WireResult::malformed;
         for (size_t i=0;i<64;++i) {
             const auto c=value.namespace_id[i];
@@ -300,6 +350,7 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
         }
         if (campaign) *campaign=value;
         if (summary) *summary=fields;
+        if (rewards) *rewards=reward_fields;
         return r.valid && r.pos==size ? WireResult::ok : WireResult::malformed;
     }
     if (op >= weapon_points_submit_operation) {
@@ -1266,17 +1317,27 @@ template<class C> bool campaign_values(C& c,sc_campaign_result& v) {
     for (auto& ch:v.namespace_id) { auto b=static_cast<uint8_t>(ch); c.byte(b); ch=static_cast<char>(b); }
     c.u32(v.status); c.u32(v.reason); c.u64(v.committed_revision); c.u64(v.rendered_revision);
     c.u32(v.selected_id); c.u32(v.loaded_id);
-    return v.abi_version==SC_CAMPAIGN_MENU_ABI_VERSION && !v.namespace_id[64] &&
+    if (v.abi_version==2) {
+        c.u32(v.intent_count);
+        if (v.intent_count>96) return false;
+        for (uint32_t i=0;i<v.intent_count;++i) {
+            c.u32(v.intent_ids[i]); if (!v.intent_ids[i]) return false;
+            for (uint32_t j=0;j<i;++j) if (v.intent_ids[i]==v.intent_ids[j]) return false;
+        }
+    }
+    return (v.abi_version==SC_CAMPAIGN_MENU_ABI_VERSION || v.abi_version==2) && !v.namespace_id[64] &&
         v.status<=SC_CAMPAIGN_REFUSED && v.reason<=SC_CAMPAIGN_NATIVE &&
         (v.status==SC_CAMPAIGN_ACCEPTED)==(v.reason==SC_CAMPAIGN_OK) &&
         v.rendered_revision<=v.committed_revision;
 }
 }
-size_t encode_campaign_request(Message& out,uint16_t op,const sc_campaign_request& request,const sc_campaign_summary* summary) {
+size_t encode_campaign_request(Message& out,uint16_t op,const sc_campaign_request& request,const sc_campaign_summary* summary,
+                               const sc_campaign_rewards* rewards) {
     if (op<campaign_row_operation || op>campaign_inspect_operation) return 0;
     const auto end=encode_native_request(out,diagnostic_submit_operation,request.execution);
-    Writer h{out}; header(h,wire_version,op,summary ? 745 : 453,WireResult::ok);
-    h.number(summary ? campaign_presentation_capability : campaign_menu_capability,8);
+    if (rewards && (!summary || rewards->count>17)) return 0;
+    Writer h{out}; header(h,wire_version,op,rewards ? 753+732*rewards->count : summary ? 745 : 453,WireResult::ok);
+    h.number(rewards ? campaign_rewards_capability : summary ? campaign_presentation_capability : campaign_menu_capability,8);
     Writer w{out,end};
     for (auto ch:request.namespace_id) w.number(static_cast<uint8_t>(ch),1);
     w.number(request.revision,8); w.number(request.index,4); w.number(request.count,4);
@@ -1288,6 +1349,16 @@ size_t encode_campaign_request(Message& out,uint16_t op,const sc_campaign_reques
         for (const auto& challenge:summary->challenges) {
             for (auto ch:challenge.unlockable) w.number(static_cast<uint8_t>(ch),1);
             w.number(challenge.found,4); w.number(challenge.required,4); w.number(challenge.checked,4);
+        }
+    }
+    if (rewards) {
+        w.number(rewards->known,4); w.number(rewards->count,4);
+        for (uint32_t i=0;i<rewards->count;++i) {
+            const auto& entry=rewards->entries[i];
+            w.number(entry.location_id,4); w.number(entry.kind,4); w.number(entry.checked,4);
+            for (auto c:entry.unlockable) w.number(static_cast<uint8_t>(c),1);
+            for (auto c:entry.name) w.number(static_cast<uint8_t>(c),1);
+            for (auto c:entry.text) w.number(static_cast<uint8_t>(c),1);
         }
     }
     return w.valid ? w.pos : 0;

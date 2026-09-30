@@ -241,6 +241,11 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
+    if (defect==L"presentation_edges") {
+        CHECK(sentinel::campaign_menu::test_physical_completion_edges());
+        CHECK(sentinel::special::test_physical_completion_owner());
+        std::puts("PASS physical completion confirmation / retry / dedupe / reentry"); return 0;
+    }
     if (defect==L"hud_source" || defect==L"hud_owner" || defect==L"mastery_masks") {
         CHECK(defect==L"hud_source" ? sentinel::special::test_hud_source() :
               defect==L"hud_owner" ? sentinel::special::test_hud_owner_path() :

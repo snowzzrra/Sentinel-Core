@@ -87,9 +87,11 @@ void execute_native(const sc_special_request&, sc_special_result&);
 void bind_run_state_if_needed(uintptr_t player, uint64_t generation = 0);
 void refresh_input_config();
 void poll_input(uintptr_t player, bool safe_gameplay);
+bool present_challenge_completion(uintptr_t widget,const char* name, const char* reward);
 void reset_session(const char* namespace_id);
 
 #ifdef SC_NATIVE_TESTING
+bool test_physical_completion_owner();
 bool test_hud_source();
 bool test_hud_owner_path();
 void use_fixture(Calls, const char* namespace_id);

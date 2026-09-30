@@ -13,12 +13,14 @@ int campaign_menu_command(int argc,wchar_t** argv) {
     const auto count=std::fread(message.data(),1,message.size(),stdin);
     uint16_t op=0; sc_campaign_request request{};
     sc_campaign_summary summary{};
+    sc_campaign_rewards rewards{};
     if (sentinel::decode_request(message,count,&op,nullptr,nullptr,nullptr,nullptr,nullptr,&request,
-        nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&summary)!=sentinel::WireResult::ok ||
+        nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&summary,&rewards)!=sentinel::WireResult::ok ||
         op<sentinel::campaign_row_operation || op>sentinel::campaign_inspect_operation) {
         std::puts("{\"result\":\"malformed_request\"}"); return 2;
     }
-    const auto r=sentinel::query_campaign(request.execution.expected.pid,2000,op,request,count==761 ? &summary : nullptr);
+    const auto r=sentinel::query_campaign(request.execution.expected.pid,2000,op,request,
+        count>=761 ? &summary : nullptr,count>=769 ? &rewards : nullptr);
     if (r.result!=sentinel::ProbeResult::ok) {
         std::printf("{\"result\":\"%s\",\"win32_error\":%u}\n",sentinel::result_name(r.result),r.win32_error);
         return static_cast<int>(r.result);
@@ -26,8 +28,10 @@ int campaign_menu_command(int argc,wchar_t** argv) {
     const auto& p=r.campaign;
     std::printf("{\"result\":\"ok\",\"core_version\":\"%s\",\"build_id\":\"%s\","
         "\"namespace\":\"%s\",\"status\":%u,\"reason\":%u,\"request_id\":\"%llu\","
-        "\"committed_revision\":\"%llu\",\"rendered_revision\":\"%llu\",\"selected_id\":%u,\"loaded_id\":%u}\n",
+        "\"committed_revision\":\"%llu\",\"rendered_revision\":\"%llu\",\"selected_id\":%u,\"loaded_id\":%u,\"hint_intents\":[",
         r.snapshot.core.version,r.snapshot.core.build_id,p.namespace_id,p.status,p.reason,p.request_id,
         p.committed_revision,p.rendered_revision,p.selected_id,p.loaded_id);
+    for (uint32_t i=0;i<p.intent_count;++i) std::printf("%s%u",i ? "," : "",p.intent_ids[i]);
+    std::puts("]}");
     return 0;
 }

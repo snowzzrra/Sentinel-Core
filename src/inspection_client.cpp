@@ -26,7 +26,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
                                    const sc_special_request* special = nullptr,
                                    const sc_deathlink_request* deathlink = nullptr,
                                    const sc_automap_request* automap = nullptr,
-                                   const sc_campaign_summary* summary = nullptr) {
+                                   const sc_campaign_summary* summary = nullptr, const sc_campaign_rewards* rewards = nullptr) {
     Inspection result;
     Handle process;
     auto fail = [&](DWORD error) {
@@ -88,7 +88,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         runes ? encode_runes_request(data, operation, *runes) :
         arsenal ? encode_arsenal_request(data, operation, *arsenal) :
         inventory ? encode_inventory_request(data, operation, *inventory) :
-        campaign ? encode_campaign_request(data,operation,*campaign,summary) :
+        campaign ? encode_campaign_request(data,operation,*campaign,summary,rewards) :
         points ? encode_weapon_points_request(data, operation, *points) :
         backup ? encode_backup_request(data, operation, *backup) :
         operation == save_write_operation ? encode_save_write_request(data, write_id) :
@@ -204,12 +204,12 @@ Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required) {
     return query_operation(pid, timeout_ms, required, inspect_operation);
 }
 Inspection query_campaign(uint32_t pid,uint32_t timeout_ms,uint16_t operation,const sc_campaign_request& r,
-                          const sc_campaign_summary* summary) {
+                          const sc_campaign_summary* summary, const sc_campaign_rewards* rewards) {
     if (operation<campaign_row_operation || operation>campaign_inspect_operation) {
         Inspection out; out.result=ProbeResult::usage; return out;
     }
-    return query_operation(pid,timeout_ms,summary ? campaign_presentation_capability : campaign_menu_capability,
-                           operation,&r.execution,0,0,nullptr,nullptr,&r,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,summary);
+    return query_operation(pid,timeout_ms,rewards ? campaign_rewards_capability : summary ? campaign_presentation_capability : campaign_menu_capability,
+                           operation,&r.execution,0,0,nullptr,nullptr,&r,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,summary,rewards);
 }
 Inspection query_engine(uint32_t pid, uint32_t timeout_ms) {
     return query_operation(pid, timeout_ms, engine_capability, engine_operation);

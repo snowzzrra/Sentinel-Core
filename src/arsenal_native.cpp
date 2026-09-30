@@ -3,10 +3,13 @@
 #include "native_target.h"
 #include "native_runtime.h"
 #include "save_session.h"
+#include "campaign_menu_native.h"
+#include "campaign_menu.h"
 #include "MinHook.h"
 #include <atomic>
 #include <cstring>
 #include <algorithm>
+#include <string>
 
 namespace sentinel::arsenal {
 namespace {
@@ -356,6 +359,53 @@ bool canonical_mastery(uintptr_t widget) {
     return mastery_index(*reinterpret_cast<const uintptr_t*>(widget + 0x2b0)) >= 0;
 }
 
+struct PageCandidate { uintptr_t root=0; uint32_t location=0; };
+thread_local uintptr_t explicit_arsenal_page=0;
+thread_local std::array<PageCandidate,2> page_candidates{};
+Update original_arsenal_show=nullptr;
+using ArsenalAction=void(*)(uintptr_t,uintptr_t,uintptr_t);
+ArsenalAction original_arsenal_action=nullptr;
+uintptr_t arsenal_page_root() {
+    if (!explicit_arsenal_page) return 0;
+    const auto table=*reinterpret_cast<const uintptr_t*>(explicit_arsenal_page);
+    const auto method=*reinterpret_cast<const uintptr_t*>(table+0x70);
+    if (!method) return 0;
+    return child(reinterpret_cast<uintptr_t(*)(uintptr_t)>(method)(explicit_arsenal_page),"main");
+}
+void page_candidate(uintptr_t widget,uint32_t location) {
+    if (!explicit_arsenal_page) return;
+    const auto page=arsenal_page_root(),visual=root(widget);
+    const char* names[]={"modInfo","masteryInfo"};
+    for (unsigned i=0;i<2;++i)
+        if (visual && visual==child(child(page,names[i]),"mastery")) page_candidates[i]={visual,location};
+}
+void publish_page_candidates() {
+    __try {
+        const auto page=arsenal_page_root();
+        const char* names[]={"modInfo","masteryInfo"};
+        for (unsigned i=0;i<2;++i) {
+            const auto pane=child(page,names[i]),visual=child(pane,"mastery");
+            if (page && pane && visual && visual==page_candidates[i].root && page_candidates[i].location &&
+                *reinterpret_cast<const uint8_t*>(page+0x51) && *reinterpret_cast<const uint8_t*>(pane+0x51) &&
+                *reinterpret_cast<const uint8_t*>(visual+0x51))
+                campaign_menu::menu().hint_intent(save::session().namespace_id().c_str(),page_candidates[i].location);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,"arsenal_page_intent_fault");
+    }
+}
+void arsenal_show(uintptr_t screen) {
+    const auto previous=explicit_arsenal_page;
+    if (!previous) { explicit_arsenal_page=screen; page_candidates={}; }
+    __try { original_arsenal_show(screen); if (!previous && admitted()) publish_page_candidates(); }
+    __finally { explicit_arsenal_page=previous; }
+}
+void arsenal_action(uintptr_t screen,uintptr_t event,uintptr_t source) {
+    const auto previous=explicit_arsenal_page;
+    if (!previous) { explicit_arsenal_page=screen; page_candidates={}; }
+    __try { original_arsenal_action(screen,event,source); if (!previous && admitted()) publish_page_candidates(); }
+    __finally { explicit_arsenal_page=previous; }
+}
 void correct_mastery(uintptr_t widget) {
     if (!canonical_mastery(widget)) return;
     const auto clip = root(widget);
@@ -380,8 +430,16 @@ void correct_mastery(uintptr_t widget) {
     const auto text = swf.localize(decl + 0x94);
     const auto counter = *reinterpret_cast<const uintptr_t*>(decl + 0x110);
     const auto amount = counter ? *reinterpret_cast<const int32_t*>(counter + 0x220) : 0;
-    swf.set_text(description, amount >= 2 ? swf.format(buffer, text, amount, goal) :
-                                           swf.format(buffer, text, goal));
+    const auto base=amount >= 2 ? swf.format(buffer, text, amount, goal) : swf.format(buffer, text, goal);
+    const auto index=mastery_index(*reinterpret_cast<const uintptr_t*>(widget+0x2b0));
+    const auto reward=campaign_menu::mastery_reward(mastery_families[index].mastery);
+    if (reward.location_id) {
+        const std::string instruction=std::string(base)+"\nREWARD: "+
+            (!std::strcmp(reward.text,"REWARD UNKNOWN") ? "UNKNOWN" : reward.text);
+        swf.set_text(description,instruction.c_str());
+        if (reward.location_id) campaign_menu::reward_scroll(description);
+        page_candidate(widget,reward.location_id);
+    } else swf.set_text(description,base);
     swf.set_text(count, swf.format(buffer, "%d/%d", progress, goal));
     swf.frame(bar, 1 + static_cast<int>(100.0f * std::min(progress, goal) / goal));
     const auto icon = child(challenge, "icon");
@@ -408,7 +466,7 @@ void mod_hook(uintptr_t widget) {
 void mastery_hook(uintptr_t widget) {
     original_mastery(widget);
     if (!admitted()) return;
-    __try { correct_mastery(widget); }
+    __try { page_candidate(widget,0); correct_mastery(widget); }
     __except(EXCEPTION_EXECUTE_HANDLER) {
         installation_trace.record(save::BStage::profile_output, save::BStatus::blocked,
                                   "arsenal_challenge_presentation_fault");
@@ -469,6 +527,20 @@ void install(const engine::Binding& binding, HANDLE stop) {
                 "arsenal_menu_enable_refused", 0, {{"rva", site.rva}, {"native_error", status}});
             return;
         }
+    }
+    const Site pages[]={
+        {0xf3f510,"48895c2418574883ec40488bd9e8aedb2800488bcbe886de6a00488b83d80000",0,reinterpret_cast<void*>(arsenal_show),reinterpret_cast<void**>(&original_arsenal_show)},
+        {0xf3b870,"48895c2418574883ec604883791000488bda488bf90f84a701000080b9b80000",0,reinterpret_cast<void*>(arsenal_action),reinterpret_cast<void**>(&original_arsenal_action)}};
+    for (const auto& page:pages) {
+        const auto target=make_target(image_base,page.rva,page.bytes);
+        auto reason=native::validate_target(memory,binding.image,target,stop,GetTickCount64()+3000);
+        if (!reason) {
+            reason=MH_CreateHook(reinterpret_cast<void*>(target.address),page.hook,page.target);
+            if (!reason) reason=MH_EnableHook(reinterpret_cast<void*>(target.address));
+        }
+        installation_trace.record(save::BStage::profile_prepare,
+            reason ? save::BStatus::refused : save::BStatus::succeeded,"phase9d_arsenal_page_binding",0,
+            {{"rva",page.rva},{"reason",reason}});
     }
     installed.store(true, std::memory_order_release);
     installation_trace.record(save::BStage::profile_prepare, save::BStatus::succeeded,

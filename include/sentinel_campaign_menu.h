@@ -29,12 +29,24 @@ typedef struct sc_campaign_summary {
     uint32_t known, found, total, band;
     sc_physical_challenge challenges[3];
 } sc_campaign_summary;
+
+// Room-authored reward identities accompany the same atomic menu revision.
+enum { SC_REWARD_MISSION=1, SC_REWARD_AGGREGATE=2, SC_REWARD_MASTERY=3 };
+typedef struct sc_campaign_reward {
+    uint32_t location_id, kind, checked;
+    char unlockable[80], name[128], text[512];
+} sc_campaign_reward;
+typedef struct sc_campaign_rewards {
+    uint32_t known, count;
+    sc_campaign_reward entries[17];
+} sc_campaign_rewards;
 typedef struct sc_campaign_request {
     sc_diagnostic_request execution;
     char namespace_id[65];
     uint64_t revision;
     uint32_t index, count;
     sc_campaign_row row;
+    uint32_t reward_presentation;
 } sc_campaign_request;
 typedef struct sc_campaign_result {
     uint32_t size, abi_version;
@@ -45,5 +57,6 @@ typedef struct sc_campaign_result {
     uint32_t status, reason;
     uint64_t committed_revision, rendered_revision;
     uint32_t selected_id, loaded_id;
+    uint32_t intent_count, intent_ids[96];
 } sc_campaign_result;
 #endif
