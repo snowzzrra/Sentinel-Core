@@ -358,7 +358,7 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
     }
     session().btrace.record(BStage::parser,BStatus::entered,"native_parser_call",0,
         {{"reference_valid",reference_valid},{"files_present",files!=0},{"prepared_present",prepared!=0},{"request_present",request!=0}},object);
-    const bool mission_checkpoint=session().campaign_run.restoring_mission_checkpoint();
+    const bool mission_checkpoint=!metadata_only && session().campaign_run.restoring_mission_checkpoint();
     if (mission_checkpoint && !assign_request_map(request,session().campaign_run.snapshot().map)) {
         parser_release(data); session().campaign_run.refuse("native_resume_request_map_failed",BStage::parser); return 0x10;
     }
@@ -368,7 +368,7 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
     // Merely changing subtype would restart the mission and lose its checkpoint.
     if (mission_checkpoint) *reinterpret_cast<uint32_t*>(request+0x98)=2;
     auto result=original_parse(data,files,prepared,request);
-    if (!result && mission_checkpoint && !metadata_only && !restore_mission_spawn(prepared,request)) {
+    if (!result && mission_checkpoint && !restore_mission_spawn(prepared,request)) {
         session().campaign_run.refuse("native_mission_checkpoint_missing",BStage::parser); result=0x10;
     }
     session().campaign_run.parser_leave(static_cast<uint32_t>(result),metadata_only); return result;

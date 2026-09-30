@@ -83,8 +83,11 @@ unsigned spawn_reads=0;
 std::wstring spawn_defect;
 std::string saved_map,saved_checkpoint="cp_02_elevator_fall",prepared_map,prepared_checkpoint,prepared_path,request_map;
 uintptr_t saved_layer=0xa2c;
+bool request_map_ready=true;
+unsigned map_assignments=0;
 bool assign_map(uintptr_t request,const std::string& map) {
-    if(spawn_defect==L"native_read_checkpoint_assign") return false;
+    ++map_assignments;
+    if(!request_map_ready || spawn_defect==L"native_read_checkpoint_assign") return false;
     request_map=map; field<NativeString>(request,0x30)=text(request_map); return true;
 }
 void deserialize_spawn(uintptr_t prepared,uintptr_t archive) {
@@ -106,8 +109,6 @@ bool read_spawn(uintptr_t serializer,uintptr_t functor,uintptr_t key,uint32_t mo
     return true;
 }
 uint64_t parsed(SaveReference* source,uintptr_t,uintptr_t prepared,uintptr_t request) {
-    // Model the native distinction the old success-only parser missed: ordinary
-    // Continue restores Hub; subtype2 initializes an empty checkpoint for ARC.
     const bool mission=field<uint32_t>(request,0x98)==2;
     prepared_map=mission?field<NativeString>(request,0x30).data:"game/hub/hub";
     prepared_checkpoint=mission?"":"hub_visit_1";
@@ -151,6 +152,8 @@ bool load(Model& m,bool metadata_only,const std::wstring& defect) {
     CHECK(decoded.parser_completed==(metadata_only?before.parser_completed:false));
     std::array<unsigned char,0xc0> request{}; request[0xb8]=metadata_only?1:0;
     if (defect==L"native_read_wrong_mode") request[0xb8]=0;
+    const auto request_before=request;
+    request_map_ready=!metadata_only;
     std::array<unsigned char,0xc0> root_bytes{};
     std::array<unsigned char,0x1a00> prepared{};
     std::vector<unsigned char> map_bytes(0xae5e8);
@@ -163,16 +166,19 @@ bool load(Model& m,bool metadata_only,const std::wstring& defect) {
     test_campaign_spawn(read_spawn,deserialize_spawn,assign_map);
     const auto count_before=parser_calls;
     const auto reads_before=spawn_reads;
+    const auto assignments_before=map_assignments;
     const auto value=test_campaign_parse_prepared(image+(defect==L"native_read_wrong_caller"?0x148c1c2:0x148c1c1),&parser_ref,
         reinterpret_cast<uintptr_t>(prepared.data()),reinterpret_cast<uintptr_t>(request.data()));
     CHECK(!parser_ref.control);
+    CHECK(map_assignments==assignments_before+(restoring && !metadata_only?1:0));
+    if(metadata_only) CHECK(request==request_before);
     CHECK(parser_calls==count_before+(value==0 || (restoring && !metadata_only &&
         (defect==L"native_read_checkpoint_missing" || defect==L"native_read_checkpoint_wrong"))?1u:0u));
     if (value) return false;
-    if(restoring) {
+    if(restoring && !metadata_only) {
         CHECK(prepared_path==saved_map+"/missionSelect");
-        CHECK(spawn_reads==reads_before+(metadata_only?0:1));
-        if(!metadata_only) CHECK(prepared_map==saved_map && prepared_checkpoint==saved_checkpoint &&
+        CHECK(spawn_reads==reads_before+1);
+        CHECK(prepared_map==saved_map && prepared_checkpoint==saved_checkpoint &&
             field<uint32_t>(reinterpret_cast<uintptr_t>(prepared.data()),0x19c0)==2);
     } else CHECK(spawn_reads==reads_before);
     const auto completed=session().campaign_run.snapshot();

@@ -242,6 +242,7 @@ int wmain(int argc,wchar_t** argv) {
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
     if (defect==L"presentation_edges") {
+        CHECK(sentinel::campaign_menu::test_question_material());
         CHECK(sentinel::campaign_menu::test_physical_completion_edges());
         CHECK(sentinel::special::test_physical_completion_owner());
         std::puts("PASS physical completion confirmation / retry / dedupe / reentry"); return 0;
@@ -431,15 +432,15 @@ int wmain(int argc,wchar_t** argv) {
             }
             writer_fixture::Model reader{remote,source,files,payload,directory};
             const bool corrupt=defect==L"native_read_hash";
+            const std::map<std::wstring,const char*> expected{
+                {L"native_read_missing","resume_file_count_mismatch"},
+                {L"native_read_duplicate","resume_file_duplicate"},
+                {L"native_read_mixed","resume_file_group_mixed"},
+                {L"native_read_failed","ordinary_native_decode_result"},
+                {L"native_read_wrong_mode","load_parser_source_not_correlated"},
+                {L"native_read_wrong_caller","load_parser_source_not_correlated"}};
             const bool metadata_ok=writer_fixture::load(reader,true,corrupt || defect==L"native_read_checkpoint_assign"?L"native_read":defect);
             if (!metadata_ok) {
-                const std::map<std::wstring,const char*> expected{
-                    {L"native_read_missing","resume_file_count_mismatch"},
-                    {L"native_read_duplicate","resume_file_duplicate"},
-                    {L"native_read_mixed","resume_file_group_mixed"},
-                    {L"native_read_failed","ordinary_native_decode_result"},
-                    {L"native_read_wrong_mode","load_parser_source_not_correlated"},
-                    {L"native_read_wrong_caller","load_parser_source_not_correlated"}};
                 const auto first=owner.btrace.snapshot().first_failure;
                 CHECK(expected.count(defect) && std::strcmp(first.predicate,expected.at(defect))==0);
                 CHECK(first.operation==0 && !owner.campaign_run.snapshot().parser_completed);
@@ -485,6 +486,12 @@ int wmain(int argc,wchar_t** argv) {
             CHECK(owner.campaign_run.begin_resume(destination));
             if (corrupt) remote.files[directory+"/game.details"][0]='X';
             const bool loaded=writer_fixture::load(reader,false,defect);
+            if (!loaded && expected.count(defect)) {
+                const auto first=owner.btrace.snapshot().first_failure;
+                CHECK(std::strcmp(first.predicate,expected.at(defect))==0);
+                CHECK(owner.campaign_run.snapshot().checkpoint==1 && !owner.campaign_run.snapshot().parser_completed);
+                std::puts("PASS precise gameplay-read refusal without checkpoint completion"); return 0;
+            }
             if(defect==L"native_read_checkpoint_missing" || defect==L"native_read_checkpoint_wrong" || defect==L"native_read_checkpoint_assign") {
                 CHECK(!loaded && !owner.campaign_run.snapshot().parser_completed);
                 CHECK(owner.campaign_run.snapshot().reason==(defect==L"native_read_checkpoint_assign"?

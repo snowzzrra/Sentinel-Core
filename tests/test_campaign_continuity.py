@@ -114,7 +114,7 @@ class CampaignContinuity(unittest.TestCase):
     def test_saved_session_rehydrates_menu_then_continues_again(self):
         for defect in ('native_read_menu_cycle', 'native_read_menu_cycle_hash'):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory(prefix='sentinel-menu-cycle-') as root:
-                self.stage('create', root, 3, 'native_read')
+                self.stage('create', root, 3, 'native_read_c')
                 result = self.stage('resume', root, 3, defect)
                 self.assertIn('repeated Continue rejects changed payload' if defect.endswith('_hash')
                               else 'shell/catalog/Continue/save/catalog checkpoint=3', result)
@@ -185,7 +185,7 @@ class CampaignContinuity(unittest.TestCase):
 
     def test_native_menu_and_continue_refuse_missing_duplicate_mixed_failed_or_uncorrelated_reads(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-native-read-refusal-') as root:
-            self.stage('create', root, 3, 'native_read')
+            self.stage('create', root, 3, 'native_read_c')
             checkpoint, = Path(root).rglob('campaign.checkpoint')
             original = checkpoint.read_bytes()
             for defect in ('missing', 'duplicate', 'mixed', 'failed', 'wrong_mode', 'wrong_caller', 'hash'):

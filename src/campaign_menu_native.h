@@ -7,9 +7,9 @@
 namespace sentinel::campaign_menu {
 // Native runtime qualifies the bindings before domain hooks patch shared callees.
 bool install(const engine::Binding&,HANDLE stop);
-std::array<native::Target,43> native_targets(uintptr_t base);
+std::array<native::Target,45> native_targets(uintptr_t base);
 bool validate_native_targets(save::Installation&,engine::Memory&,const engine::Image&,
-                             HANDLE,const std::array<native::Target,43>&);
+                             HANDLE,const std::array<native::Target,45>&);
 bool available();
 sc_campaign_reward mastery_reward(const char* perk);
 void reward_scroll(uintptr_t text);
@@ -26,6 +26,7 @@ struct MeterDiagnostics {
 MeterDiagnostics meter_diagnostics();
 #ifdef SC_NATIVE_TESTING
 bool test_physical_completion_edges();
+bool test_question_material();
 struct NativeCalls {
     void (*populate)(uintptr_t,uintptr_t);
     void (*focus)(uintptr_t);
