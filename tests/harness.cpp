@@ -105,13 +105,16 @@ void proxy_test(HMODULE module, bool normal_exit) {
     for (WORD i = 0; i < 5; ++i) {
         const auto expected = GetProcAddress(real, names[i]);
         CHECK(expected != nullptr);
-        CHECK(GetProcAddress(module, names[i]) == expected);
-        CHECK(GetProcAddress(module, MAKEINTRESOURCEA(i + 1)) == expected);
+        const auto forwarded = GetProcAddress(module, names[i]);
+        CHECK(forwarded != nullptr && forwarded != expected);
+        CHECK(GetProcAddress(module, MAKEINTRESOURCEA(i + 1)) == forwarded);
     }
-    // Pointer equality proves every name/ordinal reaches the actual implementation,
-    // including private exports whose calling convention/signature we do not guess.
+    const auto resolved = symbol<decltype(&sc_bootstrap_system_path)>(module, "sc_bootstrap_system_path");
+    wchar_t actual[MAX_PATH]{};
+    CHECK(resolved(0, actual) == ERROR_INSUFFICIENT_BUFFER);
+    CHECK(resolved(MAX_PATH, actual) == ERROR_SUCCESS && !_wcsicmp(actual, system_path));
     CHECK(FreeLibrary(real));
-    std::printf("PASS proxy auto-init, five exact System32 name/ordinal forwarders; core=%s build=%s\n",
+    std::printf("PASS proxy auto-init, five runtime System32 name/ordinal thunks; core=%s build=%s\n",
                 status.core.version, status.core.build_id);
     if (normal_exit) {
         std::puts("PASS host normal exit path selected (no explicit detach work)");

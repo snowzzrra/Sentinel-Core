@@ -32,6 +32,8 @@ sc_special_result submit_special(const sc_special_request&);
 sc_special_result special_result(const sc_special_request&, bool cancel, bool release = false);
 sc_deathlink_result submit_deathlink(const sc_deathlink_request&);
 sc_deathlink_result deathlink_result(const sc_deathlink_request&, bool cancel, bool release = false);
+sc_command_result submit_command(const sc_command_request&);
+sc_command_result command_result(const sc_command_request&, bool cancel, bool release = false);
 // False means no native hook was ever enabled/pinned and normal unload remains
 // possible. True permanently requires retaining this Core instance to exit.
 bool stop();

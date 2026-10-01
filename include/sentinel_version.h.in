@@ -1,0 +1,5 @@
+#pragma once
+#define SC_PRODUCT_VERSION "@SC_FULL_VERSION@"
+#define SC_PRODUCT_BASE_VERSION "@SC_BASE_VERSION@"
+#define SC_PRODUCT_CHANNEL "@SC_channel@"
+#define SC_PRODUCT_RC_NUMBER @SC_rc_number@

@@ -1,4 +1,6 @@
 #include "sentinel_bootstrap.h"
+#include "sentinel_version.h"
+#include <cstring>
 #include <windows.h>
 
 namespace {
@@ -8,6 +10,15 @@ DWORD startup_error = ERROR_SUCCESS;
 bool stopped = false;
 
 DWORD WINAPI start_core(void*) {
+    wchar_t path[MAX_PATH]{};
+    const DWORD system = sc_bootstrap_system_path(MAX_PATH, path);
+    if (system) { startup_error = system; return SC_BOOTSTRAP_FAILURE; }
+    sc_status identity{};
+    if (sc_inspect(SC_ABI_VERSION, sizeof(identity), &identity) != SC_OK ||
+        std::strcmp(identity.version, SC_PRODUCT_VERSION) || std::strcmp(identity.build_id, SC_BUILD_ID)) {
+        startup_error = ERROR_REVISION_MISMATCH;
+        return SC_BOOTSTRAP_FAILURE;
+    }
     return sc_initialize(SC_ABI_VERSION, SC_CAP_INSPECTION | SC_CAP_LIFECYCLE);
 }
 }

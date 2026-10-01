@@ -1,0 +1,70 @@
+name: Manual Core release
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Full 40-character source commit
+        required: true
+        type: string
+      version:
+        description: Complete canonical version, including rc-N
+        required: true
+        type: string
+      mode:
+        description: Explicit publication mode
+        required: true
+        type: choice
+        default: draft
+        options: [draft, prerelease, stable]
+      approve_stable:
+        description: Separate approval for stable publication
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: core-release-${{ inputs.version }}
+  cancel-in-progress: false
+jobs:
+  qualify:
+    uses: ./.github/workflows/windows.yml
+    permissions:
+      contents: read
+    with:
+      source_commit: ${{ inputs.source_commit }}
+      version: ${{ inputs.version }}
+  publish:
+    needs: qualify
+    runs-on: windows-2022
+    environment: ${{ inputs.mode == 'stable' && 'sentinel-stable' || 'sentinel-release' }}
+    permissions:
+      contents: write
+      actions: read
+    env:
+      SELECTED_COMMIT: ${{ inputs.source_commit }}
+      SELECTED_VERSION: ${{ inputs.version }}
+      RELEASE_MODE: ${{ inputs.mode }}
+      APPROVE_STABLE: ${{ inputs.approve_stable }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12.10'
+          architecture: x64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: sentinel-runtime
+          path: release-assets
+      - name: Verify complete draft and apply selected mode
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $arguments = @('tools/publish_distribution.py', 'release-assets', '--repository', $env:GITHUB_REPOSITORY, '--commit', $env:SELECTED_COMMIT, '--version', $env:SELECTED_VERSION, '--mode', $env:RELEASE_MODE)
+          if ($env:APPROVE_STABLE -eq 'true') { $arguments += '--approve-stable' }
+          python @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

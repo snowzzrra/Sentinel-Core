@@ -1,9 +1,13 @@
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
-// Controlled native-layout/provider fixtures; never a DOOM persistence claim.
+// Controlled native-layout/provider fixtures.
 #include "save_collector.h"
 #include "save_delete.h"
 #include "save_native_hooks.h"
 #include "save_write.h"
+#include "runes.h"
+#include "special.h"
+namespace sentinel::runes { Calls calls{}; }
+namespace sentinel::special { Calls calls{}; }
 #include <algorithm>
 #include <functional>
 

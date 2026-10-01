@@ -14,6 +14,7 @@
 #include "sentinel_runes.h"
 #include "sentinel_special.h"
 #include "sentinel_deathlink.h"
+#include "sentinel_commands.h"
 #include "sentinel_automap.h"
 #include <array>
 #include <cstddef>
@@ -70,6 +71,9 @@ constexpr uint16_t deathlink_submit_operation = 41, deathlink_result_operation =
     deathlink_cancel_operation = 43, deathlink_release_operation = 44;
 constexpr uint64_t deathlink_capability = 131072;
 constexpr uint16_t automap_operation = 45;
+constexpr uint16_t command_submit_operation = 46, command_result_operation = 47,
+    command_cancel_operation = 48, command_release_operation = 49;
+constexpr uint64_t command_capability = 2097152;
 constexpr uint64_t automap_capability = 262144;
 constexpr size_t max_request = 16384, max_message = 16384;
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
@@ -115,6 +119,7 @@ struct Inspection {
     sc_runes_result runes{};
     sc_special_result special{};
     sc_deathlink_result deathlink{};
+    sc_command_result command{};
     sc_automap_result automap{};
 };
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required = inspect_capability);
@@ -134,6 +139,7 @@ Inspection query_runes(uint32_t pid, uint32_t timeout_ms, uint16_t operation, co
 Inspection query_special(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_special_request&);
 Inspection query_automap(uint32_t pid, uint32_t timeout_ms, const sc_automap_request&);
 Inspection query_deathlink(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_deathlink_request&);
+Inspection query_command(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_command_request&);
 const char* backup_state_name(uint32_t);
 const char* save_write_state_name(uint32_t state);
 const char* save_session_state_name(uint32_t state);

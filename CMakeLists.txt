@@ -1,5 +1,16 @@
 cmake_minimum_required(VERSION 3.24)
-project(SentinelCore VERSION 0.9.0 LANGUAGES C CXX)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/version.json" sc_version_json)
+foreach(field major minor patch channel rc_number)
+  string(JSON SC_${field} GET "${sc_version_json}" ${field})
+endforeach()
+set(SC_BASE_VERSION "${SC_major}.${SC_minor}.${SC_patch}")
+set(SC_FULL_VERSION "${SC_BASE_VERSION}")
+if(SC_channel STREQUAL "rc" AND SC_rc_number MATCHES "^[1-9][0-9]*$")
+  string(APPEND SC_FULL_VERSION "-rc-${SC_rc_number}")
+elseif(NOT SC_channel STREQUAL "stable" OR NOT SC_rc_number STREQUAL "0")
+  message(FATAL_ERROR "Invalid release channel or RC number in version.json")
+endif()
+project(SentinelCore VERSION ${SC_BASE_VERSION} LANGUAGES C CXX ASM_MASM RC)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Sentinel Core currently requires Windows x64 and MSVC.")
 endif()
@@ -24,23 +35,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-add_compile_options(/W4 /WX /permissive- /Z7)
+add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/W4;/WX;/permissive-;/Z7>")
 add_link_options(/DEBUG /OPT:REF /OPT:ICF)
 add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
 
-# Local Windows candidate only: PE forwarders bind to this host's real System32.
-# No renamed system DLL, guessed private signatures or shared trampoline slots.
-file(TO_CMAKE_PATH "$ENV{SystemRoot}/System32/msimg32" SC_SYSTEM_FORWARDER)
-if(SC_SYSTEM_FORWARDER MATCHES "[ .]")
-  message(FATAL_ERROR "This local PE-forwarder candidate needs a SystemRoot without spaces or dots.")
-endif()
-if(NOT EXISTS "${SC_SYSTEM_FORWARDER}.dll")
-  message(FATAL_ERROR "System32 msimg32.dll is required for this candidate.")
-endif()
-configure_file(bootstrap/msimg32.def.in msimg32.def @ONLY)
-string(REPLACE "/" "\\\\" SC_SYSTEM_FORWARDER_C "${SC_SYSTEM_FORWARDER}")
-configure_file(bootstrap/forwarders.cpp.in forwarders.cpp @ONLY)
-set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_bootstrap.h
+configure_file(bootstrap/msimg32.def.in msimg32.def COPYONLY)
+configure_file(include/sentinel_version.h.in generated/sentinel_version.h @ONLY)
+include_directories("${CMAKE_BINARY_DIR}/generated")
+set(identity_inputs CMakeLists.txt version.json include/sentinel_version.h.in resources/version.rc.in include/sentinel_core.h include/sentinel_bootstrap.h
   include/sentinel_engine.h src/engine_observer.h src/engine_observer.cpp
   include/sentinel_context.h src/context_observer.h src/context_observer.cpp
   include/sentinel_native.h src/native_model.h src/native_model.cpp
@@ -58,6 +60,7 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   include/sentinel_special.h src/special.h src/special.cpp src/special_native.cpp src/special_hud_native.h
   tools/special_probe.cpp src/local_controls.h tools/local_controls_probe.cpp
   include/sentinel_deathlink.h src/deathlink.h src/deathlink.cpp src/deathlink_native.cpp
+  include/sentinel_commands.h src/commands.h src/commands.cpp src/commands_native.h src/commands_native.cpp src/commands_local.cpp
   tools/deathlink_probe.cpp
   src/native_target.h src/native_target.cpp src/native_runtime.h src/native_runtime.cpp
   include/sentinel_save.h src/save_observer.h src/save_observer.cpp
@@ -86,16 +89,16 @@ set(identity_inputs CMakeLists.txt include/sentinel_core.h include/sentinel_boot
   third_party/minhook/LICENSE.txt third_party/minhook/NOTICE
   include/sentinel_inspection.h src/core.cpp src/inspection_server.h src/inspection_server.cpp
   src/inspection_client.cpp src/pipe_io.h src/protocol.h src/protocol.cpp tools/probe.cpp
-  bootstrap/proxy.cpp bootstrap/msimg32.def.in bootstrap/forwarders.cpp.in)
+  bootstrap/proxy.cpp bootstrap/msimg32.def.in bootstrap/forwarders.cpp bootstrap/forwarders.asm)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${identity_inputs})
-set(identity "${PROJECT_VERSION}|${SC_SYSTEM_FORWARDER}")
+set(identity "${SC_FULL_VERSION}")
 foreach(input IN LISTS identity_inputs)
   file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${input}" digest)
   string(APPEND identity "|${input}:${digest}")
 endforeach()
 string(SHA256 SC_BUILD_ID "${identity}")
 
-add_library(sentinel_protocol STATIC src/protocol.cpp)
+add_library(sentinel_protocol STATIC src/protocol.cpp src/commands.cpp)
 target_include_directories(sentinel_protocol PUBLIC include src)
 add_library(sentinel_inspection_client STATIC src/inspection_client.cpp)
 target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
@@ -115,6 +118,7 @@ target_include_directories(sentinel_minhook PUBLIC third_party/minhook/include t
 # its prefix byte in the loop. Keep upstream unchanged and Core warnings strict.
 target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
 add_library(sentinel_native_model STATIC src/native_model.cpp src/weapon_points.cpp src/campaign_menu.cpp src/inventory.cpp src/arsenal.cpp src/runes.cpp src/special.cpp src/deathlink.cpp)
+target_link_libraries(sentinel_native_model PUBLIC sentinel_protocol)
 target_include_directories(sentinel_native_model PUBLIC include src)
 add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp src/save_campaign.cpp)
 target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
@@ -140,16 +144,26 @@ add_library(sentinel_core SHARED src/core.cpp src/inspection_server.cpp src/star
 target_link_libraries(sentinel_core PRIVATE sentinel_protocol sentinel_native advapi32 bcrypt)
 target_include_directories(sentinel_core PUBLIC include)
 add_executable(sentinel_workflow_tests tests/workflow.cpp src/startup_log.cpp)
-target_link_libraries(sentinel_workflow_tests PRIVATE sentinel_save_session sentinel_protocol)
+target_link_libraries(sentinel_workflow_tests PRIVATE sentinel_native sentinel_save_session sentinel_protocol)
 add_test(NAME workflow_handoff_logging_contract COMMAND sentinel_workflow_tests)
 set_tests_properties(workflow_handoff_logging_contract PROPERTIES TIMEOUT 15)
 target_compile_definitions(sentinel_core PRIVATE SC_BUILDING_CORE
-  SC_VERSION="${PROJECT_VERSION}" SC_BUILD_ID="${SC_BUILD_ID}")
-add_library(sentinel_bootstrap SHARED bootstrap/proxy.cpp "${CMAKE_BINARY_DIR}/forwarders.cpp" "${CMAKE_BINARY_DIR}/msimg32.def")
+  SC_VERSION="${SC_FULL_VERSION}" SC_BUILD_ID="${SC_BUILD_ID}")
+add_library(sentinel_bootstrap SHARED bootstrap/proxy.cpp bootstrap/forwarders.cpp bootstrap/forwarders.asm "${CMAKE_BINARY_DIR}/msimg32.def")
+set_source_files_properties(bootstrap/forwarders.asm PROPERTIES COMPILE_OPTIONS "/W3")
 target_link_options(sentinel_core PRIVATE /WX)
 target_link_options(sentinel_bootstrap PRIVATE /WX)
 set_target_properties(sentinel_bootstrap PROPERTIES OUTPUT_NAME msimg32)
 target_link_libraries(sentinel_bootstrap PRIVATE sentinel_core)
+target_compile_definitions(sentinel_bootstrap PRIVATE SC_BUILD_ID="${SC_BUILD_ID}")
+foreach(target sentinel_core sentinel_bootstrap sentinel_probe)
+  set(SC_RESOURCE_NAME "${target}")
+  if(target STREQUAL "sentinel_bootstrap")
+    set(SC_RESOURCE_NAME "msimg32")
+  endif()
+  configure_file(resources/version.rc.in "generated/${target}.rc" @ONLY)
+  target_sources(${target} PRIVATE "${CMAKE_BINARY_DIR}/generated/${target}.rc")
+endforeach()
 add_executable(sentinel_harness tests/harness.cpp tests/header_c.c)
 target_include_directories(sentinel_harness PRIVATE include)
 add_dependencies(sentinel_harness sentinel_bootstrap)
@@ -157,6 +171,9 @@ add_executable(sentinel_import_host tests/import_host.cpp)
 target_include_directories(sentinel_import_host PRIVATE include)
 target_link_libraries(sentinel_import_host PRIVATE sentinel_bootstrap gdi32)
 enable_testing()
+add_executable(sentinel_command_tests tests/commands.cpp)
+target_link_libraries(sentinel_command_tests PRIVATE sentinel_native_model)
+add_test(NAME command_dispatch_contract COMMAND sentinel_command_tests)
 add_executable(sentinel_installation_tests tests/installation.cpp)
 target_link_libraries(sentinel_installation_tests PRIVATE sentinel_protocol sentinel_native)
 add_test(NAME retained_installation_contract COMMAND sentinel_installation_tests)
@@ -202,7 +219,7 @@ target_include_directories(sentinel_native_host PRIVATE tests)
 target_link_libraries(sentinel_native_host PRIVATE sentinel_native_model sentinel_observer sentinel_minhook
   sentinel_inspection_client sentinel_save_session advapi32 bcrypt)
 target_compile_definitions(sentinel_native_host PRIVATE SC_BUILDING_CORE SC_NATIVE_TESTING
-  SC_VERSION="${PROJECT_VERSION}" SC_BUILD_ID="${SC_BUILD_ID}")
+  SC_VERSION="${SC_FULL_VERSION}" SC_BUILD_ID="${SC_BUILD_ID}")
 add_dependencies(sentinel_native_host sentinel_probe)
 add_test(NAME native_hook_dispatch_host COMMAND sentinel_native_host "$<TARGET_FILE:sentinel_probe>" basic)
 add_test(NAME native_wrong_thread_host COMMAND sentinel_native_host "$<TARGET_FILE:sentinel_probe>" wrong-thread)
@@ -234,7 +251,7 @@ add_test(NAME missing_core_dependency COMMAND "${CMAKE_COMMAND}"
   "-DPROXY=$<TARGET_FILE:sentinel_bootstrap>" "-DHARNESS=$<TARGET_FILE:sentinel_harness>"
   "-DSTAGE=${CMAKE_BINARY_DIR}/missing-core" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/missing_dependency.cmake")
 foreach(target sentinel_native sentinel_campaign_tests sentinel_native_host)
-  target_sources(${target} PRIVATE src/weapon_points_native.cpp src/challenge_suppression.cpp src/inventory_native.cpp src/arsenal_native.cpp src/runes_native.cpp src/special_native.cpp src/deathlink_native.cpp)
+  target_sources(${target} PRIVATE src/weapon_points_native.cpp src/challenge_suppression.cpp src/inventory_native.cpp src/arsenal_native.cpp src/runes_native.cpp src/special_native.cpp src/deathlink_native.cpp src/commands_native.cpp src/commands_local.cpp)
 endforeach()
 add_executable(sentinel_weapon_points_tests tests/weapon_points.cpp)
 target_link_libraries(sentinel_weapon_points_tests PRIVATE sentinel_native_model sentinel_protocol)

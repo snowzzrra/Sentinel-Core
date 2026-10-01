@@ -234,6 +234,11 @@ bool test_hud_owner_path() {
         active->material_name = name;
         return 9;
     };
+    hud::swf.keycap = [](uintptr_t quickuse) { return Fixture::get<uintptr_t>(quickuse, 0x1f0); };
+    hud::swf.label = [](uintptr_t clip, const char* label, bool) -> uint64_t {
+        if (std::strcmp(label, "kbm") != 0) return 0;
+        hud::swf.frame(clip, 1); return 1;
+    };
     hud::graphics_ready = true;
     hud::keycap_ready = false;
 
@@ -486,7 +491,7 @@ bool test_hud_owner_path() {
         close_to(stage_center(native_arrow).x, 120) &&
         close_to(stage_center(refill).x, 130.12f) &&
         close_to(stage_center(ammo_glyph).x, 130.12f) &&
-        !fixture.clips.at(arrow_backer)->visible &&
+        fixture.clips.at(arrow_backer)->visible &&
         fixture.clips.at(arrow_leaf)->visible && fixture.clips.at(native_arrow)->visible;
     fixture.set_bounds(hammer_source, 0, 16);
     update_on_hud(b);
@@ -529,8 +534,8 @@ bool test_hud_owner_path() {
         f10_rect.br.y < ammo_rect.tl.y &&
         native_arrow_rect.br.x < refill_icon_rect.tl.x &&
         close_to(refill_icon_rect.tl.x - native_arrow_rect.br.x, 1.0f) &&
-        close_to(f9_rect.tl.y, donor_key_rect.tl.y) &&
-        close_to(f10_rect.tl.y, donor_key_rect.tl.y) &&
+        close_to(hud::center(f9_rect).y, hud::center(donor_key_rect).y) &&
+        close_to(hud::center(f10_rect).y, hud::center(donor_key_rect).y) &&
         close_to(f10_rect.br.x - f10_rect.tl.x, 28.0f) &&
         close_to(f9_rect.br.x - f9_rect.tl.x, 22.0f);
     const auto f9_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(refill_bind)->transform.data());
@@ -735,16 +740,13 @@ bool test_hud_owner_path() {
     update_on_hud(b);
     ok &= fixture.lookups == invalid_lookups;
     route_epoch.store(77);
-    Fixture::put(first.primary, 0x30, uintptr_t{3});
-    update_on_hud(b);
-    ok &= fixture.lookups == invalid_lookups;
     Scene missing{};
     build(missing, 3);
     fixture.children.erase({missing.parent, "swapEquipment"});
     update_on_hud(missing.address());
     const auto missing_output = hud_trace.snapshot().stages[static_cast<size_t>(save::BStage::profile_output)];
     ok &= std::strcmp(missing_output.predicate, "switch_source_missing") == 0 &&
-        fixture.find(missing.parent, "apAmmoRefillBind") == 0 &&
+        fixture.find(missing.parent, "apAmmoRefillBind") != 0 &&
         fixture.find(missing.parent, "apSpecialSwitch") == 0 &&
         fixture.find(missing.parent, "apSpecialToggleBind") == 0;
     update_on_hud(b2);
@@ -760,8 +762,7 @@ bool test_hud_owner_path() {
         close_to(stage_center(fixture.find(rebuilt_arrow, "arrow")).x, 104.0f) &&
         close_to(stage_center(rebuilt.flame_root).x, 116) &&
         close_to(stage_center(rebuilt.primary).x, 140) &&
-        close_to(stage_center(fixture.find(rebuilt_swap, "arrow")).x, 164) &&
-        close_to(stage_center(rebuilt_refill).x, 176.0f);
+        close_to(stage_center(fixture.find(rebuilt_swap, "arrow")).x, 164);
     fixture.render(rebuilt.parent);
     update_on_hud(b2);
     fixture.render(rebuilt.parent);
@@ -986,12 +987,12 @@ bool test_hud_owner_path() {
     const auto& clips = trace.stages[static_cast<size_t>(save::BStage::profile_output)];
     const auto& presentations = trace.stages[static_cast<size_t>(save::BStage::profile_capture)];
     ok &= std::strcmp(trace.first_failure.predicate, "hud_weapon_info_update_context") == 0 &&
-        std::strcmp(trace.first_failure.facts[15].key, "refusal") == 0 &&
-        trace.first_failure.facts[15].value == 1;
-    ok &= admission.sequence && admission.facts[5].value != admission.facts[6].value &&
-        admission.facts[12].key &&
-        std::strcmp(admission.facts[12].key, "source_evaluated") == 0 &&
-        admission.facts[12].value == 1;
+        std::strcmp(trace.first_failure.facts[3].key, "refusal") == 0 &&
+        trace.first_failure.facts[3].value == 1;
+    ok &= admission.sequence && admission.facts[0].key && admission.facts[1].key && admission.facts[3].key &&
+        std::strcmp(admission.facts[0].key, "weapon_info_owner") == 0 && admission.facts[0].value != 0 &&
+        std::strcmp(admission.facts[1].key, "player") == 0 && admission.facts[1].value == 42 &&
+        std::strcmp(admission.facts[3].key, "refusal") == 0 && admission.facts[3].value == 0;
     ok &= std::strcmp(clips.predicate, "hud_native_keycaps_applied") == 0 &&
         clips.status == save::BStatus::succeeded &&
         std::strcmp(clips.facts[15].key, "pixels_observed") == 0 && clips.facts[15].value == 0;

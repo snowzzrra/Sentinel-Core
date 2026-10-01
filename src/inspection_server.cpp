@@ -81,7 +81,13 @@ DWORD serve(void*) {
             sc_special_request special{};
             sc_deathlink_request deathlink{};
             sc_automap_request automap{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink, &automap, &summary, &rewards);
+            sc_command_request command{};
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink, &automap, &summary, &rewards, &command);
+            sc_command_result command_result{};
+            if (result == WireResult::ok && operation >= command_submit_operation) {
+                command_result = operation == command_submit_operation ? native::submit_command(command) :
+                    native::command_result(command, operation == command_cancel_operation, operation == command_release_operation);
+            }
             sc_automap_result automap_result{};
             if (result == WireResult::ok && operation == automap_operation) automap_result = native::automap_request(automap);
             sc_deathlink_result deathlink_result{};
@@ -136,6 +142,7 @@ DWORD serve(void*) {
                         operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
             const DWORD size = static_cast<DWORD>(
+                operation >= command_submit_operation ? encode_command_response(data, result, operation, current_snapshot(), command_result) :
                 operation == automap_operation ? encode_automap_response(data, result, current_snapshot(), automap_result) :
                 operation >= deathlink_submit_operation ?
                     encode_deathlink_response(data, result, operation, current_snapshot(), deathlink_result) :

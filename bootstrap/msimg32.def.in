@@ -1,4 +1,10 @@
 LIBRARY msimg32
 EXPORTS
+    vSetDdrawflag=sc_forward_0 @1
+    AlphaBlend=sc_forward_1 @2
+    DllInitialize=sc_forward_2 PRIVATE
+    GradientFill=sc_forward_3 @4
+    TransparentBlt=sc_forward_4 @5
     sc_bootstrap_inspect @6
     sc_bootstrap_shutdown @7
+    sc_bootstrap_system_path @8

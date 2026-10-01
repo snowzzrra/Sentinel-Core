@@ -1,4 +1,5 @@
 #include "sentinel_inspection.h"
+#include "sentinel_version.h"
 #include "pipe_io.h"
 #include "protocol.h"
 #include "save_storage.h"
@@ -252,7 +253,7 @@ void admission_codec() {
     value.state = SC_SAVE_SESSION_BINDING + 1; check(false);
     value.state = SC_SAVE_SESSION_FAULTED; value.fault = 11;
     value.flags &= ~SC_SAVE_SESSION_ACCEPTING; check(true);
-    value.fault = 16; check(true); value.fault = 17; check(false); value.fault = 11;
+    value.fault = 16; check(true); value.fault = 17; check(true); value.fault = 18; check(false); value.fault = 11;
     value.namespace_id[64] = 'a'; check(false);
     uint16_t operation = 0;
     const auto request = encode_request(data, save_admission_capability, wire_version, save_admission_operation);
@@ -378,7 +379,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(initial.snapshot.core.abi_version == SC_ABI_VERSION && initial.snapshot.core.capabilities == 3);
     CHECK(initial.snapshot.core.state == SC_READY && initial.snapshot.service == ServiceState::listening);
     CHECK(initial.snapshot.core.initialization_count == 1 && std::strlen(initial.snapshot.core.build_id) == 64);
-    CHECK(std::strcmp(initial.snapshot.core.version, "0.8.0") == 0);
+    CHECK(std::strcmp(initial.snapshot.core.version, SC_PRODUCT_VERSION) == 0);
     uint64_t created = 0; CHECK(process_time(first.child.process.value, created));
     CHECK(initial.snapshot.process_created == created);
     const auto other = query(second.child.pid, 2000);
@@ -444,7 +445,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(context.context.fields[SC_CONTEXT_LOAD_SERIAL].reason == SC_CONTEXT_UNSUPPORTED);
     const auto context_json = probe(probe_path, args + L" --context --json", 0);
     CHECK(context_json.find("\"operation\":\"context\"") != std::string::npos);
-    CHECK(context_json.find("\"core_version\":\"0.8.0\"") != std::string::npos);
+    CHECK(context_json.find("\"core_version\":\"" SC_PRODUCT_VERSION "\"") != std::string::npos);
     CHECK(context_json.find("\"current_map\":{\"validity\":\"unknown\",\"reason\":\"profile_unrecognized\",\"value\":null") != std::string::npos);
     CHECK(probe(probe_path, args + L" --context", 0).find("not a load serial") != std::string::npos);
     const auto context_watch = probe(probe_path, args + L" --context --watch-count 2 --interval-ms 100 --json", 0);
@@ -524,7 +525,7 @@ int wmain(int argc, wchar_t** argv) {
     exchange(first.child.pid, request, size, WireResult::malformed);
     { // Oversize message must disconnect; no reply or allocation proportional to input.
         Handle pipe(open_pipe(first.child.pid)); CHECK(pipe);
-        std::array<uint8_t, 513> huge{}; DWORD count = 0;
+        std::array<uint8_t, max_request + 1> huge{}; DWORD count = 0;
         transfer(pipe.value, true, huge.data(), static_cast<DWORD>(huge.size()), count, nullptr, 2000);
         CHECK(transfer(pipe.value, false, huge.data(), 1, count, nullptr, 2000) != ERROR_SUCCESS);
     }

@@ -1,0 +1,72 @@
+name: Windows x64 qualification
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Full 40-character source commit
+        required: true
+        type: string
+      version:
+        description: Complete canonical version, including rc-N
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      source_commit:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: windows-2022
+    env:
+      SELECTED_COMMIT: ${{ inputs.source_commit || github.sha }}
+      SELECTED_VERSION: ${{ inputs.version }}
+      SELECTED_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_commit || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12.10'
+          architecture: x64
+      - name: Locate supported installed MSVC and CMake
+        shell: pwsh
+        run: |
+          if ($env:SELECTED_COMMIT -cnotmatch '^[a-f0-9]{40}$') { throw 'Select a full source commit' }
+          $installation = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $compiler = Join-Path $installation 'VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe'
+          if (!(Test-Path -LiteralPath $compiler)) { throw 'MSVC 14.44.35207 is required' }
+          $cmakeDirectory = Join-Path $installation 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
+          $cmakeVersion = & (Join-Path $cmakeDirectory 'cmake.exe') --version
+          if ($cmakeVersion[0] -notmatch '3\.31\.6') { throw 'CMake 3.31.6 is required' }
+          "SC_VCVARS=$installation\VC\Auxiliary\Build\vcvars64.bat" >> $env:GITHUB_ENV
+          "SC_CMAKE=$cmakeDirectory" >> $env:GITHUB_ENV
+      - name: Build Release and run synthetic contracts
+        shell: cmd
+        run: |
+          call "%SC_VCVARS%" -vcvars_ver=14.44
+          if errorlevel 1 exit /b 1
+          "%SC_CMAKE%\cmake.exe" -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          if errorlevel 1 exit /b 1
+          "%SC_CMAKE%\cmake.exe" --build build
+          if errorlevel 1 exit /b 1
+          "%SC_CMAKE%\ctest.exe" --test-dir build --output-on-failure --timeout 60
+          if errorlevel 1 exit /b 1
+          python tools\qualify_distribution.py --output build\distribution\candidate --commit "%SELECTED_COMMIT%" --version "%SELECTED_VERSION%" --tag "%SELECTED_TAG%"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sentinel-runtime
+          path: build/distribution/candidate/
+          if-no-files-found: error
+          retention-days: 14

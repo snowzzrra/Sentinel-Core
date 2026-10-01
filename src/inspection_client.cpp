@@ -1,6 +1,7 @@
 #include "sentinel_inspection.h"
 #include "pipe_io.h"
 #include "protocol.h"
+#include "commands.h"
 #include <cstring>
 
 namespace sentinel {
@@ -26,7 +27,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
                                    const sc_special_request* special = nullptr,
                                    const sc_deathlink_request* deathlink = nullptr,
                                    const sc_automap_request* automap = nullptr,
-                                   const sc_campaign_summary* summary = nullptr, const sc_campaign_rewards* rewards = nullptr) {
+                                   const sc_campaign_summary* summary = nullptr, const sc_campaign_rewards* rewards = nullptr,
+                                   const sc_command_request* command = nullptr) {
     Inspection result;
     Handle process;
     auto fail = [&](DWORD error) {
@@ -82,7 +84,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(automap ? encode_automap_request(data, *automap) :
+    const DWORD size = static_cast<DWORD>(command ? encode_command_request(data, operation, *command) :
+        automap ? encode_automap_request(data, *automap) :
         deathlink ? encode_deathlink_request(data, operation, *deathlink) :
         special ? encode_special_request(data, operation, *special) :
         runes ? encode_runes_request(data, operation, *runes) :
@@ -105,7 +108,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     if (error != ERROR_SUCCESS) return fail(error);
     WireResult code{};
     result.failure_stage = "decode_response";
-    bool decoded = automap ? decode_automap_response(data, count, code, result.snapshot, result.automap) :
+    bool decoded = command ? decode_command_response(data, count, code, operation, result.snapshot, result.command) :
+        automap ? decode_automap_response(data, count, code, result.snapshot, result.automap) :
         deathlink ? decode_deathlink_response(data, count, code, operation, result.snapshot, result.deathlink) :
         special ? decode_special_response(data, count, code, operation, result.snapshot, result.special) :
         runes ? decode_runes_response(data, count, code, operation, result.snapshot, result.runes) :
@@ -146,9 +150,14 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
          (result.automap.revision != automap->revision || result.automap.known != automap->known)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
-    const auto& execution = deathlink ? result.deathlink.execution : (special ? result.special.execution : (runes ? result.runes.execution : (arsenal ? result.arsenal.execution : (inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic))))));
+    const auto& execution = command ? result.command.execution : (deathlink ? result.deathlink.execution : (special ? result.special.execution : (runes ? result.runes.execution : (arsenal ? result.arsenal.execution : (inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic)))))));
     if (request && !campaign && !automap && (execution.request_id != request->request_id ||
         std::memcmp(execution.nonce, request->nonce, sizeof(request->nonce)))) {
+        result.result = ProbeResult::invalid_response; return result;
+    }
+    if (command && (execution.scope.lifecycle_generation != command->execution.expected.lifecycle_generation ||
+        result.command.kind != command->kind ||
+        std::memcmp(result.command.namespace_id, command->namespace_id, sizeof(command->namespace_id)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
     if (backup && (execution.scope.lifecycle_generation != backup->execution.expected.lifecycle_generation ||
@@ -283,5 +292,12 @@ Inspection query_diagnostic(uint32_t pid, uint32_t timeout_ms, uint16_t operatio
         Inspection result; result.result = ProbeResult::usage; return result;
     }
     return query_operation(pid, timeout_ms, diagnostic_capability, operation, &request);
+}
+Inspection query_command(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_command_request& r) {
+    if (operation < command_submit_operation || operation > command_release_operation || !commands::valid(r)) {
+        Inspection out; out.result = ProbeResult::usage; return out;
+    }
+    return query_operation(pid, timeout_ms, command_capability, operation, &r.execution, 0, 0,
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &r);
 }
 }

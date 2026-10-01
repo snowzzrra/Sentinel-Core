@@ -1,4 +1,8 @@
 #include "weapon_points.h"
+#include "runes.h"
+#include "special.h"
+namespace sentinel::runes { Calls calls{}; }
+namespace sentinel::special { Calls calls{}; }
 #include "native_model.h"
 #include "protocol.h"
 #include <cassert>

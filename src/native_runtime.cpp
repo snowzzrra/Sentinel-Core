@@ -4,6 +4,7 @@
 #include "runes.h"
 #include "special.h"
 #include "deathlink.h"
+#include "commands_native.h"
 #include "native_target.h"
 #include "save_native_hooks.h"
 #include "save_campaign_native.h"
@@ -385,6 +386,7 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
 void post_frame() {
     if (!accepting.load(std::memory_order_acquire) || fault.load(std::memory_order_acquire)) return;
     if (owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); return; }
+    commands::console_tick(epoch.load(std::memory_order_acquire));
     deathlink::expire_pending(GetTickCount64());
     // Missing this diagnostic opportunity is harmless; unlike a lifecycle event,
     // it need not be fabricated or become a gap when IPC briefly holds the lock.
@@ -475,10 +477,15 @@ void post_frame() {
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
     if (!why) reconcile_automap(expected_map_address, facts.current_map.bytes, scope.lifecycle_generation);
     if (!why && player) arsenal::tick_masteries(scope.lifecycle_generation, player);
+    commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); });
     if (!slot) return;
+    const bool process_scoped = slot->is_command && commands::process_scoped(slot->command_request);
+    if (process_scoped) why = SC_NATIVE_NONE;
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
     if (!same_scope(slot->request.expected, scope)) reject(SC_NATIVE_SCOPE_MISMATCH, SC_STAGE_SCOPE);
+    if (slot->is_command && !commands::admitted(slot->command_request))
+        reject(SC_NATIVE_SCOPE_MISMATCH, SC_STAGE_SCOPE);
     char backup_directory[64]{};
     if (!why && slot->is_backup) {
         const auto reason = backup_prerequisite(slot->backup_request);
@@ -496,7 +503,7 @@ void post_frame() {
     // check may coexist with EXECUTED; a caller timeout is never proof otherwise.
     if (!why) {
         detail.stage = SC_STAGE_EXECUTED;
-        result.observed_at_ms = facts.sampled_at_ms;
+        result.observed_at_ms = process_scoped ? execution_at : facts.sampled_at_ms;
         result.executed_at_ms = execution_at;
         result.current_map = facts.current_map;
         result.game_state = static_cast<uint32_t>(facts.fields[SC_CONTEXT_GAME_STATE].value);
@@ -512,6 +519,8 @@ void post_frame() {
             weapon_points::execute_native(slot->weapon_points_request, slot->weapon_points_result);
         if (slot->is_inventory)
             inventory::execute_native(slot->inventory_request, slot->inventory_result);
+        if (slot->is_command)
+            commands::execute_native(slot->command_request, slot->command_result, player);
         if (slot->is_arsenal)
             arsenal::execute_native(slot->arsenal_request, slot->arsenal_result);
         if (slot->is_runes)
@@ -596,6 +605,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
     }
     accepting.store(false, std::memory_order_release);
     binding = source;
+    const auto command_reason = commands::prepare(binding, stop_event);
     sc_native_snapshot initial{};
     initial.size = sizeof(initial); initial.abi_version = SC_NATIVE_ABI_VERSION;
     initial.scope.pid = identity.pid; initial.scope.process_created = identity.process_created;
@@ -636,6 +646,11 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             !observed_read(vtable + 0x20, frame) || frame != targets[0].address)) initial.reason = SC_NATIVE_BINDING_FAILED;
     }
     installation.finish(binding_event, initial.reason);
+#ifdef SC_NATIVE_TESTING
+    if (!fixture_active && !initial.reason) initial.reason = command_reason;
+#else
+    if (!initial.reason) initial.reason = command_reason;
+#endif
     // Publish immutable binding/status before any detour can become reachable.
     AcquireSRWLockExclusive(&lock);
     lifetime = {}; status = initial; fault.store(SC_NATIVE_NONE); gaps.store(0); epoch.fetch_add(1);
@@ -932,6 +947,24 @@ sc_deathlink_result deathlink_result(const sc_deathlink_request& request, bool c
     auto out = diagnostics.deathlink_result(request, cancel, GetTickCount64(), release);
     ReleaseSRWLockExclusive(&lock); return out;
 }
+sc_command_result submit_command(const sc_command_request& request) {
+    AcquireSRWLockExclusive(&lock);
+    const auto now = GetTickCount64(); auto why = prerequisite(now);
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    if (!why && (!same_scope(scope, request.execution.expected) || !commands::admitted(request)))
+        why = SC_NATIVE_SCOPE_MISMATCH;
+    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, nullptr, &request);
+    auto out = commands::initial(request);
+    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
+    else out = diagnostics.command_result(request, false, now);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_command_result command_result(const sc_command_request& request, bool cancel, bool release) {
+    AcquireSRWLockExclusive(&lock);
+    auto out = diagnostics.command_result(request, cancel, GetTickCount64(), release);
+    ReleaseSRWLockExclusive(&lock); return out;
+}
 sc_save_backup_snapshot submit_backup(const sc_save_backup_request& request) {
     AcquireSRWLockExclusive(&lock);
     const auto now = GetTickCount64(); auto why = prerequisite(now);
@@ -954,6 +987,7 @@ sc_save_backup_snapshot backup_result(const sc_save_backup_request& request, boo
     ReleaseSRWLockExclusive(&lock); return out;
 }
 bool stop() {
+    commands::disable();
     save::session().stop_requests();
     stopping.store(true, std::memory_order_release);
     accepting.store(false, std::memory_order_release);
