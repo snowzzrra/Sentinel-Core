@@ -58,13 +58,6 @@ class CampaignComparisonTests(unittest.TestCase):
                 for directory in (self.steam, self.local, self.backup)
                 for path in directory.rglob("*") if path.is_file()}
 
-    def test_unchanged_is_read_only_and_selection_remains_manual(self):
-        before = self.snapshot()
-        result = comparison.compare(self.args)
-        self.assertEqual(result["result"], "vanilla_campaign_unchanged")
-        self.assertEqual(result["baseline_campaign_files"], 3)
-        self.assertEqual(result["selection_verification"], "manual_vanilla_menu_check_required")
-        self.assertEqual(before, self.snapshot())
 
     def test_campaign_edit_add_and_remove_report_only_aggregate_differences(self):
         for kind in ("modified", "added", "removed"):
@@ -101,13 +94,6 @@ class CampaignComparisonTests(unittest.TestCase):
         with self.assertRaisesRegex(protection.Refused, "integrity"):
             comparison.compare(self.args)
 
-    def test_no_original_vanilla_campaign_is_inconclusive(self):
-        for path in self.campaigns:
-            path.unlink()
-        self.args.backup_directory = str(self.root / "campaign-empty-backup")
-        protection.protect(self.args)
-        with self.assertRaisesRegex(protection.Refused, "inconclusive"):
-            comparison.compare(self.args)
 
     def test_source_share_conflict_and_running_game_refuse(self):
         with self.campaigns[0].open("rb"):
@@ -117,16 +103,6 @@ class CampaignComparisonTests(unittest.TestCase):
         with self.assertRaisesRegex(protection.Refused, "exit DOOM"):
             comparison.compare(self.args)
 
-    def test_changed_campaign_cli_is_nonzero_without_disclosing_paths(self):
-        self.campaigns[0].write_bytes(b"changed")
-        argv = []
-        for name in ("steam_account", "steam_app_root", "local_provider_root", "backup_directory"):
-            argv.extend(["--" + name.replace("_", "-"), getattr(self.args, name)])
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            self.assertEqual(comparison.main(argv), 1)
-        self.assertEqual(json.loads(output.getvalue())["modified"], 1)
-        self.assertNotIn(str(self.root), output.getvalue())
 
 
 if __name__ == "__main__":

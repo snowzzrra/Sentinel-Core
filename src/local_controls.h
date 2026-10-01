@@ -29,7 +29,8 @@ inline int key(const char* text) {
     const struct { const char* name; int vk; } names[] = {
         {"SPACE", VK_SPACE}, {"TAB", VK_TAB}, {"INSERT", VK_INSERT}, {"DELETE", VK_DELETE},
         {"HOME", VK_HOME}, {"END", VK_END}, {"PAGEUP", VK_PRIOR}, {"PGUP", VK_PRIOR},
-        {"PAGEDOWN", VK_NEXT}, {"PGDN", VK_NEXT}};
+        {"PAGEDOWN", VK_NEXT}, {"PGDN", VK_NEXT}, {"BACKSPACE", VK_BACK},
+        {"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT}};
     for (const auto& n : names) if (!std::strcmp(token, n.name)) return n.vk;
     return -1;
 }

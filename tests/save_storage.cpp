@@ -55,6 +55,9 @@ struct Fixture {
         path = std::wstring(temp.data(), length) + L"sentinel-storage-" + std::to_wstring(GetCurrentProcessId()) +
             L"-" + std::to_wstring(GetTickCount64());
         CHECK(path.size() < 100 && CreateDirectoryW(path.c_str(), nullptr));
+        wchar_t expanded[MAX_PATH]{};
+        CHECK(GetLongPathNameW(path.c_str(), expanded, MAX_PATH));
+        path = expanded;
         CHECK(CreateDirectoryW((path + L"\\ap").c_str(), nullptr));
         CHECK(CreateDirectoryW((path + L"\\mock-vanilla").c_str(), nullptr));
         write(path + L"\\mock-vanilla\\protected.txt", "SYNTHETIC PROTECTED FIXTURE; NEVER A DOOM SAVE");

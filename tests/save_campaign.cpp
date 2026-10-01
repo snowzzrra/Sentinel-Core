@@ -258,7 +258,7 @@ int wmain(int argc,wchar_t** argv) {
     const bool profile_overlap=defect.rfind(L"cross_map_profile_overlap",0)==0;
     const bool recovery_case=defect.rfind(L"native_read_c",0)==0 || defect.rfind(L"native_read_delta",0)==0 ||
         defect.rfind(L"native_read_shell",0)==0 || defect==L"native_read_hash" ||
-        defect==L"native_read_mission_wrong_map" || defect.rfind(L"native_read_menu_cycle",0)==0;
+        defect.rfind(L"native_read_mission",0)==0 || defect.rfind(L"native_read_menu_cycle",0)==0;
     const auto retail_marker=std::filesystem::path(argv[2])/"retail-pair.fixture";
     const bool retail_pair=defect==L"native_read_c_retail_pair" || std::filesystem::exists(retail_marker);
     if(retail_pair && !resume && !recover) { std::filesystem::create_directories(argv[2]); std::ofstream(retail_marker)<<"primary operation; preserved rotation pair\n"; }

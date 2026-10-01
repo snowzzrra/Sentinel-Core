@@ -259,7 +259,6 @@ Result validate_streams(HANDLE handle, bool directory) {
 Result open_directory(const std::wstring& path, Handle& handle, bool payload = false) {
     if (path.size() > path_limit) return {Outcome::limit_exceeded};
     // Deny write as well as delete sharing: retaining a read-only directory handle
-    // must also exclude a concurrent write handle used to set a reparse point.
     handle = Handle(CreateFileW(path.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ, nullptr, OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));

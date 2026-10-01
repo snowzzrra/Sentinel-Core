@@ -1543,7 +1543,7 @@ bool install(const engine::Binding& binding,HANDLE stop) {
             if (!reason) reason=MH_EnableHook(reinterpret_cast<void*>(target.address));
         }
         save::session().btrace.record(save::BStage::dossier_challenges,
-            reason ? save::BStatus::refused : save::BStatus::succeeded,"phase9d_page_binding",0,
+            reason ? save::BStatus::refused : save::BStatus::succeeded,"campaign_page_binding",0,
             {{"rva",page.rva},{"reason",reason}});
     }
     ready.store(true,std::memory_order_release); return true;

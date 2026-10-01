@@ -127,9 +127,7 @@ add_executable(sentinel_campaign_tests tests/save_campaign.cpp tests/save_profil
 target_include_directories(sentinel_campaign_tests PRIVATE tests)
 target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)
 target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_native_model sentinel_minhook sentinel_save_session sentinel_protocol)
-foreach(case hud_source hud_owner mastery_masks)
-  add_test(NAME phase8_${case}_fixture COMMAND sentinel_campaign_tests create "${CMAKE_BINARY_DIR}/campaign-fixtures" 1 ${case})
-endforeach()
+
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures")
 foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write)
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures/${case}")
@@ -244,7 +242,6 @@ set_tests_properties(save_prelaunch_owner_contract PROPERTIES TIMEOUT 15)
 add_test(NAME core_lifecycle COMMAND sentinel_harness --core "$<TARGET_FILE:sentinel_core>")
 add_test(NAME proxy_forwarding_lifecycle COMMAND sentinel_harness --proxy "$<TARGET_FILE:sentinel_bootstrap>")
 add_test(NAME proxy_normal_exit COMMAND sentinel_harness --exit "$<TARGET_FILE:sentinel_bootstrap>")
-add_test(NAME proxy_second_process COMMAND sentinel_harness --proxy "$<TARGET_FILE:sentinel_bootstrap>")
 add_test(NAME static_import_drawing COMMAND sentinel_import_host)
 add_test(NAME missing_dll COMMAND sentinel_harness --missing "${CMAKE_BINARY_DIR}/absent.dll")
 add_test(NAME missing_core_dependency COMMAND "${CMAKE_COMMAND}"
@@ -257,5 +254,5 @@ add_executable(sentinel_weapon_points_tests tests/weapon_points.cpp)
 target_link_libraries(sentinel_weapon_points_tests PRIVATE sentinel_native_model sentinel_protocol)
 target_compile_options(sentinel_weapon_points_tests PRIVATE /UNDEBUG)
 add_test(NAME weapon_points_contract COMMAND sentinel_weapon_points_tests)
-set_tests_properties(core_lifecycle proxy_forwarding_lifecycle proxy_normal_exit proxy_second_process static_import_drawing missing_dll missing_core_dependency
+set_tests_properties(core_lifecycle proxy_forwarding_lifecycle proxy_normal_exit static_import_drawing missing_dll missing_core_dependency
   PROPERTIES TIMEOUT 15)

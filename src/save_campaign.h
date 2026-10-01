@@ -7,6 +7,7 @@
 #include <optional>
 
 namespace sentinel::save {
+std::string campaign_contract(const storage::Descriptor&, const std::string& namespace_id);
 class Session;
 struct ProfileWrite;
 enum class ProfilePublication { refused, persisted, checkpoint_owned };

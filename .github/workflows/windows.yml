@@ -63,6 +63,8 @@ jobs:
           if errorlevel 1 exit /b 1
           "%SC_CMAKE%\ctest.exe" --test-dir build --output-on-failure --timeout 60
           if errorlevel 1 exit /b 1
+          python -m unittest discover -s tests -p "test_*.py" -q
+          if errorlevel 1 exit /b 1
           python tools\qualify_distribution.py --output build\distribution\candidate --commit "%SELECTED_COMMIT%" --version "%SELECTED_VERSION%" --tag "%SELECTED_TAG%"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

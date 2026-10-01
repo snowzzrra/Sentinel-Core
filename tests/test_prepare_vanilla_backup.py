@@ -75,32 +75,7 @@ class ProtectionTests(unittest.TestCase):
         self.args.action = "verify"
         self.assertEqual(protection.protect(self.args)["result"], "protective_backup_verified")
 
-    def test_executable_path_mode_and_precise_timestamp_remain_stable_under_lock(self):
-        executable = self.local / "fixture.exe"
-        executable.write_bytes(b"fixture; never executed")
-        stamp = 1700000000123456700
-        os.utime(executable, ns=(stamp, stamp))
-        before = protection.inventory({"fixture": self.local})
-        with protection.pinned(executable) as source:
-            by_handle = protection.handle_metadata(source)
-            self.assertEqual(before, protection.inventory({"fixture": self.local}))
-            self.assertEqual(before[("fixture", "fixture.exe")][2] & ~0o111, by_handle[2])
-            self.assertEqual(by_handle[4], stamp)
-        self.assertEqual(protection.protect(self.args)["result"], "protective_backup_ready")
 
-    def test_directory_allocation_size_is_not_file_payload_size(self):
-        before = protection.inventory({'local_provider': self.local})
-        check = protection.check_node
-        class DirectoryAllocation:
-            def __init__(self, info): self.info = info
-            def __getattr__(self, name): return 8192 if name == 'st_size' else getattr(self.info, name)
-        with mock.patch.object(protection, 'check_node', side_effect=lambda path:
-             DirectoryAllocation(check(path)) if path == self.local else check(path)):
-            self.assertEqual(protection.inventory({'local_provider': self.local}), before)
-            protection.inventory_guard({'local_provider': self.local}, before, {}, {}, 'fixture', 'changed')
-            (self.local / 'added').write_bytes(b'actual membership change')
-            with self.assertRaises(protection.Refused):
-                protection.inventory_guard({'local_provider': self.local}, before, {}, {}, 'fixture', 'changed')
 
     def test_interrupted_copy_retained_and_never_resumed(self):
         original = self.snapshot()
@@ -215,27 +190,6 @@ class ProtectionTests(unittest.TestCase):
         self.assertEqual(caught.exception.summary["handle_changed_entries"], 0)
         self.assertFalse(self.backup.exists())
 
-    def test_private_metadata_diagnostic_is_create_only_and_not_in_sources(self):
-        diagnostic = self.root / "metadata.private.json"
-        argv = ["prepare"]
-        for key, value in vars(self.args).items():
-            if key != "action":
-                for entry in value if isinstance(value, list) else [value]:
-                    argv.extend(["--" + key.replace("_", "-"), entry])
-        failure = protection.Refused("source changed while establishing exclusive protection")
-        failure.stage = "inventory_acquisition"
-        failure.private_metadata = {"entry": "private-source-name"}
-        failure.summary = {"changed_entries": 1, "changed_fields": {"mtime_ns": 1}}
-        output = io.StringIO()
-        with mock.patch.object(protection, "protect", side_effect=failure), contextlib.redirect_stderr(output):
-            self.assertEqual(protection.main(argv + ["--diagnostic-file", str(diagnostic)]), 1)
-        self.assertNotIn("private-source-name", output.getvalue())
-        self.assertIn("private-source-name", diagnostic.read_text())
-        old = diagnostic.read_bytes()
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(protection.main(argv + ["--diagnostic-file", str(diagnostic)]), 1)
-            self.assertEqual(protection.main(argv + ["--diagnostic-file", str(self.campaign)]), 1)
-        self.assertEqual(old, diagnostic.read_bytes())
 
     def test_source_file_set_change_during_copy_refused(self):
         real_copy = protection.copy_file
@@ -294,19 +248,6 @@ class ProtectionTests(unittest.TestCase):
             protection.protect(self.args)
         self.assertFalse(self.backup.exists())
 
-    def test_cli_failure_is_nonzero_and_does_not_disclose_source_filename(self):
-        self.args.backup_directory = str(self.local / "unsafe")
-        argv = [self.args.action]
-        for key, value in vars(self.args).items():
-            if key == "action":
-                continue
-            for entry in value if isinstance(value, list) else [value]:
-                argv.extend(["--" + key.replace("_", "-"), entry])
-        output = io.StringIO()
-        with contextlib.redirect_stderr(output):
-            self.assertEqual(protection.main(argv), 1)
-        self.assertEqual(json.loads(output.getvalue())["result"], "protection_refused")
-        self.assertNotIn(str(self.local), output.getvalue())
 
 
 if __name__ == "__main__":

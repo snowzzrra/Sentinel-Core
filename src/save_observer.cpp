@@ -7,7 +7,6 @@ namespace sentinel::save {
 namespace {
 // Target SHA256 9809708c...1247. Root+9b38 ProfileManager and request witnesses
 // corroborated by native scheduling functions RVA 6744e0/66add0. Provider vtables
-// corroborated by RTTI and constructors; external SentinelDocs phase44-45 tables.
 // Never call platform selector/profile initializer: even its getter path mutates.
 constexpr uint32_t root_vtable_rva = 0x2aaa730;
 constexpr size_t observed_count = SC_SAVE_SELECTED_SLOT;

@@ -42,6 +42,11 @@ uint32_t phase_id(std::string_view phase) {
     return UINT32_MAX;
 }
 }
+std::string campaign_contract(const storage::Descriptor& descriptor,const std::string& namespace_id) {
+    return "sentinel-campaign-v2\nnamespace="+namespace_id+"\ngeneration="+
+        descriptor.identity.generation_fingerprint+"\nprovenance=synthetic-fixture\ncampaign=unified\nstarting_stage=hub\ndifficulty="+
+        std::to_string(descriptor.campaign.difficulty)+"\nslot=AUTOSAVE0\n";
+}
 bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,storage::Namespace& lease) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (descriptor.campaign.intent==storage::CampaignIntent::none) return true;
@@ -55,9 +60,7 @@ bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,st
     state_.difficulty=options_.difficulty; state_.resumed=options_.intent==storage::CampaignIntent::resume;
     // Exact native suffix, never an index inferred from directory enumeration.
     state_.slot="AUTOSAVE0"; directory_=owner.native_root()+"/GAME-"+state_.slot;
-    contract_="sentinel-campaign-v2\nnamespace="+owner.namespace_id()+"\ngeneration="+
-        descriptor.identity.generation_fingerprint+"\nprovenance=synthetic-fixture\ncampaign=unified\nstarting_stage=hub\ndifficulty="+
-        std::to_string(options_.difficulty)+"\nslot="+state_.slot+"\n";
+    contract_=campaign_contract(descriptor,owner.namespace_id());
     diagnostic_stage_=state_.resumed?BStage::resume:BStage::creation;
     owner.btrace.record(diagnostic_stage_,BStatus::entered,"campaign_contract_read");
     std::string record; auto r=lease.campaign_record(false,record);

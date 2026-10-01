@@ -35,6 +35,7 @@ def build(bin_dir, output, commit, dirty):
     if len(identities) != 1:
         raise ValueError("Core binary version/build identity does not match canonical version")
     build_id = identities.pop().decode()
+    files["prepare_vanilla_backup.py"] = (ROOT / "tools/prepare_vanilla_backup.py").read_bytes()
     for name, source in {
         "LICENSE.txt": ROOT / "LICENSE", "MinHook-LICENSE.txt": ROOT / "third_party/minhook/LICENSE.txt",
         "MinHook-NOTICE.txt": ROOT / "third_party/minhook/NOTICE",
@@ -70,7 +71,7 @@ def build(bin_dir, output, commit, dirty):
         "evidence": {"synthetic": "see evidence report paired by build_id", "windows_gameplay": "pending", "proton_gameplay": "pending"},
         "artifacts": [{"path": name, "role": "runtime_zip" if name.endswith(".zip") else
             "notice" if name.startswith("notices/") else "bootstrap" if name == "msimg32.dll" else
-            "probe" if name.endswith(".exe") else "core", "size": len(data), "sha256": digest(data)}
+            "probe" if name.endswith(".exe") else "helper" if name.endswith(".py") else "core", "size": len(data), "sha256": digest(data)}
             for name, data in sorted(files.items())],
     }
     for name, data in files.items():
@@ -102,4 +103,3 @@ if __name__ == "__main__":
     parser.add_argument("--dirty", action="store_true")
     args = parser.parse_args()
     build(args.bin, args.output, args.commit, args.dirty)
-

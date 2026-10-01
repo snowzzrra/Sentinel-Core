@@ -56,8 +56,11 @@ bool checkpoint(std::string_view value,const std::string& contract,const std::st
     value.remove_prefix(contract.size()); std::string_view part; uint64_t count=0;
     if (!take(value,"checkpoint=",part) || !number(part,out.number) || !out.number ||
         !take(value,"map=",part) || part.empty() || part.size()>191 ||
-        part.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/.-")!=part.npos ||
-        !take(value,"files=",part) || !number(part,count) || !count || count>4) return false;
+        part.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/.-")!=part.npos) return false;
+    if(value.substr(0,8)=="subtype=") {
+        if(!take(value,"subtype=",part) || (part!="1" && part!="2")) return false;
+    }
+    if(!take(value,"files=",part) || !number(part,count) || !count || count>4) return false;
     for (uint64_t i=0;i<count;++i) {
         if (!take(value,"file=",part)) return false;
         const auto first=part.find(','),last=part.rfind(','); uint64_t size=0;
@@ -137,8 +140,7 @@ RecoveryResult recover_campaign(storage::Namespace& lease,const storage::Descrip
     const auto& source=archive->metadata();
     const auto id=lease.metadata().namespace_id;
     const auto directory="ap-"+id.substr(0,40)+"/GAME-AUTOSAVE0";
-    const auto contract="sentinel-campaign-v1\nnamespace="+id+"\ngeneration="+descriptor.identity.generation_fingerprint+
-        "\nprovenance=synthetic-fixture\ncampaign=base\nstarting_stage=base_start\ndifficulty="+std::to_string(descriptor.campaign.difficulty)+"\nslot=AUTOSAVE0\n";
+    const auto contract=campaign_contract(descriptor,id);
     std::string current_contract,current_record;
     if(!user || source.steam_user!=user || source.provider!=recovery_provider || source.quarantine) return refuse("recovery_native_user_or_provider_mismatch");
     if(descriptor.campaign.difficulty>3 || source.contract!=contract || source.directory!=directory ||

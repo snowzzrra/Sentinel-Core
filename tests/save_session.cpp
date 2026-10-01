@@ -89,6 +89,9 @@ struct Fixture {
         path = std::filesystem::path(temp) / (L"sentinel-session-" + std::to_wstring(GetCurrentProcessId()) +
             L"-" + std::to_wstring(GetTickCount64()));
         CHECK(CreateDirectoryW(path.c_str(), nullptr));
+        wchar_t expanded[MAX_PATH]{};
+        CHECK(GetLongPathNameW(path.c_str(), expanded, MAX_PATH));
+        path = expanded;
     }
     ~Fixture() {
         const auto absolute = std::filesystem::absolute(path).lexically_normal();

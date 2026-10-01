@@ -124,7 +124,7 @@ int wmain(int argc,wchar_t** argv) {
   CHECK(native::validate_recorded(baseline,memory,image,old_prefix,stop,GetTickCount64()+3000,6,8)==SC_NATIVE_TARGET_NOT_UNIQUE);
   std::puts("REPRODUCED menu target8: correct callee with shared prologue refused by production validator");
   Snapshot identity{}, decoded{}; identity.core.abi_version=SC_ABI_VERSION;
-  strcpy_s(identity.core.version,"0.8.0"); strcpy_s(identity.core.build_id,"phase6-diagnostics");
+  strcpy_s(identity.core.version,"0.8.0"); strcpy_s(identity.core.build_id,"diagnostics-fixture");
   identity.pid=123; identity.process_created=456; identity.instance[0]=1;
   Message wire{}; WireResult status{}; sc_save_installation_snapshot installation{};
   auto size=encode_installation_response(wire,WireResult::ok,identity,baseline.inspect());
@@ -137,7 +137,7 @@ int wmain(int argc,wchar_t** argv) {
   CHECK(decode_save_admission_response(wire,size,status,decoded,roundtrip) && roundtrip.fault==17);
   admission.fault=18; size=encode_save_admission_response(wire,WireResult::ok,identity,admission);
   CHECK(!decode_save_admission_response(wire,size,status,decoded,roundtrip));
-  std::puts("PASS Phase6 installation group6 and campaign fault17 diagnostics decode");
+  std::puts("PASS installation group6 and campaign fault17 diagnostics decode");
   save::Installation menu;
   CHECK(campaign_menu::validate_native_targets(menu,memory,image,stop,targets));
   CHECK(!menu.inspect().primary_failure.sequence && !menu.inspect().created && !menu.inspect().enabled);
@@ -147,7 +147,7 @@ int wmain(int argc,wchar_t** argv) {
   CHECK(patched_label.inspect().primary_failure.target_index==36);
   CHECK(patched_label.inspect().primary_failure.rva==0x1859e20);
   memory.redirect=0;
-  std::puts("PASS pristine menu qualification; reproduced Phase9C target36 refusal after shared label patch");
+  std::puts("PASS pristine menu qualification; target36 refusal after shared label patch");
   auto wrong=targets; wrong[8].address=image.base+0x143c070;
   save::Installation wrong_call;
   CHECK(!campaign_menu::validate_native_targets(wrong_call,memory,image,stop,wrong));

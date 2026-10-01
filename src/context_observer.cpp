@@ -7,7 +7,6 @@ namespace {
 // SHA256 9809708c...1247, Ghidra 12.1.3/ReVa 7.3.1. Native mappath handler
 // RVA 0x437f10 -> root+0x50 -> map vtable+0x50 -> getter RVA 0x69a850.
 // Constructor RVA 0x685f50 owns idStr at +0x9a060; setter 0x6abf00 and
-// destructor 0x68acf0 corroborate. Evidence: external SentinelDocs Phase 4.2 report.
 constexpr uint32_t root_vtable_rva = 0x2aaa730, map_vtable_rva = 0x2ab30c8;
 constexpr size_t name_offset = 0x9a060;
 sc_context_field unknown(uint32_t reason, uint32_t error = 0) {
