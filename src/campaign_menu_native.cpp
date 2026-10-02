@@ -670,16 +670,25 @@ void eol_challenge_update(uintptr_t widget) {
 
 void hud_score_init(uintptr_t score) {
     original_hud_score_init(score);
-    if (!active()) return;
     __try {
-        uintptr_t meter=0;
-        if (read(score,0xf8,meter) && meter) present_hud_found(meter);
+        uintptr_t meter=0, root=0, parent=0;
+        if (read(score,0xf8,meter) && meter) {
+            if (read(meter,0x18,root) && root && read(root,0x10,parent) && parent)
+                if (const auto label=swf_child(parent,"apFoundLabel")) original_sprite_visibility(label,0,1);
+            if (active()) present_hud_found(meter);
+        }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 bool present_hud_found(uintptr_t meter) {
     uintptr_t root=0;
     if (!read(meter,0x18,root) || !root) return false;
-    const auto label=swf_child(root,"apFoundLabel");
+    const auto meter_root=root;
+    auto label=swf_child(root,"apFoundLabel");
+    bool independent=false;
+    if (!label && read(meter_root,0x10,root) && root) {
+        label=swf_child(root,"apFoundLabel");
+        independent=label!=0;
+    }
     const auto text_root=swf_child(label,"text");
     const auto title=swf_child(text_root,"txtVal",true);
     if (!title) return false;
@@ -690,9 +699,14 @@ bool present_hud_found(uintptr_t meter) {
         for (uint32_t i=0;i<projection.count;++i)
             if (campaign.map==projection.rows[i].map && (projection.rows[i].flags&SC_CAMPAIGN_REVEALED))
                 summary=projection.summaries[i];
-    if (summary.known!=1) { original_sprite_visibility(root,0,1); return true; }
+    if (summary.known!=1) {
+        original_sprite_visibility(label,0,1);
+        original_sprite_visibility(meter_root,0,1);
+        return true;
+    }
+    if (independent) original_sprite_visibility(meter_root,0,1);
     for (const auto leaf:{"background","corruption","glow_burst","pointCount","header"})
-        if (const auto sprite=swf_child(root,leaf)) original_sprite_visibility(sprite,0,1);
+        if (const auto sprite=swf_child(meter_root,leaf)) original_sprite_visibility(sprite,0,1);
     char value[64]; std::snprintf(value,sizeof(value),"ITEMS FOUND %u/%u",summary.found,summary.total);
     swf_frame(label,1);
     swf_frame(text_root,1);
@@ -709,7 +723,7 @@ bool present_hud_found(uintptr_t meter) {
         original_sprite_visibility(image,question!=0,1);
     }
     original_sprite_visibility(label,1,1);
-    original_sprite_visibility(root,1,1);
+    if (!independent) original_sprite_visibility(root,1,1);
     save::session().btrace.record(save::BStage::mission_count_fields,
         question ? save::BStatus::succeeded : save::BStatus::pending,"hud_found_presentation",0,
         {{"named_color",*reinterpret_cast<const uint32_t*>(text_root+0x6c)},{"material",question!=0},
