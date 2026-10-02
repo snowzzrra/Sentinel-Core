@@ -99,7 +99,7 @@ class CampaignComparisonTests(unittest.TestCase):
         with self.campaigns[0].open("rb"):
             with self.assertRaisesRegex(protection.Refused, "pin a path exclusively"):
                 comparison.compare(self.args)
-        self.stopped.side_effect = protection.Refused("exit DOOM and Steam completely before preparation")
+        self.stopped.side_effect = protection.Refused("exit DOOM completely before preparation")
         with self.assertRaisesRegex(protection.Refused, "exit DOOM"):
             comparison.compare(self.args)
 

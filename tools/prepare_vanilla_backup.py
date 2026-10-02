@@ -40,8 +40,7 @@ def failure_record(error, stage="protection"):
 
 MANIFEST = "vanilla-protection.json"
 SCHEMA = "sentinel-vanilla-protection-v1"
-BLOCKED_PROCESSES = {"doometernalx64vk.exe", "doometernal.exe", "steam.exe",
-                     "steamwebhelper.exe"}
+BLOCKED_PROCESSES = {"doometernalx64vk.exe", "doometernal.exe", "doomsandbox64vk.exe"}
 
 
 def kernel():
@@ -74,7 +73,7 @@ def require_stopped():
         method.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
     handle = api.CreateToolhelp32Snapshot(2, 0)
     if handle == ctypes.c_void_p(-1).value:
-        raise Refused("cannot establish stopped-game/Steam precondition")
+        raise Refused("cannot establish stopped-game precondition")
     try:
         entry = ProcessEntry()
         entry.dwSize = ctypes.sizeof(entry)
@@ -87,7 +86,7 @@ def require_stopped():
         if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES
             raise Refused("cannot complete process enumeration")
         if found:
-            raise Refused("exit DOOM and Steam completely before preparation")
+            raise Refused("exit DOOM completely before preparation")
     finally:
         api.CloseHandle(handle)
 

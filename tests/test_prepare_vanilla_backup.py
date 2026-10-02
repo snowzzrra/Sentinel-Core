@@ -43,6 +43,7 @@ class ProtectionTests(unittest.TestCase):
         # The fixture's writers are this test only. Never bypass the production
         # process check via any user-visible argument or environment setting.
         stopped = mock.patch.object(protection, "require_stopped")
+        self.stopped_patch = stopped
         self.stopped = stopped.start()
         self.addCleanup(stopped.stop)
 
@@ -242,11 +243,17 @@ class ProtectionTests(unittest.TestCase):
             protection.protect(self.args)
         self.assertFalse(self.backup.exists())
 
-    def test_game_or_steam_running_refuses_without_copy(self):
-        self.stopped.side_effect = protection.Refused("exit DOOM and Steam completely before preparation")
+    def test_game_running_refuses_without_copy(self):
+        self.stopped.side_effect = protection.Refused("exit DOOM completely before preparation")
         with self.assertRaisesRegex(protection.Refused, "exit DOOM"):
             protection.protect(self.args)
         self.assertFalse(self.backup.exists())
+
+    def test_stopped_game_backup_with_steam_allowed(self):
+        self.stopped_patch.stop()
+        result = protection.protect(self.args)
+        self.assertEqual(result["result"], "protective_backup_ready")
+        self.assertEqual(self.campaign.read_bytes(), b"original campaign fixture")
 
 
 
