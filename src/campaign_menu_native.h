@@ -5,11 +5,11 @@
 #include <string>
 
 namespace sentinel::campaign_menu {
-// Native runtime qualifies the bindings before domain hooks patch shared callees.
+// check the bindings before the domain hooks patch shared functions
 bool install(const engine::Binding&,HANDLE stop);
-std::array<native::Target,45> native_targets(uintptr_t base);
+std::array<native::Target,46> native_targets(uintptr_t base);
 bool validate_native_targets(save::Installation&,engine::Memory&,const engine::Image&,
-                             HANDLE,const std::array<native::Target,45>&);
+                             HANDLE,const std::array<native::Target,46>&);
 bool available();
 sc_campaign_reward mastery_reward(const char* perk);
 void reward_scroll(uintptr_t text);

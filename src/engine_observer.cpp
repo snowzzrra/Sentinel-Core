@@ -251,7 +251,7 @@ Binding bind_host(Memory& memory, HANDLE stop) {
     const DWORD length = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
     const auto deadline = GetTickCount64() + 2500;
     const auto reason = length && length < std::size(path) ? disk_hash(path, hash, stop, deadline) : SC_REASON_READ_FAILED;
-    // Separate finite scan budget so unavailable disk evidence does not skip unknown-build validation.
+    // separate finite scan budget so unavailable disk evidence doesn't skip unknown-build validation
     return bind(memory, std::move(image), hash, reason, stop, GetTickCount64() + 2000);
 }
 
@@ -335,7 +335,7 @@ sc_engine_snapshot sample(Memory& memory, const Binding& b, uint64_t sequence) {
         for (size_t i = 0; i < SC_ENGINE_FIELD_COUNT; ++i) {
             s.fields[i] = second.fields[i];
             if (!coherent) {
-                // Keep precise read errors; invalidate every observed value on any failed/changed pass.
+                // keep precise read errors; invalidate every observed value on any failed/changed pass
                 if (s.fields[i].validity != SC_OBSERVATION_UNKNOWN) s.fields[i] = unknown(SC_REASON_TRANSITION);
                 if (first.fields[i].validity == SC_OBSERVATION_UNKNOWN && first.fields[i].reason != SC_REASON_PARENT_UNAVAILABLE)
                     s.fields[i] = first.fields[i];

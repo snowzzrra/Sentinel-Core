@@ -26,7 +26,7 @@ engine::ReadResult pointer(engine::Memory& memory, uintptr_t owner, size_t offse
     return status;
 }
 struct Frame {
-    // Owned pointer chains kept internal solely to detect changed parents.
+    // owned pointer chains kept internal solely to detect changed parents
     std::array<uintptr_t, 12> pointers{};
     uint32_t state = 0, state_changed = 0;
     int32_t queued = 0;

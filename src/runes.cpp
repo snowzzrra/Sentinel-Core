@@ -49,17 +49,17 @@ void record_observed_locked(const SnapshotFacts& facts) {
 
 uint8_t compute_derived_crystal_pairs(uint8_t health, uint8_t armor, uint8_t ammo) {
     uint8_t mask = 0;
-    // Family 0 (Quickdraw Belch): health >= 1 && armor >= 1
+    // family 0 (quickdraw belch): health >= 1 && armor >= 1
     if (health >= 1 && armor >= 1) mask |= SC_CRYSTAL_PAIR_QUICKDRAW_BELCH;
-    // Family 1 (Loot Magnet): armor >= 2 && ammo >= 3
+    // family 1 (loot magnet): armor >= 2 && ammo >= 3
     if (armor >= 2 && ammo >= 3) mask |= SC_CRYSTAL_PAIR_LOOT_MAGNET;
-    // Family 2 (Napalm Belch): health >= 2 && ammo >= 1
+    // family 2 (napalm belch): health >= 2 && ammo >= 1
     if (health >= 2 && ammo >= 1) mask |= SC_CRYSTAL_PAIR_NAPALM_BELCH;
-    // Family 3 (Health for Blood): health >= 4 && armor >= 3
+    // family 3 (health for blood): health >= 4 && armor >= 3
     if (health >= 4 && armor >= 3) mask |= SC_CRYSTAL_PAIR_HEALTH_FOR_BLOOD;
-    // Family 4 (Belch Armor Boost): health >= 3 && ammo >= 2
+    // family 4 (belch armor boost): health >= 3 && ammo >= 2
     if (health >= 3 && ammo >= 2) mask |= SC_CRYSTAL_PAIR_BELCH_ARMOR_BOOST;
-    // Family 5 (Armor for Blood): armor >= 4 && ammo >= 4
+    // family 5 (armor for blood): armor >= 4 && ammo >= 4
     if (armor >= 4 && ammo >= 4) mask |= SC_CRYSTAL_PAIR_ARMOR_FOR_BLOOD;
     return mask;
 }
@@ -135,7 +135,7 @@ void bind_run_state_if_needed(uintptr_t player, uint64_t) {
         !calls.read(calls.context, player, after) ||
         (after.owned_normal & desired.owned_normal) != desired.owned_normal ||
         (after.owned_support & desired.owned_support) != desired.owned_support) return;
-    // Native save owns selections. Never replay stale cached choices or pair(0).
+    // native save owns selections. never replay stale cached choices or pair(0)
 }
 
 void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
@@ -178,7 +178,7 @@ void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
         const uint32_t delta = needed & ~before.owned_normal;
 
         if (!delta) {
-            // Already registered; idempotent completion without altering slots
+            // already registered; keep the slots as they are
             out.owned_normal_after = before.owned_normal;
             out.owned_support_after = before.owned_support;
             for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = before.selected_slots[i];
@@ -233,7 +233,7 @@ void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
         const uint32_t delta = needed & ~before.owned_support;
 
         if (!delta) {
-            // Already registered; idempotent completion without selecting
+            // already registered; don't select it
             out.owned_normal_after = before.owned_normal;
             out.owned_support_after = before.owned_support;
             for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = before.selected_slots[i];

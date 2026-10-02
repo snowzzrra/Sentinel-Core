@@ -267,7 +267,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 const auto use_at = history_line.find(use_json);
                 if (use_at != std::string::npos)
                     history_line.replace(use_at, use_json.size(), special_use_history(use_snapshot, exported_use_sequence));
-                // Two bounded generations; file work stays on the diagnostic exporter.
+                // two limited generations; file work stays on the diagnostic exporter
                 if (file != INVALID_HANDLE_VALUE && history_bytes + history_line.size() > 1024 * 1024) {
                     CloseHandle(file); file = INVALID_HANDLE_VALUE;
                     if (MoveFileExW(history_path.c_str(), (history_path + L".previous").c_str(), MOVEFILE_REPLACE_EXISTING)) {

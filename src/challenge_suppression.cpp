@@ -110,9 +110,7 @@ uint8_t read_hook(uintptr_t manager, uintptr_t decl) {
     return original_read(manager, decl);
 }
 
-// The canonical aggregate is exactly the authored three-member mission group:
-// the two other member declarations witnessed by the live group scan plus the
-// completing declaration, each a distinct live mission-flagged declaration.
+// use three distinct live mission entries: the two found by the group scan plus the one being completed
 bool canonical_group(const Scope& current) {
     if (!current.manager || !current.decl) return false;
     uintptr_t decls[canonical_group_members]{};
@@ -212,8 +210,7 @@ native::Target target(uintptr_t base, uint32_t offset, const char* hex) {
     return out;
 }
 
-// Leaf entries carry no unwind record, so uniqueness of the exact entry window
-// is established directly instead of through validate_target.
+// leaf functions have no unwind record; check the exact entry bytes directly for a unique match
 bool unique_leaf(engine::Memory& memory, const engine::Image& image, uintptr_t address,
                  const char* hex, HANDLE stop, uint64_t deadline) {
     std::array<uint8_t, 32> expected{};

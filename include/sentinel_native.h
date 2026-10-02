@@ -9,7 +9,7 @@
 #define SC_DIAGNOSTIC_MAX_DEADLINE_MS 5000u
 #define SC_DIAGNOSTIC_RETENTION_MS 30000u
 
-// Independent exact-size factual ABI. No gameplay authorization is represented.
+// this abi reports facts with an exact size; it gives no permission to change gameplay
 typedef enum sc_native_availability {
     SC_NATIVE_PENDING, SC_NATIVE_ENABLED, SC_NATIVE_DISABLED, SC_NATIVE_RETAINED
 } sc_native_availability;
@@ -42,7 +42,7 @@ typedef struct sc_native_scope {
     uint32_t pid;
     uint64_t process_created;
     uint8_t instance_id[16];
-    // Core event-derived generation, NOT an engine native_load_serial.
+    // core counts events for this generation; it isn't the engine's load serial
     uint64_t lifecycle_generation;
 } sc_native_scope;
 typedef struct sc_native_event {
@@ -53,10 +53,10 @@ typedef struct sc_native_snapshot {
     uint32_t size, abi_version;
     sc_native_scope scope;
     uint32_t availability, reason, site_revision, site_rva;
-    uint32_t phase; // 1 = after normal original common-frame return.
+    uint32_t phase; // 1 = after normal original common-frame return
     uint32_t installed_hooks, validator_reasons[3], retained_module;
-    uint32_t coverage; // bit 0 ExecuteMapChange, 1 primary FreeMapInstance,
-                       // bit 2 descriptor isCheckpointReload. Not exhaustive.
+    uint32_t coverage; // bit 0 changes the map, bit 1 frees the primary map instance,
+                       // bit 2 marks a checkpoint reload; other flags may exist
     uint32_t lifecycle, depth, checkpoint_flag_known, checkpoint_flag;
     uint64_t event_sequence, event_gap_count, history_oldest, history_overwritten;
     uint64_t callback_sequence, callback_at_ms;
@@ -74,7 +74,7 @@ typedef struct sc_diagnostic_request {
     sc_native_scope expected;
     uint64_t request_id;
     uint8_t nonce[16];
-    uint32_t deadline_ms; // Relative admission deadline, 1..5000 ms.
+    uint32_t deadline_ms; // relative admission deadline, 1..5000 ms
 } sc_diagnostic_request;
 typedef struct sc_diagnostic_result {
     uint32_t state, reason, cancel_requested, retrieved;
@@ -82,7 +82,7 @@ typedef struct sc_diagnostic_result {
     uint64_t request_id;
     uint8_t nonce[16];
     uint64_t admitted_at_ms, deadline_at_ms, claimed_at_ms;
-    uint64_t observed_at_ms; // Accepted sample completion (legacy uptime epoch); detail exposes start separately.
+    uint64_t observed_at_ms; // sample completion uses the uptime clock; detail reports the start separately
     uint64_t executed_at_ms, completed_at_ms, retrieved_at_ms;
     uint32_t thread_id, site_revision, phase, lifecycle, game_state;
     sc_context_map current_map;
@@ -101,11 +101,11 @@ enum {
 typedef struct sc_diagnostic_detail {
     uint32_t revision, stage, observation_attempted, observation_accepted;
     uint32_t timing_valid, timing_error, claim_lock_missed;
-    uint64_t observation_started_at_ms; // GetTickCount64 uptime epoch.
-    uint64_t observation_elapsed_ns, observation_budget_ns; // QPC wall interval.
+    uint64_t observation_started_at_ms; // gettickcount64 uptime epoch
+    uint64_t observation_elapsed_ns, observation_budget_ns; // qpc wall interval
     uint32_t sample_reason, state_validity, state_reason, state_error;
     uint32_t map_validity, map_reason, map_error;
-    // 0 unknown/not attempted, 1 clear, 2 set, 3 unreadable.
+    // 0 unknown/not attempted, 1 clear, 2 set, 3 unreadable
     uint32_t pending_before, pending_before_reason, pending_before_error;
     uint32_t pending_after, pending_after_reason, pending_after_error;
 } sc_diagnostic_detail;

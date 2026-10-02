@@ -97,7 +97,7 @@ void locators_and_identity() {
     CHECK(unknown.root == root && unknown.metadata.profile == SC_PROFILE_NONE);
     const auto before = f.memory.copies;
     const auto s = sample(f.memory, unknown, 1);
-    CHECK(f.memory.copies - before == 4); // Root/vtable twice, NO guessed child/global reads.
+    CHECK(f.memory.copies - before == 4); // root/vtable twice, no guessed child/global reads
     CHECK(s.fields[SC_ENGINE_ROOT].validity == SC_OBSERVATION_PROVISIONAL);
     CHECK(s.fields[SC_ENGINE_MAP_PRESENT].reason == SC_REASON_PROFILE_UNRECOGNIZED);
     CHECK(s.fields[SC_ENGINE_LOADING].reason == SC_REASON_PROFILE_UNRECOGNIZED);

@@ -20,24 +20,24 @@
 #include <cstddef>
 #include <string>
 
-// Native client value types, NOT wire layouts or a DLL ABI.
+// native client value types, not wire layouts or a dll abi
 namespace sentinel {
 constexpr uint16_t wire_version = 1;
 constexpr uint16_t inspect_operation = 1;
 constexpr uint64_t inspect_capability = 1;
 constexpr uint16_t engine_operation = 2;
-constexpr uint64_t engine_capability = 2; // Operation 2 only; basic op 1 is unchanged.
+constexpr uint64_t engine_capability = 2; // operation 2 only; basic op 1 is unchanged
 constexpr uint16_t context_operation = 3;
 constexpr uint64_t context_capability = 4;
 constexpr uint16_t native_operation = 4, diagnostic_submit_operation = 5,
     diagnostic_result_operation = 6, diagnostic_cancel_operation = 7;
 constexpr uint64_t native_capability = 8, diagnostic_capability = 16;
-// Detail revision 1, explicit new operations; old payloads remain byte-for-byte.
+// detail revision 1 has separate operations; keep the base payload bytes the same
 constexpr uint16_t diagnostic_detail_submit_operation = 8,
     diagnostic_detail_result_operation = 9, diagnostic_detail_cancel_operation = 10;
 constexpr uint64_t diagnostic_detail_capability = 32;
 constexpr uint16_t save_operation = 11;
-constexpr uint64_t save_capability = 64; // Read-only save observation; no native mutation.
+constexpr uint64_t save_capability = 64; // read-only save observation; no native change
 constexpr uint16_t save_admission_operation = 12;
 constexpr uint64_t save_admission_capability = 128;
 constexpr uint16_t save_write_operation = 13;
@@ -83,7 +83,7 @@ enum class ServiceState : uint32_t { stopped, listening, stopping, failed };
 struct Snapshot {
     sc_status core{};
     uint32_t pid = 0;
-    uint64_t process_created = 0; // Windows FILETIME ticks, never a JSON number.
+    uint64_t process_created = 0; // windows filetime ticks, never a json number
     std::array<uint8_t, 16> instance{};
     ServiceState service = ServiceState::stopped;
     uint32_t service_error = 0;
@@ -96,11 +96,11 @@ struct Inspection {
     ProbeResult result = ProbeResult::io_error;
     uint32_t win32_error = 0;
     uint32_t server_pid = 0;
-    const char* failure_stage = "none"; // Client-side API stage; never from the server.
+    const char* failure_stage = "none"; // client-side api stage; never from the server
     const char* target_state = "unverified";
     uint32_t target_wait_error = 0;
     uint64_t verified_process_created = 0;
-    std::wstring host_path; // Obtained from the OS, not the reply.
+    std::wstring host_path; // obtained from the os, not the reply
     Snapshot snapshot{};
     sc_engine_snapshot engine{};
     sc_context_snapshot context{};

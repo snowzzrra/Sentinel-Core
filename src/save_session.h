@@ -32,7 +32,7 @@ constexpr uint32_t required_routes = startup_route | collector_route | campaign_
 struct ProfileChoice { std::array<char, 16> name{}; int32_t index = -1; };
 struct ProfileWrite { ProfileChoice choice; unsigned campaign = 0; uint64_t sequence = 0; };
 struct NativeCampaignCatalog { std::vector<std::string> slots; std::string selected; };
-// One retained startup PROFILE request. No payloads, user IDs or callback I/O.
+// one kept startup profile request. no payloads, user ids or callback i/o
 enum class ProfileStage : size_t {
     request, profile_created, catalog_created, first_poll, prepare, decode, transport,
     catalog_poll, catalog, reader, framing, checksum, parse, overlay, application, root, admission, write_after_refusal, output_validation, count
@@ -69,14 +69,14 @@ struct ProfileTrace {
     bool identity_matched = false;
     ProfileOwnershipTrace ownership{};
 };
-// Diagnostic metadata only: no payload import or admission follows from these reads.
+// diagnostic metadata only: no payload import or admission follows from these reads
 struct UnroutedSource {
     uintptr_t data = 0;
     std::array<char, 64> name{};
     int32_t length = 0;
     uint32_t step = 0, reason = 0, error = 0, kind = 0;
 };
-// One immutable first unowned boundary, not a frame log. Native addresses remain private.
+// one fixed first unowned boundary, not a frame log. native addresses remain private
 struct UnroutedTrace {
     uint64_t at_ms = 0;
     const char* route = "not_observed";
@@ -202,11 +202,11 @@ private:
     unsigned profile_campaign_ = 0;
     uint64_t profile_sequence_ = 0;
     std::map<uintptr_t, ProfileWrite> profile_writes_;
-    std::mutex selection_mutex_; // Serializes remote record writes, independently of Session state.
+    std::mutex selection_mutex_; // serializes remote record writes, independently of session state
     std::array<uint64_t, 3> persisted_selection_{};
     bool choice_ready_ = false, prospective_choice_ = false, baseline_ready_ = false, profile_failed_ = false;
     ProfileOwner profile_owner_{};
-    std::string vanilla_name_; // Written once; borrowed JSON strings remain valid until process exit.
+    std::string vanilla_name_; // written once; borrowed json strings remain valid until process exit
     int32_t vanilla_index_ = -1;
 };
 Session& session();

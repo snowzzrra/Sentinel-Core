@@ -11,7 +11,7 @@ std::string campaign_contract(const storage::Descriptor&, const std::string& nam
 class Session;
 struct ProfileWrite;
 enum class ProfilePublication { refused, persisted, checkpoint_owned };
-// Facts captured by the native lifecycle owner, never by diagnostic publication.
+// facts captured by the native lifecycle owner, never by diagnostic publication
 struct CampaignTransition {
     uint64_t event_id=0, generation_before=0, generation_after=0, native_return=0, at_ms=0;
     uint32_t game=UINT32_MAX, depth=0, observation_reason=0, difficulty=UINT32_MAX;

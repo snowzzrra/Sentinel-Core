@@ -25,8 +25,7 @@ struct ReadbackFuture : SaveFuture {
             owner.native_writes.readback_result(operation, false);
         }
         if (native) native->vtable->destroy(native, 1);
-        // Worker references may outlive this wrapper. The actual SaveData Clear/
-        // destructor detour removes the pointer mapping, never this wrapper.
+        // workers may outlive this wrapper; the native save clear/destructor hook removes the pointer mapping
         calls.native.catalog.release(&data);
     }
 };
@@ -51,7 +50,7 @@ bool populate(ReadbackFuture& future, engine::Memory& memory) {
             "readback_manifest_file_not_scoped", {{"file_index", count}, {"name_length", name.size()}})) return false;
         void* allocation = future.calls.native.allocate(0x190);
         if (!trace.check(allocation != nullptr, "readback_stream_allocation_failed", {{"file_index", count}, {"bytes", 0x190}})) return false;
-        // Preserve native ownership and the stored-byte verification flag.
+        // keep native ownership and the stored-byte verification flag
         future.calls.construct_stream(allocation, name.c_str() + prefix.size(), 0x140);
         const auto stream = reinterpret_cast<uintptr_t>(allocation);
         std::memcpy(reinterpret_cast<void*>(files + static_cast<uintptr_t>(count) * 8), &stream, 8);
@@ -219,7 +218,7 @@ ReadWorkerResult* prepare_readback(Session& owner, engine::Memory& memory, uintp
             trace.read(memory, table, 0x78, size, "readback_file_size_function_unreadable") &&
             trace.check(size != nullptr, "readback_file_size_function_null");
     } catch (const std::bad_alloc&) { trace.check(false, "readback_prepare_allocation_failed"); }
-    // Preserve the native weak waiter cleanup even for a failed manifest.
+    // keep the native weak waiter cleanup even for a failed manifest
     if (!valid) manifest.payloads.clear();
     SizeProxy proxy{size_table.data(), remote, size, manifest, owner, id};
     auto* result = invoke_prepare(original, context, out, waiter, reinterpret_cast<uintptr_t>(&proxy), remote, &owner.btrace, id);

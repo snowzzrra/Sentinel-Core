@@ -4,7 +4,7 @@
 
 namespace sentinel::commands {
 struct ManualRequest {
-    uint32_t kind = 0; // 1 noclip toggle, 2 off, 3 on, 4 spawn.
+    uint32_t kind = 0; // 1 noclip toggle, 2 off, 3 on, 4 spawn
     char entity_def[256]{};
     bool explicit_position = false;
     float position[3]{};

@@ -159,9 +159,9 @@ bool payload(engine::Memory& memory, uintptr_t data, const ProfileCalls& calls, 
         if (result.reason) {
             const char* predicate = result.reason == SC_REASON_OUT_OF_RANGE ? "profile_copy_policy_rejected" :
                 result.reason == SC_REASON_PARTIAL_READ ? "profile_buffer_partial_read" : "profile_buffer_inaccessible";
-            return record(ProfileStage::framing, false, predicate); // Partial vector is discarded, never parsed.
+            return record(ProfileStage::framing, false, predicate); // partial vector is discarded, never parsed
         }
-        offset += size; // Whole span was checked; offset <= bounded length.
+        offset += size; // whole span was checked; offset <= limited length
     }
     Files after{}; uintptr_t next_file = 0, next_buffer = 0; uint64_t next_length = 0, next_capacity = 0;
     const auto stable_field = [&](uintptr_t base, size_t offset, auto& value) {
@@ -307,15 +307,15 @@ uint64_t read_profile(Session& owner, engine::Memory& memory, SaveReference* ref
     if (!valid) {
         owner.profile_step(ProfileStage::reader, ProfileStatus::refused, predicate);
         owner.fail_profile(); calls.release(reference); calls.release(data);
-        return 0x10; // Consumed by 14148cc10 without its error-4 reset/error-0x100 save fallback.
+        return 0x10; // consumed by 14148cc10 without its error-4 reset/error-0x100 save fallback
     }
     Reading reading(context);
-    const auto result = calls.read(reference, data); // Consumes both references on every native exit.
+    const auto result = calls.read(reference, data); // consumes both references on every native exit
     owner.profile_step(ProfileStage::reader, result == 0 && context.applied ? ProfileStatus::succeeded : ProfileStatus::refused,
         result ? "native_reader_result" : context.applied ? "native_reader_and_overlay_completed" : "overlay_not_called",
         true, 0, static_cast<int64_t>(result));
     if (result != 0 || !context.applied) {
-        owner.fail_profile(); return 0x10; // Keep native cleanup; suppress reset-producing error remapping.
+        owner.fail_profile(); return 0x10; // keep native cleanup; suppress reset-producing error remapping
     }
     owner.profile_step(ProfileStage::application, ProfileStatus::succeeded, "native_reader_settings_cache_completed", true);
     if (!owner.profile_read_completed()) {
@@ -420,7 +420,7 @@ void prepare_profile_write(Session& owner, engine::Memory& memory, SaveReference
         uintptr_t native_user, const char* suffix, PrepareProfile original, RetainProfileReference retain, const ProfileCalls& calls) {
     if (!owner.routed()) {
         owner.unrouted_import("profile_write_prepare", "mutate", 0, native_user);
-        original(profile, data, native_user, suffix); return; // Native caller still owns reference cleanup.
+        original(profile, data, native_user, suffix); return; // native caller still owns reference cleanup
     }
     if (!owner.native_io()) owner.profile_step(ProfileStage::write_after_refusal, ProfileStatus::refused,
         "native_profile_encode_attempt_after_fault");

@@ -18,7 +18,7 @@ class BackupJob;
 struct SaveReference;
 struct SaveFuture;
 struct SaveResult;
-// Internal SDK-stage variant. The provider later maps this to its 24-byte result.
+// internal sdk-stage variant. the provider later maps this to its 24-byte result
 struct SdkWriteResult { int64_t state, outcome; uint64_t detail, value; };
 using PollSdkWrite = SdkWriteResult* (*)(uintptr_t, SdkWriteResult*, void*);
 using SdkWriteCallback = void (*)(uintptr_t, const int32_t*, bool);
@@ -103,7 +103,7 @@ public:
     bool request_backup(uint64_t operation, const std::shared_ptr<BackupJob>&);
     std::shared_ptr<BackupJob> backup(uint64_t operation) const;
 private:
-    // Helpers below run only under mutex_.
+    // helpers below run only under mutex_
     NativeWriteOperation* operation(uint64_t);
     void complete(SdkWriteObservation&, SdkFileWrite&);
     mutable std::mutex mutex_;
@@ -112,7 +112,7 @@ private:
     std::map<uintptr_t, NativeWriteJob> jobs_;
     uint64_t next_ = 0, next_operation_ = 0;
     bool lost_ = false;
-    BTrace* diagnostics_ = nullptr; // Session-owned; all access is under mutex_.
+    BTrace* diagnostics_ = nullptr; // session-owned; all access is under mutex_
 };
 // Lexical ownership of the exact native child being polled. Nothing from this
 // stack scope is retained by a job; constructors copy its stable operation ID.

@@ -37,8 +37,7 @@ void invoke(Invocation* scope, const SubmissionCalls* calls) {
             calls->save(calls->root, &task, 0, 0, 0);
             scope->result.task_returned = task.control != 0;
         } __finally {
-            // The native manager retains its own reference to the task. Releasing
-            // this returned reference does not claim cancellation/completion.
+            // the native manager keeps its own reference to the task. releasing this returned reference doesn't claim cancellation/completion
             if (task.control) calls->release(&task);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {

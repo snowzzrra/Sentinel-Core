@@ -153,7 +153,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
         const uint32_t delta_u = needed.persistent_upgrades & ~before.persistent_upgrades;
 
         if (!delta_w && !delta_e && !delta_s && !delta_u) {
-            // Already owned; idempotent completion without side effects
+            // already owned; finish without changing anything
             out.weapons_after = before.weapons;
             out.equipment_after = before.equipment;
             out.ice_bomb_after = before.ice_bomb;
@@ -219,7 +219,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
         if (before.health_tier >= needed.health_tier &&
             before.armor_tier >= needed.armor_tier &&
             before.ammo_tier >= needed.ammo_tier) {
-            // Already at or above requested capacity tiers; idempotent completion
+            // capacity is already high enough; finish without changing it
             out.weapons_after = before.weapons;
             out.equipment_after = before.equipment;
             out.ice_bomb_after = before.ice_bomb;

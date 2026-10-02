@@ -3,7 +3,7 @@
 #include <windows.h>
 
 namespace sentinel {
-// Only Core's serialized explicit lifecycle calls start/stop; no DllMain work.
+// only core's serialized explicit lifecycle calls start/stop; no dllmain work
 DWORD start_inspection();
 DWORD stop_inspection();
 Snapshot current_snapshot();

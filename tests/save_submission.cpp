@@ -34,7 +34,7 @@ SaveReference* make(uintptr_t manager, SaveReference* out, uint32_t user, uintpt
     CHECK(accepted == (m.mode != 1 && m.mode != 2 && m.mode != 12 && !(m.mode == 3 && m.native_calls == 2)));
     if (m.mode == 4) CHECK(!write(m));
     if (m.mode == 10) {
-        // TLS correlation never crosses onto an unrelated worker thread.
+        // tls correlation never crosses onto an unrelated worker thread
         std::thread worker([&] { const auto id = m.writes.open_provider(0x9999, directory);
             CHECK(capture_submission(m.writes, id, directory) && !m.writes.backup(id)); });
         worker.join();
@@ -51,7 +51,7 @@ void release(SaveReference* ref) { CHECK(ref->control == task); ++active->releas
 SaveReference* root(uintptr_t root_value, SaveReference* out, uint8_t a, uint8_t b, uint8_t c) {
     auto& m = *active; CHECK(root_value == 0x123 && !a && !b && !c);
     if (m.mode == 6) RaiseException(0xe0424444, 0, 0, nullptr);
-    // Native helper work preceding the slot factory must remain unassociated.
+    // helper work before the slot factory isn't part of this submission
     if (m.mode == 9) CHECK(write(m) && !m.captured);
     if (m.mode != 8) native_save_factory(m.writes, m.mode == 1 ? caller + 1 : caller, caller,
         0x111, out, 7, 0x222, make);
@@ -74,7 +74,7 @@ void run_submission_contracts() {
         if (result.matched) CHECK(progress.state == BackupState::pending && progress.operation == result.operation);
         else if (result.operation) CHECK(progress.cancel_requested);
         else CHECK(progress.state == BackupState::failed);
-        // Includes the SEH paths: neither TLS pointer may reference a dead frame.
+        // includes the seh paths: neither tls pointer may reference a dead frame
         const auto id = m.writes.open_provider(0x8888, directory);
         CHECK(capture_submission(m.writes, id, directory) && !m.writes.backup(id));
         for (uint64_t n = 1; n <= id; ++n) m.writes.close_provider(n);

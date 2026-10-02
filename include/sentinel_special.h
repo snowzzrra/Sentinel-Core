@@ -42,7 +42,7 @@ enum {
     SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE = 1u << 4
 };
 
-/* Ammo Refill presentation flags projected by the authoritative AP owner. */
+/* ap supplies the ammo refill display flags */
 enum {
     SC_SPECIAL_REFILL_CONNECTED     = 1u << 0,
     SC_SPECIAL_REFILL_AUTHORITATIVE = 1u << 1,
@@ -71,7 +71,7 @@ typedef struct sc_special_request {
     uint32_t own_hammer;        /* desired cumulative ownership */
     uint32_t hammer_tier;       /* desired permanent tier (0..2) */
     uint32_t selected;          /* selection intent / projection */
-    uint32_t refill_balance;    /* publish: authoritative available charges */
+    uint32_t refill_balance;    /* publish: refill charges from ap */
     uint32_t refill_flags;      /* publish: SC_SPECIAL_REFILL_* presentation flags */
     uint64_t refill_request_id; /* take/execute: request identity */
     uint32_t refill_authorize;  /* execute: SC_SPECIAL_REFILL_AUTHORIZED or 0 */
@@ -120,7 +120,7 @@ typedef struct sc_special_result {
     uint32_t native_selected;                                        /* selection policy with POLICY flag; not observed native use */
     uint32_t native_state_known;                                     /* SC_SPECIAL_KNOWN_* */
     uint32_t crucible_charge, crucible_charge_max;                   /* native resource observation */
-    uint32_t refill_balance, refill_flags;                           /* AP-authoritative projection */
+    uint32_t refill_balance, refill_flags;                           /* display values from ap */
     uint64_t refill_request_id;                                      /* pending/last request identity */
     uint32_t refill_request_state;
     uint32_t refill_executed;                                        /* native execution confirmed */

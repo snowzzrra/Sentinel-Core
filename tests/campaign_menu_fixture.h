@@ -186,7 +186,7 @@ void exercise() {
         test_root_campaign(root_screen,campaign+source*8);
     }
     CHECK(root_navigations==3 && root_campaigns==3);
-    CHECK(root_moves==6); // Repeated native navigation must not shift again.
+    CHECK(root_moves==6); // repeated native navigation must not shift again
     for (size_t i=3;i<9;++i) {
         CHECK(at<float>(transform_address,i*0x40+0x14)==float((i-2)%5)*30.f);
         CHECK(at<float>(transform_address,i*0x40+0x18)==float(i-2)*57.f);
@@ -224,7 +224,7 @@ void exercise() {
     for (uint32_t i=1;i<3;++i) { request.index=i; request.row=rows[i]; CHECK(exchange(campaign_row_operation).status==0); }
     request.index=0; request.row={}; request.row.id=2;
     CHECK(exchange(campaign_commit_operation).committed_revision==1);
-    CHECK(exchange(campaign_inspect_operation).rendered_revision==0); // ACK is not rendering.
+    CHECK(exchange(campaign_inspect_operation).rendered_revision==0); // ack isn't rendering
     at<int>(screen,0x108)=-1; test_update(screen);
     CHECK(populations==1 && at<uintptr_t>(campaign,0x1a8)==source_list);
     CHECK(strings[widget_addresses[2]+0x188]=="??? / LOCKED" && at<int>(widget_addresses[2],0x154)==5);
@@ -299,7 +299,7 @@ void exercise() {
     for (uint32_t i=0;i<3;++i) { request.index=i; request.row=rows[i]; CHECK(exchange(campaign_row_operation).status==0); }
     request.index=0; request.row={}; request.row.id=2; CHECK(exchange(campaign_commit_operation).status==0);
     test_update(screen); CHECK(populations==1 && at<NativeString>(retained,0).data==retained_map);
-    CHECK(exchange(campaign_inspect_operation).loaded_id==0); // Selection is not a completed load.
+    CHECK(exchange(campaign_inspect_operation).loaded_id==0); // selection isn't a completed load
     at<uintptr_t>(screen,0x870)=0; test_update(screen);
     CHECK(populations==2 && at<int>(list,0x150)==2);
     CHECK(at<uintptr_t>(combat_meter,0x198)==0 && at<int>(combat_meter,0x15c)==0);
@@ -337,13 +337,13 @@ void actions() {
     calls.widget_state=[](uintptr_t widget,int state) { at<int>(widget,0x154)=state; };
     test_calls(calls);
     at<int>(children[1],0x154)=5;
-    present_campaign_actions(owner,false); // Projection arrived after a disabled native button.
+    present_campaign_actions(owner,false); // projection arrived after a disabled native button
     CHECK(strings[children[0]+0x188]=="RETURN TO FORTRESS");
     CHECK(strings[children[1]+0x188]=="CHOOSE MISSION");
     CHECK(at<int>(children[1],0x154)==1 && at<int>(list,0x150)==1);
     at<int>(list,0x150)=0;
     present_campaign_actions(owner,false);
-    CHECK(at<int>(list,0x150)==0); // Do not steal a subsequent manual focus change.
+    CHECK(at<int>(list,0x150)==0); // don't steal focus after a manual change
     present_campaign_actions(owner,true);
     CHECK(at<int>(list,0x150)==1);
     std::puts("PASS Hub action labels, late availability, entry focus and manual focus retention");

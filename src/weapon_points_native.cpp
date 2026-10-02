@@ -62,12 +62,11 @@ void notify_hook(uintptr_t self, uint32_t code, uintptr_t data) {
     if (active() && code == 0xd && rva(_ReturnAddress()) == 0x13ce5b1 &&
         rva(reinterpret_cast<void*>(add_origin)) == 0x147546e &&
         challenge::consume_qualified_battery_toast()) return;
-    if (active() && code == 0x39) code = 0x3a; // Native Slayer Gate completion without points.
+    if (active() && code == 0x39) code = 0x3a; // native slayer gate completion without points
     original_notify(self, code, data);
 }
 void exchange_hook(uintptr_t self, uintptr_t player) {
-    // Native menu action 0x31 exchanges WUP for Mastery Tokens. AP Mastery
-    // ownership is independent, so this conversion is unavailable in AP.
+    // native menu action 0x31 exchanges wup for mastery tokens. ap mastery ownership is independent, so this conversion is unavailable in ap
     if (!active()) original_exchange(self, player);
 }
 native::Target target(uintptr_t base, uint32_t offset, const char* hex) {
@@ -105,8 +104,7 @@ bool read(void*, uintptr_t p, uint32_t& balance, uint32_t& gained) {
 }
 uint32_t grant(void*, uintptr_t p, uint32_t amount) {
     uint32_t error = 0;
-    // The typed grant calls the validated trampoline directly. Nested vanilla
-    // rewards retain their own provenance; they do not inherit an AP bypass.
+    // the typed grant calls the validated trampoline directly. nested vanilla rewards keep their own source; they don't inherit an ap bypass
     __try { original_add(p, 0, static_cast<int32_t>(amount), 1); }
     __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
     return error;
@@ -151,7 +149,7 @@ void use_fixture(Calls value, const char* id) {
 }
 #endif
 void install(const engine::Binding& binding, HANDLE stop) {
-    // Called by the existing pinned native owner; no second lifecycle/queue.
+    // called by the existing pinned native owner; no second lifecycle/queue
     image_base = binding.image.base; image_size = binding.image.size; engine_root = binding.root;
     engine::LocalMemory memory;
     struct Site { uint32_t offset; const char* bytes; void* detour; void** original; };

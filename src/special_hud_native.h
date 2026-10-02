@@ -1,6 +1,6 @@
 #pragma once
 
-// Included in special_native.cpp's private namespace. The engine owns all clips.
+// included in special_native.cpp's private namespace. the engine owns all clips
 namespace hud {
 struct Value { uint32_t type, reserved; uintptr_t payload; };
 struct alignas(8) String { unsigned char storage[0x30]; };
@@ -108,8 +108,7 @@ bool hold_ice_frame(uintptr_t parent, bool cursed) {
 }
 
 bool key_offset(uintptr_t clip, uintptr_t source, uintptr_t movie, Point& out) {
-    // The 0x40 transform slot contains swfMatrix_t after its 4-byte header:
-    // xx, yy, xy, yx, tx, ty. swf.position writes tx/ty at +0x14/+0x18.
+    // the 0x40 transform slot contains swfmatrix_t after its 4-byte header: xx, yy, xy, yx, tx, ty. swf.position writes tx/ty at +0x14/+0x18
     Point point{};
     for (unsigned i = 0; i < 4 && clip; ++i) {
         if (*reinterpret_cast<uintptr_t*>(clip + 0x30) != movie) return false;
@@ -149,8 +148,7 @@ Point center(Rect rect) { return {(rect.tl.x + rect.br.x) * 0.5f,
                                   (rect.tl.y + rect.br.y) * 0.5f}; }
 
 bool unrender(uintptr_t clip, Point point, Point& out) {
-    // RenderSprite (0x18341d0) stores the rendered bounds at +0xa8 and
-    // their local-to-render matrix at +0x90. Both describe the same render.
+    // rendersprite (0x18341d0) stores the rendered bounds at +0xa8 and their local-to-render matrix at +0x90. both describe the same render
     const auto m = reinterpret_cast<const float*>(clip + 0x90);
     const float det = m[0] * m[1] - m[2] * m[3];
     const float area = std::fabs(m[0] * m[1]) + std::fabs(m[2] * m[3]);
@@ -189,7 +187,7 @@ bool affine_to(uintptr_t clip, uintptr_t ancestor, uintptr_t movie, Point point,
 }
 
 bool bounds(uintptr_t clip, uintptr_t parent, Rect& out) {
-    // Convert the cached render rectangle directly into WeaponInfo space.
+    // convert the cached render rectangle directly into weaponinfo space
     Rect local{};
     if (!raw_bounds(clip, local)) return false;
     const auto movie = *reinterpret_cast<uintptr_t*>(clip + 0x30);
@@ -334,7 +332,7 @@ bool key_name(unsigned vk, char (&name)[16]) {
     return scan && GetKeyNameTextA(static_cast<LONG>(scan << 16), name, sizeof(name)) > 0;
 }
 
-// Clone native sprites under their live SWF parent, without copying objects.
+// clone native sprites under their live swf parent, without copying objects
 uintptr_t clone(uintptr_t source, uintptr_t parent, const char* name, bool& created) {
     if (const auto found = child(parent, name)) return found;
     if (!source || !parent) return 0;
@@ -402,8 +400,7 @@ GraphicsSource graphics_source(uintptr_t element) {
 bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSource& context,
              unsigned keys, uint64_t epoch, bool& clips_applied) {
     clips_applied = false;
-    // Avoid concurrent or reentrant mutations of the same SWF tree without
-    // waiting inside unknown engine callbacks.
+    // avoid concurrent or reentrant mutations of the same swf tree without waiting inside unknown engine callbacks
     static std::atomic_flag presenting = ATOMIC_FLAG_INIT;
     if (presenting.test_and_set(std::memory_order_acquire)) return false;
     struct ReleasePresentation {
@@ -419,7 +416,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     }
     static std::mutex state_mutex;
     const auto source = context.source;
-    // The refill template supplies pips; geometry comes from a rendered Special.
+    // the refill template supplies pips; geometry comes from a rendered special
     auto layout_source = source;
     const auto parent = context.parent, movie = context.movie;
     Rect source_probe{};
@@ -501,7 +498,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     auto refill_bind = child(parent, "apAmmoRefillBind");
     auto special_bind = child(parent, "apSpecialToggleBind");
     const bool visible = owner.namespace_valid && *reinterpret_cast<uint8_t*>(element + 0x209);
-    // All references come from this update's live parent, including invalidation.
+    // all references come from this update's live parent, including invalidation
     if (!visible) {
         restore_native(crucible_position, context.crucible_root, movie, epoch);
         restore_native(hammer_position, context.hammer_root, movie, epoch);
@@ -601,7 +598,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
             (special_x + original_plate.x - original_special.x)) * render_row_slope :
             icon_baseline_y};
     const float source_icon_width = source_icon_bounds.br.x - source_icon_bounds.tl.x;
-    // SWF parent coordinates measured from the accepted complete-inventory layout.
+    // swf parent coordinates measured from the accepted complete-inventory layout
     const bool authored_refill = !native_arrow_visual || !flame_icon_visual || !active_icon_visual;
     const Point refill_icon_target = authored_refill ? Point{97.33f, -60.93f} :
         Point{arrow_bounds.br.x + native_gap + source_icon_width * 0.5f, icon_baseline_y};
@@ -813,7 +810,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         return false;
     };
     const bool known = owner.refill_balance <= 3;
-    // The equipment clone carries its donor CTA; the AP labels are separate clips.
+    // the equipment clone carries its donor cta; the ap labels are separate clips
     if (const auto cta = child(child(refill, "icon"), "cta")) show(cta, false);
     const auto icon_group = child(refill, "icon");
     if (const auto small = child(icon_group, "iconSmall")) show(small, false);

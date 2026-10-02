@@ -134,7 +134,7 @@ void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int
         CHECK(error == ERROR_PIPE_CONNECTED || finish_io(pipe.value, ov, connected, error, nullptr, 2000, count) == ERROR_SUCCESS);
         Message request{};
         CHECK(transfer(pipe.value, false, request.data(), static_cast<DWORD>(request.size()), count, nullptr, 2000) == ERROR_SUCCESS);
-        if (variant == 0) { // An available endpoint whose server never replies.
+        if (variant == 0) { // an available endpoint whose server never replies
             CHECK(transfer(pipe.value, false, request.data(), 1, count, nullptr, 2000) == ERROR_BROKEN_PIPE);
         } else {
             Snapshot forged = snapshot;
@@ -290,7 +290,7 @@ void prelaunch_contract(const std::wstring& dll, const std::wstring& probe_path)
     CHECK(storage::inspect(descriptor, metadata).outcome == storage::Outcome::ownership_conflict);
     const auto capture = probe(probe_path, L"--pid " + std::to_wstring(prepared.child.pid) + L" --save-admission --json", 8);
     CHECK(capture.find("\"state\":\"prepared\"") != std::string::npos);
-    prepared.shutdown(); // Child verifies retained module, sticky refusal, and no reinitialization.
+    prepared.shutdown(); // child checks kept module, sticky refusal, and no reinitialization
     CHECK(storage::reopen(descriptor, lease).ok()); lease.reset();
     { std::ofstream out(fixture_file, std::ios::binary | std::ios::trunc); out << "invalid-fixture\n"; }
     CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", fixture_file.c_str()));
@@ -493,7 +493,7 @@ int wmain(int argc, wchar_t** argv) {
     const auto watch = probe(probe_path, args + L" --engine --watch-count 2 --interval-ms 100 --json", 0);
     CHECK(std::count(watch.begin(), watch.end(), '\n') == 2 && GetTickCount64() - watch_started < 3000);
     CHECK(GetTickCount64() - watch_started >= 90);
-    { // Target exits between capture records; no retries against a replacement process.
+    { // target exits between capture records; no retries against a replacement process
         Host exiting(dll, 5);
         std::thread exit_host([&] { Sleep(200); exiting.shutdown(); });
         const auto stopped_watch = probe(probe_path, L"--pid " + std::to_wstring(exiting.child.pid) +
@@ -523,14 +523,14 @@ int wmain(int argc, wchar_t** argv) {
     exchange(first.child.pid, request, size - 1, WireResult::malformed);
     request[8] = 255;
     exchange(first.child.pid, request, size, WireResult::malformed);
-    { // Oversize message must disconnect; no reply or allocation proportional to input.
+    { // oversize message must disconnect; no reply or allocation proportional to input
         Handle pipe(open_pipe(first.child.pid)); CHECK(pipe);
         std::array<uint8_t, max_request + 1> huge{}; DWORD count = 0;
         transfer(pipe.value, true, huge.data(), static_cast<DWORD>(huge.size()), count, nullptr, 2000);
         CHECK(transfer(pipe.value, false, huge.data(), 1, count, nullptr, 2000) != ERROR_SUCCESS);
     }
     { Handle abandoned(open_pipe(first.child.pid)); CHECK(abandoned); }
-    { // A connected client sends no request; admission resumes after its deadline.
+    { // a connected client sends no request; admission resumes after its deadline
         Handle stalled(open_pipe(first.child.pid)); CHECK(stalled);
         const auto start = GetTickCount64();
         CHECK(query(first.child.pid, 150).result == ProbeResult::timeout);
@@ -538,7 +538,7 @@ int wmain(int argc, wchar_t** argv) {
         CHECK(GetTickCount64() - start < 3500);
     }
     CHECK(query(first.child.pid, 2000).result == ProbeResult::ok);
-    { // Explicit shutdown must cancel an admitted idle read before unloading Core.
+    { // explicit shutdown must cancel an admitted idle read before unloading core
         Handle held(open_pipe(first.child.pid)); CHECK(held);
         const auto start = GetTickCount64(); first.shutdown();
         CHECK(GetTickCount64() - start < 6000);
@@ -551,11 +551,11 @@ int wmain(int argc, wchar_t** argv) {
     relaunched.shutdown(); second.shutdown();
     Host idle(dll, 4, true);
     CHECK(query(idle.child.pid, 150).result == ProbeResult::endpoint_absent);
-    { // A same-user impostor occupying another PID's name is rejected by OS PID.
+    { // a same-user impostor occupying another pid's name is rejected by os pid
         Handle imposter(fake_pipe(idle.child.pid)); CHECK(imposter);
         CHECK(query(idle.child.pid, 150).result == ProbeResult::process_mismatch);
     }
-    { // Actual denied pipe access to a live task-owned target: never relabel as exit.
+    { // real denied pipe access to a live task-owned target: never relabel as exit
         ACL empty{}; CHECK(InitializeAcl(&empty, sizeof(empty), ACL_REVISION));
         SECURITY_DESCRIPTOR descriptor{};
         CHECK(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
@@ -574,7 +574,7 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("HARNESS_DENIED_JSON %s", captured.c_str());
     }
     idle.shutdown();
-    { // Empty explicit DACL distinguishes access denial from endpoint absence.
+    { // empty explicit dacl distinguishes access denial from endpoint absence
         ACL acl{}; CHECK(InitializeAcl(&acl, sizeof(acl), ACL_REVISION));
         SECURITY_DESCRIPTOR sd{}; CHECK(InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION));
         CHECK(SetSecurityDescriptorDacl(&sd, TRUE, &acl, FALSE));
@@ -585,8 +585,8 @@ int wmain(int argc, wchar_t** argv) {
         probe(probe_path, L"--pid " + std::to_wstring(GetCurrentProcessId()) + L" --json", 4);
     }
     for (int i = 0; i < 5; ++i) fake_response(probe_path, initial.snapshot, i);
-    fake_response(probe_path, initial.snapshot, 4, true); // Old server's op-1 rejection envelope.
-    CHECK(GetModuleHandleW(L"sentinel_core.dll") == nullptr); // Test client never hosts Core.
+    fake_response(probe_path, initial.snapshot, 4, true); // old server's op-1 rejection envelope
+    CHECK(GetModuleHandleW(L"sentinel_core.dll") == nullptr); // test client never hosts core
     std::puts("PASS separate hosts/CLI, OS PID+creation, identity, ACL, reconnect, malformed/capability/version, timeouts, shutdown; HARNESS ONLY");
     return 0;
 }

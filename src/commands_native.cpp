@@ -17,8 +17,7 @@ SetLevel set_level = nullptr;
 constexpr uint32_t command_global = 0x4271ba8, command_vtable = 0x2e453e0;
 void dispatch(uintptr_t system, const char* text) {
     const auto level = get_level();
-    // Restriction level belongs to this engine thread. Restore it on every exit;
-    // only the closed AP operation grammar can enter this scope.
+    // restriction level belongs to this engine thread. restore it on every exit; only the closed ap operation grammar can enter this scope
     __try { set_level(system, 0); execute(system, text); }
     __finally { set_level(system, level); }
 }

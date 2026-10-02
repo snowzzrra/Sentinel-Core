@@ -43,7 +43,7 @@ DWORD observe(void*) {
 DWORD serve(void*) {
     Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!event) { inspection_failed(GetLastError()); return 1; }
-    // One sampler owns all engine reads. Resolver startup never blocks basic IPC.
+    // one sampler owns all engine reads. resolver startup never blocks basic ipc
     observer = CreateThread(nullptr, 0, observe, nullptr, 0, nullptr);
     if (!observer) {
         publish_engine(engine::unavailable(SC_REASON_INTERNAL_ERROR));
@@ -176,8 +176,7 @@ DWORD serve(void*) {
                     encode_engine_response(data, result, current_snapshot(), current_engine_snapshot()) :
                     encode_response(data, result, current_snapshot()));
             if (transfer(pipe, true, data.data(), size, count, stop, remaining(deadline)) == ERROR_SUCCESS) {
-                // Wait for client close (or reject extra input), so DisconnectNamedPipe
-                // cannot discard the reply before it is read. Never FlushFileBuffers.
+                // wait for the client to close or reject extra input before disconnecting; don't flush the pipe or discard the unread reply
                 transfer(pipe, false, data.data(), 1, count, stop, remaining(deadline));
             }
         }
@@ -220,7 +219,7 @@ DWORD secure_pipe() {
 }
 }
 DWORD start_inspection() {
-    if (worker) return ERROR_BUSY; // A failed stop must be retried, never replaced.
+    if (worker) return ERROR_BUSY; // a failed stop must be retried, never replaced
     DWORD error = secure_pipe();
     if (error != ERROR_SUCCESS) return error;
     stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -237,11 +236,11 @@ DWORD start_inspection() {
 }
 DWORD stop_inspection() {
     if (!worker) return ERROR_SUCCESS;
-    SetEvent(stop); // Worker cancels/drains its own overlapped I/O.
+    SetEvent(stop); // worker cancels/drains its own overlapped i/o
     const auto deadline = GetTickCount64() + 5000;
     DWORD wait = WaitForSingleObject(worker, remaining(deadline));
     if (wait != WAIT_OBJECT_0) return wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
-    // Joining the service first also synchronizes its observer-handle publication.
+    // joining the service first also synchronizes its observer-handle publication
     if (observer) {
         wait = WaitForSingleObject(observer, remaining(deadline));
         if (wait != WAIT_OBJECT_0) return wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();

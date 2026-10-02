@@ -61,8 +61,7 @@ int main() {
         session.begin_profile(0x1234);
         session.profile_step(sentinel::save::ProfileStage::decode, sentinel::save::ProfileStatus::refused,
             "native_authentication_refused", true, 0, 1, 4);
-        // Exercise the actual C++ route producer after its first failure is set.
-        // The unusual source spelling must remain hex-encoded and private.
+        // exercise the real c++ route producer after its first failure is set. the unusual source spelling must remain hex-encoded and private
         sentinel::save::UnroutedSource source;
         constexpr char source_name[]="PROFILE\"\\fixture\n";
         std::memcpy(source.name.data(),source_name,sizeof(source_name)-1);
@@ -157,7 +156,7 @@ int main() {
             "late failed stage retains exact native result after history limit");
         check(content.size()<=65536 && fs::file_size(log)==capped_size,"independent snapshot and history remain bounded after failure");
         check(!fs::exists(latest.wstring()+L".pending"),"latest publication completed atomic replacement");
-        // The process owns its open log handle until exit; retain fixture evidence.
+        // the process owns its open log handle until exit; keep fixture evidence
         std::cout << "workflow handoff and automatic logging fixtures passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

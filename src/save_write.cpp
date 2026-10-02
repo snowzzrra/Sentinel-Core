@@ -15,7 +15,7 @@ static_assert(sizeof(SaveResult) == 24 && offsetof(SaveResult, value) == 16);
 static_assert(sizeof(SaveReference) == 8 && sizeof(SaveFutureVtable) == 16);
 SaveFuture* destroy_refusal(SaveFuture* future, uint32_t) { return future; }
 SaveResult* poll_refusal(SaveFuture*, SaveResult* out, void*) {
-    *out = {0, 1, 1, 0}; // Ready / saveGameError, never success or fallback 0x40.
+    *out = {0, 1, 1, 0}; // ready / savegameerror, never success or fallback 0x40
     return out;
 }
 const SaveFutureVtable refusal_vtable{destroy_refusal, poll_refusal};
@@ -193,7 +193,7 @@ UnroutedSource unrouted_source(engine::Memory& memory, SaveReference* reference)
         result.reason = read.reason; result.error = read.error; return !read.reason;
     };
     SaveReference ref{}; NativeString name{};
-    result.kind = 1; // Invalid/unreadable; zero means no source metadata was requested.
+    result.kind = 1; // invalid/unreadable; zero means no source metadata was requested
     if (!copy(reinterpret_cast<uintptr_t>(reference), 0, &ref, sizeof(ref)) ||
         !copy(ref.control, 8, &result.data, sizeof(result.data)) ||
         !copy(result.data, 0, &name, sizeof(name))) return result;
@@ -221,7 +221,7 @@ SaveFuture** access_scoped(Session& owner, engine::Memory& memory, uintptr_t pro
         if (owner.state() == SessionState::prepared || owner.state() == SessionState::starting)
             source = unrouted_source(memory, reference);
         owner.unrouted_import(access == Access::read ? "provider_read" : "provider_mutation",
-            access == Access::read ? "import" : "mutate", provider, identity, source); // Metadata never permits late admission.
+            access == Access::read ? "import" : "mutate", provider, identity, source); // metadata never permits late admission
         if (owner.state() == SessionState::disabled) return calls.create(provider, out, identity, reference);
         owner.btrace.record(BStage::provider, BStatus::blocked, "provider_route_unavailable", 0,
             {{"access", access}, {"session_state", owner.state()}, {"session_fault", owner.fault()}});
@@ -263,7 +263,7 @@ SaveFuture** access_scoped(Session& owner, engine::Memory& memory, uintptr_t pro
                 }
             }
             future->selection = selection;
-            calls.create(provider, &future->native, identity, reference); // Consumes its reference, even on failure.
+            calls.create(provider, &future->native, identity, reference); // consumes its reference, even on failure
             if (future->native) {
                 owner.btrace.record(BStage::provider, BStatus::pending, "provider_native_future_created", future->operation,
                     {{"access", access}, {"profile", profile}, {"selection_sequence", selection.sequence}}, data);

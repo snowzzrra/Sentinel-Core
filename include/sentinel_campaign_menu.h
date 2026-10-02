@@ -12,8 +12,8 @@ enum { SC_CAMPAIGN_ACCEPTED=0, SC_CAMPAIGN_REFUSED=1 };
 enum { SC_CAMPAIGN_OK=0, SC_CAMPAIGN_SCOPE=1, SC_CAMPAIGN_REVISION=2,
        SC_CAMPAIGN_INCOMPLETE=3, SC_CAMPAIGN_ROWS=4, SC_CAMPAIGN_NATIVE=5 };
 typedef struct sc_campaign_row {
-    uint32_t id, flags; // Opaque stable caller identity; zero is reserved.
-    uint32_t native_index; // Entry in the room-authored native mission roster.
+    uint32_t id, flags; // fixed caller id; zero is reserved
+    uint32_t native_index; // mission entry supplied by the room
     char map[192], title[96];
 } sc_campaign_row;
 // sentinel.campaign_presentation.v1 accompanies a row at the same revision.
@@ -30,7 +30,7 @@ typedef struct sc_campaign_summary {
     sc_physical_challenge challenges[3];
 } sc_campaign_summary;
 
-// Room-authored reward identities accompany the same atomic menu revision.
+// room rewards use the same menu revision
 enum { SC_REWARD_MISSION=1, SC_REWARD_AGGREGATE=2, SC_REWARD_MASTERY=3 };
 typedef struct sc_campaign_reward {
     uint32_t location_id, kind, checked;

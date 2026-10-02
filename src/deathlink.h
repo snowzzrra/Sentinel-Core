@@ -16,7 +16,7 @@ struct ApplicationOutcome {
     uint32_t protection = SC_DEATHLINK_PROTECTION_NONE;
 };
 
-// Internal production seam; never externally supplied or serialized.
+// internal code only; don't accept or serialize it as input
 struct Calls {
     void* context = nullptr;
     uintptr_t (*player)(void* context) = nullptr;
@@ -24,9 +24,9 @@ struct Calls {
     // Positive outcome counters are measured around the call by the native
     // module; a native exception is returned as the error code.
     uint32_t (*apply_lethal)(void* context, uintptr_t player_ptr, ApplicationOutcome& outcome) = nullptr;
-    // Optional fixture reader; production never gates Hardcore on protection.
+    // optional fixture reader; production never gates hardcore on protection
     bool (*protection_active)(void* context, uintptr_t player_ptr) = nullptr;
-    // One direct native death transition, outside the damage/protection pipeline.
+    // one direct native death transition, outside the damage/protection pipeline
     uint32_t (*force_death)(void* context, uintptr_t player_ptr, ApplicationOutcome& outcome) = nullptr;
 };
 

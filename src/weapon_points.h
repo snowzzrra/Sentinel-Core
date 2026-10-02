@@ -11,7 +11,7 @@ bool valid(const sc_weapon_points_request&);
 bool same(const sc_weapon_points_request&, const sc_weapon_points_request&);
 sc_weapon_points_result initial(const sc_weapon_points_request&);
 
-// Internal production seam; never externally supplied or serialized.
+// internal code only; don't accept or serialize it as input
 struct Calls {
     void* context = nullptr;
     uintptr_t (*player)(void*) = nullptr;
@@ -23,7 +23,7 @@ void execute(const sc_weapon_points_request&, sc_weapon_points_result&, const Ca
 void install(const engine::Binding&, HANDLE stop);
 bool available();
 bool admitted(const char* namespace_id);
-// Original native caller while the currency entry detour invokes its trampoline.
+// original native caller while the currency entry detour invokes its trampoline
 uintptr_t currency_origin(uintptr_t direct_return_site);
 void execute_native(const sc_weapon_points_request&, sc_weapon_points_result&);
 #ifdef SC_NATIVE_TESTING

@@ -50,7 +50,7 @@ struct Json {
         preferences->members["invertMouse"]={1,5,0,{},0};
         members["preferences"]=preferences->root;
         master_level=std::make_unique<Json>();
-        master_level->members["completionInfo"]={}; // Native zero-resource case is null, not an array.
+        master_level->members["completionInfo"]={}; // native zero-resource case is null, not an array
         members["idMasterLevelManager"]=master_level->root;
     }
     ~Json() { for (auto& entry : members) destroy_value(&entry.second); }
@@ -99,7 +99,7 @@ struct Frame {
     ProfileCalls calls{};
     Json* native_output = nullptr;
     explicit Frame(Session& value) : owner(value) {
-        put(state, 8, uint32_t{23}); // Native user handle, independent of allocation.
+        put(state, 8, uint32_t{23}); // native user handle, independent of allocation
         put(shell, 0, uintptr_t(image_base + 0x2dbbbe8)); put(shell, 8, reinterpret_cast<uintptr_t>(state.data())); put(shell, 16, manager);
         put(state, 0x18, reinterpret_cast<uintptr_t>(shell.data())); put(state, 0x20, uintptr_t(image_base + 0x1416b50));
         put(state, 0x28, uintptr_t(image_base + 0x1416f10)); put(state, 0x30, uintptr_t(image_base + 0x1416ee0));
@@ -145,11 +145,11 @@ SaveReference* retain_reference(SaveReference* out, const SaveReference* from) {
     ++control->strong; ++control->weak; *out = *from; return out;
 }
 void native_prepare(SaveReference* profile, SaveReference* data, uintptr_t native_user, const char*) {
-    auto& f = *active; REQUIRE(native_user == 0x24680); // Actual ABI: NOT the shell.
+    auto& f = *active; REQUIRE(native_user == 0x24680); // real abi: not the shell
     REQUIRE(reinterpret_cast<Control*>(profile->control)->object == reinterpret_cast<uintptr_t>(f.shell.data()));
     REQUIRE(!f.owner.routed() || f.data_control.strong == 3);
-    f.owner.forget_save_data(reinterpret_cast<uintptr_t>(f.data.data())); // Native Clear detour.
-    f.preparation(); // Serializer followed by encoder; its status is ignored.
+    f.owner.forget_save_data(reinterpret_cast<uintptr_t>(f.data.data())); // native clear detour
+    f.preparation(); // serializer followed by encoder; its status is ignored
     release_reference(profile); release_reference(data);
 }
 void prepare(Frame& f, const std::function<void()>& body) {
@@ -209,7 +209,7 @@ uint64_t native_read(SaveReference* profile, SaveReference* data) {
         const auto comment = root.members.at("lastSaveGameName").comments;
         result = serialize_profile(f.owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls);
         REQUIRE(root.members.at("lastSaveGameName").comments == comment);
-    } // Native reader destroys JSON before its wrapper's borrowed AP string expires.
+    } // native reader destroys json before its wrapper's borrowed ap string expires
     release_reference(profile); release_reference(data);
     return result ? 4 : f.read_result;
 }
@@ -270,7 +270,7 @@ void encoded_profile(Frame& f,const Json& document) {
 }
 bool check_payload(Session& owner, engine::Memory& memory, uintptr_t data) { return profile_payload_valid(owner, memory, data, active->calls); }
 SaveFuture** create(uintptr_t, SaveFuture** out, uintptr_t, SaveReference* ref) {
-    ++active->creates; release_reference(ref); *out = refused_save_future(); return out; // Reached-provider boundary; no persistence receipt.
+    ++active->creates; release_reference(ref); *out = refused_save_future(); return out; // reached-provider boundary; no persistence receipt
 }
 void set_name(uintptr_t, const char*) { REQUIRE(false); }
 void publish(Frame& f, bool expected, bool cancel = false) {
@@ -311,14 +311,14 @@ void exercise_unowned_profile(Session& owner,unsigned mode) {
     active=nullptr;
 }
 void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make) {
-    // A live Session owns the vanilla selection, not a PROFILE allocation.
+    // a live session owns the vanilla selection, not a profile allocation
     for (unsigned defect = 0; defect < 14; ++defect) {
         auto owner = make(); Frame a(*owner), b(*owner); active = &a;
         a.calls = b.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
         REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {}, "AUTOSAVE0", 0, true, 0));
         frame(a, a.vanilla, a.vanilla_index);
         if (defect != 7) REQUIRE(read_profile(*owner, a.memory, &a.profile_ref, &a.data_ref, a.calls) == 0);
-        Frame& later = defect == 6 ? a : b; active = &later; // Reuse address with another user.
+        Frame& later = defect == 6 ? a : b; active = &later; // reuse address with another user
         uintptr_t later_manager = manager;
         if (defect == 1) { later_manager += 8; put(later.shell, 16, later_manager); }
         if (defect == 2 || defect == 6) put(later.state, 8, uint32_t{24});
@@ -352,7 +352,7 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         frame(f, f.vanilla, f.vanilla_index, 0, size);
         REQUIRE(f.bytes.size() == size);
         const auto before = f.bytes;
-        // The complete production adapter uses LocalMemory for all actual addresses.
+        // the complete production adapter uses localmemory for all real addresses
         engine::LocalMemory memory;
         const auto result = read_profile(*owner, memory, &f.profile_ref, &f.data_ref, f.calls);
         std::printf("PROFILE LocalMemory bytes=%zu result=%llu predicate=%s readers=%u releases=%u\n",
@@ -438,7 +438,7 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         const unsigned malformed = test <= 11 || test == 19 || test == 20 ? test : 0;
         frame(f, f.vanilla, f.vanilla_index, malformed);
         const auto original_bytes = f.bytes;
-        REQUIRE(!owner->accepts_requests()); // Catalog/binding alone is not admission.
+        REQUIRE(!owner->accepts_requests()); // catalog/binding alone isn't admission
         if (test == 12) f.read_result = 4;
         if (test == 18) f.allocation_failure = true;
         if (test == 23) put(f.data, 0x1c8, int32_t(0));
@@ -464,8 +464,7 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         const char* baseline = nullptr; int32_t baseline_index = -1;
         REQUIRE(owner->profile_output_baseline(baseline, baseline_index) && std::strcmp(baseline, "AUTOSAVE7") == 0 && baseline_index == 2);
         if (test >= 30) {
-            // A delayed PROFILE callback still owns valid inputs after an
-            // unrelated route failed. No native import may run at that point.
+            // a delayed profile callback still owns valid inputs after an unrelated route failed. no native import may run at that point
             f.refresh_refs();
             const auto fault = test == 30 ? SessionFault::native_write : SessionFault::native_collection;
             owner->fail(fault);
@@ -483,7 +482,7 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
             REQUIRE(std::strcmp(baseline, "AUTOSAVE7") == 0); continue;
         }
         const bool failure = test == 14 || test == 15 || test == 16 || test == 25 || test == 29;
-        if (test == 29) f.memory.campaign = "DLC1-"; // Shell choice must belong to the enumerated campaign.
+        if (test == 29) f.memory.campaign = "DLC1-"; // shell choice must belong to the enumerated campaign
         prepare(f, [&] {
             Json output(test == 26 ? "autosave3" : "AUTOSAVE3", test == 14 || test == 25 ? 1 : 0);
             output.members.at("musicVolume").payload = 99;
@@ -496,14 +495,13 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
             REQUIRE(output.members.at("musicVolume").payload == 99 && output.members.at("lastSaveGameName").comments == comments);
             REQUIRE(failure ? output.name() == "AUTOSAVE3" : output.name() == "AUTOSAVE7" && output.index() == 2);
             frame(f, test == 17 ? "AUTOSAVE10" : output.name(), output.index());
-            // The real writer ignores status and encodes. Exercise that exact
-            // ordering: publication must independently refuse its unsafe output.
+            // the real writer ignores status and encodes. exercise that exact ordering: publication must independently refuse its unsafe output
         });
         if (test == 27 || test == 28) {
             const auto data = reinterpret_cast<uintptr_t>(f.data.data());
-            owner->forget_save_data(data); // Clear or physical destructor, before provider transfer.
+            owner->forget_save_data(data); // clear or physical destructor, before provider transfer
             ProfileWrite absent; REQUIRE(!owner->take_profile_write(data, absent));
-            if (test == 28) { // Reuse that exact address for a different operation.
+            if (test == 28) { // reuse that exact address for a different operation
                 prepare(f, [&] {
                     Json output("AUTOSAVE10", 1); ProfileHolder holder{1, {}, &output.root};
                     REQUIRE(serialize_profile(*owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls) == 0);
@@ -558,8 +556,7 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         REQUIRE(read_profile(*owner,f.memory,&f.profile_ref,&f.data_ref,f.calls)==0);
         prepare(f,[&] {
             Json output("AUTOSAVE0",0);
-            // A valid pair in the final cursor must never repair a broken entry
-            // document. Native encoding still uses output.root after failure.
+            // a valid pair in the final cursor must never repair a broken entry document. native encoding still uses output.root after failure
             auto& child=output.master_level->members;
             child["lastSaveGameName"]={reinterpret_cast<uintptr_t>("AUTOSAVE0"),4,0,{},0};
             child["lastUsedGameSlot"]={0,1,0,{},0}; child["magicNumber"]={magic,1,0,{},0};
@@ -589,10 +586,10 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
                 }
                 REQUIRE(cursor_fact && (defect>3 || missing_fact));
             }
-            // Like 1414978e0, encode after the callback even when it failed.
+            // like 1414978e0, encode after the callback even when it failed
             encoded_profile(f,output);
         });
-        publish(f,defect==0); // Refused structured output cannot reach the backend.
+        publish(f,defect==0); // refused structured output can't reach the backend
     }
     active = nullptr;
     std::puts("PASS production PROFILE reader/serializer and LocalMemory bounded acquisition (51 payload + 14 owner + 6 output document cases; synthetic host, not DOOM)");
@@ -608,7 +605,7 @@ void exercise_campaign_profile(Session& owner, const std::function<void(const st
     put(later.shell, 0x12350, NativeString{0, later.selected.data(), static_cast<int32_t>(later.selected.size()), 64, {}});
     active = &later;
     campaign([&] {
-        REQUIRE(owner.native_io()); // PROFILE also saves before map-ready and during menu cleanup.
+        REQUIRE(owner.native_io()); // profile also saves before map-ready and during menu cleanup
         const auto session_before=owner.btrace.snapshot().stages[static_cast<size_t>(BStage::session)].sequence;
         prepare(later, [&] {
             Json output; output.root = {}; later.native_output = &output;
@@ -620,7 +617,7 @@ void exercise_campaign_profile(Session& owner, const std::function<void(const st
             REQUIRE(std::strcmp(reinterpret_cast<const char*>(output.members.at("s_volume").payload), "0.02") == 0);
             REQUIRE(std::strcmp(reinterpret_cast<const char*>(output.preferences->members.at("equippedSkin").payload),"fixture-skin-7")==0);
             REQUIRE(output.preferences->members.at("invertMouse").payload==1);
-            encoded_profile(later,output); // Encode the complete entry tree, never the final cursor.
+            encoded_profile(later,output); // encode the complete entry tree, never the final cursor
         });
         REQUIRE(owner.btrace.snapshot().stages[static_cast<size_t>(BStage::session)].sequence==session_before);
         const auto trace = owner.profile_trace().ownership;
@@ -628,8 +625,7 @@ void exercise_campaign_profile(Session& owner, const std::function<void(const st
         later.refresh_refs(); SaveFuture* future = nullptr; uintptr_t provider = 0;
         REQUIRE(owner.native_provider(provider));
         const WriteCalls calls{[](uintptr_t remote, SaveFuture** out, uintptr_t identity, SaveReference* data) {
-            // Native encoder/Steam transport substitute; production scoped
-            // future and selection completion still own exact correlation.
+            // native encoder/steam transport substitute; production scoped future and selection completion still own exact correlation
             using Put = bool(*)(uintptr_t, const char*, const void*, int32_t);
             const auto table = *reinterpret_cast<uintptr_t**>(remote);
             REQUIRE(reinterpret_cast<Put>(table[0])(remote, "PROFILE/profile.bin", active->bytes.data(), static_cast<int32_t>(active->bytes.size())));
@@ -655,11 +651,10 @@ void exercise_profile_caller(Session& owner, const std::function<bool(SaveRefere
     const auto input = f.bytes;
     REQUIRE(!owner.accepts_requests());
     const bool backend_ok = provider(f.data_ref);
-    REQUIRE(!owner.accepts_requests()); // File-job success still precedes native PROFILE import.
+    REQUIRE(!owner.accepts_requests()); // file-job success still precedes native profile import
     REQUIRE(!f.data_ref.control && f.data_control.strong == 1 && f.data_control.weak == 1);
     if (backend_ok) {
-        // Same SaveData/control as the factory argument, now copied by the
-        // native parent for its synchronous reader after provider destruction.
+        // same savedata/control as the factory argument, now copied by the native parent for its synchronous reader after provider destruction
         ++f.data_control.strong; ++f.data_control.weak;
         f.data_ref.control = reinterpret_cast<uintptr_t>(&f.data_control);
         ProfileChoice expected{};
@@ -723,8 +718,7 @@ void exercise_selection_writes(Session& owner, unsigned outcome, const std::func
     };
     auto* older = produce("AUTOSAVE3", 0);
     auto* newer = produce("AUTOSAVE10", 1);
-    // The source SaveData can clear/die after transfer. Its older future must
-    // retain AUTOSAVE3 even though the current shell choice is already 10.
+    // the source savedata can clear/die after transfer. its older future must keep autosave3 even though the shell choice is already 10
     owner.forget_save_data(reinterpret_cast<uintptr_t>(f.data.data()));
     complete(older, newer);
     older->vtable->destroy(older, 1); newer->vtable->destroy(newer, 1);

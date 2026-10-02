@@ -31,7 +31,7 @@ SRWLOCK startup = SRWLOCK_INIT;
 Lifecycle lifetime;
 Diagnostics diagnostics;
 sc_native_snapshot status{};
-// Pointer/name changes invalidate certainty. They never create a generation.
+// pointer/name changes invalidate certainty. they never create a generation
 uint64_t bound_generation = 0;
 uintptr_t bound_map_address = 0;
 sc_context_map bound_map_name{};
@@ -452,7 +452,7 @@ void post_frame() {
                      facts.fields[SC_CONTEXT_GAME_STATE].validity != SC_OBSERVATION_OBSERVED ||
                      facts.fields[SC_CONTEXT_GAME_STATE].value != SC_GAME_IN_GAME)
                 reject(SC_NATIVE_CONTEXT_UNAVAILABLE, SC_STAGE_FRESH_CONTEXT);
-            // Accepted reader facts alone do not authorize the diagnostic body.
+            // accepted reader facts alone don't authorize the diagnostic body
             detail.observation_accepted = facts.current_map.validity == SC_OBSERVATION_OBSERVED &&
                 facts.fields[SC_CONTEXT_GAME_STATE].validity == SC_OBSERVATION_OBSERVED &&
                 facts.fields[SC_CONTEXT_GAME_STATE].value == SC_GAME_IN_GAME;
@@ -465,11 +465,10 @@ void post_frame() {
     }
     if (!why && owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); reject(SC_NATIVE_WRONG_THREAD, SC_STAGE_NATIVE_FAULT); }
     if (!why && !accepting.load(std::memory_order_acquire)) reject(SC_NATIVE_STOPPED, SC_STAGE_NATIVE_FAULT);
-    // Autonomous work uses the same fresh native admission as IPC, even with
-    // zero diagnostic slots. A diagnostic query is never its actuator.
+    // autonomous work uses the same fresh native admission as ipc, even with zero diagnostic slots. a diagnostic query is never its actuator
     const auto player=!why ? tick_player_safely(binding.image.base + 0x69af70, expected_map_address, scope.lifecycle_generation) : 0;
     if (!player && owner_thread() == GetCurrentThreadId()) special::poll_input(0, false);
-    // Player natives may call back into a lifecycle hook before returning.
+    // player natives may call back into a lifecycle hook before returning
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
     if (!why) reconcile_fast_travel(expected_map_address,facts.current_map.bytes,scope.lifecycle_generation,player);
@@ -509,8 +508,7 @@ void post_frame() {
         result.game_state = static_cast<uint32_t>(facts.fields[SC_CONTEXT_GAME_STATE].value);
         result.state = SC_DIAGNOSTIC_EXECUTED;
         if (slot->is_backup) {
-            // The observation budget ends above. Native serialization has its
-            // own ordinary engine scheduling; it is not a two-millisecond job.
+            // the observation budget ends above. native serialization has its own ordinary engine scheduling; it isn't a two-millisecond job
             const auto submitted = save::submit_native_backup(slot->backup, backup_directory);
             Diagnostics::await_backup(*slot, result, detail, submitted);
             return;
@@ -598,7 +596,7 @@ void prepare(const Snapshot& identity) {
 }
 void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_event) {
     auto& installation = save::session().installation;
-    (void)context::observation_clock(); // Cache QPC frequency before any hook is reachable.
+    (void)context::observation_clock(); // cache qpc frequency before any hook is reachable
     AcquireSRWLockExclusive(&startup);
     if (pinned.load(std::memory_order_acquire) || stopping.load(std::memory_order_acquire)) {
         ReleaseSRWLockExclusive(&startup); return;
@@ -651,7 +649,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
 #else
     if (!initial.reason) initial.reason = command_reason;
 #endif
-    // Publish immutable binding/status before any detour can become reachable.
+    // publish fixed binding/status before any detour can become reachable
     AcquireSRWLockExclusive(&lock);
     lifetime = {}; status = initial; fault.store(SC_NATIVE_NONE); gaps.store(0); epoch.fetch_add(1);
     ReleaseSRWLockExclusive(&lock);
@@ -683,7 +681,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             original_frame = reinterpret_cast<Frame>(trampolines[0]);
             original_change = reinterpret_cast<Change>(trampolines[1]);
             original_free = reinterpret_cast<Free>(trampolines[2]);
-            // Per-target operations only. Never MH_ALL_HOOKS or a foreign target.
+            // per-target operations only. never mh_all_hooks or a foreign target
             for (unsigned i = 0; i < targets.size() && !why; ++i) {
                 std::array<uint8_t, 32> current{};
                 auto event = installation.begin(SC_INSTALL_NATIVE_ENABLE, 1, i,
@@ -700,22 +698,21 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
                 installation.finish(event, why, enabled);
             }
         } else {
-            // These trampolines have NEVER been reachable. Removing them cannot
-            // race a detour entry. Once pinned/enabled, removal is unsupported.
+            // these trampolines have never been reachable. removing them can't race a detour entry. once pinned/enabled, removal is unsupported
             for (unsigned i = 0; i < created; ++i) installation.hook(SC_INSTALL_REMOVE, 1, i,
                 static_cast<uint32_t>(targets[i].address - binding.image.base), [&] {
                     return MH_RemoveHook(reinterpret_cast<void*>(targets[i].address)); });
             if (mh == MH_OK) installation.hook(SC_INSTALL_UNINITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Uninitialize(); });
         }
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
-        // Qualify menu callees before domain hooks patch shared SWF entries.
+        // check menu callees before domain hooks patch shared swf entries
         if (!why && !stopping.load(std::memory_order_acquire) && save::session().campaign_run.enabled() &&
             !campaign_menu::validate_native_targets(installation, memory, binding.image, stop_event,
                                                    campaign_menu::native_targets(binding.image.base))) {
             save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
             why=SC_NATIVE_EXCEPTION;
         }
-        // Special qualifies the shared HUD earnings entry before WUP owns its detour.
+        // special checks the shared hud earnings entry before wup owns its detour
         if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
         // The WUP owner validates and patches the 13ce4c0 entry first; the
         // challenge scope then qualifies the untouched seam/continuation windows
@@ -744,7 +741,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
 bool gameplay_admitted() { return gameplay_admitted_locked_scope(); }
 uint64_t observation_stamp() { return epoch.load(std::memory_order_acquire); }
 void publish_context(const sc_context_snapshot& observed, uint64_t before) {
-    special::refresh_input_config(); // Observer thread: no game-thread file I/O.
+    special::refresh_input_config(); // observer thread: no game-thread file i/o
 #ifdef SC_NATIVE_TESTING
     const auto& value = fixture_active ? fixture.context() : observed;
 #else
@@ -991,7 +988,7 @@ bool stop() {
     save::session().stop_requests();
     stopping.store(true, std::memory_order_release);
     accepting.store(false, std::memory_order_release);
-    AcquireSRWLockExclusive(&startup); // Never called from a native callback.
+    AcquireSRWLockExclusive(&startup); // never called from a native callback
     accepting.store(false, std::memory_order_release);
     AcquireSRWLockExclusive(&lock);
     diagnostics.cancel_pending(GetTickCount64()); clear_context(SC_NATIVE_STOPPED);

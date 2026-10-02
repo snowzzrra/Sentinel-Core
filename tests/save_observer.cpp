@@ -68,7 +68,7 @@ void suppressed(const sc_save_snapshot& s, uint32_t reason) {
     unresolved(s);
 }
 int main() {
-    // Actual DLL export/size/version rejection is exercised by inspection tests.
+    // real dll export/size/version rejection is exercised by inspection tests
     { Fake m; engine::Binding b; suppressed(save::sample(m, b, 1), SC_REASON_PROFILE_UNRECOGNIZED); CHECK(m.reads.empty()); }
     Fixture f; auto s = f.sample();
     CHECK(s.sample_reason == SC_REASON_NONE && s.sequence == 7 && s.layout_revision == 1 && s.duration_ms == 16);
@@ -76,7 +76,7 @@ int main() {
     CHECK(s.fields[SC_SAVE_MANAGER].value == 1 && s.fields[SC_SAVE_QUEUED_REQUESTS].value == 0);
     for (size_t i = SC_SAVE_JOB_WITNESS; i <= SC_SAVE_REQUEST50_WITNESS; ++i)
         CHECK(s.fields[i].validity == SC_OBSERVATION_OBSERVED && s.fields[i].value == 0);
-    unresolved(s); // Empty jobs/count is deliberately not a native completion result.
+    unresolved(s); // empty jobs/count is deliberately not a native completion result
     for (const auto& provider : std::array<std::pair<uintptr_t, uint32_t>, 3>{{
         {0x142e87db0ULL, SC_SAVE_PROVIDER_LOCAL_ENCRYPTED}, {0x142e88198ULL, SC_SAVE_PROVIDER_LOCAL}, {0x200012000ULL, SC_SAVE_PROVIDER_FOREIGN}}}) {
         Fixture t; t.memory.put(t.provider, provider.first); const auto result = t.sample();
@@ -88,7 +88,7 @@ int main() {
       CHECK(result.fields[SC_SAVE_PROVIDER].reason == SC_REASON_PARENT_NULL && result.fields[SC_SAVE_JOB_WITNESS].reason == SC_REASON_PARENT_NULL); }
     { Fixture t; t.memory.put(t.manager, uintptr_t{0}); CHECK(t.sample().fields[SC_SAVE_PROVIDER].reason == SC_REASON_PARENT_NULL); }
     { Fixture t; t.memory.put(t.control + 8, uintptr_t{0}); CHECK(t.sample().fields[SC_SAVE_PROVIDER].reason == SC_REASON_PARENT_NULL); }
-    // Exact native-owned chains including the extra +58 nesting.
+    // exact native-owned chains including the extra +58 nesting
     { Fixture t; t.memory.put(t.manager + 0x60, t.job); t.memory.put(t.job + 8, t.job + 0x1000);
       t.memory.put(t.manager + 0x58, t.job + 0x2000); t.memory.put(t.job + 0x2008, t.job + 0x3000); t.memory.put(t.job + 0x3008, t.job + 0x4000);
       t.memory.put(t.manager + 0x50, t.job + 0x5000); t.memory.put(t.job + 0x5008, t.job + 0x6000);
@@ -111,7 +111,7 @@ int main() {
     { Fixture t; t.memory.put(t.root + 0xb8, uint8_t{1}); suppressed(t.sample(), SC_REASON_TRANSITION); }
     { Fixture t; t.memory.put(t.root + 0xb8, uint8_t{2}); suppressed(t.sample(), SC_REASON_INVALID_VALUE); }
     { Fixture t; t.memory.put(t.root, uintptr_t{0x142e90658ULL}); suppressed(t.sample(), SC_REASON_INVALID_VALUE); }
-    // A second stable-value frame does not rescue a changed owner/count/state.
+    // a second stable-value frame doesn't rescue a changed owner/count/state
     for (unsigned which = 0; which < 5; ++which) {
         Fixture t; unsigned visits = 0;
         t.memory.before = [&](uintptr_t address) {
@@ -160,7 +160,7 @@ int main() {
     CHECK(size == 24 && decode_request(wire, size, &operation) == WireResult::ok && operation == 11);
     size = encode_request(wire, native_capability, wire_version, save_operation);
     CHECK(decode_request(wire, size, &operation) == WireResult::capability_unavailable);
-    // Existing request operation/capability/payload shapes retain their exact bytes.
+    // existing request operation/capability/payload shapes keep their exact bytes
     constexpr uint64_t capabilities[] = {0, 1, 2, 4, 8, 16, 16, 16, 32, 32, 32};
     sc_diagnostic_request request{}; request.expected.pid = 42; request.expected.process_created = 123;
     request.expected.instance_id[0] = 9; request.expected.lifecycle_generation = 1;

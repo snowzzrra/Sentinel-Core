@@ -192,10 +192,10 @@ sc_result sc_shutdown(void) {
     current_context = sentinel::context::unavailable(SC_REASON_STOPPED);
     current_save = sentinel::save::unavailable(SC_REASON_STOPPED);
     ReleaseSRWLockExclusive(&lock);
-    // Never hold the snapshot lock while joining an admitted reader.
+    // never hold the snapshot lock while joining an admitted reader
     sentinel::native::stop();
     const DWORD error = sentinel::stop_inspection();
-    const bool retained = sentinel::native::stop(); // Observer startup is now joined.
+    const bool retained = sentinel::native::stop(); // observer startup has finished
     AcquireSRWLockExclusive(&lock);
     current.service_error = error;
     sc_result result;

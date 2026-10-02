@@ -85,7 +85,7 @@ void append_local_locked(const LocalEvent& event) {
             shared_state.local[i - 1] = shared_state.local[i];
         --shared_state.local_count;
     }
-    // Preserve unacknowledged events. Overflow is observable and never ACKed.
+    // keep unacknowledged events. overflow is observable and never acked
     if (shared_state.local_count >= local_capacity) {
         ++shared_state.local_dropped;
         return;
@@ -223,7 +223,7 @@ void bind_run_state_if_needed(uintptr_t player) {
     (void)player;
 }
 
-// Requests manage the queue; tick owns native application.
+// requests manage the queue; tick owns native application
 void execute(const sc_deathlink_request& r, sc_deathlink_result& out, const Calls& c) {
     const auto now = GetTickCount64();
 
@@ -377,7 +377,7 @@ void expire_pending(uint64_t now) {
     ReleaseSRWLockExclusive(&state_lock);
 }
 
-// Only the admitted native frame advances policy. Queries just read telemetry.
+// only the admitted native frame advances policy. queries just read telemetry
 void tick(const Calls& c) {
     const auto now = GetTickCount64();
     const auto player = c.player ? c.player(c.context) : 0;

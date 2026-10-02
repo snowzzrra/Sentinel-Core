@@ -28,7 +28,7 @@ BOOL CALLBACK load_system(PINIT_ONCE, void*, void**) {
         }
     }
     wcscpy_s(system_path, actual);
-    // System forwarding and native hooks retain their modules until process exit.
+    // system forwarding and native hooks keep their modules until process exit
     return TRUE;
 }
 }

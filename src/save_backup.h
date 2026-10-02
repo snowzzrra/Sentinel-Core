@@ -31,12 +31,12 @@ public:
     void cancel() { cancel_.store(true, std::memory_order_release); }
     void readback_finished(bool success);
     BackupProgress progress() const;
-    // Allocation-free facts for queue housekeeping and IPC.
+    // allocation-free facts for queue housekeeping and ipc
     void inspect(sc_save_backup_snapshot&) const;
     void copy(Session&, engine::Memory&, const SdkWriteObservation&, const std::vector<uintptr_t>& buffers);
 private:
     BackupFailure stopped() const;
-    void settle(); // mutex_ held; never completes a still-running copy.
+    void settle(); // mutex_ held; never completes a still-running copy
     const uint32_t pid_;
     const uint64_t created_, deadline_;
     const SteamOwner owner_;

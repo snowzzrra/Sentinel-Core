@@ -62,7 +62,7 @@ int run(uint32_t difficulty,const std::wstring& defect,const std::function<void(
     else { maps.push_back("game/sp/e1m1_intro/e1m1_intro"); maps.push_back("game/sp/e1m2_battle/e1m2_battle"); }
     transition_defect=L"travel";
     for(size_t i=0;i<maps.size();++i) {
-        // Outgoing checkpoint completes BEFORE ExecuteMapChange, as in retail.
+        // outgoing checkpoint completes before executemapchange, as in retail
         if(i) save();
         const auto previous=native::inspect().scope;
         store(descriptor,0x10,text(maps[i]));
@@ -77,13 +77,13 @@ int run(uint32_t difficulty,const std::wstring& defect,const std::function<void(
         }
         CHECK(session().accepts_requests() && observed.map_active && observed.map==maps[i]);
         CHECK(observed.native_subtype==subtype);
-        CHECK(observed.generation_after==previous.lifecycle_generation+1); // Nested primary free is not a second generation.
+        CHECK(observed.generation_after==previous.lifecycle_generation+1); // nested primary free isn't a second generation
         points();
         if(i) {
             auto stale=request(previous);
             CHECK(native::submit_weapon_points(stale).execution.reason==SC_NATIVE_SCOPE_MISMATCH);
         }
-        save(); // First destination checkpoint: real provider + SDK + readback.
+        save(); // first destination checkpoint: real provider + sdk + readback
         const auto saved=campaign.snapshot();
         CHECK(saved.continuity_persisted && saved.native_saved && saved.readback_verified);
         std::printf("PASS map=%s generation=%llu checkpoint=%llu WUP=%d session=admitted\n",

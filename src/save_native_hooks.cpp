@@ -291,8 +291,7 @@ void configure_prelaunch() {
     if (result.ok()) result = storage::reopen(descriptor, lease);
     record.finish(event, result.ok() ? SC_NATIVE_NONE : SC_NATIVE_BINDING_FAILED, SC_INSTALL_UNKNOWN, result.win32_error);
     if (result.ok()) {
-        // The one-use descriptor/lease owner must survive even when startup is
-        // missed or binding fails before any native hook becomes reachable.
+        // the one-use descriptor/lease owner must survive even when startup is missed or binding fails before any native hook becomes reachable
         HMODULE module = nullptr;
         event = record.begin(SC_INSTALL_PIN);
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
@@ -329,7 +328,7 @@ bool validate_native_helpers(Installation& record, engine::Memory& memory, const
         checked_bytes(memory, image.base + event.rva, checkpoint_call.data(), checkpoint_call.size(), event);
     record.finish(event, checkpoint_ok ? SC_NATIVE_NONE : SC_NATIVE_TARGET_BYTES);
     if (!checkpoint_ok) return false;
-    // Only this checked native callback may delegate the shared PROFILE presence query before routing.
+    // only this checked native callback may delegate the shared profile presence query before routing
     constexpr std::array<uint8_t,5> presence_call{0xe8,0x26,0x2f,0xff,0xff};
     event=record.begin(SC_INSTALL_FACTORY_CALL,3,SC_INSTALL_UNKNOWN,0x1be4b35);
     const bool presence_ok=image.contains(event.rva,5,IMAGE_SCN_MEM_READ|IMAGE_SCN_MEM_EXECUTE,IMAGE_SCN_MEM_WRITE) &&
@@ -419,8 +418,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
             return MH_RemoveHook(reinterpret_cast<void*>(targets[0].address)); });
         session().reject(SessionFault::installation); return;
     }
-    // From this point RootInit/trampoline/event remain process-lifetime objects.
-    // No early-return cleanup may remove this reachable gate.
+    // from this point rootinit/trampoline/event remain process-lifetime objects. no early-return cleanup may remove this reachable gate
     for (unsigned i = 1; i < targets.size(); ++i) {
         targets[i] = native::save_target(binding.image.base, i);
         if (native::validate_recorded(record, memory, binding.image, targets[i], stop, GetTickCount64() + 3000, 2, i)) {
@@ -528,7 +526,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         const auto enabled = MH_EnableHook(reinterpret_cast<void*>(targets[index].address));
         record.finish(event, enabled == MH_OK ? SC_NATIVE_NONE : SC_NATIVE_HOOK_FAILED, static_cast<uint32_t>(enabled));
         if (enabled != MH_OK) {
-            // Reachable trampolines stay pinned. No partial install can admit.
+            // reachable trampolines stay pinned. no partial install can admit
             session().reject(SessionFault::installation); return;
         }
     }

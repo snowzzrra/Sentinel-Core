@@ -139,8 +139,7 @@ sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uin
         } else {
             const double ticks = static_cast<double>(end - begin);
             measured.elapsed_ns = static_cast<uint64_t>(std::ceil(ticks * 1000000000.0 / static_cast<double>(clock.frequency)));
-            // Compare in the counter's domain; never compare uptime quantization
-            // against a 2 ms guard, round down an overrun, or exclude descheduling.
+            // use the counter clock for the 2 ms check; don't use rounded uptime, round down an overrun or skip descheduled time
             if (ticks > static_cast<double>(clock.frequency) * budget_ms / 1000.0)
                 state_error = map_error = {SC_REASON_BUDGET, 0};
         }

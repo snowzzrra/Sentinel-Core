@@ -253,7 +253,7 @@ void save(Model& m,const std::wstring& defect,const std::shared_ptr<BackupJob>& 
     SaveReference task{};
     if (m.queued) {
         CHECK(!capture_native_checkpoint(session().native_writes));
-        factory(0x1000,&task,0,0); // Earlier mode0 factory has returned; no TLS scope remains.
+        factory(0x1000,&task,0,0); // earlier mode0 factory has returned; no tls scope remains
     } else campaign_save_factory(defect==L"unassociated"?0:0x674744,0x674744,0x1000,&task,0,0,factory);
     CHECK(!m.source_ref.control && m.future && !capture_native_checkpoint(session().native_writes));
     const bool rejected=defect==L"unrelated" || defect==L"partial_save" || defect==L"unassociated" || m.foreign;

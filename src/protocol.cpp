@@ -4,7 +4,7 @@
 
 namespace sentinel {
 namespace {
-constexpr uint32_t magic = 0x50494353; // "SCIP", little endian.
+constexpr uint32_t magic = 0x50494353; // "scip", little endian
 struct Writer {
     Message& data;
     size_t pos = 0;
@@ -270,8 +270,7 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
         r.u64(e.expected.lifecycle_generation); r.u64(e.request_id);
         for (auto& b:e.nonce) { r.byte(b); nonce|=b!=0; }
         r.u32(e.deadline_ms);
-        // Menus may precede the first observed map generation. Scope zero is
-        // meaningful here; gameplay diagnostic/WUP operations still reject it.
+        // menus may precede the first observed map generation. scope zero is meaningful here; gameplay diagnostic/wup operations still reject it
         if (!e.expected.pid || !e.expected.process_created || !e.request_id || !instance || !nonce ||
             !e.deadline_ms || e.deadline_ms>SC_DIAGNOSTIC_MAX_DEADLINE_MS) return WireResult::malformed;
         for (auto& c:value.namespace_id) c=static_cast<char>(r.number(1));
@@ -397,8 +396,7 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
         return r.number(8) == save_installation_capability ? WireResult::ok : WireResult::capability_unavailable;
     }
     if (op >= save_backup_submit_operation && op <= save_backup_cancel_operation) {
-        // Reuse the exact existing request identity decoder, then consume only
-        // this operation's fixed namespace/campaign/slot/deadline extension.
+        // reuse the exact existing request identity decoder, then consume only this operation's fixed namespace/campaign/slot/deadline extension
         if (length != 149) return WireResult::malformed;
         if (r.number(8) != save_backup_capability) return WireResult::capability_unavailable;
         Message identity = in;
@@ -462,9 +460,9 @@ size_t encode_response(Message& out, WireResult result, const Snapshot& s) {
         for (auto byte : s.instance) w.number(byte, 1);
         w.number(s.core.state, 4); w.number(static_cast<uint32_t>(s.service), 4);
         w.number(s.service_error, 4);
-        w.number(0, 4); // Engine integration: unavailable.
-        w.number(0, 4); // Gameplay safety: unprobed.
-        w.number(0, 4); // Game build compatibility: unprobed.
+        w.number(0, 4); // engine integration: unavailable
+        w.number(0, 4); // gameplay safety: unprobed
+        w.number(0, 4); // game build compatibility: unprobed
         w.number(s.core.last_result, 4); w.number(s.core.initialization_count, 4);
         w.text(s.core.version); w.text(s.core.build_id);
     }
@@ -492,14 +490,14 @@ bool decode_response(const Message& in, size_t size, WireResult& result, Snapsho
     if (s.core.state > SC_STOPPED || service > static_cast<uint32_t>(ServiceState::failed)) return false;
     s.service = static_cast<ServiceState>(service);
     s.service_error = static_cast<uint32_t>(r.number(4));
-    // Wire v1 defines only these factual unavailable/unprobed states.
+    // wire v1 defines only these factual unavailable/unprobed states
     if (r.number(4) != 0 || r.number(4) != 0 || r.number(4) != 0) return false;
     s.core.last_result = static_cast<uint32_t>(r.number(4));
     s.core.initialization_count = static_cast<uint32_t>(r.number(4));
     r.text(s.core.version); r.text(s.core.build_id);
     return r.valid && r.pos == size;
 }
-// Op 2 has its own exact payload. Op 1 and its strict ABI/engine placeholder bytes stay intact.
+// op 2 has its own exact payload. op 1 and its strict abi/engine placeholder bytes stay intact
 size_t encode_engine_response(Message& out, WireResult result, const Snapshot& s, const sc_engine_snapshot& e) {
     Writer w{out}; header(w, wire_version, engine_operation, 0, result);
     if (result == WireResult::ok) {
@@ -511,7 +509,7 @@ size_t encode_engine_response(Message& out, WireResult result, const Snapshot& s
         w.number(e.duration_ms, 4); w.number(e.sample_reason, 4);
         w.number(e.pe_reason, 4); w.number(e.machine, 4); w.number(e.timestamp, 4);
         w.number(e.image_size, 4); w.number(e.entry_rva, 4); w.number(e.disk_hash_reason, 4);
-        // Fixed 64 lowercase hex bytes, or 64 NULs when unavailable (no optional lengths).
+        // fixed 64 lowercase hex bytes, or 64 nuls when unavailable (no optional lengths)
         for (size_t i = 0; i < 64; ++i) w.number(static_cast<uint8_t>(e.disk_sha256[i]), 1);
         w.number(e.profile, 4); w.number(e.locator_revision, 4); w.number(e.root_locator_reason, 4);
         w.number(e.root_signature_rva, 4); w.number(e.root_target_rva, 4);
@@ -568,7 +566,7 @@ const char* field_name(size_t field) {
     constexpr const char* names[] = {"root_available", "loading", "in_game", "map_present", "player_present", "cutscene_id"};
     return field < SC_ENGINE_FIELD_COUNT ? names[field] : "invalid_field";
 }
-// Op 11 is additive. Its field records use explicit widths, not C struct layout.
+// op 11 is additive. its field records use explicit widths, not c struct layout
 size_t encode_save_response(Message& out, WireResult result, const Snapshot& s, const sc_save_snapshot& v) {
     Writer w{out}; header(w, wire_version, save_operation, 0, result);
     if (result == WireResult::ok) {

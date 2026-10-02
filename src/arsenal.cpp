@@ -220,7 +220,7 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
             out.outcome = SC_ARSENAL_OUTCOME_NOOP;
             break;
         }
-        // Ensure that mod ownership does NOT alter existing mod selection
+        // ensure that mod ownership doesn't alter existing mod selection
         out.flags |= SC_ARSENAL_FLAG_SELECTION_PRESERVED;
         shared_state.mods |= request.mods;
         after.mods |= request.mods;
@@ -262,8 +262,7 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
     }
 
     case SC_ARSENAL_PROJECT_MASTERY: {
-        // Invariant: AP Mastery ownership does NOT grant base mod or normal upgrades,
-        // and does NOT complete the native challenge.
+        // an ap mastery doesn't grant the base mod or upgrades, or finish the native challenge
         const uint16_t missing = static_cast<uint16_t>(request.masteries & ~before.masteries_ap);
         if (!missing) {
             out.outcome = SC_ARSENAL_OUTCOME_NOOP;

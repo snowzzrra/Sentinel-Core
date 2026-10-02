@@ -12,7 +12,7 @@ struct DeleteContext {
 };
 static_assert(sizeof(DeleteContext) == 0x30 && offsetof(DeleteContext, job) == 0x28);
 static_assert(sizeof(DeleteResult) == 24);
-// Inspected prefix through the job handle; the native allocation is 0x70.
+// inspected prefix through the job handle; the native allocation is 0x70
 struct DirectoryDeleteContext {
     uintptr_t storage;
     NativeString directory;
@@ -77,8 +77,7 @@ DeleteResult* poll_scoped_delete(Session& owner, engine::Memory& memory,
     const bool allowed = readable && owner.native_io() && owner.collecting(context.storage, owner.native_root()) &&
         campaign_directory(owner, memory, context.directory);
     if (readable && context.job != 0) {
-        // Only the zero-handle branch can enqueue. Even a foreign or faulted
-        // job must retain native observation/cleanup; it may already have run.
+        // only the zero-handle branch can enqueue. even a foreign or faulted job must keep native observation/cleanup; it may already have run
         if (!allowed) owner.fail(SessionFault::delete_indeterminate);
         return calls.poll(future, output, executor);
     }
@@ -88,15 +87,13 @@ DeleteResult* poll_scoped_delete(Session& owner, engine::Memory& memory,
         calls.release(future); *output = {0, 1, 1, 0}; return output;
     }
     owner.fail(SessionFault::delete_indeterminate);
-    // A missing object or completed-looking zero-handle context does not prove
-    // fresh ownership. Do not release it or restart the native worker.
+    // a missing object or completed-looking zero-handle context doesn't prove fresh ownership. don't release it or restart the native worker
     *output = {1, 0, 0, 0}; return output;
 }
 DeleteOperationResult* delete_auxiliary_scoped(Session& owner, engine::Memory& memory, uintptr_t object,
         DeleteOperationResult* out, DeleteOperation original) {
     if (!owner.routed()) { owner.unrouted_import("delete_auxiliary", "mutate"); if (owner.state() == SessionState::disabled) return original(object, out); }
-    // 141bd71a0 -> 141bd9b40 -> 141bd3ed0 -> 141bd4d40. The native job
-    // retains this context across dispatch; do not release its references.
+    // 141bd71a0 -> 141bd9b40 -> 141bd3ed0 -> 141bd4d40. the native job keeps this context across dispatch; don't release its references
     struct Context {
         uintptr_t remote;
         NativeString directory, prefix, suffix;
@@ -125,9 +122,9 @@ DeleteOperationResult* delete_auxiliary_scoped(Session& owner, engine::Memory& m
         }
         if (allowed) allowed = std::strcmp(text.data(), ".") && std::strcmp(text.data(), "..");
     }
-    // Native true is worker completion, not proof that each FileDelete worked.
+    // native true is worker completion, not proof that each filedelete worked
     if (allowed) return original(object, out);
     owner.fail(SessionFault::unscoped_delete);
-    *out = {1, 1}; return out; // Native error alternative, before any deletion.
+    *out = {1, 1}; return out; // native error alternative, before any deletion
 }
 } // namespace sentinel::save

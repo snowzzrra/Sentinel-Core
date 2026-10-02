@@ -23,7 +23,7 @@ REQUIRED = ("sentinel_core.dll", "msimg32.dll", "sentinel_probe.exe", "prepare_v
             "compare_vanilla_campaign.py", "Prepare-MilestoneA.ps1", "Retest-MilestoneA.ps1", "retest_milestone_a.py")
 QUERIES = ("basic", "engine", "native", "save_admission", "save_installation", "save_context", "save_write")
 MAX_OUTPUT = 256 * 1024
-MAX_STARTUP_LOG = 1024 * 1024  # 128 bounded native transition records, including PROFILE stages.
+MAX_STARTUP_LOG = 1024 * 1024  # 128 limited native transition records, including profile stages
 MAX_STARTUP_RECORD = 65536
 B_STAGES = frozenset(('session profile_read profile_output profile_choice profile_capture profile_prepare '
     'profile_publish catalog creation difficulty transition checkpoint_factory provider sdk_prepare sdk_submit '
@@ -482,7 +482,7 @@ class Handoff:
 
     def retire(self):
         self.close()
-        # Only this run's ephemeral publication; its exact bytes remain private.
+        # only this run's ephemeral publication; its exact bytes remain private
         if self.published and self.path.exists():
             if self.path.read_text(encoding="utf-8") != self.text:
                 raise Refused("prelaunch_publication_changed_cleanup_refused")
@@ -531,7 +531,7 @@ def scalars(value, keys):
         if item is None or isinstance(item, (bool, int)):
             result[key] = item
         elif isinstance(item, str):
-            # Protocol scalars contain no paths or unrestricted text.
+            # protocol scalars contain no paths or unrestricted text
             limit = 64 if key in ("expected_bytes", "actual_bytes") else 128
             result[key] = item if len(item) <= limit and re.fullmatch(r"[A-Za-z0-9_. /:+-]*", item) and not re.search(r"[A-Za-z]:[/\\]", item) else "redacted_nonprotocol_value"
     return result
@@ -744,8 +744,7 @@ class Run:
             lifecycle, _ = self.campaign_lifecycle(self.state, self.directory)
             if lifecycle.startswith('terminal_'): raise Refused('terminal_case_preserved_use_ordinary_RUN')
             protection.require_stopped()
-            # Only the exact operator-selected case may continue. No identity,
-            # reservation, native payload or previous evidence is recreated.
+            # only the exact operator-selected case may continue. no identity, reservation, native payload or previous evidence is recreated
             self.state['finished'] = False
             return
         if stage in ("START", "RUN", "PREPARE"):
@@ -865,7 +864,7 @@ class Run:
                         raise Refused('game_process_replaced_while_path_unavailable')
                 raw = error.result
                 detail = {k: raw.get(k) for k in ('exit_code', 'timed_out', 'cancelled', 'launch_error', 'win32_error', 'duration_ms', 'stdout_truncated', 'stderr_truncated')}
-                # Full stderr and exact paths remain in the individual private receipts.
+                # full stderr and exact paths remain in the individual private receipts
                 detail.pop('launch_error', None)
                 detail['launch_failed'] = bool(raw.get('launch_error'))
                 phases = [line for line in raw.get('stderr', '').splitlines() if line in
@@ -881,7 +880,7 @@ class Run:
                 entry['history'] = entry['history'][-64:]
                 entry['state'] = 'unavailable'; self.save()
                 if attempt < 2: time.sleep(attempt + 1)
-        return None  # Unknown collection state never means process exit or replacement.
+        return None  # unknown collection state never means process exit or replacement
 
     def observe_identity(self, prefix):
         return self.collection('process_identity', prefix, lambda target: observe_game(self.config, target))
@@ -1124,7 +1123,7 @@ class Run:
         flags = admission.get('flags', 0) & 7
         if flags == 7: return True
         if flags != 5: return False
-        # Only native proof of root destruction permits retired requests here.
+        # only native proof of root destruction permits retired requests here
         for row in records:
             event = row.get('b_diagnostics', {}).get('stages', {}).get('session', {})
             if (row.get('admission', {}).get('namespace_id') == namespace and
@@ -1180,8 +1179,7 @@ class Run:
     def run_campaign(self):
         if not self.state.get('campaign_case'): self.prepare()
         case = self.state['campaign_case']
-        # A resumed shell observes the exact retained attempt first; it cannot
-        # turn an ambiguous native create into a retry of New Game.
+        # a resumed shell observes the exact kept attempt first; it can't turn an ambiguous native create into a retry of new game
         if self.state.get('handoff_armed') and case['phase'] in ('create', 'resume'):
             if not self.state.get('process') and not self.discover_recorded_process():
                 raise Refused('interrupted_campaign_attempt_not_observed_do_not_recreate')
@@ -1220,8 +1218,7 @@ class Run:
         try:
             self._collect_startup_log()
         except (MemoryError, OSError) as error:
-            # Optional collection never discards the last complete observation
-            # or interrupts waiting for stopped-process comparison/export.
+            # optional collection never discards the last complete observation or interrupts waiting for stopped-process comparison/export
             self.collection_degraded(error)
 
     def collection_degraded(self, error):
@@ -1257,7 +1254,7 @@ class Run:
                 except (ValueError, TypeError, AttributeError): status['rejected_records'] = status.get('rejected_records', 0) + 1
         except (MemoryError, OSError) as error:
             status['history_state'] = type(error).__name__
-        # A transient failed/truncated read cannot erase records already retained.
+        # a transient failed/truncated read can't erase records already kept
         if len(rows) < len(previous.get('records', [])): rows = previous['records']
         latest = previous.get('latest')
         try:
@@ -1345,9 +1342,7 @@ class Run:
                         ((retry_modules or failed) and time.monotonic() >= next_capture)):
                     try: self.capture()
                     except (Refused, protection.Refused, OSError, ValueError) as error:
-                        # The already-observed process can exit between a log
-                        # sample and capture's identity query. Finish collection
-                        # and comparison; prior failures remain authoritative.
+                        # the process can exit between the log sample and identity check; finish collection and comparison, and keep earlier failures
                         if isinstance(error, Refused) and str(error) == 'no_game_process': break
                         self.fail(error, "safe_capture")
                         if 'replaced' in str(error) or 'identity_mismatch' in str(error) or str(error) == 'loaded_module_identity_verified_mismatch': raise
@@ -1434,7 +1429,7 @@ class Run:
                             namespace_refusal = "AP_namespace_" + record["namespace_state"] + "_remaining_safe_queries_captured"
                 record["response"] = safe_response(query, response)
             self.save()
-            # Admission exit 8 is evidence, never a reason to skip safe queries.
+            # admission exit 8 is evidence, never a reason to skip safe queries
         final = self.observe_identity(self.directory / "private" / f"capture-{capture_id}-final-process")
         if final and any(str(final[key]) != str(self.state["process"][key]) for key in ("pid", "process_created", "path")):
             raise Refused("game_process_replaced_at_capture_end")
@@ -1467,7 +1462,7 @@ class Run:
 
     def finish(self, args):
         if args.stage == "EXPORT" and (self.state.get("comparison") or {}).get("state") == "completed":
-            return  # Export cannot reattribute later legitimate changes to a completed test.
+            return  # export can't reattribute later legitimate changes to a completed test
         self.state["operator"] = {"attribution": "operator_supplied_not_script_verified", "catalog": args.catalog,
                                   "selection": args.selection, "rollback": args.rollback, "note": redact(args.note, self.config)}
         if self.state.get('campaign_case') and self.state.get('comparison', {}).get('state') == 'completed':
@@ -1560,8 +1555,7 @@ class Run:
             profile_time = trace.get('first_failure', {}).get('changed_ms')
             campaign_time = campaign_failure.get('at_ms')
             profile_stage = trace.get('first_failed_stage')
-            # Native event times and failed-sample bounds share GetTickCount64
-            # for this exact process. Collector invocation order is not evidence.
+            # native event times and failed-sample bounds share gettickcount64 for this exact process. collector invocation order isn't evidence
             before_profile = bool(campaign_time and profile_time and campaign_time < profile_time)
             before_campaign = bool(campaign_failure.get('timing') == 'native_event' and campaign_time and
                 profile_time and profile_time < campaign_time and profile_stage != 'write_after_refusal')
@@ -1660,8 +1654,7 @@ class Run:
         if case and not checkpoint:
             lifecycle, terminal = self.campaign_lifecycle(self.state, self.directory)
             if terminal:
-                # Retire only after exact close/comparison AND successful final
-                # export; preserve every case file and disposable namespace.
+                # retire only after exact close/comparison and successful final export; keep every case file and disposable namespace
                 active = read_json(self.reference)
                 if active['run_id'] == self.state['run_id']:
                     active['retired_campaign'] = terminal
@@ -1689,7 +1682,7 @@ def main(argv=None):
         try:
             with lock_path.open("xb"): pass
         except FileExistsError: pass
-        # An OS-held exclusive handle survives shell boundaries but never a crash.
+        # an os-held exclusive handle survives shell boundaries but never a crash
         with protection.pinned(lock_path):
             run = Run(args.config, args.stage, args.scenario, args.resume_case)
             stage = {"stage": args.stage, "started_utc": utc(), "state": "running", "failure": None}
@@ -1716,7 +1709,7 @@ def main(argv=None):
     except (Refused, protection.Refused, OSError, ValueError, KeyError, TypeError, MemoryError) as error:
         if run:
             run.fail(error, "cleanup_or_export")
-            # A failed export never replaces the first preparation/capture failure.
+            # a failed export never replaces the first preparation/capture failure
             try: run.export("partial-" + uuid.uuid4().hex[:8])
             except (OSError, ValueError, MemoryError) as secondary: print("Secondary export error: " + type(secondary).__name__)
         else:

@@ -44,6 +44,8 @@ Update original_category_counts=nullptr;
 Update original_start_show=nullptr;
 Populate original_boss_update=nullptr;
 Update original_hud_score_init=nullptr;
+using HudUpdate=void(*)(uintptr_t,uintptr_t);
+HudUpdate original_hud_score_update=nullptr;
 Update original_end_items=nullptr;
 Update original_end_combat_init=nullptr;
 MeterAllocate original_meter_allocate=nullptr;
@@ -118,8 +120,7 @@ struct RootLayout {
     std::array<std::array<float,2>,9> positions{};
 } root_layout;
 void compact_root(uintptr_t screen) {
-    // Named Root widgets retain their authored SWF positions when hidden.
-    // Keep their native bindings/actions and fill the two vacated positions.
+    // hidden root widgets keep their positions, bindings and actions; fill the two empty spots
     constexpr size_t offsets[]{0x140,0x148,0x150,0x158,0x160,0x168,0x178,0x180,0x188};
     RootLayout observed;
     std::array<uintptr_t,9> translations{};
@@ -133,8 +134,7 @@ void compact_root(uintptr_t screen) {
                  {"sprite_present",observed.sprites[i]!=0},{"transform_index",index}},screen);
             return;
         }
-        // Native SET_x/SET_y use this same local translation and invalidate
-        // the sprite's render/hit-test descendants with 0x1857110.
+        // native x/y setters use this translation and refresh sprite render/hit-test children with 0x1857110
         if (!engine::add(transforms,size_t(index)*0x40+0x14,sizeof(observed.positions[i]),translations[i]) ||
             memory.copy(translations[i],observed.positions[i].data(),sizeof(observed.positions[i])).reason ||
             !std::isfinite(observed.positions[i][0]) || !std::isfinite(observed.positions[i][1])) {
@@ -157,8 +157,7 @@ void root_navigation(uintptr_t screen,uint8_t reset) {
     if (active()) save::session().campaign_run.cancel_menu_save();
     shown_screen=0;
     if (active()) {
-        // State 0 is the native hidden state. Root navigation skips it when
-        // restoring focus; native widgets and their ownership remain intact.
+        // state 0 hides the widget; root navigation skips it when restoring focus and keeps its native data
         for (const size_t offset : {0x148u,0x150u}) {
             uintptr_t widget=0;
             if (!read(screen,offset,widget) || !widget) { fault("campaign_root_widget_unreadable"); return; }
@@ -223,7 +222,7 @@ void present_logo(uintptr_t screen,bool start) {
     }
     const auto root=reinterpret_cast<uintptr_t(*)(uintptr_t)>(method)(screen);
     const auto group=swf_child(swf_child(root,"_center"),"logo");
-    // Packaged bitmap resources supply the composition in the authored geometry.
+    // use the packaged bitmaps with their original layout
     save::session().btrace.record(stage,group?save::BStatus::succeeded:save::BStatus::pending,
         group?"logo_container_bound":"logo_container_unavailable",0,{{"container",group!=0}});
 }
@@ -288,8 +287,7 @@ void safe_present_save_preview(uintptr_t screen,const save::CampaignSnapshot& sn
     }
 }
 void userinfo_point(uintptr_t widget,int kind,uintptr_t material,int count,int width,int delta) {
-    // Native Dossier/Pause currency IDs: 1 Praetor, 2 Mastery.
-    // The widget lays out positions and dividers from retained rows.
+    // dossier/pause currency ids are 1 for praetor and 2 for mastery; kept rows set positions and dividers
     if (active() && (kind==1 || kind==2)) {
         save::session().btrace.record(save::BStage::dossier_points,save::BStatus::succeeded,
             "native_currency_row_suppressed",0,{{"kind",kind}},widget);
@@ -322,7 +320,7 @@ sc_physical_challenge challenge_projection(uint32_t id,bool end=false) {
         if (!(projection.rows[i].flags&SC_CAMPAIGN_DETAILS) || map!=projection.rows[i].map ||
             projection.summaries[i].known!=1) continue;
         for (const auto& challenge:projection.summaries[i].challenges) {
-            // idDeclUnlockable::GetDisplayInfo hashes its exact name with unsigned 31*x+c.
+            // iddeclunlockable::getdisplayinfo hashes its exact name with unsigned 31*x+c
             uint32_t key=0;
             for (const auto* p=challenge.unlockable;*p;++p) key=key*31+static_cast<uint8_t>(*p);
             if (challenge.required && key==id) return challenge;
@@ -387,7 +385,7 @@ uintptr_t question_material(uintptr_t sprite) {
     if (!sprite || !read(sprite,0x30,swf) || !swf) return 0;
     swf_frame(sprite,1);
     const int image_type=1;
-    // The shared codex question texture belongs to the native ui cache class.
+    // the shared codex question texture belongs to the native ui cache class
     const auto cache_class=reinterpret_cast<uint8_t*>(swf+0x128);
     const auto legacy=*cache_class;
     uintptr_t material=0;
@@ -537,7 +535,7 @@ void challenge_card_update(uintptr_t widget,uintptr_t context,uintptr_t flags) {
         __except(EXCEPTION_EXECUTE_HANDLER) {}
         return;
     }
-    // Only the presenter's values are borrowed. Native records and celebration flags remain owned by the game.
+    // borrow just the display values; the game keeps its records and celebration flags
     *reinterpret_cast<uint32_t*>(widget+0x448)=challenge.found;
     *reinterpret_cast<uint32_t*>(widget+0x44c)=challenge.required;
     *reinterpret_cast<uint8_t*>(widget+0x450)=challenge.checked!=0;
@@ -600,7 +598,7 @@ void present_hud_challenge(uintptr_t widget) {
         return;
     }
     const auto percent=challenge.found*100/challenge.required;
-    // The native meter uses frame 100 for completion; pending 100% retains frame 99.
+    // the native meter uses frame 100 for completion; pending 100% keeps frame 99
     swf_frame(indicator,challenge.checked?100:(percent<100?percent:99));
     char value[32]{};
     std::snprintf(value,sizeof(value),"%u/%u",challenge.found,challenge.required);
@@ -668,27 +666,8 @@ void eol_challenge_update(uintptr_t widget) {
     }
 }
 
-void hud_score_init(uintptr_t score) {
-    original_hud_score_init(score);
-    __try {
-        uintptr_t meter=0, root=0, parent=0;
-        if (read(score,0xf8,meter) && meter) {
-            if (read(meter,0x18,root) && root && read(root,0x10,parent) && parent)
-                if (const auto label=swf_child(parent,"apFoundLabel")) original_sprite_visibility(label,0,1);
-            if (active()) present_hud_found(meter);
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-}
-bool present_hud_found(uintptr_t meter) {
-    uintptr_t root=0;
-    if (!read(meter,0x18,root) || !root) return false;
-    const auto meter_root=root;
-    auto label=swf_child(root,"apFoundLabel");
-    bool independent=false;
-    if (!label && read(meter_root,0x10,root) && root) {
-        label=swf_child(root,"apFoundLabel");
-        independent=label!=0;
-    }
+bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
+    const auto label=swf_child(root,"apFoundLabel");
     const auto text_root=swf_child(label,"text");
     const auto title=swf_child(text_root,"txtVal",true);
     if (!title) return false;
@@ -701,10 +680,10 @@ bool present_hud_found(uintptr_t meter) {
                 summary=projection.summaries[i];
     if (summary.known!=1) {
         original_sprite_visibility(label,0,1);
-        original_sprite_visibility(meter_root,0,1);
+        if (meter_root) original_sprite_visibility(meter_root,0,1);
         return true;
     }
-    if (independent) original_sprite_visibility(meter_root,0,1);
+    if (independent && meter_root) original_sprite_visibility(meter_root,0,1);
     for (const auto leaf:{"background","corruption","glow_burst","pointCount","header"})
         if (const auto sprite=swf_child(meter_root,leaf)) original_sprite_visibility(sprite,0,1);
     char value[64]; std::snprintf(value,sizeof(value),"ITEMS FOUND %u/%u",summary.found,summary.total);
@@ -730,6 +709,32 @@ bool present_hud_found(uintptr_t meter) {
          {"found",summary.found},{"total",summary.total},{"playing",*reinterpret_cast<const uint8_t*>(label+0x50)},
          {"question_color",image?*reinterpret_cast<const uint32_t*>(image+0x6c):0}});
     return true;
+}
+void present_score_found(uintptr_t score) {
+    uintptr_t widget=0,root=0;
+    uint8_t visible=0;
+    if (!read(score,0x88,widget) || !read(widget,0x18,root) || !root) return;
+    if (!active() || !read(score,0xb8,visible) || !visible) {
+        if (const auto label=swf_child(root,"apFoundLabel")) original_sprite_visibility(label,0,1);
+        return;
+    }
+    present_found_root(root,swf_child(root,"demonic_corruption"),true);
+}
+void hud_score_init(uintptr_t score) {
+    original_hud_score_init(score);
+    __try { present_score_found(score); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+void hud_score_update(uintptr_t score,uintptr_t frame) {
+    original_hud_score_update(score,frame);
+    __try { present_score_found(score); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+bool present_hud_found(uintptr_t meter) {
+    uintptr_t root=0;
+    if (!read(meter,0x18,root) || !root) return false;
+    const auto meter_root=root;
+    if (swf_child(root,"apFoundLabel")) return present_found_root(root,meter_root,false);
+    if (!read(meter_root,0x10,root) || !root) return false;
+    return present_found_root(root,meter_root,true);
 }
 bool text_matches(uintptr_t field,const char* expected) {
     save::NativeString value{};
@@ -860,7 +865,7 @@ void boss_update(uintptr_t screen,uintptr_t event) {
         for (const auto leaf:{"info","description","icon_c","combat_icon","cta","bmp_hex_grid_b"})
             if (const auto sprite=swf_child(punch,leaf)) original_sprite_visibility(sprite,0,1);
         std::array<uintptr_t,40> artwork{}; unsigned leaves=0;
-        // The tier and count card visibility drive native completion; only item artwork is hidden.
+        // the tier and count card visibility drive native completion; only item artwork is hidden
         for (unsigned i=1;i<=5;++i) {
             char name[]="item1_c"; name[4]+=static_cast<char>(i-1);
             const auto item=swf_child(reward,name);
@@ -1065,7 +1070,7 @@ void hide_details(uintptr_t screen) {
     if (!read(screen,0x118,details) || !details) return;
     string_assign(details+0x180,"");
     *reinterpret_cast<uintptr_t*>(details+0x1b0)=0;
-    // The native details owner hides its entire SWF sprite for an empty map.
+    // the native details owner hides its entire swf sprite for an empty map
     render_details(details);
 }
 void focus(uintptr_t screen) {
@@ -1077,8 +1082,7 @@ void focus(uintptr_t screen) {
         !read(screen,0x128,count) || index>=count || !read(screen,0x120,rows) || !rows) {
         hide_details(screen); return;
     }
-    // Populate deliberately includes every row without inventing completion.
-    // Read real native statistics only when an unlocked row is focused.
+    // list every row without marking it complete; read native stats only for the focused unlocked row
     native_completed(screen,reinterpret_cast<uintptr_t>(&entries[index]));
     const auto row=rows+static_cast<size_t>(index)*0x550;
     list_assign(row+8,screen+0x328);
@@ -1099,8 +1103,7 @@ void populate(uintptr_t screen,uintptr_t list) {
     uintptr_t campaign=0,previous=0,pending=0;
     if (!read(screen,0x100,campaign) || !campaign || !read(campaign,0x1a8,previous) ||
         !read(screen,0x870,pending)) { fault("native_campaign_list_unreadable"); return; }
-    // LaunchMission retains the entry through its owned save continuation.
-    // Never move/overwrite a row while that native continuation owns it.
+    // keep the mission row in place while its native save callback holds it
     if (pending) return;
     if (!initialized) {
         for (auto& entry:entries) string_init(reinterpret_cast<uintptr_t>(&entry.name));
@@ -1165,7 +1168,7 @@ void load(uintptr_t screen,int index) {
              {"index",static_cast<uint64_t>(index)},{"row_valid",row_valid},{"unlocked",unlocked}},screen);
         return;
     }
-    // Permission/save/checkpoint/loading remain in LoadMission/LaunchMission.
+    // permission/save/checkpoint/loading remain in loadmission/launchmission
     uintptr_t pending=0;
     const auto boundary=native::checkpoint_transition();
     if (!read(screen,0x870,pending) || pending) {
@@ -1205,7 +1208,7 @@ void update(uintptr_t screen) {
     if (active() && screen==shown_screen && shown.revision!=menu().projection().revision) {
         uintptr_t pending=0; int32_t state=-1;
         if (read(screen,0x870,pending) && !pending && read(screen,0x108,state) && state==0) {
-            *reinterpret_cast<int32_t*>(screen+0x108)=-1; // Native Update owns clear/repopulate/focus.
+            *reinterpret_cast<int32_t*>(screen+0x108)=-1; // native update owns clear/repopulate/focus
             rebuild=true;
         }
     }
@@ -1226,7 +1229,7 @@ void update(uintptr_t screen) {
 }
 bool available() { return ready.load(std::memory_order_acquire); }
 void reward_scroll(uintptr_t text) {
-    // Native TextField.mode stores SWF_TEXT_RENDER_AUTOSCROLL (4) at +0x174.
+    // text mode at +0x174 uses flag 4 for auto-scroll
     uint32_t mode=0;
     if (text && read(text,0x174,mode) && mode<=5) *reinterpret_cast<uint32_t*>(text+0x174)=4;
 }
@@ -1262,7 +1265,7 @@ bool request_map(uintptr_t request,const std::string& map) {
 bool mission_request(uintptr_t request,std::string& destination) {
     int32_t subtype=0;
     if (!read(request,0x98,subtype)) return false;
-    if (subtype!=2) return true; // Ordinary Continue keeps its saved destination.
+    if (subtype!=2) return true; // ordinary continue keeps its saved destination
     uintptr_t entry=0;
     save::NativeString name{};
     char map[192]{};
@@ -1296,7 +1299,7 @@ void present_campaign_actions(uintptr_t screen,bool entered) {
         contains_choose|=child==choose;
         if (i==index) focused=child;
     }
-    if (!contains_choose) return; // Retain native action membership and permissions.
+    if (!contains_choose) return; // keep native action membership and permissions
     const bool hub=snapshot.map=="game/hub/hub";
     const auto label=[&](uintptr_t widget,const char* wanted) {
         save::NativeString current{}; char text[96]{};
@@ -1377,13 +1380,13 @@ void test_meter_update(uintptr_t meter) { meter_update_detour(meter); }
 #endif
 #include "physical_contact_observer.h"
 
-std::array<native::Target,45> native_targets(uintptr_t base) {
+std::array<native::Target,46> native_targets(uintptr_t base) {
     constexpr uint32_t rvas[]={0x10d2c00,0x10d42f0,0x10d27b0,0x10d1c50,0x10d3140,
         0x3fa8e0,0x3faff0,0x10d1cf0,0x43c070,0x1116c50,0x159c280,
         0x10e08f0,0x10dc420,0x18071d0,0x1857110,0x0f9bd70,0x1864430,
         0x0f9c000,0x185c150,0x184e470,0x184e4b0,0x184e3b0,0x186db00,
         0x17a9660,0x1d69e00,0x360bb0,0x1863b00,0x15b2680,0x0effea0,0x0f5cfe0,0x0f59270,
-        0x0f489c0,0x0f4f990,0x17aa5d0,0x10ef3e0,0x0f30810,0x1859e20,0x1865280,0xf98fc0,0xf62bc0,0x1863c30,0xfaa270,0xd9d010,0x1838970,0x1863d90};
+        0x0f489c0,0x0f4f990,0x17aa5d0,0x10ef3e0,0x0f30810,0x1859e20,0x1865280,0xf98fc0,0xf62bc0,0x1863c30,0xfaa270,0xd9d010,0x1838970,0x1863d90,0x0effd60};
     constexpr const char* bytes[]={
         "4053565741554881ec98000000488b05c4bd0d034833c4488944247033db488d",
         "40574883ec60488b05dba60d034833c44889442450488bf9488d4c2420e8ce65",
@@ -1429,8 +1432,9 @@ std::array<native::Target,45> native_targets(uintptr_t base) {
         "4053b8a0400000e8241b8c01482be0488b05524720034833c448898424804000",
         "40534883ec20488b01488bd9ff90480d000084c00f8582000000488b03488bcb",
         "405356574154415641574881ec98000000488b05506097024833c44889842480",
-        "48896c24104889742418574883ec308bf2488bf981fa0d0100000f87f7000000"};
-    std::array<native::Target,45> targets{};
+        "48896c24104889742418574883ec308bf2488bf981fa0d0100000f87f7000000",
+        "40534883ec20488bd9e892d56e00488b8bf80000004885c9740a4883c4205be9"};
+    std::array<native::Target,46> targets{};
     const auto digit=[](char c) { return c<='9' ? c-'0' : c-'a'+10; };
     for (unsigned i=0;i<targets.size();++i) {
         targets[i].address=base+rvas[i];
@@ -1444,7 +1448,7 @@ std::array<native::Target,45> native_targets(uintptr_t base) {
     return targets;
 }
 bool validate_native_targets(save::Installation& record,engine::Memory& source_memory,
-                              const engine::Image& image,HANDLE stop,const std::array<native::Target,45>& targets) {
+                              const engine::Image& image,HANDLE stop,const std::array<native::Target,46>& targets) {
     if (!image.contains(0x5e05200,sizeof(uintptr_t),IMAGE_SCN_MEM_READ,IMAGE_SCN_MEM_EXECUTE)) return false;
     // Populate's actual CALL owns this list-copy contract. Record failures here
     // as well as in the target validator so startup refusal remains actionable.
@@ -1467,7 +1471,7 @@ bool validate_native_targets(save::Installation& record,engine::Memory& source_m
     for (unsigned i=0;i<targets.size();++i) {
         const auto rva=static_cast<uint32_t>(targets[i].address-image.base);
         if (i==5 || i==10 || i==16 || i==23 || i==31) {
-            // These leaf callees have no unwind entry and are not detoured.
+            // these leaf callees have no unwind entry and are not detoured
             std::array<uint8_t,32> actual{};
             if (!image.contains(rva,actual.size(),IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ,0) ||
                 source_memory.copy(targets[i].address,actual.data(),actual.size()).reason || actual!=targets[i].bytes) return false;
@@ -1490,10 +1494,10 @@ bool install(const engine::Binding& binding,HANDLE stop) {
         reinterpret_cast<void*>(dossier_map),reinterpret_cast<void*>(challenge_card_update),
         reinterpret_cast<void*>(start_show),reinterpret_cast<void*>(boss_update),
         reinterpret_cast<void*>(hud_challenge_update),reinterpret_cast<void*>(eol_challenge_update),reinterpret_cast<void*>(category_counts),
-        reinterpret_cast<void*>(trigger_gate)};
-    constexpr unsigned hooked[]={0,1,2,3,4,11,12,9,15,16,17,27,28,29,30,31,32,34,35,38,39,41,42};
-    void* originals[23]{};
-    for (unsigned i=0;i<23;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
+        reinterpret_cast<void*>(trigger_gate),reinterpret_cast<void*>(hud_score_update)};
+    constexpr unsigned hooked[]={0,1,2,3,4,11,12,9,15,16,17,27,28,29,30,31,32,34,35,38,39,41,42,45};
+    void* originals[24]{};
+    for (unsigned i=0;i<24;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
         return MH_CreateHook(reinterpret_cast<void*>(targets[hooked[i]].address),detours[i],&originals[i]); })!=MH_OK) return false;
     original_populate=reinterpret_cast<Populate>(originals[0]); original_focus=reinterpret_cast<Update>(originals[1]);
     original_load=reinterpret_cast<Load>(originals[2]); original_available=reinterpret_cast<Available>(originals[3]);
@@ -1536,8 +1540,9 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     original_eol_challenge_update=reinterpret_cast<Update>(originals[20]);
     original_category_counts=reinterpret_cast<Update>(originals[21]);
     original_trigger_gate=reinterpret_cast<Available>(originals[22]);
+    original_hud_score_update=reinterpret_cast<HudUpdate>(originals[23]);
     end_items_category_vtable=binding.image.base+0x2d10d78;
-    for (unsigned i=0;i<23;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
+    for (unsigned i=0;i<24;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
         return MH_EnableHook(reinterpret_cast<void*>(targets[hooked[i]].address)); })!=MH_OK) return false;
     struct OptionalPageHook { uint32_t rva; const char* bytes; void* hook; void** original; };
     const OptionalPageHook pages[]={

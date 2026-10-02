@@ -48,7 +48,7 @@ void vanilla() {
     std::array<unsigned char,0x110> screen{};
     *reinterpret_cast<uint32_t*>(screen.data()+0x10c)=1;
     test_campaign_pump(reinterpret_cast<uintptr_t>(screen.data()));
-    CHECK(pumped==1 && !selected); // Vanilla retains native slot-picker state.
+    CHECK(pumped==1 && !selected); // vanilla keeps native slot-picker state
 }
 uintptr_t continue_flags=0;
 void continue_files() {
@@ -100,14 +100,14 @@ void create(uint32_t difficulty,const std::wstring& defect) {
         test_campaign_pump(screen_address);
         CHECK(selected==1 && !created && !internal);
         test_campaign_pump(screen_address);
-        CHECK(selected==1); // Stable menu updates do not repeat native selection.
+        CHECK(selected==1); // stable menu updates don't repeat native selection
         selected=0;
-        argument[1]=0; // Ordinary single-campaign NewGame, not a slot widget.
+        argument[1]=0; // ordinary single-campaign newgame, not a slot widget
         CHECK(test_campaign_action(screen_address,action)==1);
         CHECK(created==1 && selected==1 && integer==1 && internal==1 && choices==1);
         CHECK(session().campaign_run.snapshot().phase=="native_start_queued");
         CHECK(*reinterpret_cast<uint32_t*>(cvar.data()+8)==difficulty);
-        CHECK(test_campaign_action(screen_address,action)==1 && created==1); // Duplicate and nested callback reserve once.
+        CHECK(test_campaign_action(screen_address,action)==1 && created==1); // duplicate and nested callback reserve once
         const auto boundaries=session().btrace.snapshot();
         CHECK(std::strcmp(boundaries.stages[static_cast<size_t>(BStage::native_start)].predicate,"native_start_internal_returned")==0);
         CHECK(std::strcmp(boundaries.stages[static_cast<size_t>(BStage::bootstrap)].predicate,"fortress_devmenu_returned")==0);

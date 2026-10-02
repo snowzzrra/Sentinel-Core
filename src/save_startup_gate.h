@@ -31,7 +31,7 @@ public:
         if (state!=State::pending) return {state};
         uint64_t missing=0; first_wait_ms_.compare_exchange_strong(missing,GetTickCount64());
         waiting_.fetch_add(1,std::memory_order_acq_rel);
-        // No Session, diagnostic, installer or native lock is held here.
+        // no session, diagnostic, installer or native lock is held here
         const auto result=WaitForSingleObject(event_,INFINITE);
         const auto error=result==WAIT_OBJECT_0?0u:GetLastError();
         waiting_.fetch_sub(1,std::memory_order_acq_rel);
@@ -59,7 +59,7 @@ public:
              {"init_slot_equals_target0",arm_.init_equals_target},{"root_equal",root_equal_},
              {"caller_equal",caller_equal_},{"caller_rva",caller_rva_}});
     }
-    // Scope completion covers every return and C++ exception from installation.
+    // scope completion covers every return and c++ exception from installation
     class Completion final {
     public:
         explicit Completion(StartupGate& gate,BTrace* trace=nullptr):gate_(gate),trace_(trace) {}

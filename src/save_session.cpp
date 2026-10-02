@@ -11,9 +11,9 @@ NativeRouteScope::NativeRouteScope(uintptr_t caller, uintptr_t image) : previous
 NativeRouteScope::~NativeRouteScope() { native_route_caller = previous; native_route_rva = previous_rva; }
 void Session::begin_profile(uintptr_t data) {
     std::lock_guard<std::mutex> guard(profile_trace_mutex_);
-    if (profile_trace_.request) return; // Retain the first startup request through later refusals.
+    if (profile_trace_.request) return; // keep the first startup request through later refusals
     profile_trace_.request = 1; profile_data_ = data;
-    profile_trace_.identity_matched = native_io(); // Native hook's provider_operation failure closes native_io.
+    profile_trace_.identity_matched = native_io(); // native hook's provider_operation failure closes native_io
 }
 bool Session::is_profile_request(uintptr_t data) const {
     std::lock_guard<std::mutex> guard(profile_trace_mutex_);
@@ -82,7 +82,7 @@ storage::Result Session::configure(const storage::Descriptor& descriptor,
         "\ngeneration_fingerprint=" + descriptor.identity.generation_fingerprint +
         "\nprovenance=synthetic-fixture\n";
     lease_ = std::move(lease);
-    guard.unlock(); // Campaign refusal records a Session fault through its own lock.
+    guard.unlock(); // campaign refusal records a session fault through its own lock
     if (!recovery_clear(*lease_)) { reject(SessionFault::native_campaign); return {storage::Outcome::interrupted_preparation, 0}; }
     if (descriptor.campaign.intent == storage::CampaignIntent::recover) recovery_descriptor_ = descriptor;
     else if (!campaign_run.configure(*this, descriptor, *lease_)) return {storage::Outcome::invalid_descriptor, 0};
@@ -337,8 +337,7 @@ void Session::provider_reset(uintptr_t manager, const ProviderInvalidation& sour
              {"stack_rva_4",source.stack_rvas[4]},{"stack_rva_5",source.stack_rvas[5]},
              {"stack_rva_6",source.stack_rvas[6]},{"stack_rva_7",source.stack_rvas[7]}});
         if (terminal) {
-            // The selected native root is being destroyed. Keep ownership/routes,
-            // but never permit a new provider operation against released objects.
+            // the selected native root is being destroyed. keep ownership/routes, but never permit a new provider operation against released objects
             shutdown_rva_ = shutdown;
             provider_ended_ = true; requests_stopped_ = true; requests_ = false;
             return;

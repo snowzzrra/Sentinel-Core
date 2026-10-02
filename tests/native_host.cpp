@@ -59,7 +59,7 @@ __declspec(noinline) uint64_t fixture_change(uintptr_t root, uintptr_t descripto
     changes.fetch_add(GetCurrentThreadId() != 0 && files == 0 ? 1 : 0);
     game.store(SC_GAME_LOADING);
     fixture_free(root, reinterpret_cast<uintptr_t>(&slot_object));
-    map.store(d->success ? 42 : 0); // Intentional exact same address/name fixture.
+    map.store(d->success ? 42 : 0); // intentional exact same address/name fixture
     game.store(d->success ? d->destination : SC_GAME_MAIN_MENU);
     return d->success ? change_return : 0;
 }
@@ -144,8 +144,7 @@ template<class Predicate> void until_at(int line, const char* stage, Predicate p
 #define until(...) until_at(__LINE__, #__VA_ARGS__, __VA_ARGS__)
 void park() { pause_frames.store(true); CHECK(WaitForSingleObject(parked, 4000) == WAIT_OBJECT_0); }
 void resume() {
-    // Consume the parked acknowledgement before a fast next stdin command can
-    // mistake it for acknowledgement of a new pause request.
+    // consume the parked acknowledgement before a fast next stdin command can mistake it for acknowledgement of a new pause request
     ResetEvent(parked); pause_frames.store(false); SetEvent(wake);
 }
 void transition(uint32_t action) {
@@ -178,7 +177,7 @@ struct Child {
         std::string text; char bytes[4096]; DWORD count = 0;
         while (ReadFile(output.value, bytes, sizeof(bytes), &count, nullptr) && count) text.append(bytes, count);
         CHECK(text.size() < 32768);
-        std::fwrite(text.data(), 1, text.size(), stdout); // Retained JSONL in test log.
+        std::fwrite(text.data(), 1, text.size(), stdout); // kept jsonl in test log
         return text;
     }
 };
@@ -240,7 +239,7 @@ int wmain(int argc, wchar_t** argv) {
                 last_return.store(fixture_change(reinterpret_cast<uintptr_t>(&root_object), reinterpret_cast<uintptr_t>(&descriptor), 0));
                 SetEvent(changed);
             }
-            call_frame(); Sleep(2); // Only this task-owned host synthesizes frames.
+            call_frame(); Sleep(2); // only this task-owned host synthesizes frames
         }
     });
     until([] { return caller.load() && originals.load(); }); park();
@@ -376,7 +375,7 @@ int wmain(int argc, wchar_t** argv) {
             ResetEvent(gate_entered); gate_stage.store(stage); resume();
             CHECK(WaitForSingleObject(gate_entered, 4000) == WAIT_OBJECT_0);
             const auto start = GetTickCount64(); CHECK(query(GetCurrentProcessId(), 500).result == ProbeResult::ok);
-            CHECK(GetTickCount64() - start < 500); // Sole IPC worker remains responsive.
+            CHECK(GetTickCount64() - start < 500); // sole ipc worker remains responsive
             Child cancel(probe, retrieve_args(r, true));
             const auto cancellation = cancel.complete(8);
             CHECK(cancellation.find("\"state\":\"claimed\"") != std::string::npos && cancellation.find("\"cancel_requested\":true") != std::string::npos);
@@ -428,7 +427,7 @@ int wmain(int argc, wchar_t** argv) {
         if (std::wcscmp(argv[2], L"unobserved-map") == 0) map.store(43);
         else game.store(SC_GAME_LOADING);
         resume(); until([] { return native::inspect().reason == SC_NATIVE_EVENT_GAP; });
-        CHECK(native::inspect().scope.lifecycle_generation == generation); // Observation cannot mint a generation.
+        CHECK(native::inspect().scope.lifecycle_generation == generation); // observation can't mint a generation
     }
     CHECK(!native::inspect().context_generation && native::inspect().event_gap_count);
     const auto original_count = originals.load();
@@ -442,7 +441,7 @@ int wmain(int argc, wchar_t** argv) {
     const auto installation_json = installation_probe.complete(0);
     CHECK(installation_json.find("\"operation\":\"save_installation\"") != std::string::npos &&
           installation_json.find("\"primary_failure\":{") != std::string::npos && installation_json.find("GetTickCount64") != std::string::npos);
-    CHECK(installation_query.installation.primary_failure.sequence); // Initial unknown-build refusal remains queryable.
+    CHECK(installation_query.installation.primary_failure.sequence); // initial unknown-build refusal remains queryable
     sc_save_installation_snapshot installation_status{};
     CHECK(sc_save_installation_inspect(1, sizeof(installation_status), &installation_status) == SC_OK);
     CHECK(installation_status.primary_failure.sequence == installation_query.installation.primary_failure.sequence);
@@ -457,11 +456,11 @@ int wmain(int argc, wchar_t** argv) {
     const auto identity = current_snapshot();
     inspection_failed(ERROR_GEN_FAILURE);
     CHECK(sc_initialize(SC_ABI_VERSION, 0) == SC_UNLOAD_RETAINED);
-    CHECK(current_snapshot().instance == identity.instance); // A retained service failure cannot rebind live hooks.
+    CHECK(current_snapshot().instance == identity.instance); // a kept service failure can't rebind live hooks
     CHECK(sc_shutdown() == SC_UNLOAD_RETAINED && sc_shutdown() == SC_UNLOAD_RETAINED);
     CHECK(native::retained() && sc_initialize(SC_ABI_VERSION, 0) == SC_UNLOAD_RETAINED);
     CHECK(native::inspect().availability == SC_NATIVE_RETAINED);
-    call_frame(); CHECK(originals.load() > original_count); // Still valid pass-through trampolines after shutdown.
+    call_frame(); CHECK(originals.load() > original_count); // still valid pass-through trampolines after shutdown
     CHECK(query(GetCurrentProcessId(), 500).result == ProbeResult::endpoint_absent);
     finish_thread.store(true); resume(); callback.join();
     CloseHandle(parked); CloseHandle(wake); CloseHandle(gate_entered); CloseHandle(gate_release); CloseHandle(changed);

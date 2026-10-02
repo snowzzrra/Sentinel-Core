@@ -91,7 +91,7 @@ uint64_t submit(uintptr_t self, const char* name, const void* bytes, uint32_t si
     proxy.owner.native_writes.submitted(proxy.sequence, index, handle);
     return handle;
 }
-// Only FileWriteAsync (+0x10) is used on this field by validated 141bd5b10.
+// only filewriteasync (+0x10) is used on this field by validated 141bd5b10
 const std::array<void*, 3> proxy_table{nullptr, nullptr, reinterpret_cast<void*>(submit)};
 SdkWriteResult* invoke(PollSdkWrite original, uintptr_t context, SdkWriteResult* out,
         void* task, uintptr_t proxy, uintptr_t remote, BTrace* diagnostics, uint64_t operation) {
@@ -434,8 +434,7 @@ bool NativeWrites::prepared(uint64_t sequence, std::vector<SdkFileWrite> files) 
             !trace.check(write.payloads.size() == files.size(), "payload_manifest_count_mismatch",
                 {{"expected", write.payloads.size()}, {"actual", files.size()}})) return false;
         const auto* value = operation(write.operation);
-        // Native Load treats a zero size as missing. Refuse before deletion if
-        // its required readback cannot represent an empty transport file.
+        // native load treats a zero size as missing. refuse before deletion if its required readback can't represent an empty transport file
         if (value && value->readback_required) {
             if (!trace.check(files.size() <= value->readback_capacity, "payload_count_exceeds_readback_capacity",
                 {{"count", files.size()}, {"capacity", value->readback_capacity}})) return false;
@@ -579,7 +578,7 @@ bool NativeWrites::inspect(uint64_t sequence, SdkWriteObservation& out) const {
     return false;
 }
 void NativeWrites::poll_released(uintptr_t utilities, bool (*completed)(uintptr_t, uint64_t, bool*)) {
-    // Capture one handle at a time; no Steam call runs under the trace mutex.
+    // capture one handle at a time; no steam call runs under the trace mutex
     uint64_t after = 0;
     for (unsigned checked = 0; checked < 64; ++checked) {
         uint64_t sequence = 0, handle = 0; uint32_t index = 0;
@@ -714,8 +713,7 @@ void sdk_write_callback(Session& owner, engine::Memory& memory, uintptr_t callba
         const bool readable = !failed && !read.reason;
         owner.native_writes.callback(handle, !readable, code, read.reason, read.error);
     }
-    // Observe before the native callback's no-waiter early return. Never consume
-    // an SDK result or replace the game's callback/waker handling.
+    // observe before the native callback's no-waiter early return. never consume an sdk result or replace the game's callback/waker handling
     original(callback, result, failed);
 }
 void destroy_sdk_vector(Session& owner, engine::Memory& memory, uintptr_t vector, DestroySdkVector original) {

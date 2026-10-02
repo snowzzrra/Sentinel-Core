@@ -37,9 +37,7 @@ struct CallFacts {
     uint8_t notify = 0;
 };
 
-// A match requires the exact native player/map/thread/epoch identity, the
-// canonical three-member campaign aggregate captured from the native group
-// scan, the documented caller/return site and the exact currency arguments.
+// match the exact player, map, thread and epoch, all three scanned campaign members, the caller/return site and currency arguments
 inline const char* suppression_mismatch(const ScopeFacts& scope, const CallFacts& call) {
     if (!scope.active) return "active";
     if (!scope.admitted) return "admitted";

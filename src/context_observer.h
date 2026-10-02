@@ -14,7 +14,7 @@ const Clock& observation_clock();
 struct Evidence {
     uint64_t started_at_ms = 0, elapsed_ns = 0, budget_ns = 0;
     uint32_t timing_valid = 0, timing_error = 0;
-    engine::ReadResult state{}, map{}; // Before budget/cancellation suppression.
+    engine::ReadResult state{}, map{}; // before budget/cancellation suppression
 };
 sc_context_snapshot unavailable(uint32_t reason);
 sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& binding,

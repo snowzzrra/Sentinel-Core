@@ -39,6 +39,6 @@ int main() {
     if (!alpha || !transparent) return 4;
     std::printf("PASS static import, deferred init and AlphaBlend/TransparentBlt pixel results; core=%s build=%s\n",
                 status.core.version, status.core.build_id);
-    // Deliberate ordinary process exit, without explicit shutdown or hot unload.
+    // deliberate ordinary process exit, without explicit shutdown or hot unload
     return 0;
 }

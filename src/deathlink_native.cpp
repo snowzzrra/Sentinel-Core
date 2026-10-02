@@ -13,19 +13,19 @@ std::atomic<bool> ready{false};
 uintptr_t image_base = 0, engine_root = 0;
 uint32_t image_size = 0;
 
-// Verified against the supported Steam image (9809708c). All addresses are RVAs.
-constexpr uint32_t rva_player = 0x69af70;             // idGameLocal::GetPlayer(index)
-constexpr uint32_t rva_damage_typeinfo = 0x1631e80;   // returns idDeclTypeInfo for damage
-constexpr uint32_t rva_find_decl = 0x17aa5d0;         // FindDecl(typeinfo, path, flags)
+// checked against steam image 9809708c; all addresses are offsets from the image base
+constexpr uint32_t rva_player = 0x69af70;             // get the player at this index
+constexpr uint32_t rva_damage_typeinfo = 0x1631e80;   // get the damage declaration type
+constexpr uint32_t rva_find_decl = 0x17aa5d0;         // look up the declaration with this type, path and flags
 constexpr uint32_t rva_protection = 0x1424150;        // native death-prevention/invulnerability state
-constexpr uint32_t rva_damage_immunity = 0x163ffe0;   // timed immunity checked by idPlayer::Damage
-constexpr uint32_t rva_player_death = 0x11feae0;      // idPlayerAnalyzer::PlayerDeath (true local death)
+constexpr uint32_t rva_damage_immunity = 0x163ffe0;   // damage checks timed immunity
+constexpr uint32_t rva_player_death = 0x11feae0;      // record a real local player death
 constexpr uint32_t rva_player_killed = 0x13eddd0;     // native terminal death transition
-constexpr uint32_t rva_player_is_dead = 0x13eccd0;    // idPlayer::IsDead
-constexpr uint32_t rva_extra_life = 0xa9c230;         // idPlayerAccessibility TryUseExtraLife wrapper
-constexpr uint32_t rva_player_damage_slot = 0x4e8;    // idPlayer vtable slot: native Damage pipeline
+constexpr uint32_t rva_player_is_dead = 0x13eccd0;    // check if the player is dead
+constexpr uint32_t rva_extra_life = 0xa9c230;         // try using an extra life
+constexpr uint32_t rva_player_damage_slot = 0x4e8;    // player vtable slot for native damage
 
-// This authored damage is in player/default's brinkOfDeathExemptionList.
+// player/default exempts this damage from brink of death
 const char* const LETHAL_DAMAGE_PATH = "damage/ai/zombie/flame";
 constexpr float lethal_damage_scale = 2000.0f;
 
@@ -64,7 +64,7 @@ void player_death_detour(uintptr_t self) {
     const auto now = GetTickCount64();
     if (application_active.load(std::memory_order_acquire)) {
         application_deaths.fetch_add(1, std::memory_order_relaxed);
-        // Causal suppression: this true death belongs to the remote logical event.
+        // causal suppression: this true death belongs to the remote logical event
         record_native_death(SC_DEATHLINK_CAUSE_REMOTE, SC_DEATHLINK_PROTECTION_NONE, now);
     } else {
         record_native_death(SC_DEATHLINK_CAUSE_LOCAL, SC_DEATHLINK_PROTECTION_NONE, now);
@@ -103,8 +103,7 @@ uint32_t apply_lethal(void*, uintptr_t p, ApplicationOutcome& outcome) {
         const auto read_health = valid_code_pointer(health) ? reinterpret_cast<PlayerHealth>(health) : nullptr;
         if (read_health) health_before = read_health(p);
 
-        // One native damage application; Extra Life, Saving Throw and native
-        // invulnerability retain their normal interception paths.
+        // one native damage application; extra life, saving throw and native invulnerability keep their normal interception paths
         float direction[3] = {0.0f, 0.0f, 1.0f};
         const auto before_deaths = application_deaths.load(std::memory_order_relaxed);
         const auto before_lives = application_extra_lives.load(std::memory_order_relaxed);
@@ -157,8 +156,7 @@ uint32_t force_death(void*, uintptr_t p, ApplicationOutcome& outcome) {
         const auto before_lives = application_extra_lives.load(std::memory_order_relaxed);
         application_active.store(true, std::memory_order_release);
         killed_called = true;
-        // Enter Killed after damage interception: native death state, HUD,
-        // camera and scheduled death events are handled by the engine.
+        // enter killed after damage interception: native death state, hud, camera and scheduled death events are handled by the engine
         reinterpret_cast<void(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t)>(image_base + rva_player_killed)
             (p, 0, 0, decl + 0x90);
         application_active.store(false, std::memory_order_release);

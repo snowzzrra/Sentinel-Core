@@ -84,7 +84,7 @@ int main() {
     Lifecycle life;
     CHECK(life.generation == 0 && life.state == SC_LIFETIME_UNOBSERVED);
     life.begin(true, true, false, 10, 9);
-    life.begin(false, false, false, 11, 9); // Nested primary destruction.
+    life.begin(false, false, false, 11, 9); // nested primary destruction
     life.end(false, true, SC_GAME_LOADING, 12, 9);
     CHECK(life.generation == 1 && life.depth == 1 && life.state == SC_LIFETIME_TRANSITION);
     life.end(true, true, SC_GAME_IN_GAME, 13, 9);
@@ -127,7 +127,7 @@ int main() {
     for (uint64_t i = 3; i <= SC_DIAGNOSTIC_CAPACITY; ++i) CHECK(queue.submit(request(i), 0, 130).state == SC_DIAGNOSTIC_QUEUED);
     CHECK(queue.submit(request(9), 0, 130).reason == SC_NATIVE_QUEUE_FULL);
     queue.cancel_pending(131);
-    CHECK(queue.submit(request(10), 0, 30200).state == SC_DIAGNOSTIC_QUEUED); // bounded retention, not durable exactly-once
+    CHECK(queue.submit(request(10), 0, 30200).state == SC_DIAGNOSTIC_QUEUED); // limited retention, not durable exactly-once
     CHECK(queue.retrieve(request(1), false, 30200).state == SC_DIAGNOSTIC_UNKNOWN);
 
     // Deterministic claimed/cancel race: only the callback thread writes terminal

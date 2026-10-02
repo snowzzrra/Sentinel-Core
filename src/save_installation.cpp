@@ -42,7 +42,7 @@ void Installation::finish(sc_install_event event, uint32_t reason, uint32_t minh
   if (event.stage == SC_INSTALL_READY && !state_.primary_failure.sequence) { state_.phase = 3; mirror = mirror_; }
  }
  ReleaseSRWLockExclusive(&lock_);
- // At most first failure + installation-ready. No frame/callback logging.
+ // at most first failure + installation-ready. no frame/callback logging
  if (mirror) {
   char text[224]{};
   std::snprintf(text, sizeof(text), "[Sentinel Install] seq=%llu stage=%u group=%u target=%u rva=%x reason=%u minhook=%u win32=%u (2147483648=not_attempted)\n",

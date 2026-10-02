@@ -64,11 +64,10 @@ public:
         sc_save_backup_request backup_request{};
         std::shared_ptr<save::BackupJob> backup;
         save::SubmissionResult submission;
-        // The callback publishes its final submission facts here, then stops
-        // accessing the slot. Queue housekeeping owns it after this handoff.
+        // the callback publishes its final submission facts here, then stops accessing the slot. queue housekeeping owns it after this handoff
         std::atomic<bool> awaiting_backup{false};
     };
-    // admission/retrieval/claim/housekeeping run under the caller's short lock.
+    // admission/retrieval/claim/housekeeping run under the caller's short lock
     sc_diagnostic_result submit(const sc_diagnostic_request& request,
                                 uint32_t reject, uint64_t now, sc_diagnostic_detail* detail = nullptr,
                                 const sc_save_backup_request* backup = nullptr,

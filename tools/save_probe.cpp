@@ -62,7 +62,7 @@ int print_result(const char* operation, Result result,
     const auto id = nullable(metadata.namespace_id);
     const auto path = nullable(utf8(metadata.path));
     const auto backup_path = nullable(utf8(backup.path));
-    // Descriptor/parser and storage API bounds cap every emitted string and file count.
+    // descriptor/parser and storage api bounds cap every emitted string and file count
     std::printf("{\"operation\":\"%s\",\"outcome\":\"%s\",\"win32_error\":%lu,"
         "\"namespace_id\":%s,\"namespace_path\":%s,\"storage_state\":\"%s\","
         "\"backup_path\":%s,\"backup_files\":%lu,\"backup_bytes\":%llu,"
@@ -108,7 +108,7 @@ int save_storage_command(int argc, wchar_t** argv) {
         result = sentinel::storage::inspect(descriptor, observed);
         if (result.ok()) {
             metadata = observed;
-            result.outcome = Outcome::ok; // Inspection is not a reopen operation.
+            result.outcome = Outcome::ok; // inspection isn't a reopen operation
         }
     } else {
         result = std::wcscmp(mode, L"--save-session-prepare") == 0 ?

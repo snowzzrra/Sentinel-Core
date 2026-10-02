@@ -19,7 +19,7 @@ enum { SC_SAVE_UNSUPPORTED = 64, SC_SAVE_NATIVE_NAMESPACE_ROUTE_UNPROVEN,
 typedef struct sc_save_field {
     uint32_t validity;
     uint32_t reason;
-    uint64_t value; /* Meaningful only when OBSERVED; UNKNOWN is canonical zero. */
+    uint64_t value; /* only use observed values; unknown is zero */
     uint32_t win32_error;
     uint32_t reserved; /* Zero in ABI 1. */
 } sc_save_field;
@@ -92,7 +92,7 @@ typedef struct sc_save_write_snapshot {
     uint64_t operation_id, sdk_sequence;
     uint32_t file_count, submitted, completed, pending_handles;
     uint32_t preparation_jobs, preflight_jobs, native_value, reserved;
-    int64_t native_state, native_outcome; /* Canonical zero without PROVIDER_TERMINAL. */
+    int64_t native_state, native_outcome; /* zero unless the provider finished */
     char directory[64];
     uint8_t reserved_bytes[16];
 } sc_save_write_snapshot;

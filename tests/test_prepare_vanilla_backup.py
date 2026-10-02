@@ -153,7 +153,7 @@ class ProtectionTests(unittest.TestCase):
             with real_pin(path, directory) as stream:
                 if path == self.local / "settings.cfg" and not changed:
                     api = protection.kernel()
-                    handle = api.CreateFileW(str(self.campaign), 0x100, 7, None, 3, 0, None)  # WRITE_ATTRIBUTES, share all.
+                    handle = api.CreateFileW(str(self.campaign), 0x100, 7, None, 3, 0, None)  # write_attributes, share all
                     self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
                     try:
                         ticks = self.campaign.stat().st_mtime_ns // 100 + 116444736000000000 + 10000000

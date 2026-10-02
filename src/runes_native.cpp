@@ -69,10 +69,10 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
     __try {
         const uintptr_t rm = p + 0x19168;
         facts = {};
-        // Pair projection is not a native capacity observation (A01/D05).
+        // pair projection isn't a native capacity observation (a01/d05)
         facts.derived_pairs = native_facts.derived_pairs;
 
-        // 1. Registered normal runes
+        // registered normal runes
         const auto reg_list = *reinterpret_cast<const uintptr_t**>(rm + 0x50);
         const auto reg_count = *reinterpret_cast<const int*>(rm + 0x58);
         if (reg_count < 0 || reg_count > 64 || (reg_count && !reg_list)) return false;
@@ -91,7 +91,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
             }
         }
 
-        // 2. Registered support runes
+        // registered support runes
         const auto supp_list = *reinterpret_cast<const uintptr_t**>(rm + 0x68);
         const auto supp_count = *reinterpret_cast<const int*>(rm + 0x70);
         if (supp_count < 0 || supp_count > 16 || (supp_count && !supp_list)) return false;
@@ -110,7 +110,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
             }
         }
 
-        // 3. Equipped normal slots
+        // equipped normal slots
         for (int slot = 0; slot < 3; ++slot) {
             const auto equipped_perk = *reinterpret_cast<const uintptr_t*>(rm + 0x80 + slot * 8);
             if (equipped_perk) {
@@ -126,7 +126,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
             }
         }
 
-        // 4. Equipped support slot
+        // equipped support slot
         const auto equipped_supp = *reinterpret_cast<const uintptr_t*>(rm + 0x98);
         if (equipped_supp) {
             const auto name = *reinterpret_cast<const char**>(equipped_supp + 8);
@@ -140,7 +140,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
             }
         }
 
-        // 5. Unlocked slots
+        // unlocked slots
         facts.unlocked_slots = 0;
         const auto req0 = *reinterpret_cast<const int*>(rm + 0x40);
         const auto req1 = *reinterpret_cast<const int*>(rm + 0x44);
@@ -149,7 +149,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         if (reg_count >= req1) facts.unlocked_slots |= (1u << 1);
         if (reg_count >= req2) facts.unlocked_slots |= (1u << 2);
 
-        // 6. Derived crystal pairs
+        // derived crystal pairs
         native_facts = facts;
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }

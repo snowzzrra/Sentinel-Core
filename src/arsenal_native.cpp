@@ -281,7 +281,7 @@ uintptr_t arsenal_ui_hook(uintptr_t out, uintptr_t weapon, uintptr_t family, uin
     return result;
 }
 
-// Arsenal clip corrections preserve native ownership and challenge state.
+// arsenal clip corrections keep native ownership and challenge state
 namespace menu {
 struct Value { uint32_t type, reserved; uintptr_t payload; };
 struct Calls {
@@ -344,7 +344,7 @@ void correct_mod(uintptr_t widget) {
     const auto pips = child(root(widget), "pips");
     unsigned corrected = 0;
     for (unsigned i = 0; pips && i < 3; ++i) {
-        // Native frame 3 denotes mastery; zero is an independently unowned upgrade.
+        // native frame 3 denotes mastery; zero is an independently unowned upgrade
         if (*reinterpret_cast<const int16_t*>(widget + 0x2c2 + i * 2) != 0) continue;
         char name[] = "pip0";
         name[3] += static_cast<char>(i);
@@ -417,7 +417,7 @@ void correct_mastery(uintptr_t widget) {
     const auto count = child(child(bar, "count"), "txtVal", true);
     if (!challenge || !description || !bar || !count) return;
 
-    // Use the same localized description and authored arguments as 0xf94ac0.
+    // use the same localized description and authored arguments as 0xf94ac0
     char buffer[0x4010]{};
     const auto text = swf.localize(decl + 0x94);
     const auto counter = *reinterpret_cast<const uintptr_t*>(decl + 0x110);
@@ -527,7 +527,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
 }
 } // namespace menu
 
-// Other native Arsenal primitives remain quarantined.
+// other native arsenal primitives remain quarantined
 bool read(void*, uintptr_t, SnapshotFacts&) { return false; }
 uint32_t ensure_mods(void*, uintptr_t, uint32_t) { return 1; }
 uint32_t select_mod(void*, uintptr_t, uint8_t, uint8_t) { return 1; }
@@ -612,7 +612,7 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
 #ifdef SC_NATIVE_TESTING
     if (fixture_namespace[0]) { execute(request, out, calls); return; }
 #endif
-    // The intrinsic Super Shotgun detours consume this shared authorization.
+    // the intrinsic super shotgun detours consume this shared authorization
     if (request.kind == SC_ARSENAL_ENSURE_MODS &&
         request.mods == SC_ARSENAL_ATTACHMENT_MEAT_HOOK) {
         out.mods_before = shared_mods();

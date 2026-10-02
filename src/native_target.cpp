@@ -13,7 +13,7 @@ Target profile_target(uintptr_t base, unsigned index) {
         "48895c2408574883ec20488bf9488bda488b0a4885c9747f488b01ff5058f640"};
     Target out{}; out.address = base + rvas[index];
     const auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
-    // Exact 32-byte prefixes retained from the supported Ghidra image.
+    // exact 32-byte prefixes kept from the supported ghidra image
     for (size_t n = 0; n < std::strlen(bytes[index]) / 2; ++n)
         out.bytes[n] = static_cast<uint8_t>(digit(bytes[index][n * 2]) * 16 + digit(bytes[index][n * 2 + 1]));
     return out;
@@ -81,8 +81,7 @@ Target save_target(uintptr_t base, unsigned index) {
     for (size_t n = 0; n < out.bytes.size(); ++n)
         out.bytes[n] = static_cast<uint8_t>(digit(bytes[index][n * 2]) * 16 + digit(bytes[index][n * 2 + 1]));
     if (index == 4 || index == 41) {
-        // DeleteAll and directory-delete polls have identical entry prefixes,
-        // but own different native context layouts (0x30 versus 0x70).
+        // deleteall and directory-delete polls have identical entry prefixes, but own different native context layouts (0x30 versus 0x70)
         const char* unique = index == 4 ? "00488b7f084885ff0f849d020000488b0543d22a0148896c246048c7c5ffffff" :
             "00488b7f084885ff0f849d020000488b05ab5d2b0148896c246048c7c5ffffff";
         out.signature_offset = 64;
@@ -105,7 +104,7 @@ Target save_target(uintptr_t base, unsigned index) {
             out.signature[n] = static_cast<uint8_t>(digit(unique[n * 2]) * 16 + digit(unique[n * 2 + 1]));
     }
     if (index == 3 || index == 5 || index == 9) {
-        // Template prologues are shared by other functions in this exact image.
+        // template prologues are shared by other functions in this exact image
         const char* unique = index == 3 ? "33f60f1f400066660f1f840000000000488b1f4803de488d4b30e8217e95fe48" :
             index == 5 ? "4b08ff5310f00fc17b04ffcf83ff01488b7c24307d0dba18000000488bcbe841" :
             "e1498be8488d0dc59a6601488bfae81dc9b7fe488b47204533f64885c0740848";

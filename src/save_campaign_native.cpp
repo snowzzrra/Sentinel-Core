@@ -109,7 +109,7 @@ void new_game(uintptr_t menu,uint32_t requested,uint8_t extra_life) {
         owner.btrace.record(BStage::creation,BStatus::refused,"new_game_profile_choice_unavailable",0,
             {{"session_state",owner.state()},{"session_fault",owner.fault()}},menu); return;
     }
-    // Preserve exact native history inputs before Campaign's narrower selection checks.
+    // keep exact native history inputs before campaign's narrower selection checks
     if (!clean) owner.btrace.record(BStage::creation,BStatus::refused,"native_creation_history_not_clean",0,
         {{"prior_campaign",prior_campaign},{"lifecycle",lifetime.lifecycle},{"menu_observed",menu_observed},
          {"depth",lifetime.depth},{"event_gap_count",lifetime.event_gap_count},
@@ -170,13 +170,12 @@ uint64_t campaign_action(uintptr_t screen,uintptr_t action) {
             !read(image+0x45f7370,0,game) || (game && !read(game,0x1968,flags))) return 1;
         return game?continue_from_files(screen,action,game+0x1968,flags):original_action(screen,action);
     }
-    // Native state2 Back returns to slots; state1 Back exits to the parent.
+    // native state2 back returns to slots; state1 back exits to the parent
     if (read(action,0,kind) && kind==0xf && screen_state==2 && session().accepts_requests()) {
         *reinterpret_cast<uint32_t*>(screen+0x108)=1;
         return original_action(screen,action);
     }
-    // Empty-slot NewGame is value3; ordinary fresh-campaign NewGame is value0.
-    // Preserve every unrelated native action and vanilla screen path.
+    // empty-slot newgame is value3; ordinary fresh-campaign newgame is value0. keep every unrelated native action and vanilla screen path
     if (!read(action,0,kind) || kind!=1 || !read(action,0x10,count) || !count ||
         !read(action,8,arguments) || !read(arguments,0,tag) || tag!=5 ||
         !read(arguments,8,value) || (value!=3 && !(value==0 && screen_state==2 &&
@@ -189,7 +188,7 @@ uint64_t campaign_action(uintptr_t screen,uintptr_t action) {
             {{"accepting",session().accepts_requests()},{"navigation_owned",navigation_owned},{"armed",session().campaign_run.snapshot().phase=="armed"}},screen); return 1;
     }
     invoke_navigation(screen);
-    return 1; // Consume this explicit New Game action before navigation to Difficulty.
+    return 1; // consume this explicit new game action before navigation to difficulty
 }
 void select_campaign_slot(uintptr_t menu) {
     navigation_owned=true;
@@ -354,7 +353,7 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
             {{"reference_valid",reference_valid},{"session_state",session().state()},{"session_fault",session().fault()}},object);
         parser_release(data);
         session().btrace.record(BStage::parser,BStatus::blocked,"parser_refusal_release_returned",0,{{"native_result",0x10}},object);
-        return 0x10; // Same parser refusal, consumed reference; no reset/create fallback.
+        return 0x10; // same parser refusal, consumed reference; no reset/create fallback
     }
     session().btrace.record(BStage::parser,BStatus::entered,"native_parser_call",0,
         {{"reference_valid",reference_valid},{"files_present",files!=0},{"prepared_present",prepared!=0},{"request_present",request!=0}},object);
@@ -385,7 +384,7 @@ bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransitio
     if (session().campaign_run.snapshot().phase=="armed") {
         session().btrace.record(BStage::transition,BStatus::entered,"native_startup_transition_call",0,
             {{"event_id",transition.event_id},{"depth",transition.depth}},descriptor); return true;
-    } // Native menu startup is observed below.
+    } // native menu startup is observed below
     if (!transition.observed) {
         session().btrace.record(BStage::transition,BStatus::refused,"native_transition_not_observed",0,
             {{"event_id",transition.event_id},{"observed",false},{"depth",transition.depth}},descriptor);
@@ -394,7 +393,7 @@ bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransitio
     if (transition.depth>1) {
         session().btrace.record(BStage::transition,BStatus::entered,"native_nested_transition_call",0,
             {{"event_id",transition.event_id},{"depth",transition.depth}},descriptor); return true;
-    } // Outer native operation owns the campaign result.
+    } // outer native operation owns the campaign result
     std::string map; uint8_t flags=0;
     const bool flags_read=self==root && read(descriptor,0x1960,flags);
     const bool map_read=flags_read && name(descriptor,0x10,map);

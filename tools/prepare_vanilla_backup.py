@@ -83,7 +83,7 @@ def require_stopped():
             if entry.szExeFile.casefold() in BLOCKED_PROCESSES:
                 found.add(entry.szExeFile.casefold())
             ok = api.Process32NextW(handle, ctypes.byref(entry))
-        if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES
+        if ctypes.get_last_error() != 18:  # error_no_more_files
             raise Refused("cannot complete process enumeration")
         if found:
             raise Refused("exit DOOM completely before preparation")
@@ -92,7 +92,7 @@ def require_stopped():
 
 
 def explicit_path(value):
-    # Do not normalize aliases/traversal into an apparently safe destination.
+    # don't normalize aliases/traversal into an apparently safe destination
     path = Path(value)
     if (not re.match(r"^[A-Za-z]:[\\/]", value) or
             any(p in (".", "..") or p.endswith((".", " ")) or ":" in p
@@ -109,13 +109,12 @@ def overlap(left, right):
 
 def check_node(path):
     info = path.lstat()
-    if info.st_file_attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+    if info.st_file_attributes & 0x400:  # file_attribute_reparse_point
         raise Refused("reparse points are not supported")
     if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
         raise Refused("non-regular source entry")
     if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
-        # Windows path stat may report an unavailable link count. Establish it
-        # using file metadata, never infer a hard link from zero/unknown.
+        # get the link count from file metadata if path stat can't read it; zero or unknown doesn't prove a hard link
         api = kernel()
         handle = api.CreateFileW(str(path), 0x80, 7, None, 3, 0x00200000, None)
         if handle == ctypes.c_void_p(-1).value:
@@ -164,7 +163,7 @@ def pinned(path, directory=False):
             raise Refused("cannot establish ordinary pinned path")
         streams = ctypes.create_string_buffer(65536)
         if (not api.GetFileInformationByHandleEx(handle, 7, streams, len(streams)) and
-                not (directory and ctypes.get_last_error() == 38)):  # No directory streams.
+                not (directory and ctypes.get_last_error() == 38)):  # no directory streams
             raise Refused("cannot establish complete file stream set")
         offset = 0
         while True:
@@ -180,7 +179,7 @@ def pinned(path, directory=False):
             yield None
         else:
             fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
-            handle = None  # fd owns the Windows handle now.
+            handle = None  # the file descriptor owns the windows handle
             with os.fdopen(fd, "rb") as source:
                 verify_links(api, msvcrt.get_osfhandle(source.fileno()), path, "exclusive_handle_link_metadata",
                              os.fstat(source.fileno()).st_nlink)
@@ -236,7 +235,7 @@ def inventory_guard(sources, before, handles, acquired, stage, reason):
     changed |= {key for key in before.keys() & after.keys() if before[key] != after[key]}
     changed_handles = {key for key in acquired if acquired[key] != handle_after[key]}
     def comparable(value):
-        # Windows path stat infers execute bits from .exe/.bat/.cmd; fstat cannot.
+        # windows path stat infers execute bits from .exe/.bat/.cmd; fstat can't
         return value[:2] + (value[2] & ~0o111,) + value[3:]
     handle_path_mismatches = {key for key in acquired if comparable(before[key]) != comparable(acquired[key])}
     if not changed and not changed_handles and not handle_path_mismatches:
@@ -331,7 +330,7 @@ def differences(entries, current, metadata=None, affected="historical_backup"):
 
 
 def verify_backup(destination, identity):
-    # Inspect the complete tree, including unused entries, before trusting paths.
+    # inspect the complete tree, including unused entries, before trusting paths
     tree = inventory({"backup": destination})
     if not (destination / MANIFEST).is_file():
         raise Refused("incomplete protection directory; retained without repair or activation")
@@ -473,7 +472,7 @@ def _protect(args):
             destination = (run_parent or destination.parent) / (destination.name + "-run-" + uuid.uuid4().hex)
         if not reused:
             args.operation_stage = "snapshot_copy"
-            destination.mkdir()  # Create-only; never resume an interrupted directory.
+            destination.mkdir()  # create-only; never resume an interrupted directory
             stack.enter_context(pinned(destination, directory=True))
             for relative in directories:
                 (destination / relative).mkdir(parents=True, exist_ok=True)
@@ -524,7 +523,7 @@ def main(argv=None):
             if any(overlap(path, explicit_path(root)) for root in
                    (args.steam_app_root, args.local_provider_root, args.backup_directory, args.ap_root)):
                 raise Refused("private diagnostic must be outside original, backup and AP roots")
-            # Pin/check ancestors so aliases cannot redirect the diagnostic into originals.
+            # pin/check ancestors so aliases can't redirect the diagnostic into originals
             pin_ancestors(diagnostic_pins, [path.parent])
             diagnostic = path.open("x", encoding="utf-8")
         result = protect(args)
@@ -533,7 +532,7 @@ def main(argv=None):
             json.dump({"result": "protection_completed", "receipt": result, "comparisons": getattr(args, "comparisons", [])}, diagnostic)
         return 0
     except (Refused, OSError, ValueError, KeyError, TypeError, RecursionError) as error:
-        # Do not print OS exceptions: they can include private source filenames.
+        # don't print os exceptions: they can include private source filenames
         failure = failure_record(error, getattr(args, "operation_stage", "protection"))
         if diagnostic:
             json.dump({**failure, "metadata": getattr(error, "private_metadata", None),

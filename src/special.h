@@ -25,7 +25,7 @@ struct SnapshotFacts {
     bool hammer_loot_projected = false;
 };
 
-// Internal production seam; never externally supplied or serialized.
+// internal code only; don't accept or serialize it as input
 struct Calls {
     void* context = nullptr;
     uintptr_t (*player)(void* context) = nullptr;
@@ -50,7 +50,7 @@ AcquisitionRestore acquisition_restore(uintptr_t before_decl, uintptr_t before_i
 // pending use-request at most; a press while a live request is pending is
 // coalesced and never queued twice.
 bool create_refill_request(uint64_t now_ms);
-// Uses the same fresh ownership, selection operation and verified preference as IPC.
+// uses the same fresh ownership, selection operation and checked preference as ipc
 sc_special_result toggle_local(const char* namespace_id, const Calls&);
 
 extern Calls calls;
@@ -72,7 +72,7 @@ struct UseHistory {
     std::array<save::BEvent, 32> events{};
 };
 UseHistory use_history();
-// Cumulative owner state and selection policy, independent of native presence/resources.
+// cumulative owner state and selection policy, independent of native presence/resources
 struct HudOwnerSnapshot {
     uint64_t revision = 0, request_revision = 0;
     uint32_t owns_crucible = 0, owns_hammer = 0, hammer_tier = 0, selected = 0;

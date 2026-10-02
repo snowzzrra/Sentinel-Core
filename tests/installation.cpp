@@ -41,7 +41,7 @@ void contract() {
  HANDLE stop=CreateEventW(nullptr,TRUE,FALSE,nullptr); CHECK(stop);
  Memory memory; native::ValidationDetail detail;
  CHECK(native::validate_target(memory,image,target,stop,GetTickCount64()+1000,&detail)==SC_NATIVE_NONE);
- bytes[0x2010]=1; // Neighboring fragment without the chain does not belong to the entry.
+ bytes[0x2010]=1; // neighboring fragment without the chain doesn't belong to the entry
  CHECK(native::validate_target(memory,image,target,stop,GetTickCount64()+1000,&detail)==SC_NATIVE_TARGET_BOUNDARY);
  bytes[0x2010]=1|(UNW_FLAG_CHAININFO<<3);
  auto cyclic=table[1]; std::memcpy(bytes+0x2014,&cyclic,12);
@@ -89,7 +89,7 @@ void contract() {
  save::Installation startup; startup.startup(2);
  CHECK(startup.inspect().startup_observation==2 && startup.inspect().primary_failure.stage==SC_INSTALL_STARTUP);
  save::Session owner; CHECK(owner.state()==save::SessionState::disabled && !owner.native_io());
- owner.install(1,2,save::required_routes); CHECK(!owner.native_io()); // Record/readiness never admits.
+ owner.install(1,2,save::required_routes); CHECK(!owner.native_io()); // record/readiness never admits
  Snapshot identity{}; identity.core.abi_version=1; strcpy_s(identity.core.version,"0.7.0"); strcpy_s(identity.core.build_id,"fixture");
  identity.pid=123; identity.process_created=456; identity.instance[0]=1;
  Message wire{}; const auto size=encode_installation_response(wire,WireResult::ok,identity,retained);
@@ -107,7 +107,7 @@ int wmain(int argc,wchar_t** argv) {
  const bool menu_only=argc==3 && !std::wcscmp(argv[2],L"--menu-only");
  CHECK(argc==2 || menu_only);
  HANDLE file=CreateFileW(argv[1],GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr); CHECK(file!=INVALID_HANDLE_VALUE);
- // Image data only: no loader, imports, entry point, hooks, game process, or save I/O.
+ // image data only: no loader, imports, entry point, hooks, game process, or save i/o
  HANDLE mapping=CreateFileMappingW(file,nullptr,PAGE_READONLY|SEC_IMAGE_NO_EXECUTE,0,0,nullptr); CHECK(mapping);
  auto bytes=static_cast<uint8_t*>(MapViewOfFile(mapping,FILE_MAP_READ,0,0,0)); CHECK(bytes);
  Memory memory; engine::Image image; CHECK(!engine::read_image(memory,reinterpret_cast<uintptr_t>(bytes),image).reason);

@@ -36,8 +36,7 @@ class CampaignRecovery(unittest.TestCase):
                 for f in path.rglob('*') if f.is_file()}
 
     def remove_payload(self, target):
-        # Dedicated TemporaryDirectory only; keep remaining exact bytes for
-        # production quarantine and preserve all immutable source archives.
+        # dedicated temporarydirectory only; keep remaining exact bytes for production quarantine and keep all fixed source archives
         (target / 'game.details').unlink()
 
     def test_exact_backup_missing_payload_recovery_fresh_continue_writable(self):
@@ -180,8 +179,7 @@ class CampaignRecovery(unittest.TestCase):
                 self.assertEqual(self.digest(root / 'remote'), before)
 
     def test_crash_each_native_mutation_keeps_admission_closed_and_quarantine_exact(self):
-        # Four payload publications + native selection. 0 stops before first
-        # mutation after the durable journal. 6/7 fail continuity/completion.
+        # four payload publications + native selection. 0 stops before first change after the durable journal. 6/7 fail continuity/completion
         for boundary in range(8):
             with self.subTest(boundary=boundary), tempfile.TemporaryDirectory(prefix='sentinel-c-') as temp:
                 root = Path(temp); archive, target, _ = self.create(root)

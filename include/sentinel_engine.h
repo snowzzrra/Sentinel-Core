@@ -17,9 +17,7 @@ enum { SC_REASON_NONE, SC_REASON_NOT_SAMPLED, SC_REASON_STOPPED,
        SC_REASON_PARENT_NULL, SC_REASON_INVALID_VALUE, SC_REASON_TRANSITION,
        SC_REASON_CANCELLED, SC_REASON_BUDGET, SC_REASON_INTERNAL_ERROR, SC_REASON_STALE };
 enum { SC_PROFILE_NONE, SC_PROFILE_STEAM_20260818 };
-/* value is meaningful ONLY when validity != UNKNOWN; unknown value is canonical 0.
-   Presence means the checked pointer slot was non-null, not object lifetime/control.
-   cutscene_id is the raw signed integer; no action authorization is derived. */
+/* only use values when validity is known; unknown values are zero, presence only checks the pointer slot, and the raw signed cutscene id gives no permission to act */
 typedef struct sc_engine_field {
     uint32_t validity;
     uint32_t reason;

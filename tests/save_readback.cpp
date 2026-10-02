@@ -50,7 +50,7 @@ SaveReference* submitted_root(uintptr_t root, SaveReference* out, uint8_t a, uin
 }
 void submitted_release(SaveReference* out) {
     CHECK(out->control == 0x3344); out->control = 0; ++submitted_writer->releases;
-    // The modeled native manager keeps owning its provider future.
+    // the modeled native manager keeps owning its provider future
 }
 void* allocate(size_t size) {
     auto& m = *active;
@@ -114,7 +114,7 @@ ReadWorkerResult* native_prepare(uintptr_t context, ReadWorkerResult* out, SaveR
         const auto name = m.directory + "/" + field<NativeString>(stream, 8).data;
         const auto bytes = get_size(remote, name.c_str());
         if (bytes <= 0) { *out = {1, 0x100, 0}; return out; }
-        CHECK(static_cast<size_t>(bytes) == m.bytes.size()); // Oversized native allocations never occur.
+        CHECK(static_cast<size_t>(bytes) == m.bytes.size()); // oversized native allocations never occur
         field<uint64_t>(stream, 0x150) = static_cast<uint64_t>(bytes);
         field<uint64_t>(stream, 0x158) = static_cast<uint64_t>(bytes);
         field<uintptr_t>(stream, 0x168) = reinterpret_cast<uintptr_t>(std::calloc(1, static_cast<size_t>(bytes)));
@@ -135,7 +135,7 @@ SaveFuture* destroy_read(SaveFuture* base, uint32_t) {
 }
 SaveResult* poll_read(SaveFuture* base, SaveResult* out, void* task) {
     auto& m = *active; auto& future = *static_cast<ReadFuture*>(base); ++m.read_polls;
-    if (m.mode == 17) { *out = {0, 0, 1, 0}; return out; } // Native success without the verification worker.
+    if (m.mode == 17) { *out = {0, 0, 1, 0}; return out; } // native success without the verification worker
     if (!future.stage++) {
         std::array<uintptr_t, 2> context{reinterpret_cast<uintptr_t>(&m.remote), future.data.control};
         SaveReference waiter{}; ReadWorkerResult result{};
@@ -211,7 +211,7 @@ ReadWorkerResult* ordinary_prepare(uintptr_t context, ReadWorkerResult* out, Sav
         CHECK(get_size(remote, (m.directory + "/game.details").c_str()) > 0);
         *out = {0, 1, 0};
     }
-    // Both native exits consume exactly one weak reference, not a strong one.
+    // both native exits consume exactly one weak reference, not a strong one
     auto* control = reinterpret_cast<Control*>(waiter->control);
     CHECK(control && control->weak == 2); --control->weak; waiter->control = 0;
     return out;
@@ -244,7 +244,7 @@ void backup_worker_contracts(const std::function<std::unique_ptr<Session>()>& ma
         SdkFileWrite file; const auto name = manifest.directory + "/game.details";
         std::memcpy(file.name.data(), name.c_str(), name.size() + 1);
         file.size = static_cast<uint32_t>(private_bytes.size());
-        file.buffer = 1; // Old writer memory is deliberately unusable.
+        file.buffer = 1; // old writer memory is deliberately unusable
         CHECK(digest_payload(memory, reinterpret_cast<uintptr_t>(private_bytes.data()), file.size,
             file.sha256, GetTickCount64() + 1000));
         manifest.payloads.push_back(file);
@@ -257,7 +257,7 @@ void backup_worker_contracts(const std::function<std::unique_ptr<Session>()>& ma
             std::thread worker([&] { job.copy(*owner, gated, manifest, buffers); });
             CHECK(WaitForSingleObject(gated.entered, 3000) == WAIT_OBJECT_0);
             if (mode == 1) job.cancel(); else job.readback_finished(false);
-            CHECK(job.progress().state == BackupState::copying); // No premature completion/cleanup.
+            CHECK(job.progress().state == BackupState::copying); // no premature completion/cleanup
             SetEvent(gated.proceed); worker.join();
         } else job.copy(*owner, memory, manifest, buffers);
         auto progress = job.progress();
@@ -300,10 +300,10 @@ static void ordinary_worker_contracts(const std::function<std::unique_ptr<Sessio
         create_read(0x777, &future, 0x7788, &source);
         CHECK(future && !source.control && control->strong == 1 && m.reads == 1);
         CHECK(!owner->native_writes.readback_operation(control->data));
-        m.identity_alive = false; // Factory already captured its borrowed argument.
+        m.identity_alive = false; // factory already captured its borrowed argument
         std::array<uintptr_t, 2> context{reinterpret_cast<uintptr_t>(&m.remote), reinterpret_cast<uintptr_t>(control)};
         uintptr_t replacement = reinterpret_cast<uintptr_t>(m.table.data());
-        if (mode == 3) context[0] = reinterpret_cast<uintptr_t>(&replacement); // Replaced after the factory.
+        if (mode == 3) context[0] = reinterpret_cast<uintptr_t>(&replacement); // replaced after the factory
         if (mode == 6) owner->fail(SessionFault::native_write);
         if (mode == 7 || mode == 12) context[0] = 0;
         if (mode == 9) context[1] = 0;
@@ -336,7 +336,7 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
         auto backup = std::make_shared<BackupJob>(GetCurrentProcessId(), 123456, GetTickCount64() + 10000);
         CHECK(owner->native_writes.request_backup(m.operation, backup));
         CHECK(!owner->native_writes.request_backup(m.operation, backup));
-        if (mode == 16) m.fail_allocation = 3; // First private stream allocation, after native write.
+        if (mode == 16) m.fail_allocation = 3; // first private stream allocation, after native write
         SaveFuture* future = create_write_readback(*owner, m.operation, 0x777, 0x7788, m.directory, calls());
         m.identity_alive = false;
         if (mode == 15) {
@@ -387,7 +387,7 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
                 for (const auto& fact : diagnostic.facts) if (fact.key)
                     std::fprintf(stderr, " %s=%lld\n", fact.key, static_cast<long long>(fact.value));
             }
-            CHECK(!diagnostic.sequence); // Pending, successful native calls and readback are not faults.
+            CHECK(!diagnostic.sequence); // pending, successful native calls and readback are not faults
         }
         else if (mode < std::size(failures) && failures[mode]) {
             CHECK(diagnostic.sequence && diagnostic.operation == m.operation);
@@ -405,7 +405,7 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
         if (verified) {
             CHECK(saved.state == BackupState::complete && saved.readback_success && saved.storage_complete);
             CHECK(saved.output.files == 1 && saved.output.bytes == m.bytes.size());
-            // The output remains usable after every native stream has died.
+            // the output remains usable after every native stream has died
             const auto file = CreateFileW((saved.output.path + L"\\payload-0.bin").c_str(), GENERIC_READ,
                 FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
             CHECK(file != INVALID_HANDLE_VALUE);
@@ -431,7 +431,7 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
         const auto sequence = writes.begin(0xabc, 0x789, count, "PROFILE"); CHECK(sequence);
         std::vector<SdkFileWrite> files(count);
         for (auto& file : files) { file.prepared = true; file.size = count == 1 ? 0u : 1u; }
-        CHECK(!writes.prepared(sequence, files)); // Refused before the preflight invokes quota/deletion.
+        CHECK(!writes.prepared(sequence, files)); // refused before the preflight invokes quota/deletion
     }
     for (const bool armed : {false, true}) {
         auto owner = make(); Model m(*owner); active = &m; m.table[15] = reinterpret_cast<uintptr_t>(size);

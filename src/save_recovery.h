@@ -28,7 +28,7 @@ struct RecoveryResult {
     const char* reason = "not_requested";
     std::wstring quarantine;
 };
-// Pending without an exact completion remains a durable admission barrier.
+// pending without an exact completion remains a durable admission barrier
 bool recovery_clear(storage::Namespace&);
 RecoveryResult recover_campaign(storage::Namespace&, const storage::Descriptor&, const RecoveryTransport&);
 }

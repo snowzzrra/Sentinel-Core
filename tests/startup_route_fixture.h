@@ -47,12 +47,12 @@ inline void exercise_gate() {
         CHECK(gate.waiting()==1 && forwarded==0 && admitted==0);
         try {
             StartupGate::Completion completion(gate,&trace);
-            routes.store(1,std::memory_order_release); // Partial installation.
+            routes.store(1,std::memory_order_release); // partial installation
             CHECK(forwarded==0 && WaitForSingleObject(done,0)==WAIT_TIMEOUT);
             if (mode==0) {
                 routes.store(steam_20260818_routes,std::memory_order_release);
                 completion.ready();
-                CHECK(forwarded==0); // ready() commits only on scope completion.
+                CHECK(forwarded==0); // ready() commits only on scope completion
             } else if (mode==2) completion.cancel();
             else if (mode==3) throw std::runtime_error("fixture_install_exception");
         } catch (const std::runtime_error&) { CHECK(mode==3); }
@@ -86,7 +86,7 @@ inline void exercise_gate() {
     CHECK(diagnostic_fact(event,"startup_enter_ms")>=diagnostic_fact(event,"install_complete_ms"));
     CHECK(!trace.snapshot().first_failure.sequence);
 }
-// Actual adapter and consumed-reference contract. Only the native transport is substituted.
+// real adapter and consumed-reference contract. only the native transport is substituted
 inline void exercise(Session& owner,unsigned defect=0) {
     if (!defect) exercise_gate();
     CHECK(owner.state()==SessionState::prepared);

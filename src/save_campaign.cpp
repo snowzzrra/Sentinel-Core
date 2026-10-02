@@ -58,7 +58,7 @@ bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,st
     }
     owner_=&owner; lease_=&lease; options_=descriptor.campaign; state_.enabled=true;
     state_.difficulty=options_.difficulty; state_.resumed=options_.intent==storage::CampaignIntent::resume;
-    // Exact native suffix, never an index inferred from directory enumeration.
+    // exact native suffix, never an index inferred from directory enumeration
     state_.slot="AUTOSAVE0"; directory_=owner.native_root()+"/GAME-"+state_.slot;
     contract_=campaign_contract(descriptor,owner.namespace_id());
     diagnostic_stage_=state_.resumed?BStage::resume:BStage::creation;
@@ -132,8 +132,7 @@ bool Campaign::begin_create(bool clean,const std::string& slot,int32_t index,boo
 bool Campaign::prepare_menu_save(const CampaignTransition& boundary) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled) return true;
-    // The visible, unlocked native selection supplies the request; the current
-    // catalog, menu checkpoint, or active Fortress supplies its save source.
+    // the visible, unlocked native selection supplies the request; the catalog, menu checkpoint, or active fortress supplies its save source
     const bool catalog=state_.resumed && !initiated_ && catalog_hydrated_;
     const bool persisted=menu_active_ && state_.continuity_persisted;
     const bool fortress=state_.map_active && state_.map=="game/hub/hub" &&
@@ -225,7 +224,7 @@ bool Campaign::allow_difficulty(uint32_t value) {
     if (state_.changes_blocked!=UINT32_MAX) ++state_.changes_blocked;
     owner_->btrace.record(diagnostic_stage_,BStatus::blocked,"room_difficulty_change_blocked",state_.operation,
         {{"actual",value},{"expected",options_.difficulty},{"blocked_count",state_.changes_blocked}});
-    return false; // Room managed: reject the change at the native setter, no frame spam.
+    return false; // room managed: reject the change at the native setter, no frame spam
 }
 bool Campaign::allow_access(uintptr_t data,const std::string& directory,bool write,bool erase) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -322,7 +321,7 @@ bool Campaign::parse_checkpoint(std::string_view value) {
     if (part.empty() || part.size()>191) return reject("checkpoint_map_length_invalid",{{"map_bytes",part.size()}});
     if (part.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.")!=part.npos) return reject("checkpoint_map_characters_invalid");
     state_.map=part;
-    state_.native_subtype=1; // Legacy records describe the campaign snapshot.
+    state_.native_subtype=1; // legacy records describe the campaign snapshot
     if (value.substr(0,8)=="subtype=") {
         if (!take(value,"subtype=",part) || !number(part,state_.native_subtype) ||
             (state_.native_subtype!=1 && state_.native_subtype!=2)) return reject("checkpoint_subtype_invalid");
@@ -531,7 +530,7 @@ void Campaign::parser_leave(uint32_t result,bool metadata_only) {
             catalog_hydrated_=true;
             owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"native_metadata_parser_succeeded",0,{{"native_result",result}});
         }
-        return; // Hydration does not prove a gameplay load or activate its map.
+        return; // hydration doesn't prove a gameplay load or activate its map
     }
     state_.parser_result=result; state_.parser_completed=result==0;
     if (result) reject("native_load_parser_failed",{{"native_result",result},{"expected_result",0},{"source_verified",state_.source_verified}});
@@ -589,8 +588,7 @@ bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,u
     if (map.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.")!=std::string::npos)
         return reject("unsupported_native_map_name");
     if (continuing || !mission_destination_.empty()) {
-        // The durable outgoing checkpoint remains valid on disk. Its receipt
-        // cannot certify the destination's balance/payload before its own save.
+        // keep the outgoing checkpoint on disk; its receipt can't confirm destination data before the destination saves
         state_.native_saved=false; state_.readback_verified=false; state_.continuity_persisted=false;
         state_.native_factory_matched=false;
     }
@@ -659,8 +657,7 @@ void Campaign::complete_map() {
         {{"resumed",state_.resumed},{"map_active",state_.map_active},{"save_ready",state_.save_ready},{"generation",state_.generation_after},
          {"effective_difficulty",state_.effective_difficulty},{"expected_difficulty",options_.difficulty},{"awaiting_checkpoint",checkpoint_awaiting_transition_.has_value()}});
     if (checkpoint_awaiting_transition_) {
-        // The native readback object may already have been destroyed. Retain
-        // its verified exact-operation hashes, not the borrowed native object.
+        // the readback object may be gone; keep this operation's checked hashes, not the borrowed object
         engine::LocalMemory memory; persist_checkpoint(*checkpoint_awaiting_transition_,memory);
         checkpoint_awaiting_transition_.reset();
     }
@@ -703,8 +700,7 @@ bool Campaign::checkpoint_ready(const CampaignTransition& result) {
         {{"difficulty_read",result.difficulty_read},{"actual_difficulty",result.difficulty},{"expected_difficulty",options_.difficulty}});
     state_.save_ready=true;
     if (map_pending_ && state_.transition.ended) {
-        // Preserve the original return's state/time. The separately recorded
-        // native writer confirms this pending generation's readiness.
+        // keep the original return's state/time. the separately recorded native writer confirms this pending generation's readiness
         state_.effective_difficulty=result.difficulty;
         complete_map();
     }

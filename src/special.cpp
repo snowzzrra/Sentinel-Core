@@ -227,7 +227,7 @@ void bind_run_state_if_needed(uintptr_t player, uint64_t generation) {
     next_bind_at = now + 500;
     const auto desired = shared_state;
     ReleaseSRWLockExclusive(&state_lock);
-    // Selection/consumed resources belong to native save reconstruction.
+    // selection/consumed resources belong to native save reconstruction
     if (!desired.owns_crucible && !desired.owns_hammer) return;
     if (calls.ensure(calls.context, player, desired.owns_crucible, desired.owns_hammer, desired.hammer_tier)) return;
     SnapshotFacts after{};
@@ -351,7 +351,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
             out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
             AcquireSRWLockExclusive(&state_lock);
             adopt_native_locked(after);
-            // The read callback reports the applied route and its authority.
+            // the read callback reports the applied route and its authority
             fill_facts(after, shared_state, out);
             ReleaseSRWLockExclusive(&state_lock);
         }
@@ -406,7 +406,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
         const bool matches_executed = shared_state.last_executed_id == r.refill_request_id &&
                                       shared_state.last_executed != 0;
         if (matches_executed) {
-            // Repeated ACK/retry never performs the refill twice.
+            // repeated ack/retry never performs the refill twice
             fill_facts(before, shared_state, out);
             ReleaseSRWLockExclusive(&state_lock);
             out.flags |= SC_SPECIAL_FLAG_AFTER_VALID | SC_SPECIAL_FLAG_REFILL_EXECUTED |
@@ -436,7 +436,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
 
         out.flags |= SC_SPECIAL_FLAG_REFILL_AUTHORIZED;
         out.native_exception = c.refill(c.context, player);
-        out.flags |= SC_SPECIAL_FLAG_REFILL_UNVERIFIED; // No capacity readback; partial effects are possible.
+        out.flags |= SC_SPECIAL_FLAG_REFILL_UNVERIFIED; // no capacity readback; partial effects are possible
 
         SnapshotFacts after{};
         const bool read_ok = c.read(c.context, player, after);
@@ -444,7 +444,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
 
         AcquireSRWLockExclusive(&state_lock);
         if (out.native_exception) {
-            // A failed native execution must not leave a retryable charge use.
+            // a failed native execution must not leave a retryable charge use
             shared_state.last_executed = 0;
             shared_state.refill_request_state = SC_SPECIAL_REFILL_REJECTED;
         } else {

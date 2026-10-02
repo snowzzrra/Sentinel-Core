@@ -61,8 +61,7 @@ void unknown_map(const sc_context_snapshot& s, uint32_t reason) {
     for (char c : s.current_map.bytes) CHECK(c == 0);
 }
 int main() {
-    // Actual double-read acceptance path, not a detached clock predicate. A 0.1 ms
-    // observation crosses a simulated 16 ms uptime tick. Old guard rejected it.
+    // check the real double-read path with a 0.1 ms observation across a simulated 16 ms uptime tick
     for (const int64_t elapsed : {100000LL, 2000000LL, 2000001LL, 15000000LL}) {
         Fixture timed; counter_value = 0; counter_delta = elapsed; uptime_value = 1000;
         const context::Clock clock{controlled_counter, controlled_uptime, 1000000000};
@@ -120,7 +119,7 @@ int main() {
     unknown_map(context::freshness(s, 1101), SC_REASON_STALE);
     unknown_map(context::freshness(s, 99), SC_REASON_STALE);
     CHECK(context::freshness(s, 1100).current_map.validity == SC_OBSERVATION_OBSERVED);
-    // Each field is encoded explicitly; no C padding or live addresses cross IPC.
+    // each field is encoded explicitly; no c padding or live addresses cross ipc
     Snapshot host{}; host.pid = 42; host.process_created = 123; host.instance[0] = 9;
     host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.4.0"); strcpy_s(host.core.build_id, "fixture");
     Message wire{}; Snapshot decoded{}; sc_context_snapshot output{}; WireResult result{};
@@ -133,7 +132,7 @@ int main() {
     sc_engine_snapshot legacy{}; CHECK(!decode_engine_response(wire, size, result, decoded, legacy));
     wire[size] = 1; wire[8] = static_cast<uint8_t>(size + 1 - header_size); wire[9] = static_cast<uint8_t>((size + 1 - header_size) >> 8);
     CHECK(!decode_context_response(wire, size + 1, result, decoded, output));
-    auto bad = s; bad.current_map.length = SC_CONTEXT_MAP_CAPACITY - 1; // Bounded long names also fit the wire.
+    auto bad = s; bad.current_map.length = SC_CONTEXT_MAP_CAPACITY - 1; // limited long names also fit the wire
     std::memset(bad.current_map.bytes, 'q', SC_CONTEXT_MAP_CAPACITY - 1); bad.current_map.bytes[SC_CONTEXT_MAP_CAPACITY - 1] = 0;
     size = encode_context_response(wire, WireResult::ok, host, bad); CHECK(size < max_message);
     CHECK(decode_context_response(wire, size, result, decoded, output) && output.current_map.length == 255);

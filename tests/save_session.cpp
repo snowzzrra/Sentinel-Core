@@ -197,7 +197,7 @@ void scoped_delete_contracts(Fixture& fixtures, engine::Memory& memory) {
         if (mode == 11) directory = owner.native_root() + "/PROFILE";
         if (mode == 17) directory[owner.native_root().size() + 3] = '\0';
         DeleteFixture fixture(directory); active_delete = &fixture; DeleteResult result{};
-        // These changes happen after the native factory captured its context.
+        // these changes happen after the native factory captured its context
         if (mode == 12) fixture.directory_context.storage = 0x5678;
         if (mode == 13) owner.fail(SessionFault::native_write);
         if (mode == 14) fixture.directory_context.storage = 0;
@@ -235,7 +235,7 @@ void scoped_delete_contracts(Fixture& fixtures, engine::Memory& memory) {
         active_delete = &fixture; DeleteResult result{}; std::array<uint8_t, 16> executor{};
         fixture.files = {fixture.directory_text + "/game.details", "PROFILE/profile.bin"};
         poll_scoped_delete(owner, memory, &fixture.future, &result, executor.data(), calls);
-        CHECK(fixture.files == std::vector<std::string>{"PROFILE/profile.bin"}); // Deletion already occurred in this model.
+        CHECK(fixture.files == std::vector<std::string>{"PROFILE/profile.bin"}); // deletion already occurred in this model
         owner.fail(SessionFault::native_write); executor[9] = 1;
         poll_scoped_delete(owner, memory, &fixture.future, &result, executor.data(), calls);
         CHECK(result.state == 1 && fixture.directory_context.job && fixture.future.control && !fixture.released && fixture.launches == 1);
@@ -290,7 +290,7 @@ DeleteOperationResult* auxiliary_operation(uintptr_t value, DeleteOperationResul
     const std::string prefix = std::string(context.directory.data) + "/";
     if (!auxiliary_delete_fails) auxiliary_files.erase(std::remove_if(auxiliary_files.begin(), auxiliary_files.end(),
         [&](const auto& name) { return name.compare(0, prefix.size(), prefix) == 0; }), auxiliary_files.end());
-    *out = {0, 1}; return out; // Native aggregate ignores individual deletion failures.
+    *out = {0, 1}; return out; // native aggregate ignores individual deletion failures
 }
 void auxiliary_contracts(Fixture& fixtures, engine::Memory& memory) {
     for (unsigned test = 0; test < 14; ++test) {
@@ -320,7 +320,7 @@ void auxiliary_contracts(Fixture& fixtures, engine::Memory& memory) {
         CHECK(delete_auxiliary_scoped(owner, memory, reinterpret_cast<uintptr_t>(&context), &result, auxiliary_operation) == &result);
         const bool allowed = test <= 1 || test >= 12;
         CHECK(auxiliary_runs == (allowed ? 1u : 0u) && result.outcome == (allowed ? 0 : 1) && result.value == 1);
-        CHECK(std::memcmp(&context, &before_context, sizeof(context)) == 0); // Job/ref/notification ownership untouched.
+        CHECK(std::memcmp(&context, &before_context, sizeof(context)) == 0); // job/ref/notification ownership untouched
         CHECK(auxiliary_files[0] == before[0] && auxiliary_files[1] == before[1]);
         if (!allowed || test == 13) CHECK(auxiliary_files == before);
         if (!allowed) CHECK(owner.routed() && !owner.native_io());
@@ -332,7 +332,7 @@ void delete_contracts(Fixture& fixtures, engine::Memory& memory) {
     {
         Session disabled; DeleteFixture fixture; active_delete = &fixture; DeleteResult result{};
         refuse_unscoped_delete(disabled, memory, &fixture.future, &result, nullptr, calls);
-        CHECK(fixture.launches == 1 && fixture.polls == 1 && result.state == -1); // Native default path.
+        CHECK(fixture.launches == 1 && fixture.polls == 1 && result.state == -1); // native default path
     }
     {
         Session owner; fixtures.admit(owner); DeleteFixture fixture; active_delete = &fixture; DeleteResult result{};
@@ -343,23 +343,23 @@ void delete_contracts(Fixture& fixtures, engine::Memory& memory) {
         CHECK(fixture.files == protected_files && owner.routed() && !owner.accepts_requests());
         CHECK(owner.fault() == SessionFault::unscoped_delete);
         refuse_unscoped_delete(owner, memory, &fixture.future, &result, nullptr, calls);
-        CHECK(fixture.polls == 0 && fixture.released == 1 && result.state == 1); // No second release/restart.
+        CHECK(fixture.polls == 0 && fixture.released == 1 && result.state == 1); // no second release/restart
     }
     {
         Session owner; fixtures.admit(owner); DeleteFixture fixture; active_delete = &fixture; DeleteResult result{};
-        fixture.context.job = 999; // Execution may already have happened; zero I/O is not asserted.
+        fixture.context.job = 999; // execution may already have happened; zero i/o isn't asserted
         refuse_unscoped_delete(owner, memory, &fixture.future, &result, nullptr, calls);
         CHECK(result.state == -1 && fixture.polls == 1 && !fixture.launches && !fixture.released);
         CHECK(owner.fault() == SessionFault::delete_indeterminate && owner.routed() && !owner.accepts_requests());
         fixture.finish = true;
         refuse_unscoped_delete(owner, memory, &fixture.future, &result, nullptr, calls);
         CHECK(result.state == 0 && result.outcome == 0 && fixture.released == 1 && !fixture.launches);
-        CHECK(owner.state() == SessionState::faulted && owner.routed()); // Native result cannot reauthorize.
+        CHECK(owner.state() == SessionState::faulted && owner.routed()); // native result can't reauthorize
     }
     for (unsigned invalid = 0; invalid != 2; ++invalid) {
         Session owner; fixtures.admit(owner); DeleteFixture fixture; active_delete = &fixture; DeleteResult result{};
         if (invalid) fixture.future.control = 1;
-        else fixture.context.result = 0; // A completed-looking payload with no job is not fresh ownership.
+        else fixture.context.result = 0; // a completed-looking payload with no job isn't fresh ownership
         refuse_unscoped_delete(owner, memory, &fixture.future, &result, nullptr, calls);
         CHECK(result.state == 1 && !fixture.polls && !fixture.released && !fixture.launches);
         CHECK(owner.fault() == SessionFault::delete_indeterminate && owner.routed());
@@ -439,7 +439,7 @@ EnumerationFuture** create_enumeration(EnumerationFuture** out, SaveReference* r
     engine::LocalMemory memory;
     collect_scoped(*enumeration_owner, memory, &context.value, &enumeration_result, {collect, assign, release});
     release_write(reference);
-    // Opaque fixture token only; production leaves construction/polling to native code.
+    // opaque fixture token only; production leaves construction/polling to native code
     *out = reinterpret_cast<EnumerationFuture*>(&enumeration_creates);
     return out;
 }
@@ -550,7 +550,7 @@ WritePreflightResult* native_preflight(uintptr_t raw, WritePreflightResult* out)
         return steam_name_equal(std::string_view(name).substr(0, prefix.size()), prefix);
     }), remote_names.end());
     *out = {0, context.files, context.count, context.capacity};
-    context.files = context.count = context.capacity = 0; // Native success moves its owned vector.
+    context.files = context.count = context.capacity = 0; // native success moves its owned vector
     return out;
 }
 void preflight_contracts(Fixture& fixtures, engine::Memory& memory) {
@@ -567,7 +567,7 @@ void preflight_contracts(Fixture& fixtures, engine::Memory& memory) {
         if (test == 7) name = root;
         PreflightContext context; context.name = native_text(name);
         std::array<unsigned char, 0x300> payloads{};
-        const uintptr_t table = 0x2a57348; // Native prepared idFile_Memory vector.
+        const uintptr_t table = 0x2a57348; // native prepared idfile_memory vector
         for (unsigned i = 0; i < 2; ++i) {
             auto* entry = payloads.data() + i * 0x180;
             NativeString file{}; file.data = const_cast<char*>(i ? "SlotFile" : "game.details");
@@ -609,7 +609,7 @@ void preflight_contracts(Fixture& fixtures, engine::Memory& memory) {
 }
 void write_contracts(Fixture& fixtures, engine::Memory& memory) {
     const WriteCalls calls{create_write, set_write_name, release_write,
-        [](Session&, engine::Memory&, uintptr_t) { return true; }}; // PROFILE delegation; full policy has its own host.
+        [](Session&, engine::Memory&, uintptr_t) { return true; }}; // profile delegation; full policy has its own host
     const auto invoke = [&](Session& owner, WriteFixture& f, bool reading = false) {
         active_write = &f; SaveFuture* future = nullptr;
         const auto result = reading ? read_scoped(owner, memory, 0x9876, &future, 0xabcd, &f.reference, calls) :
@@ -668,13 +668,13 @@ void write_contracts(Fixture& fixtures, engine::Memory& memory) {
     {
         Session owner; fixtures.admit(owner); owner.stop_requests();
         WriteFixture f("GAME-AUTOSAVE7");
-        CHECK(successful(invoke(owner, f)) && f.assigns == 1); // Retained native route.
+        CHECK(successful(invoke(owner, f)) && f.assigns == 1); // kept native route
         WriteFixture profile("PROFILE");
         auto refused = invoke(owner, profile); SaveResult outcome{};
         refused->vtable->poll(refused, &outcome, nullptr);
         CHECK(outcome.state == 0 && outcome.outcome == 1 && !profile.creates && !profile.assigns);
-        refused->vtable->destroy(refused, 1); // Output validation alone cannot invent an operation's selection.
-        CHECK(std::strcmp(profile.text, "PROFILE") == 0); // Shared settings domain unchanged here.
+        refused->vtable->destroy(refused, 1); // output validation alone can't invent an operation's selection
+        CHECK(std::strcmp(profile.text, "PROFILE") == 0); // shared settings domain unchanged here
     }
     const SaveResult outcomes[]{{0, 1, 0x40, 0}, {0, 1, 0x100, 0}, {0, 0, 0, 0},
         {1, 0, 0, 0}, {0, 0, 1, 0}, {0, 1, 1, 0}};
@@ -689,7 +689,7 @@ void write_contracts(Fixture& fixtures, engine::Memory& memory) {
         else {
             CHECK(result.state == -1 && backend.polls == 1 && owner.fault() == SessionFault::none);
             if (test != 6) {
-                owner.stop_requests(); // Existing native work remains polled and confined.
+                owner.stop_requests(); // existing native work remains polled and confined
                 future->vtable->poll(future, &result, nullptr);
                 CHECK(result.state == 0 && result.outcome == (test == 4 ? 0 : 1) && result.value == 1);
                 CHECK(backend.polls == 2 && !backend.destroys);
@@ -732,7 +732,7 @@ void write_contracts(Fixture& fixtures, engine::Memory& memory) {
         CHECK(future->vtable->poll(future, &result, &published) == &result);
         CHECK(result.state == 0 && result.outcome == 1 && result.value == 1);
         future->vtable->destroy(future, 1);
-        CHECK(published && saving && notifications == 0); // Destructor is not a receipt.
+        CHECK(published && saving && notifications == 0); // destructor isn't a receipt
         if (result.state == 0 && result.outcome == 1) error = 0x10;
         ++finalizer_runs; published = false; saving = false; ++notifications;
         --f.control.strong; --f.control.weak; lock_owned = false;
@@ -744,7 +744,7 @@ void write_contracts(Fixture& fixtures, engine::Memory& memory) {
         f.throw_assign = allocation_failure; f.fail_assign = !allocation_failure;
         auto future = invoke(owner, f);
         CHECK(!f.creates && f.assigns == 1 && std::strcmp(f.text, "GAME-AUTOSAVE1") == 0);
-        // An abandoned provider future owns neither the caller's lock nor data.
+        // an abandoned provider future owns neither the caller's lock nor data
         future->vtable->destroy(future, 1);
         CHECK(f.control.strong == 1 && f.released == 1);
     }
@@ -918,7 +918,7 @@ int main(int argc, char** argv) {
         CHECK(collections == before_collect + (scenario == 4 ? 0u : 1u));
         const auto count = collections;
         collect_scoped(owner, memory, &context.value, &result, calls);
-        CHECK(result.tag == 1 && collections == count); // No vanilla fallback after fault.
+        CHECK(result.tag == 1 && collections == count); // no vanilla fallback after fault
     }
     fail_copy = false;
     delete_contracts(fixture, memory);

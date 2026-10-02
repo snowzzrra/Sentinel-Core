@@ -93,10 +93,9 @@ SaveFuture** profile_read_prerequisite(Session& owner, engine::Memory& memory, u
             future->catalog_data.control = reinterpret_cast<uintptr_t>(control);
             void* object = calls.allocate(0x280);
             if (object) {
-                calls.construct(object); // Proven constructor includes native Clear().
+                calls.construct(object); // proven constructor includes native clear()
                 control->object = reinterpret_cast<uintptr_t>(object);
-                // Match the native enumeration preparation on this private,
-                // completely constructed SaveData object, before publication.
+                // prepare native enumeration on the fully built private save object before publishing it
                 const int32_t enumerating = 1; const uint8_t enabled = 1;
                 std::memcpy(static_cast<char*>(object) + 0x278, &enumerating, sizeof(enumerating));
                 std::memcpy(static_cast<char*>(object) + 0x27d, &enabled, 1);

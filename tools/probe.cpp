@@ -269,7 +269,7 @@ int print_admission(const sentinel::Inspection& r, bool json) {
         "state=%s fault=%s prepared_routes=%u required_routes=%u flags=%u\nnamespace=%s native_root=%s\n",
         s.core.version, v.abi_version, s.pid, s.core.build_id, sentinel::save_session_state_name(v.state),
         sentinel::save_session_fault_name(v.fault), v.prepared_routes, v.required_routes, v.flags, v.namespace_id, v.native_root);
-    // A readable status is not a successful preflight.
+    // a readable status isn't a successful preflight
     const bool admitted = v.state == SC_SAVE_SESSION_ADMITTED && (v.flags & SC_SAVE_SESSION_ACCEPTING);
     if (!admitted) std::fputs("AP admission failed or is not ready; vanilla slots may remain visible. Do not create or load a campaign. Continue safe installation/context queries.\n", stderr);
     return admitted ? 0 : 8;

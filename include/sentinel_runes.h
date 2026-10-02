@@ -2,10 +2,7 @@
 #define SENTINEL_RUNES_H
 #include "sentinel_native.h"
 
-/* Sentinel Core Native Runes, Support Runes, and Sentinel Crystal Pair Effects.
-   Guarantees canonical native registration distinct from perk grants.
-   Guarantees independent 3-slot player selection: receiving a Rune never auto-equips.
-   Guarantees deterministic crystal pair effects derived from progressive capacity tiers. */
+/* register runes apart from perks; keep all three selection slots, don't auto-equip pickups, and derive crystal pair effects from capacity tiers */
 #define SC_RUNES_ABI_VERSION 1u
 
 enum {

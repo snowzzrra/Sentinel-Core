@@ -38,7 +38,7 @@ inline DWORD finish_io(HANDLE pipe, OVERLAPPED& ov, BOOL immediate, DWORD error,
     const DWORD result = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT :
         (wait == WAIT_OBJECT_0 + 1 ? ERROR_OPERATION_ABORTED : GetLastError());
     CancelIoEx(pipe, &ov);
-    GetOverlappedResult(pipe, &ov, &transferred, TRUE); // Drain before stack/event reuse.
+    GetOverlappedResult(pipe, &ov, &transferred, TRUE); // drain before stack/event reuse
     return result;
 }
 inline DWORD transfer(HANDLE pipe, bool write, void* data, DWORD size, DWORD& count,
@@ -49,6 +49,6 @@ inline DWORD transfer(HANDLE pipe, bool write, void* data, DWORD size, DWORD& co
     const BOOL ok = write ? WriteFile(pipe, data, size, &count, &ov) : ReadFile(pipe, data, size, &count, &ov);
     return finish_io(pipe, ov, ok, ok ? ERROR_SUCCESS : GetLastError(), stop, timeout, count);
 }
-// OS pipe identity queries also require read-attributes access.
+// os pipe identity queries also require read-attributes access
 constexpr DWORD client_access = FILE_GENERIC_READ | FILE_WRITE_DATA;
 }

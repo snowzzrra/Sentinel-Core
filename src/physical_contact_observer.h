@@ -1,4 +1,4 @@
-// Included inside campaign_menu_native.cpp private native binding namespace.
+// included inside campaign_menu_native.cpp private native binding namespace
 Available original_trigger_gate=nullptr;
 constexpr uint32_t contact_ids[]={7770073,7770086};
 

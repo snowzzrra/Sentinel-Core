@@ -97,8 +97,7 @@ void Diagnostics::collect(uint64_t now) {
         auto state = s.state.load(std::memory_order_acquire);
         if (state == SC_DIAGNOSTIC_CLAIMED && s.awaiting_backup.load(std::memory_order_acquire)) {
             sc_save_backup_snapshot progress{}; s.backup->inspect(progress);
-            // A failed copy can precede the outer native read completion. Keep
-            // the slot while either that read or the actual copy still runs.
+            // a failed copy can precede the outer native read completion. keep the slot while either that read or the real copy still runs
             if ((progress.flags & SC_BACKUP_READ_TERMINAL) && progress.state != SC_BACKUP_COPYING) {
                 auto done = s.result; done.completed_at_ms = now;
                 done.state = s.submission.entered ? SC_DIAGNOSTIC_EXECUTED : SC_DIAGNOSTIC_REJECTED;
@@ -222,7 +221,7 @@ sc_weapon_points_result Diagnostics::points_result(const sc_weapon_points_reques
     const auto execution = retrieve(r.execution, cancel, now, nullptr, nullptr, &r, nullptr, nullptr, nullptr);
     if (execution.state >= SC_DIAGNOSTIC_EXECUTED) {
         for (auto& s : slots_) {
-            // Native facts belong exclusively to the callback until terminal release.
+            // native facts belong exclusively to the callback until terminal release
             if (s.state.load(std::memory_order_acquire) >= SC_DIAGNOSTIC_EXECUTED &&
                 same_points(s,&r) && key(s.request,r.execution) && same_scope(s.request.expected,r.execution.expected)) {
                 out = s.weapon_points_result;
@@ -363,7 +362,7 @@ sc_save_backup_snapshot Diagnostics::backup_result(const sc_save_backup_request&
     for (const auto& s : slots_) {
         if (s.state.load(std::memory_order_acquire) == SC_DIAGNOSTIC_UNKNOWN || !same_backup(s, &r) ||
             !key(s.request, r.execution) || !same_scope(s.request.expected, r.execution.expected)) continue;
-        // Callback-owned submission/result fields are invisible until handoff.
+        // callback-owned submission/result fields are invisible until handoff
         if (!s.awaiting_backup.load(std::memory_order_acquire)) return out;
         out.execution = s.result; out.execution.cancel_requested = s.cancel.load(std::memory_order_acquire);
         out.execution.retrieved = 1; out.execution.retrieved_at_ms = now;

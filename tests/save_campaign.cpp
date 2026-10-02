@@ -132,7 +132,7 @@ uint64_t native_load(uintptr_t self,uintptr_t descriptor,uintptr_t files) {
     if (transition_defect==L"travel") {
         native::test_free(self,[](uintptr_t,uintptr_t) {});
     }
-    // Native loader consumes the request selected by the production adapter.
+    // native loader consumes the request selected by the production adapter
     const auto map=*reinterpret_cast<uintptr_t*>(self+0x50);
     std::memcpy(reinterpret_cast<void*>(map+0x9a060),reinterpret_cast<void*>(descriptor+0x10),sizeof(NativeString));
     if (transition_defect==L"nested" && !nested_change) {
@@ -193,7 +193,7 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
     if (defect==L"pending_transition" || defect==L"unrelated") {
         CHECK(!session().campaign_run.snapshot().map_active && session().campaign_run.snapshot().reason=="none");
         *reinterpret_cast<uint32_t*>(root+0x44)=SC_GAME_IN_GAME;
-        CHECK(!session().campaign_run.snapshot().map_active); // Fresh memory alone never certifies the event.
+        CHECK(!session().campaign_run.snapshot().map_active); // fresh memory alone never certifies the event
         if (defect==L"unrelated") native::test_free(binding.root,[](uintptr_t,uintptr_t) {});
     }
     if (checkpoint && defect!=L"initial_save" && defect!=L"initial_save_return_failed" && defect!=L"save_failure" && defect!=L"partial_save") checkpoint();
@@ -355,7 +355,7 @@ int wmain(int argc,wchar_t** argv) {
             if (resume && !recovery_case) remote.files[directory+"/"+extra_names[i]]=extra_payloads[i];
         }
         const int32_t file_count=retail_pair || profile_overlap?2:4;
-        if (profile_overlap) std::swap(all_files[0],all_files[1]); // Native duration precedes details.
+        if (profile_overlap) std::swap(all_files[0],all_files[1]); // native duration precedes details
         store(data,0x1c0,reinterpret_cast<uintptr_t>(all_files.data())); store(data,0x1c8,file_count); store(data,0x1cc,file_count);
         if (resume && !recovery_case) remote.files[directory+"/game.details"]=payload;
     }
@@ -687,7 +687,7 @@ int wmain(int argc,wchar_t** argv) {
         }
         if (defect==L"wrong_difficulty") { CHECK(!owner.campaign_run.allow_difficulty((difficulty+1)%4)); CHECK(!owner.accepts_requests()); return 0; }
         if (defect==L"missing_difficulty") { CHECK(!owner.campaign_run.map_begin("game/sp/initial",1)); return 0; }
-        CHECK(owner.campaign_run.allow_difficulty(difficulty)); // Native consumer restores the parsed save field.
+        CHECK(owner.campaign_run.allow_difficulty(difficulty)); // native consumer restores the parsed save field
         if (defect==L"wrong_map") { CHECK(!owner.campaign_run.map_begin("other/map",1)); return 0; }
         if (profile_lifecycle) {
             writer_fixture::Model next{remote,next_source,next_stream,next_payload,directory};
@@ -723,7 +723,7 @@ int wmain(int argc,wchar_t** argv) {
     if (defect==L"extra_life" || defect==L"ultra") return 0;
     if (profile_lifecycle) {
         CHECK(!owner.campaign_run.snapshot().map_active && owner.campaign_run.snapshot().phase=="native_start_queued");
-        write_profile(); // New Game's PROFILE save precedes map readiness.
+        write_profile(); // new game's profile save precedes map readiness
     }
     const bool transition_failure=defect==L"native_return" || defect==L"abnormal" || defect==L"state_read" || defect==L"generation" || defect==L"difficulty" || defect==L"terminal_cleanup";
     if(transition_failure) { CHECK(native_transition(difficulty,defect)==0); return 0; }
@@ -734,7 +734,7 @@ int wmain(int argc,wchar_t** argv) {
         writer_fixture::Model next{remote,next_source,next_stream,next_payload,directory};
         CHECK(native_transition(difficulty,L"initial_save",[&] {
             CHECK(!owner.campaign_run.snapshot().map_active);
-            write_profile(); // Initial cutscene: native map transition has not returned.
+            write_profile(); // initial cutscene: native map transition has not returned
             writer_fixture::save(writer,L"");
             CHECK(!owner.campaign_run.snapshot().continuity_persisted);
         },[&] {
@@ -745,7 +745,7 @@ int wmain(int argc,wchar_t** argv) {
             CHECK(owner.campaign_run.snapshot().checkpoint==2);
         },[&] {
             CHECK(!owner.campaign_run.snapshot().map_active && !owner.campaign_run.snapshot().save_ready);
-            write_profile(); // ExitMainMenu still emits the native PROFILE save.
+            write_profile(); // exitmainmenu still emits the native profile save
         })==0);
         const auto saved=owner.campaign_run.snapshot();
         CHECK(saved.checkpoint==2 && saved.native_saved && saved.readback_verified && saved.continuity_persisted);
@@ -756,8 +756,7 @@ int wmain(int argc,wchar_t** argv) {
             profile_writes,difficulty,GetCurrentProcessId()); return 0;
     }
     CHECK(native_transition(difficulty,defect==L"pending"?L"pending_save":defect,[&] {
-        // Native PROFILE preparation receives the user context, then the exact
-        // campaign factory/provider/readback chain reaches checkpoint 1.
+        // native profile preparation receives the user context, then the exact campaign factory/provider/readback chain reaches checkpoint 1
         if (defect.empty() || defect==L"queued_checkpoint" || defect==L"menu_pending_save") profile_write();
         if(retail_pair) for(size_t i=1;i<extra_names.size();++i) remote.files[directory+"/"+extra_names[i]]=extra_payloads[i];
         writer_fixture::save(writer,defect==L"pending"?L"pending_save":defect,c_backup);

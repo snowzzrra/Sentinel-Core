@@ -1,4 +1,4 @@
-// Included only by the native test build, inside sentinel::special.
+// included only by the native test build, inside sentinel::special
 struct alignas(8) HudTestClip {
         std::array<uint8_t, 0x100> bytes{};
         std::array<uint8_t, 0x88> context{};
@@ -809,7 +809,7 @@ bool test_hud_owner_path() {
     Fixture::put(foreign_transform, 0x14, 1600.0f);
     Fixture::put(foreign_transform, 0x18, 500.0f);
     Fixture::put(reinterpret_cast<uintptr_t>(fixture.clips.at(foreign.primary)->transform.data()),
-                 0x14, 94.0f); // Native adjacent equipment bounds can overlap.
+                 0x14, 94.0f); // native adjacent equipment bounds can overlap
     const auto foreign_crucible = fixture.find(foreign.parent, "crucible_source");
     const auto foreign_hammer = fixture.find(foreign.parent, "hammer_source");
     const auto foreign_swap = fixture.find(foreign.parent, "swapEquipment");
@@ -871,7 +871,7 @@ bool test_hud_owner_path() {
                            (toggle / 2) % 2 ? 18.0f : 10.0f);
         fixture.render(foreign.parent);
         retail_cache_ok &= observe_selected(toggle % 2 ? SC_SPECIAL_WEAPON_CRUCIBLE : SC_SPECIAL_WEAPON_HAMMER);
-        update_on_hud(foreign.address()); // Cache still describes the preceding render.
+        update_on_hud(foreign.address()); // cache still describes the before render
         fixture.render(foreign.parent);
         update_on_hud(foreign.address());
         fixture.render(foreign.parent);

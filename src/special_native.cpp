@@ -70,7 +70,7 @@ void record_use(const char* predicate, save::BStatus status,
         ReleaseSRWLockExclusive(&use_history_lock);
         return;
     }
-    // Coalesce repeated samples of the same native caller until its facts change.
+    // skip repeat logs from the same native caller until its facts change
     for (uint32_t i = use_events.count; i; --i) {
         const auto& prior = use_events.events[(use_events.sequence - use_events.count + i - 1) % use_events.events.size()];
         if (prior.operation != event.operation || prior.predicate != predicate ||
@@ -99,24 +99,24 @@ uint32_t image_size = 0;
 char fixture_namespace[65]{};
 #endif
 
-// Verified against the supported Steam image (9809708c). All addresses are RVAs.
-constexpr uint32_t rva_inventory_typeinfo = 0x1617cd0;   // returns idDeclTypeInfo for inventory items
-constexpr uint32_t rva_find_decl = 0x17aa5d0;            // FindDecl(typeinfo, path, flags)
-constexpr uint32_t rva_find_item = 0x1690660;            // idInventoryCollection::FindItem(inventory, decl)
-constexpr uint32_t rva_give_item = 0x1691cd0;            // idInventoryCollection::GiveItem(...)
-constexpr uint32_t rva_item_count = 0x398510;            // idInventoryCollection::Num()
-constexpr uint32_t rva_item_at = 0x1691450;              // idInventoryCollection::GetItem(index)
+// checked against steam image 9809708c; all addresses are offsets from the image base
+constexpr uint32_t rva_inventory_typeinfo = 0x1617cd0;   // get the inventory declaration type
+constexpr uint32_t rva_find_decl = 0x17aa5d0;            // look up the declaration with this type, path and flags
+constexpr uint32_t rva_find_item = 0x1690660;            // find the inventory item for this declaration
+constexpr uint32_t rva_give_item = 0x1691cd0;            // give an inventory item
+constexpr uint32_t rva_item_count = 0x398510;            // count inventory items
+constexpr uint32_t rva_item_at = 0x1691450;              // get an inventory item by index
 constexpr uint32_t rva_meter_set = 0x128c3b0;
 constexpr uint32_t rva_judgement_meter_vtable = 0x2d6cf18;
 constexpr uintptr_t judgement_meter_offset = 0x177a0;
 constexpr uint32_t rva_unlock_perk = 0xfe2500;           // exact perk registration
 constexpr uint32_t rva_activate_perk = 0xfe19b0;         // exact perk activation
 constexpr uint32_t rva_active_perk = 0xfe37f0;           // exact active-perk reader
-constexpr uint32_t rva_loot_spawn_amount = 0xaa44f0;     // Hammer loot amount terminal
-constexpr uint32_t rva_perk_typeinfo = 0x1631f90;        // returns idDeclTypeInfo for perks
-constexpr uint32_t rva_current_weapon = 0xbd7740;        // current idWeapon of the player
-constexpr uint32_t rva_hud_earnings = 0xeea070;          // idHUD_MissionChallenge earnings append
-constexpr uint32_t rva_hud_element_setup = 0xeeac40;     // idHUD_MissionChallenge construction
+constexpr uint32_t rva_loot_spawn_amount = 0xaa44f0;     // hammer loot amount terminal
+constexpr uint32_t rva_perk_typeinfo = 0x1631f90;        // get the perk declaration type
+constexpr uint32_t rva_current_weapon = 0xbd7740;        // the player's current weapon
+constexpr uint32_t rva_hud_earnings = 0xeea070;          // append mission challenge earnings to the hud
+constexpr uint32_t rva_hud_element_setup = 0xeeac40;     // build the mission challenge hud
 constexpr uint32_t rva_mission_challenge_vtable = 0x2cff930;
 constexpr uint32_t rva_weapon_info_vtable = 0x2d03798;
 constexpr uint32_t rva_fast_travel_checkpoint_render = 0xf4a100;
@@ -128,7 +128,7 @@ constexpr uint32_t rva_hammer_input_return = 0x14433f0;
 constexpr uint32_t rva_weapon_cast = 0x21107c0;
 constexpr uint64_t special_button = UINT64_C(0x400000000);
 using CrucibleResolver = bool(*)(uintptr_t);
-// The qualified leaf returns SETNZ AL; its callers test AL, not RAX.
+// the checked leaf returns setnz al; its callers test al, not rax
 using InputDown = bool(*)(uintptr_t, uint64_t);
 CrucibleResolver original_crucible_resolver = nullptr;
 InputDown original_input_down = nullptr;
@@ -147,7 +147,7 @@ struct PolicySnapshot {
     bool crucible = false, hammer = false, known = false;
     char namespace_id[65]{};
 };
-PolicySnapshot published_policy; // Protected with route_namespace_lock.
+PolicySnapshot published_policy; // protected with route_namespace_lock
 std::atomic<bool> special_down{false};
 thread_local uintptr_t input_job_player = 0;
 thread_local uint64_t input_job_epoch = 0;
@@ -261,7 +261,7 @@ uintptr_t current_hud_player() {
 
 uint64_t weapon_info_label_detour(uintptr_t parent, const char* label, bool warn) {
     const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress()) - image_base;
-    // Only the native WeaponInfo visibility and QuickUse presenters use this projection.
+    // only the native weaponinfo visibility and quickuse presenters use this projection
     if ((caller == 0xf0cb96 || caller == 0xf0c314 || caller == 0xf0c34a) &&
         !std::strcmp(label, "noEquipment")) {
         __try {
@@ -368,8 +368,7 @@ void project_special_hud(uintptr_t element) {
                 graphics.movie && *reinterpret_cast<uintptr_t*>(graphics.primary_root + 0x30) == graphics.movie &&
                 *reinterpret_cast<uintptr_t*>(graphics.primary_root + 0x40) == graphics.parent &&
                 grenade_mask == 2 && *reinterpret_cast<uint8_t*>(element + 0x209)) {
-                // Native WeaponInfo chooses noEquipment from Frag ownership alone.
-                // Ice-only needs the equipment timeline before AP clips are placed.
+                // native weaponinfo chooses noequipment from frag ownership alone. ice-only needs the equipment timeline before ap clips are placed
                 const bool frame_changed = hud::hold_ice_frame(graphics.parent,
                     *reinterpret_cast<uint8_t*>(element + 0x2a9) != 0);
                 const bool visibility_changed = !*reinterpret_cast<uint8_t*>(graphics.primary_root + 0x51) ||
@@ -530,7 +529,7 @@ uintptr_t find_item(uintptr_t inventory, uintptr_t decl) {
     return reinterpret_cast<FindItem>(image_base + rva_find_item)(inventory, decl);
 }
 
-// Match the native resolver's typed presence checks, independently of charges.
+// match the native resolver's typed presence checks, independently of charges
 bool route_ownership(uintptr_t p, bool& crucible, bool& hammer) {
     __try {
         const auto c = *reinterpret_cast<uintptr_t*>(p + 0x4d198);
@@ -570,7 +569,7 @@ uint32_t applied_mode(bool crucible, bool hammer) {
 }
 
 void publish_policy(uintptr_t p) {
-    // Only the admitted owner/job samples mutable engine inventory.
+    // only the admitted owner/job samples mutable engine inventory
     if (!route_scope(p)) return;
     bool c = false, h = false;
     const bool known = route_ownership(p, c, h);
@@ -609,7 +608,7 @@ __declspec(noinline) bool crucible_resolver_detour(uintptr_t p) {
          {"owner_thread", route_thread.load()}, {"presence_known", known}, {"crucible_present", c},
          {"hammer_present", h}, {"policy_selected", mode}, {"gate_result", result},
          {"vanilla_fallback", !known}, {"action_observed", 0}});
-    // Resource/action guards remain in the original callers and ActivateCrucible.
+    // resource/action guards remain in the original callers and activatecrucible
     return result;
 }
 
@@ -657,8 +656,7 @@ bool filter_hammer_input(uintptr_t caller, uint64_t button, bool raw, uintptr_t 
              {"hammer_meter_milli", observed.meter_milli}, {"hands_action", observed.action},
              {"observation_error", observed.error}, {"native_handler_return_known", 0}});
     }
-    // The query precedes Hammer meter/latch/animation. Preserve every other
-    // caller's boolean result; do not queue or synthesize an input.
+    // query before the hammer meter, latch and animation; keep other callers' results and don't invent an input
     return known ? allowed && raw : raw;
 }
 
@@ -758,8 +756,7 @@ bool ensure_item(uintptr_t inv, uintptr_t p, const char* path, uintptr_t& decl_o
 bool read(void*, uintptr_t p, SnapshotFacts& facts) {
     if (!p) return false;
     __try {
-        // Observations are fresh: a fact that cannot be read on this sample is
-        // reported unknown instead of being inherited from an older sample.
+        // if this sample can't read a value, report unknown; don't reuse an older value
         facts = {};
         const auto inv = inventory_of(p);
         if (!inv) return false;
@@ -798,7 +795,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
                 if (ammo_item) {
                     facts.known |= SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE;
                     facts.crucible_charge = item_count(ammo_item);
-                    facts.crucible_charge_max = UINT32_MAX; // natively owned capacity is not guessed
+                    facts.crucible_charge_max = UINT32_MAX; // natively owned capacity isn't guessed
                 }
             }
         }
@@ -900,8 +897,7 @@ uint32_t refill(void*, uintptr_t p) {
         uint32_t attempted = 0, confirmed = 0;
         const auto inventory_count = count_fn(inv);
         if (inventory_count > 4096) return 3;
-        // Ordinary pools use the inventory writer; Crucible charges use their
-        // native judgement meter. Hammer resources are not ammo pools.
+        // ordinary pools use the inventory writer; crucible charges use their native judgement meter. hammer resources are not ammo pools
         for (int i = 0; i < static_cast<int>(inventory_count); ++i) {
             const auto item = at_fn(inv, i);
             if (!item) continue;
@@ -963,7 +959,7 @@ RouteObservation observe_route(uintptr_t p) {
         observed.known = facts.known;
         if (facts.known & SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE) observed.charge = facts.crucible_charge;
         observed.action = *reinterpret_cast<uint32_t*>(p + 0x15f98);
-        // SelectPendingWeapon (1461520) writes this; ClearPendingWeapon (14573c0) writes -1.
+        // selectpendingweapon (1461520) writes this; clearpendingweapon (14573c0) writes -1
         observed.pending_quick_slot = *reinterpret_cast<int32_t*>(p + 0x7158);
         const auto resource = p + 0x177a0;
         const auto resource_table = *reinterpret_cast<uintptr_t*>(resource);
@@ -1026,8 +1022,7 @@ void input_job_detour(uintptr_t context) {
     const auto previous_epoch = input_job_epoch;
     const auto p = route_player.load(std::memory_order_acquire);
     const auto epoch = route_epoch.load(std::memory_order_acquire);
-    // PE 9809708c: 1441f70 submits player+4d230 to 1438f00, which tail-jumps
-    // through 1442480 into the ordinary input consumer 1442710.
+    // pe 9809708c: 1441f70 submits player+4d230 to 1438f00, which tail-jumps through 1442480 into the ordinary input consumer 1442710
     input_job_player = p && context == p + 0x4d230 ? p : 0;
     input_job_epoch = epoch;
     const auto reason = route_scope_reason(p);
@@ -1116,7 +1111,7 @@ __declspec(noinline) void hammer_attack_detour(uintptr_t p) {
 }
 
 bool present(void*, uintptr_t p, uint32_t, uint32_t, uint32_t) {
-    // WeaponInfo Update owns the SWF tree; a publish is visible there on its next callback.
+    // weaponinfo update owns the swf tree; a publish is visible there on its next callback
     const auto epoch = route_epoch.load(std::memory_order_acquire);
     if (p && p == route_player.load(std::memory_order_acquire) && epoch == native::observation_stamp()) {
         static thread_local uint64_t last_revision = UINT64_MAX, last_epoch = 0;
@@ -1273,7 +1268,7 @@ void refresh_input_config() {
     controls_directory = path_valid ? absolute : L"";
     ReleaseSRWLockExclusive(&directory_lock);
     const auto keys = path_valid ? controls::read(absolute) : controls::Bindings{};
-    // A shared key cannot dispatch two actions; conflicting files disable both.
+    // a shared key can't dispatch two actions; conflicting files disable both
     const unsigned packed = !path_valid || keys.conflict() ? 0u :
         static_cast<unsigned>(keys.keys[0] | (keys.keys[1] << 8));
     configured_keys.store(packed, std::memory_order_relaxed);
@@ -1325,7 +1320,7 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
     input_trace.record(save::BStage::special_input, enabled ? save::BStatus::succeeded : save::BStatus::pending,
         "input_gate", 0, {{"ready", installed}, {"safe_gameplay", safe_gameplay}, {"player", p != 0},
                          {"foreground", foreground_pid == GetCurrentProcessId()}, {"keys", keys}});
-    // The packaged client owns F9 refill requests and their AP ledger transaction.
+    // the packaged client owns f9 refill requests and their ap ledger transaction
     for (unsigned i = 1; i < 2; ++i) {
         const auto vk = static_cast<int>((keys >> (i * 8)) & 0xff);
         const bool down = vk && (GetAsyncKeyState(vk) & 0x8000) != 0;
@@ -1342,7 +1337,7 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
              {"dispatched", pressed}, {"attempts", attempts[i]}, {"dispatches", dispatches[i]},
              {"gate_refusals", gate_refusals[i]}, {"admission_refusals", admission_refusals[i]}});
         if (!pressed) continue;
-        // Native reconstruction callbacks may invalidate the outer tick scope.
+        // native reconstruction callbacks may invalidate the outer tick scope
         const bool admitted = native::gameplay_admitted();
         if (!admitted) count(admission_refusals[i]);
         save::session().btrace.record(save::BStage::special_input,
@@ -1627,7 +1622,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
             "joint_route_install", 0, {{"created", created}, {"queued", queued}, {"status", status}, {"ready", installed}});
     }
 
-    // Upgrade writers and reader are qualified together; base Special routing stays independent.
+    // upgrade writers and reader are checked together; base special routing stays independent
     const Site upgrade_sites[] = {
         {rva_unlock_perk, "4885d20f84c903000044884c2420448844241848894c24085356415441564883"},
         {rva_activate_perk, "44884c24204488442418488954241048894c2408555357415541564157488d6c"},
@@ -1655,7 +1650,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
     }
     native_upgrade_ready.store(upgrade_valid, std::memory_order_release);
 
-    // Optional terminal observation of the three Hammer loot drop types.
+    // optional terminal observation of the three hammer loot drop types
     native::Target loot_target{};
     loot_target.address = image_base + rva_loot_spawn_amount;
     const char* loot_bytes = "488954241048894c24085556574881ecf0000000498bf9498bf0488bea4885d2";
@@ -1678,7 +1673,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {{"rva", rva_loot_spawn_amount}, {"validation", loot_validation},
          {"create_status", loot_created}, {"enable_status", loot_enabled}});
 
-    // Optional MissionChallenge toast capture is independent of gameplay hooks.
+    // optional missionchallenge toast capture is independent of gameplay hooks
     const auto deadline = GetTickCount64() + 10000;
     native::Target hud_target{};
     hud_target.address = image_base + rva_hud_element_setup;

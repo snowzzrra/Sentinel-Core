@@ -40,7 +40,7 @@ EnumerationFuture** enumerate_scoped(Session& owner, engine::Memory& memory, Enu
     if (!owner.routed()) {
         if (owner.state() == SessionState::disabled) return create(out, identity, root, prefix);
         owner.unrouted_import("catalog_enumeration", "enumerate");
-        // The list future owns identity cleanup; its collector refuses before storage reads.
+        // the list future owns identity cleanup; its collector refuses before storage reads
         return create(out, identity, owner.native_root().c_str(), prefix);
     }
     std::array<char, 64> captured{};

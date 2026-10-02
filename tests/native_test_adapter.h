@@ -17,7 +17,7 @@ struct TestAdapter {
     uintptr_t (*map)();
     bool (*checkpoint)(uintptr_t descriptor, uint8_t& flag);
     bool (*primary)(uintptr_t slot, uintptr_t& map);
-    void (*gate)(bool executed); // Deterministic race gate in this test build only.
+    void (*gate)(bool executed); // deterministic race gate in this test build only
 };
 void test_start(const TestAdapter& adapter, const Snapshot& identity, HANDLE stop);
 void test_events(const engine::Binding&, uint64_t (*change)(uintptr_t,uintptr_t,uintptr_t));

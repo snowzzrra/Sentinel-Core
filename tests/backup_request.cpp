@@ -58,7 +58,7 @@ void run_backup_request_contracts() {
     CHECK(failed.flags & SC_BACKUP_CANCEL_REQUESTED);
     CHECK(queue.backup_result(r, false, 120001).state == SC_BACKUP_UNKNOWN);
     CHECK(queue.submit(r.execution, 0, 120002).state == SC_DIAGNOSTIC_QUEUED);
-    CHECK(queue.backup_result(r, true, 120003).state == SC_BACKUP_UNKNOWN); // New diagnostic is not the retired backup.
+    CHECK(queue.backup_result(r, true, 120003).state == SC_BACKUP_UNKNOWN); // new diagnostic isn't the retired backup
     CHECK(queue.retrieve(r.execution, false, 120003).state == SC_DIAGNOSTIC_QUEUED);
 
     for (unsigned mode = 0; mode < 4; ++mode) {

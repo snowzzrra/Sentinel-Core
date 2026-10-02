@@ -21,7 +21,7 @@ bool provider_initialized(Session&, engine::Memory&, uintptr_t manager, const Pr
 // RootInit publishes the selected manager after its constructor initialized the
 // provider. Called only after normal RootInit return, before startup_leave.
 bool bind_root_provider(Session&, engine::Memory&, const ProviderCalls&);
-// Stack frames come from the current native invalidation callback, never IPC.
+// stack frames come from the native invalidation callback, never ipc
 void invalidate_provider(Session&, engine::Memory&, uintptr_t manager, uintptr_t image,
     uintptr_t caller, uint32_t origin, const uintptr_t* frames, size_t count);
 // Re-read this bound provider's physical inventory and full ownership record.

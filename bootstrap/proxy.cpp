@@ -63,7 +63,7 @@ sc_result sc_bootstrap_shutdown(void) {
         if (wait != WAIT_OBJECT_0) {
             startup_error = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
             ReleaseSRWLockExclusive(&lock);
-            return SC_BOOTSTRAP_FAILURE; // Caller must retain the module and retry.
+            return SC_BOOTSTRAP_FAILURE; // caller must keep the module and retry
         }
         CloseHandle(worker);
         worker = nullptr;

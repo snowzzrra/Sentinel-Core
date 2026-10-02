@@ -22,7 +22,7 @@ struct ReadHandles {
 };
 
 Result read_descriptor_text(const wchar_t* filename, std::string& text) {
-    // Only local drive paths; no device names, alternate streams or UNC providers.
+    // only local drive paths; no device names, alternate streams or unc providers
     const size_t length = std::wcslen(filename);
     if (length < 4 || length > 32760) return {Outcome::invalid_descriptor, ERROR_INVALID_NAME};
     std::wstring path(filename);
@@ -41,7 +41,7 @@ Result read_descriptor_text(const wchar_t* filename, std::string& text) {
     if (GetDriveTypeW(absolute.substr(0, 3).c_str()) != DRIVE_FIXED)
         return {Outcome::unsafe_path, ERROR_NOT_SUPPORTED};
 
-    // Pin every parent against replacement, then the file against concurrent writes.
+    // pin every parent against replacement, then the file against concurrent writes
     ReadHandles handles;
     size_t end = 3;
     for (;;) {
@@ -209,7 +209,7 @@ bool component(std::wstring_view name) {
     return true;
 }
 bool valid_root(std::wstring_view path) {
-    // Retain room for namespace and backup suffixes inside the Win32 path limit.
+    // keep room for namespace and backup suffixes inside the win32 path limit
     if (path.size() < 4 || path.size() > 110 || path[1] != L':' || path[2] != L'\\' ||
         !((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) ||
         path.back() == L'\\') return false;
@@ -239,8 +239,7 @@ Result validate_handle(HANDLE handle, const std::wstring& path, bool directory) 
     return {};
 }
 Result validate_streams(HANDLE handle, bool directory) {
-    // Query the retained handle: path-based enumeration reopens the file and
-    // conflicts with exclusive ownership/publication handles.
+    // query the held handle; reopening the path conflicts with exclusive read/write handles
     alignas(FILE_STREAM_INFO) std::array<unsigned char, 512> buffer{};
     if (!GetFileInformationByHandleEx(handle, FileStreamInfo, buffer.data(), static_cast<DWORD>(buffer.size()))) {
         const DWORD error = GetLastError();
@@ -258,7 +257,7 @@ Result validate_streams(HANDLE handle, bool directory) {
 }
 Result open_directory(const std::wstring& path, Handle& handle, bool payload = false) {
     if (path.size() > path_limit) return {Outcome::limit_exceeded};
-    // Deny write as well as delete sharing: retaining a read-only directory handle
+    // block write and delete sharing with the read-only directory handle
     handle = Handle(CreateFileW(path.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ, nullptr, OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
@@ -521,8 +520,7 @@ Result namespace_id(const Identity& identity, std::string& id) {
         !lower_hex(identity.generation_fingerprint) || !utf8(identity.seed, seed) ||
         std::any_of(seed.begin(), seed.end(), [](wchar_t c) { return c < 32 || c == 127; }))
         return {Outcome::invalid_identity};
-    // Fixed identity-domain tag, followed by four 32-bit big-endian length-prefixed
-    // UTF-8/canonical decimal fields. Product, protocol and process IDs are absent.
+    // hash the fixed identity tag and four length-prefixed utf-8/decimal fields with big-endian 32-bit lengths; leave out product, protocol and process ids
     std::string canonical = "sentinel-ap-session-identity";
     canonical_field(canonical, identity.seed);
     canonical_field(canonical, std::to_string(*identity.team));
@@ -633,7 +631,7 @@ Result Namespace::backup_offline(Backup& backup) {
         if (!FlushFileBuffers(file.value)) return io_error();
         ++backup.files;
     }
-    // Receipt is separate from the copied storage manifest and explicitly offline.
+    // receipt is separate from the copied storage manifest and explicitly offline
     result = publish_metadata(backup.path, receipt_name, "sentinel-offline-backup-v1\nnamespace=" +
         lease.metadata.namespace_id + "\nfiles=" + std::to_string(backup.files) + "\nbytes=" +
         std::to_string(backup.bytes) + "\nprovenance=synthetic-fixture\nnative_completion=unproven\nstate=complete\n");
@@ -795,7 +793,7 @@ Result Namespace::backup_transport(const TransportMetadata& metadata, ReadTransp
     if (backup.path.size() > path_limit) return {Outcome::limit_exceeded};
     if (!CreateDirectoryW(backup.path.c_str(), nullptr)) return io_error();
     Handle directory; result = open_directory(backup.path, directory, true); if (!result.ok()) return result;
-    const auto deadline = GetTickCount64() + 10000; // Checked between chunks; not a system-call latency guarantee.
+    const auto deadline = GetTickCount64() + 10000; // checked between chunks; not a system-call latency guarantee
     std::array<char, 65536> buffer{};
     std::vector<Handle> written_files; written_files.reserve(metadata.files.size());
     for (size_t i = 0; i < metadata.files.size(); ++i) {
@@ -810,7 +808,7 @@ Result Namespace::backup_transport(const TransportMetadata& metadata, ReadTransp
         }
         if (!FlushFileBuffers(file.value)) return io_error();
         result = verify_transport_file(file.value, metadata.files[i], deadline); if (!result.ok()) return result;
-        written_files.push_back(std::move(file)); // Keep earlier verified files immutable until publication.
+        written_files.push_back(std::move(file)); // keep earlier checked files fixed until publication
         ++backup.files;
     }
     result = publish_metadata(backup.path, transport_manifest, transport_text(metadata, lease.descriptor, lease.metadata.namespace_id));

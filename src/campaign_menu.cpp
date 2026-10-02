@@ -64,7 +64,7 @@ sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r
             }
         }
     }
-    // Unauthenticated requests receive no existing menu state.
+    // unauthenticated requests receive no existing menu state
     if (admitted) {
         out.committed_revision=committed_.revision; out.rendered_revision=rendered_;
         out.selected_id=selected_; out.loaded_id=loaded_;

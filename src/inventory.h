@@ -20,7 +20,7 @@ struct SnapshotFacts {
     uint8_t ice_bomb = SC_INVENTORY_UNKNOWN_ITEM;
 };
 
-// Internal production seam; never externally supplied or serialized.
+// internal code only; don't accept or serialize it as input
 struct Calls {
     void* context = nullptr;
     uintptr_t (*player)(void*) = nullptr;
@@ -35,7 +35,7 @@ void execute(const sc_inventory_request&, sc_inventory_result&, const Calls&);
 void install(const engine::Binding&, HANDLE stop);
 bool available();
 bool admitted(const char* namespace_id);
-uint8_t grenade_indicator_mask(uintptr_t player); // 1 Frag, 2 Ice, 0 none, 255 UNKNOWN.
+uint8_t grenade_indicator_mask(uintptr_t player); // 1 frag, 2 ice, 0 none, 255 unknown
 void execute_native(const sc_inventory_request&, sc_inventory_result&);
 void reset_session(const char* namespace_id);
 

@@ -19,8 +19,7 @@ void invalidate_provider(Session& owner, engine::Memory& memory, uintptr_t manag
     for (size_t i=0;i<count;++i) {
         const auto pc = rva(frames[i]);
         if (pc && logged < source.stack_rvas.size()) source.stack_rvas[logged++] = pc;
-        // Supported PE .pdata owns [675290,675d23): native root shutdown.
-        // A real unwind frame inside it proves destruction is already executing.
+        // supported pe .pdata owns [675290,675d23): native root shutdown. a real unwind frame inside it proves destruction is already executing
         if (pc > 0x675290 && pc <= 0x675d23) source.shutdown_rva = pc;
     }
     // Retail exit removes the master user BEFORE root destruction. Supported
@@ -185,8 +184,7 @@ SaveFuture** query_exists_scoped(Session& owner, engine::Memory& memory, SaveFut
         if (future && owner.native_io() && name_at(memory, input, name) && calls.provider.context) {
             context = calls.provider.context(calls.provider.image_base + 0x397fb88);
             if (at(memory, context, 0, remote) && owner.collecting(remote, owner.native_root())) {
-                // The shared account query keeps the native implementation and
-                // its consumed-reference/result semantics. No campaign redirect.
+                // the shared account query keeps the native implementation and its consumed-reference/result semantics. no campaign redirect
                 if (name == "PROFILE") shared_profile = true;
                 else {
                     const auto root = owner.native_root() + "/";
@@ -292,7 +290,7 @@ bool provider_initialized(Session& owner, engine::Memory& memory, uintptr_t mana
     try {
         uintptr_t selected_manager = 0, control = 0, provider = 0, table = 0;
         if (!at(memory, root, 0x9b38, selected_manager)) { owner.fail(SessionFault::provider_identity); return false; }
-        if (manager != selected_manager) return false; // Another native account/service manager.
+        if (manager != selected_manager) return false; // another native account/service manager
         if (at(memory, manager, 0, control) && at(memory, control, 8, provider) && at(memory, provider, 0, table) &&
             table == calls.image_base + 0x2e90658 && calls.context) {
             const auto context = calls.context(calls.image_base + 0x397fb88);

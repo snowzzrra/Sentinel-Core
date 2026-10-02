@@ -69,7 +69,7 @@ struct CatalogFuture : SaveFuture {
         }
         std::string selected = source.selected;
         int32_t index = 0; const bool prospective = ordered.empty() && (selected.empty() || selected == "AUTOSAVE0");
-        if (prospective) selected = "AUTOSAVE0"; // Native empty-cache format "%s0", index 0.
+        if (prospective) selected = "AUTOSAVE0"; // native empty-cache format "%s0", index 0
         else {
             const auto found = std::find(ordered.begin(), ordered.end(), selected);
             if (!require(found!=ordered.end(),"catalog_selected_slot_missing",{{"count",count},{"selected_length",selected.size()}})) return false;
@@ -143,7 +143,7 @@ SaveFuture** enumerate_provider(Session& owner, engine::Memory& memory, uintptr_
     if (!valid) { owner.btrace.record(BStage::catalog,BStatus::refused,"catalog_factory_source_or_scope",0,
         {{"allocated",future!=nullptr},{"native_io",owner.native_io()},{"retained",future && future->data.control!=0}});
         owner.fail(SessionFault::native_collection); calls.release(data); *out = refused_save_future(); return out; }
-    // The original factory still consumes its argument and owns the native job.
+    // the original factory still consumes its argument and owns the native job
     calls.enumerate(provider, &future->native, identity, data, future->prefix.c_str());
     if (!future->native) { owner.btrace.record(BStage::catalog,BStatus::refused,"catalog_native_factory_returned_null"); owner.fail(SessionFault::native_collection); *out = refused_save_future(); return out; }
     future->vtable = &vtable; *out = future.release(); return out;

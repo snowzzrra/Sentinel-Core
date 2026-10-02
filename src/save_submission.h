@@ -19,8 +19,8 @@ SubmissionResult submit_native_save(NativeWrites&, const std::shared_ptr<BackupJ
     std::string_view directory, const SubmissionCalls&);
 SaveReference* native_save_factory(NativeWrites&, uintptr_t caller, uintptr_t expected_caller,
     uintptr_t manager, SaveReference*, uint32_t user, uintptr_t request, NativeSaveFactory);
-// Called only after the ordinary writer has validated/scoped its consumed data.
+// called only after the ordinary writer has validated/scoped its consumed data
 bool capture_submission(NativeWrites&, uint64_t operation, std::string_view directory);
-// Exact synchronous mode1 native checkpoint factory, never a newest-write rule.
+// exact synchronous mode1 native checkpoint factory, never a newest-write rule
 bool capture_native_checkpoint(NativeWrites&);
 } // namespace sentinel::save

@@ -57,7 +57,7 @@ struct Model {
     void prepared_files() {
         for (unsigned i = 0; i < 2; ++i) {
             auto* entry = storage.data() + i * 0x180;
-            const auto table = image + 0x2a57348; // Native prepared vector contains idFile_Memory.
+            const auto table = image + 0x2a57348; // native prepared vector contains idfile_memory
             NativeString name{}; name.data = const_cast<char*>(i ? "SlotFile" : "game.details"); name.length = i ? 8 : 12;
             const auto& bytes = i ? second : first;
             const uint64_t size = bytes.size(), capacity = size + 1;
@@ -118,7 +118,7 @@ SdkWriteResult* native_poll(uintptr_t raw, SdkWriteResult* out, void*) {
         *out = {0, 1, 0, model.mode == 3 ? 0x10u : 0x40u}; return out;
     }
     callback(model, 0); issue(model, 1); callback(model, 1);
-    // Match native bool success: inactive variant bytes need not be initialized.
+    // match native bool success: inactive variant bytes need not be initialized
     out->state = 0; out->outcome = 0; *reinterpret_cast<uint8_t*>(&out->detail) = 1; return out;
 }
 WritePreflightResult* prepare(uintptr_t raw, WritePreflightResult* out) {
@@ -232,7 +232,7 @@ SaveResult* poll_pipeline(SaveFuture* raw, SaveResult* out, void*) {
         prepare_write_job(owner, model.sdk.memory, &static_cast<Pipeline*>(raw)->source, prepared.data(), &identity, native_prepare_job, image);
         if (!prepared[1]) { *out = {0, 1, 0x40, 0}; return out; }
         model.preparation_parent = model.preparation_worker = true;
-        ++model.prepared.strong; ++model.prepared.weak; // The scheduled worker owns an independent reference.
+        ++model.prepared.strong; ++model.prepared.weak; // the scheduled worker owns an independent reference
         *out = {-1, 0, 0, 0}; return out;
     }
     if (model.step == 2) {
@@ -250,13 +250,13 @@ SaveResult* poll_pipeline(SaveFuture* raw, SaveResult* out, void*) {
         WritePreflightResult result{}; std::memcpy(&result, model.preflight.data() + 0x60, sizeof(result));
         if (result.tag) { *out = {0, 1, 1, 0}; return out; }
         CHECK(result.first == model.sdk.context.files && result.second == 2);
-        std::memset(model.preflight.data() + 0x68, 0, 24); // Move to SDK state before context release.
+        std::memset(model.preflight.data() + 0x68, 0, 24); // move to sdk state before context release
         model.preflight_parent = false; drop_job(true);
     }
     SdkWriteResult sdk{};
     poll_sdk_write(owner, model.sdk.memory, reinterpret_cast<uintptr_t>(&model.sdk.context), &sdk, nullptr, {native_poll, image, context_init});
     if (sdk.state == -1) { *out = {-1, 0, 0, 0}; return out; }
-    release_vector(model.sdk, model.sdk.context.files); // Native teardown precedes outward result mapping.
+    release_vector(model.sdk, model.sdk.context.files); // native teardown precedes outward result mapping
     NativeWriteOperation observed; CHECK(owner.native_writes.inspect_operation(id, observed) && !observed.provider_terminal);
     *out = {0, 0, 1, 0}; return out;
 }
@@ -293,7 +293,7 @@ void run_write_owner_contracts(const std::function<std::unique_ptr<Session>()>& 
                     CHECK(result.state == -1 && observed.preflight_jobs == (test == 7 ? 0u : 1u));
                     if (test == 2 || test == 7) { future->vtable->destroy(future, 1); future = nullptr; }
                     if (test == 3) owner->forget_save_data(model.source.object);
-                    // A native worker has no caller stack or polling TLS to borrow.
+                    // a native worker has no caller stack or polling tls to borrow
                     std::thread worker([&] {
                         CHECK(WritePollScope::current(owner->native_writes) == 0);
                         auto* out = reinterpret_cast<WritePreflightResult*>(model.preflight.data() + 0x60);
@@ -326,7 +326,7 @@ void run_write_owner_contracts(const std::function<std::unique_ptr<Session>()>& 
         CHECK(owner->native_writes.snapshot(2).state == SC_SAVE_WRITE_NOT_RETAINED);
         if (test == 0) { CHECK(observed.sdk_sequence == 1); CHECK(inspect(sdk).operation == observed.id); }
     }
-    // Native allocators may reuse addresses before an original destructor returns.
+    // native allocators may reuse addresses before an original destructor returns
     NativeWrites owners; const auto old = owners.open_provider(1, "a"), next = owners.open_provider(2, "b");
     CHECK(owners.attach_job(old, 123, false)); const auto token = owners.detach_job(123);
     CHECK(owners.attach_job(next, 123, false)); owners.finish_job(token);
@@ -348,7 +348,7 @@ void run_write_owner_contracts(const std::function<std::unique_ptr<Session>()>& 
 }
 }
 void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& make) {
-    { // Retirement must preserve a released vector whose provider is still pending.
+    { // retirement must keep a released vector whose provider is still pending
         NativeWrites writes; CHECK(writes.snapshot().state == SC_SAVE_WRITE_NONE);
         for (uintptr_t i = 1; i <= 64; ++i) {
             CHECK(writes.open_provider(i, "PROFILE") == i && writes.attach_files(i, i + 100, 1));
@@ -363,14 +363,14 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
         CHECK(writes.inspect(1, retained) && !writes.inspect(2, retained));
         CHECK(writes.snapshot(1).state == SC_SAVE_WRITE_PENDING && writes.snapshot(2).state == SC_SAVE_WRITE_NOT_RETAINED);
         writes.provider_result(1, {0, 0, 1, 0});
-        CHECK(writes.snapshot(1).state == SC_SAVE_WRITE_NATIVE_SUCCEEDED); // No prepared/captured hashes or SDK result.
+        CHECK(writes.snapshot(1).state == SC_SAVE_WRITE_NATIVE_SUCCEEDED); // no prepared/captured hashes or sdk result
     }
     for (unsigned test = 0; test < 10; ++test) {
         auto owner = make(); Model model(*owner); active = &model;
         CHECK(owner->bind_provider(owner->native_root(), model.context.remote, owner->ownership_record()));
         owner->startup_leave(false); CHECK(source(model) == 1);
         auto* entry = model.storage.data();
-        if (test == 0) entry[0x178] = 0; // A borrowed nonempty buffer is not a stable prepared payload.
+        if (test == 0) entry[0x178] = 0; // a borrowed nonempty buffer isn't a stable prepared payload
         if (test == 1) { const uint64_t size = 100u * 1024u * 1024u + 1u; std::memcpy(entry + 0x150, &size, 8); }
         if (test == 2) { const uint64_t capacity = 2; std::memcpy(entry + 0x158, &capacity, 8); }
         if (test == 3) std::memcpy(entry + 0x180 + 8, entry + 8, sizeof(NativeString));
@@ -393,7 +393,7 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
         } else {
             CHECK(result.tag == 1 && result.second == 1 && owner->fault() == SessionFault::native_write);
             CHECK(input.files == before.files && input.count == before.count && input.capacity == before.capacity);
-            CHECK(!observed.payloads[0].prepared); // Failed preparation never publishes a partial manifest.
+            CHECK(!observed.payloads[0].prepared); // failed preparation never publishes a partial manifest
             constexpr const char* expected[]{"payload_not_owned", "payload_size_limit", "payload_capacity_short",
                 "payload_duplicate_name", "payload_hash_bytes_unreadable", "payload_vtable_mismatch",
                 "payload_hash_extent_invalid", "payload_name_extent_invalid", "", "payload_vtable_mismatch"};
@@ -407,7 +407,7 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
                 CHECK(fact("file_index") == 1 && fact("file_type") == 2 && fact("expected_file_type") == 1);
                 CHECK(fact("vtable_rva") == 0x2a575a8 && fact("expected_vtable_rva") == 0x2a57348);
             }
-            // Downstream refusals cannot replace the actionable original field.
+            // downstream refusals can't replace the actionable original field
             owner->btrace.record(BStage::provider, BStatus::refused, "fixture_later_provider_failure", 1);
             CHECK(owner->btrace.snapshot().first_failure.sequence == first.sequence);
             if (test == 4) {
@@ -504,7 +504,7 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
         }
         if (test == 1 || test == 2 || test == 10) {
             CHECK(!last.payloads[0].completed);
-            model.utilities.failed = true; // Invalid/unavailable handle returning false is not completion.
+            model.utilities.failed = true; // invalid/unavailable handle returning false isn't completion
             poll_released_sdk_writes(*owner, model.memory, calls);
             CHECK(!inspect(model).payloads[0].completed && model.utilities.queries > 0);
             model.memory.wrong_initializer = true; const auto before = model.contexts;
@@ -521,7 +521,7 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
             last = inspect(model); CHECK(last.payloads[0].completed && !last.payloads[0].callback && last.payloads[0].sdk_result == 0);
             CHECK(last.terminal == (test == 2));
             if (test == 2) CHECK(last.result.state == 1);
-            // The same vector address can be reused while the old capture remains immutable.
+            // the same vector address can be reused while the old capture remains fixed
             CHECK(source(model, 1) == 2);
             const auto next = owner->native_writes.begin(real_remote, model.context.files, 1, model.directory);
             CHECK(next == 2 && !inspect(model, next).released);
@@ -536,12 +536,12 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
             CHECK(last.payloads[0].completed && last.payloads[1].completed && last.payloads[1].callback);
             hash_is(last.payloads[1].sha256, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
             const auto contexts = model.contexts, queries = model.utilities.queries;
-            CHECK(owner->native_writes.snapshot(1).state == SC_SAVE_WRITE_PENDING); // SDK alone is not the provider result.
+            CHECK(owner->native_writes.snapshot(1).state == SC_SAVE_WRITE_PENDING); // sdk alone isn't the provider result
             owner->native_writes.provider_result(1, {0, 0, 1, 0});
             const auto observed = owner->native_writes.snapshot(1);
             CHECK(observed.state == static_cast<uint32_t>(test < 16 ? SC_SAVE_WRITE_SDK_CONFIRMED : SC_SAVE_WRITE_NATIVE_SUCCEEDED));
             CHECK(observed.completed == 2 && observed.submitted == 2 && !observed.pending_handles);
-            CHECK(model.contexts == contexts && model.utilities.queries == queries); // Read-only snapshots never enter Steam.
+            CHECK(model.contexts == contexts && model.utilities.queries == queries); // read-only snapshots never enter steam
         }
         CHECK(!owner->native_writes.lost());
         if (test == 0) {
@@ -560,11 +560,11 @@ void run_sdk_write_contracts(const std::function<std::unique_ptr<Session>()>& ma
             writes.released(static_cast<uintptr_t>(i + 1));
             writes.close_provider(operation);
         }
-        CHECK(!writes.open_provider(999, "root")); // Never evict pending SDK ownership.
+        CHECK(!writes.open_provider(999, "root")); // never evict pending sdk ownership
         writes.callback(0x100, false, 1);
         CHECK(writes.open_provider(999, "root") == 65 && writes.attach_files(65, 1000, 1));
         CHECK(writes.begin(1, 1000, 1, "root") == 65);
-        CHECK(!writes.begin(1, 1000, 1, "root")); // No live vector alias.
+        CHECK(!writes.begin(1, 1000, 1, "root")); // no live vector alias
     }
     {
         Session off; Model model(off); active = &model;

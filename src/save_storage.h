@@ -9,7 +9,7 @@
 #include <vector>
 
 namespace sentinel::storage {
-// Explicit synthetic fixture identity, independent of product/protocol/process versions.
+// explicit synthetic fixture identity, independent of product/protocol/process versions
 struct Identity {
     std::string seed;
     std::optional<uint32_t> team;
@@ -19,8 +19,8 @@ struct Identity {
 enum class CampaignIntent { none, create, resume, recover };
 struct CampaignOptions {
     CampaignIntent intent = CampaignIntent::none;
-    uint32_t difficulty = 4; // No default gameplay difficulty; 4 is unsupported Ultra-Nightmare.
-    std::string recovery_basename; // Explicit retained transport archive; never latest.
+    uint32_t difficulty = 4; // no default gameplay difficulty; 4 is unsupported ultra-nightmare
+    std::string recovery_basename; // explicit kept transport archive; never latest
 };
 struct Descriptor { Identity identity; std::wstring root; CampaignOptions campaign; };
 enum class Outcome {
@@ -40,7 +40,7 @@ struct Metadata {
     std::string namespace_id;
     std::wstring path;
     uint32_t schema = 1;
-    // Preparation proves local metadata only. This component cannot attach a native writer.
+    // preparation proves local metadata only. this component can't attach a native writer
     bool native_attached = false;
 };
 struct Backup {
@@ -51,7 +51,7 @@ struct Backup {
     uint64_t bytes = 0;
 };
 struct TransportFile {
-    std::string name; // Native relative name, never a local output path.
+    std::string name; // native relative name, never a local output path
     uint32_t size = 0;
     std::array<unsigned char, 32> sha256{};
 };
@@ -86,7 +86,7 @@ private:
 // slot=<positive canonical decimal>\ngeneration_fingerprint=<64 lowercase hex>\n
 // provenance=synthetic-fixture\nroot=<existing absolute local Windows directory>\n
 Result parse_descriptor(std::string_view text, Descriptor& descriptor);
-// Shares the probe's bounded, pinned, local-file reader with prelaunch admission.
+// shares the probe's limited, pinned, local-file reader with prelaunch admission
 Result read_descriptor_file(const wchar_t* filename, Descriptor& descriptor);
 Result read_control_text(const wchar_t* filename, std::string& text);
 Result namespace_id(const Identity& identity, std::string& id);
@@ -130,6 +130,6 @@ private:
 // existing namespaces are never initialized, imported, reset, or repaired.
 Result prepare(const Descriptor& descriptor, std::unique_ptr<Namespace>& result);
 Result reopen(const Descriptor& descriptor, std::unique_ptr<Namespace>& result);
-// Read-only: takes an existing lease without creating/modifying files; can report busy.
+// read-only: takes an existing lease without creating/modifying files; can report busy
 Result inspect(const Descriptor& descriptor, Metadata& metadata);
 } // namespace sentinel::storage

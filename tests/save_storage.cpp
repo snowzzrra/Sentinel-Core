@@ -220,7 +220,7 @@ void transport_backups(Fixture& fixture) {
     for (int mode = 0; mode < 8; ++mode) {
         auto bad = metadata;
         if (mode == 0) bad.directory = "PROFILE";
-        if (mode == 1) bad.directory.back() = '2'; // Native slots end at 11.
+        if (mode == 1) bad.directory.back() = '2'; // native slots end at 11
         if (mode == 2) bad.files[1].name = "GAME.DETAILS";
         if (mode == 3) bad.files[0].name = "../game.details";
         if (mode == 4) bad.files[0].size = 0;
@@ -266,7 +266,7 @@ void transport_backups(Fixture& fixture) {
     CHECK(DeleteFileW((complete + L"\\payload-0.bin").c_str()));
     write(complete + L"\\payload-0.bin", "abc");
     CHECK(owner->reopen_transport(basename, archive).ok());
-    owner.reset(); // Archive independently pins its read set through later recovery reads.
+    owner.reset(); // archive independently pins its read set through later recovery reads
     CHECK(archive->read(0, 0, buffer.data(), 3).ok() && std::string(buffer.data(), 3) == "abc");
 }
 void lifecycle_and_backup(Fixture& f) {
