@@ -42,6 +42,7 @@ struct Metadata {
     uint32_t schema = 1;
     // preparation proves local metadata only. this component can't attach a native writer
     bool native_attached = false;
+    std::string native_root;
 };
 struct Backup {
     // Unique backup-attempt directory. A complete flushed receipt, not its name,

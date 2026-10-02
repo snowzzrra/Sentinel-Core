@@ -664,7 +664,10 @@ bool decode_save_admission_response(const Message& in, size_t size, WireResult& 
             if (!((v.namespace_id[i] >= '0' && v.namespace_id[i] <= '9') ||
                   (v.namespace_id[i] >= 'a' && v.namespace_id[i] <= 'f'))) return false;
         if (v.namespace_id[64] || std::memcmp(v.native_root, "ap-", 3) ||
-            std::memcmp(v.native_root + 3, v.namespace_id, 40) || v.native_root[43]) return false;
+            v.native_root[43]) return false;
+        for (size_t i = 3; i < 43; ++i)
+            if (!((v.native_root[i] >= '0' && v.native_root[i] <= '9') ||
+                  (v.native_root[i] >= 'a' && v.native_root[i] <= 'f'))) return false;
     } else {
         for (auto c : v.namespace_id) if (c) return false;
         for (auto c : v.native_root) if (c) return false;

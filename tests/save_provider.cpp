@@ -223,6 +223,8 @@ void run_provider_contracts(const std::function<std::unique_ptr<Session>()>& mak
             }); other.join(); // stop keeps the real-root mutex as well as the offline lease
         } else {
             REQUIRE(!owner->routed() && owner->fault() == SessionFault::provider_identity);
+            if (test == 7) REQUIRE(std::strcmp(owner->btrace.snapshot().first_failure.predicate,"remote_file_count_invalid")==0);
+            if (test == 16) REQUIRE(std::strcmp(owner->btrace.snapshot().first_failure.predicate,"remote_marker_write_failed")==0);
         }
     }
     for (unsigned test = 0; test < 8; ++test) {

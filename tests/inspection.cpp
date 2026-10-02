@@ -241,7 +241,8 @@ void admission_codec() {
     value.state = SC_SAVE_SESSION_PREPARED; check(false);
     std::memset(value.namespace_id, 'a', 64); std::memcpy(value.native_root, "ap-", 3);
     std::memset(value.native_root + 3, 'a', 40); value.prepared_routes = 3; check(true);
-    value.native_root[3] = 'b'; check(false); value.native_root[3] = 'a';
+    value.native_root[3] = 'b'; check(true);
+    value.native_root[3] = 'g'; check(false); value.native_root[3] = 'a';
     value.state = SC_SAVE_SESSION_REJECTED; value.fault = 3;
     value.flags = SC_SAVE_SESSION_STARTUP_QUALIFIED; check(true);
     value.flags |= SC_SAVE_SESSION_ACCEPTING; check(false);

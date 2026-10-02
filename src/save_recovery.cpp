@@ -139,7 +139,7 @@ RecoveryResult recover_campaign(storage::Namespace& lease,const storage::Descrip
     if(!lease.reopen_transport(std::wstring(basename.begin(),basename.end()),archive).ok()) return refuse("recovery_archive_verification_failed");
     const auto& source=archive->metadata();
     const auto id=lease.metadata().namespace_id;
-    const auto directory="ap-"+id.substr(0,40)+"/GAME-AUTOSAVE0";
+    const auto directory=lease.metadata().native_root+"/GAME-AUTOSAVE0";
     const auto contract=campaign_contract(descriptor,id);
     std::string current_contract,current_record;
     if(!user || source.steam_user!=user || source.provider!=recovery_provider || source.quarantine) return refuse("recovery_native_user_or_provider_mismatch");
@@ -149,7 +149,7 @@ RecoveryResult recover_campaign(storage::Namespace& lease,const storage::Descrip
     if(!checkpoint(source.checkpoint,contract,directory,saved) || !matches(saved,source) ||
         !saved.files.count("game.details") || !saved.files.count("game_duration.dat") ||
         (saved.files.size()!=2 && saved.files.size()!=4)) return refuse("recovery_archive_checkpoint_mismatch");
-    const auto marker="ap-"+id.substr(0,40)+"/sentinel-owner-"+id+".txt";
+    const auto marker=lease.metadata().native_root+"/sentinel-owner-"+id+".txt";
     const auto& identity=descriptor.identity;
     const auto ownership="sentinel-native-session-v1\nnamespace_id="+id+"\nseed_hex="+hex(identity.seed)+"\nteam="+std::to_string(*identity.team)+
         "\nslot="+std::to_string(*identity.slot)+"\ngeneration_fingerprint="+identity.generation_fingerprint+"\nprovenance=synthetic-fixture\n";
@@ -159,7 +159,7 @@ RecoveryResult recover_campaign(storage::Namespace& lease,const storage::Descrip
             t.read(t.remote,marker.c_str(),bytes.data(),static_cast<int32_t>(bytes.size()))==static_cast<int32_t>(bytes.size()) && bytes==ownership;
     };
     if(!owned()) return refuse("recovery_native_marker_mismatch");
-    const auto selection_key="ap-"+id.substr(0,40)+"/sentinel-selection-GAME.txt";
+    const auto selection_key=lease.metadata().native_root+"/sentinel-selection-GAME.txt";
     std::string previous_selection;
     const bool had_selection=t.exists(t.remote,selection_key.c_str());
     if(had_selection) {

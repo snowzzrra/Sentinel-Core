@@ -62,6 +62,11 @@ bool slot_name(std::string_view value, std::string& canonical) {
     canonical = "AUTOSAVE"; canonical.append(number); return true;
 }
 using NativeCatalogSource = std::array<NativeCampaignCatalog, 3>;
+bool provider_refused(Session& owner, const char* predicate,
+        std::initializer_list<BFact> facts = {}) {
+    owner.btrace.record(BStage::provider, BStatus::refused, predicate, 0, facts);
+    return false;
+}
 bool inspect_remote(Session& owner, engine::Memory& memory, uintptr_t remote,
         NativeCatalogSource& catalog, bool prepare) {
     uintptr_t table = 0;
@@ -70,7 +75,8 @@ bool inspect_remote(Session& owner, engine::Memory& memory, uintptr_t remote,
     if (!at(memory, remote, 0, table) || !at(memory, table, 0, write) || !write ||
         !at(memory, table, 0x08, read) || !read || !at(memory, table, 0x68, exists) || !exists ||
         !at(memory, table, 0x78, size) || !size || !at(memory, table, 0x90, count) || !count ||
-        !at(memory, table, 0x98, name) || !name) return false;
+        !at(memory, table, 0x98, name) || !name)
+        return provider_refused(owner, "remote_storage_methods_unavailable");
     const auto prefix = owner.native_root() + "/";
     // The full digest in the marker's name avoids overwriting a different
     // identity's marker when shortened native roots collide. Payload ownership
@@ -79,18 +85,21 @@ bool inspect_remote(Session& owner, engine::Memory& memory, uintptr_t remote,
     const auto deadline = GetTickCount64() + 250;
     const auto marker_prefix = prefix + "sentinel-owner-";
     const auto length = static_cast<int32_t>(owner.ownership_record().size());
-    if (length <= 0 || length > 2048) return false;
+    if (length <= 0 || length > 2048) return provider_refused(owner, "ownership_record_size_invalid");
     bool found = false; uint32_t root_files = 0;
     const auto scan = [&] {
         found = false; root_files = 0;
         for (auto& campaign : catalog) campaign.slots.clear();
         std::array<std::vector<std::string>, 3> payload_slots;
         const auto files = count(remote);
-        if (files < 0 || files > 100000) return false;
+        if (files < 0 || files > 100000)
+            return provider_refused(owner, "remote_file_count_invalid", {{"file_count",static_cast<uint64_t>(files)}});
         for (int32_t i = 0; i < files; ++i) {
-            if (GetTickCount64() > deadline) return false;
+            if (GetTickCount64() > deadline)
+                return provider_refused(owner, "remote_scan_deadline", {{"file_count",static_cast<uint64_t>(files)},{"file_index",static_cast<uint64_t>(i)}});
             int32_t reported_size = 0; std::string key;
-            if (!name_at(memory, name(remote, i, &reported_size), key)) return false;
+            if (!name_at(memory, name(remote, i, &reported_size), key))
+                return provider_refused(owner, "remote_filename_unreadable", {{"file_index",static_cast<uint64_t>(i)}});
             if (!steam_name_equal(std::string_view(key).substr(0, prefix.size()), prefix)) continue;
             ++root_files;
             const auto relative = std::string_view(key).substr(prefix.size());
@@ -102,54 +111,70 @@ bool inspect_remote(Session& owner, engine::Memory& memory, uintptr_t remote,
                 const int campaign = native_campaign_index(stem.substr(0, dash + 1));
                 if (campaign >= 0 || details) {
                     std::string slot;
-                    if (campaign < 0 || !slot_name(stem.substr(dash + 1), slot)) return false;
+                    if (campaign < 0 || !slot_name(stem.substr(dash + 1), slot))
+                        return provider_refused(owner, "remote_campaign_slot_invalid");
                     auto& payloads = payload_slots[static_cast<size_t>(campaign)];
                     if (std::find(payloads.begin(), payloads.end(), slot) == payloads.end()) payloads.push_back(slot);
                     if (details) {
                         auto& slots = catalog[static_cast<size_t>(campaign)].slots;
-                        if (slots.size() == 12 || std::find(slots.begin(), slots.end(), slot) != slots.end()) return false;
+                        if (slots.size() == 12 || std::find(slots.begin(), slots.end(), slot) != slots.end())
+                            return provider_refused(owner, "remote_campaign_metadata_duplicate");
                         slots.push_back(std::move(slot));
                     }
                 }
             }
             if (!steam_name_equal(std::string_view(key).substr(0, marker_prefix.size()), marker_prefix)) continue;
-            if (!steam_name_equal(key, marker) || found || reported_size != length) return false;
+            if (!steam_name_equal(key, marker) || found || reported_size != length)
+                return provider_refused(owner, "remote_ownership_marker_conflict",
+                    {{"name_matches",steam_name_equal(key,marker)},{"duplicate",found},{"reported_size",static_cast<uint64_t>(reported_size)},{"expected_size",static_cast<uint64_t>(length)}});
             found = true;
         }
         // Interrupted native writes/deletes can leave payloads without metadata.
         // Such a slot is not an empty namespace eligible for fresh creation.
         for (size_t campaign = 0; campaign < catalog.size(); ++campaign)
-            if (payload_slots[campaign].size() != catalog[campaign].slots.size()) return false;
-        return GetTickCount64() <= deadline;
+            if (payload_slots[campaign].size() != catalog[campaign].slots.size())
+                return provider_refused(owner, "remote_campaign_payload_orphan", {{"campaign",campaign}});
+        if (GetTickCount64() > deadline) return provider_refused(owner, "remote_scan_deadline");
+        return true;
     };
     if (!scan()) return false;
     if (!found) {
-        if (!prepare || root_files || exists(remote, marker.c_str()) || GetTickCount64() > deadline) return false;
+        if (!prepare || root_files || exists(remote, marker.c_str()) || GetTickCount64() > deadline)
+            return provider_refused(owner, "remote_marker_creation_ineligible", {{"prepare",prepare},{"root_files",root_files},{"deadline_expired",GetTickCount64()>deadline}});
         // No rewrite, repair, copying of vanilla payloads or destructive rollback.
         // A failed/partial write stays unadmitted and cannot be replayed in-process.
-        if (!write(remote, marker.c_str(), owner.ownership_record().data(), length) ||
-            !scan() || !found || root_files != 1) return false;
+        if (!write(remote, marker.c_str(), owner.ownership_record().data(), length))
+            return provider_refused(owner, "remote_marker_write_failed", {{"bytes",static_cast<uint64_t>(length)},{"deadline_expired",GetTickCount64()>deadline}});
+        if (!scan()) return false;
+        if (!found || root_files != 1)
+            return provider_refused(owner, "remote_marker_write_not_observed", {{"marker_found",found},{"root_files",root_files}});
     }
-    if (!exists(remote, marker.c_str()) || size(remote, marker.c_str()) != length) return false;
+    if (!exists(remote, marker.c_str()) || size(remote, marker.c_str()) != length)
+        return provider_refused(owner, "remote_marker_readback_size_mismatch");
     std::array<char, 2048> bytes{};
     if (read(remote, marker.c_str(), bytes.data(), length) != length ||
-        std::string_view(bytes.data(), static_cast<size_t>(length)) != owner.ownership_record()) return false;
+        std::string_view(bytes.data(), static_cast<size_t>(length)) != owner.ownership_record())
+        return provider_refused(owner, "remote_marker_readback_mismatch");
     // No hard latency claim for an individual synchronous Steam API call. A slow,
     // changed or partial observation cannot become an admission receipt.
     if (GetTickCount64() > deadline || size(remote, marker.c_str()) != length ||
-        read(remote, marker.c_str(), bytes.data(), length) != length || GetTickCount64() > deadline) return false;
-    if (std::string_view(bytes.data(), static_cast<size_t>(length)) != owner.ownership_record()) return false;
+        read(remote, marker.c_str(), bytes.data(), length) != length || GetTickCount64() > deadline)
+        return provider_refused(owner, "remote_marker_stability_failed", {{"deadline_expired",GetTickCount64()>deadline}});
+    if (std::string_view(bytes.data(), static_cast<size_t>(length)) != owner.ownership_record())
+        return provider_refused(owner, "remote_marker_ownership_changed");
     for (unsigned campaign = 0; campaign < catalog.size(); ++campaign) {
         const std::string campaign_prefix = native_campaign_prefix(campaign);
         const auto key = prefix + "sentinel-selection-" + campaign_prefix.substr(0, campaign_prefix.size() - 1) + ".txt";
         if (!exists(remote, key.c_str())) continue;
         const auto n = size(remote, key.c_str());
-        if (n < 1 || n > 256 || read(remote, key.c_str(), bytes.data(), n) != n || GetTickCount64() > deadline) return false;
+        if (n < 1 || n > 256 || read(remote, key.c_str(), bytes.data(), n) != n || GetTickCount64() > deadline)
+            return provider_refused(owner, "remote_selection_readback_failed", {{"campaign",campaign},{"deadline_expired",GetTickCount64()>deadline}});
         const std::string header = "sentinel-native-selection-v1\nnamespace_id=" + owner.namespace_id() +
             "\ncampaign=" + campaign_prefix + "\nname=";
         const std::string_view record(bytes.data(), static_cast<size_t>(n));
         if (record.substr(0, header.size()) != header || record.size() <= header.size() || record.back() != '\n' ||
-            !slot_name(record.substr(header.size(), record.size() - header.size() - 1), catalog[campaign].selected)) return false;
+            !slot_name(record.substr(header.size(), record.size() - header.size() - 1), catalog[campaign].selected))
+            return provider_refused(owner, "remote_selection_record_invalid", {{"campaign",campaign}});
     }
     return true;
 }
@@ -280,6 +305,7 @@ bool bind_root_provider(Session& owner, engine::Memory& memory, const ProviderCa
     // qualification. No provider reinitialization or late routing upgrade occurs.
     if (!owner.startup_provider_root(root)) return false;
     if (!at(memory, root, 0x9b38, manager) || !manager) {
+        provider_refused(owner, "root_provider_manager_unavailable", {{"manager_present",manager!=0}});
         owner.fail(SessionFault::provider_identity); return false;
     }
     return provider_initialized(owner, memory, manager, calls);
@@ -287,20 +313,26 @@ bool bind_root_provider(Session& owner, engine::Memory& memory, const ProviderCa
 bool provider_initialized(Session& owner, engine::Memory& memory, uintptr_t manager, const ProviderCalls& calls) {
     uintptr_t root = 0;
     if (!owner.provider_root(root)) return false;
+    const auto refuse = [&](const char* predicate) {
+        provider_refused(owner,predicate); owner.fail(SessionFault::provider_identity); return false;
+    };
     try {
         uintptr_t selected_manager = 0, control = 0, provider = 0, table = 0;
-        if (!at(memory, root, 0x9b38, selected_manager)) { owner.fail(SessionFault::provider_identity); return false; }
+        if (!at(memory, root, 0x9b38, selected_manager)) return refuse("root_provider_manager_unreadable");
         if (manager != selected_manager) return false; // another native account/service manager
-        if (at(memory, manager, 0, control) && at(memory, control, 8, provider) && at(memory, provider, 0, table) &&
-            table == calls.image_base + 0x2e90658 && calls.context) {
+        if (!at(memory, manager, 0, control) || !at(memory, control, 8, provider) || !at(memory, provider, 0, table))
+            return refuse("provider_object_chain_unreadable");
+        if (table != calls.image_base + 0x2e90658) return refuse("provider_is_not_native_steam");
+        if (!calls.context) return refuse("provider_context_initializer_unavailable");
+        {
             const auto context = calls.context(calls.image_base + 0x397fb88);
             uintptr_t remote = 0; NativeCatalogSource catalog;
             if (!owner.observe_provider_objects(manager, control, provider)) {
-                owner.fail(SessionFault::provider_identity); return false;
+                return refuse("provider_object_identity_changed");
             }
             if (owner.routed()) {
                 if (at(memory, context, 0, remote) && owner.collecting(remote, owner.native_root())) return true;
-                owner.fail(SessionFault::provider_identity); return false;
+                return refuse("provider_remote_identity_changed");
             }
             RecoveryTransport recovery{}; recovery.owner=calls.owner;
             if (owner.recovery_requested()) {
@@ -309,16 +341,17 @@ bool provider_initialized(Session& owner, engine::Memory& memory, uintptr_t mana
                     !at(memory,remote_table,0,recovery.write) || !at(memory,remote_table,8,recovery.read) ||
                     !at(memory,remote_table,0x68,recovery.exists) || !at(memory,remote_table,0x78,recovery.size) ||
                     !at(memory,remote_table,0x90,recovery.count) || !at(memory,remote_table,0x98,recovery.name)) {
-                    owner.fail(SessionFault::provider_identity); return false;
+                    return refuse("recovery_remote_storage_methods_unavailable");
                 }
                 recovery.remote=remote;
                 if (!owner.recover_startup(recovery)) return false;
             }
-            if (at(memory, context, 0, remote) && owner.acquire_native_root_lock() &&
-                inspect_remote(owner, memory, remote, catalog, true) &&
+            if (!at(memory, context, 0, remote)) return refuse("provider_context_unreadable");
+            if (!owner.acquire_native_root_lock()) return refuse("native_root_lock_unavailable");
+            if (inspect_remote(owner, memory, remote, catalog, true) &&
                 owner.bind_provider(owner.native_root(), remote, owner.ownership_record())) return true;
         }
-    } catch (const std::bad_alloc&) {}
+    } catch (const std::bad_alloc&) { return refuse("provider_binding_allocation_failed"); }
     owner.fail(SessionFault::provider_identity); return false;
 }
 } // namespace sentinel::save

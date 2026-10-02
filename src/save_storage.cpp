@@ -104,6 +104,7 @@ struct Lease {
     std::vector<Handle> directories;
     Handle owner;
     Handle manifest;
+    Handle native_root;
 };
 Result io_error(DWORD error = GetLastError()) {
     return {error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION ?
@@ -386,6 +387,37 @@ Result open_namespace(const Descriptor& descriptor, bool create, Lease& lease) {
     if (!result.ok()) return result;
     result = validate_manifest(text, descriptor, id);
     if (!result.ok()) return result;
+    lease.metadata.native_root = "ap-" + id.substr(0, 40);
+    const auto root_path = lease.metadata.path + L"\\native.root";
+    result = open_file(root_path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, lease.native_root);
+    if (!result.ok() && result.win32_error == ERROR_FILE_NOT_FOUND && create &&
+        descriptor.campaign.intent == CampaignIntent::create) {
+        // a fresh campaign gets its own provider path, even in the same room
+        for (const auto* record : {L"campaign.contract", L"campaign.checkpoint"}) {
+            Handle file;
+            const auto absent = open_file(lease.metadata.path + L"\\" + record, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, file);
+            if (absent.ok() || absent.win32_error != ERROR_FILE_NOT_FOUND)
+                return {Outcome::interrupted_preparation, absent.win32_error};
+        }
+        std::array<unsigned char, 20> random{};
+        const auto status = BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (status < 0) return {Outcome::io_error, static_cast<uint32_t>(status)};
+        text = "sentinel-native-root-v1\nnamespace=" + id + "\nroot=ap-" +
+            hex(std::string_view(reinterpret_cast<const char*>(random.data()), random.size())) + "\n";
+        result = publish_metadata(lease.metadata.path, L"native.root", text);
+        if (!result.ok()) return result;
+        result = open_file(root_path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, lease.native_root);
+    }
+    if (result.ok()) {
+        result = read_metadata(lease.native_root.value, text);
+        if (!result.ok()) return result;
+        const auto header = "sentinel-native-root-v1\nnamespace=" + id + "\nroot=";
+        if (text.size() != header.size() + 44) return {Outcome::corrupt_manifest};
+        const auto root = std::string_view(text).substr(header.size());
+        if (text.compare(0, header.size(), header) || root.size() != 44 || root.substr(0, 3) != "ap-" ||
+            root.back() != '\n' || !lower_hex(root.substr(3, 40))) return {Outcome::corrupt_manifest};
+        lease.metadata.native_root.assign(root.substr(0, 43));
+    } else if (result.win32_error != ERROR_FILE_NOT_FOUND) return result;
     return {created ? Outcome::storage_prepared : Outcome::storage_reopened};
 }
 struct Entry {
@@ -662,11 +694,11 @@ bool transport_name(std::string_view value) {
     }
     return true;
 }
-bool transport_metadata(const TransportMetadata& value, const std::string& id) {
+bool transport_metadata(const TransportMetadata& value, const std::string& native_root) {
     if (value.quarantine && (!value.steam_user || value.operation_id)) return false;
     if (!value.process_id || !value.process_created || (!value.operation_id && !value.quarantine) || value.files.empty() || value.files.size() > 16)
         return false;
-    const auto directory = folded(value.directory), root = "ap-" + id.substr(0, 40) + "/";
+    const auto directory = folded(value.directory), root = native_root + "/";
     if (directory.compare(0, root.size(), root)) return false;
     const auto slot = directory.substr(root.size()); bool known = false;
     for (const char* campaign : {"game-autosave", "dlc1-autosave", "dlc2-autosave"})
@@ -709,7 +741,7 @@ bool number64(std::string_view value, uint64_t& out) {
     }
     return true;
 }
-Result parse_transport(std::string_view text, const Descriptor& descriptor, const std::string& id, TransportMetadata& out) {
+Result parse_transport(std::string_view text, const Descriptor& descriptor, const std::string& id, const std::string& native_root, TransportMetadata& out) {
     if (text.substr(0, transport_magic.size()) != transport_magic)
         return {text.substr(0, 27) == "sentinel-transport-backup-v" ? Outcome::unsupported_manifest : Outcome::corrupt_manifest};
     const auto original = text; text.remove_prefix(transport_magic.size());
@@ -743,7 +775,7 @@ Result parse_transport(std::string_view text, const Descriptor& descriptor, cons
         file.size = static_cast<uint32_t>(size); std::memcpy(file.sha256.data(), hash.data(), hash.size());
         out.files.push_back(std::move(file));
     }
-    if (text != "state=complete\n" || !transport_metadata(out, id) || transport_text(out, descriptor, id) != original)
+    if (text != "state=complete\n" || !transport_metadata(out, native_root) || transport_text(out, descriptor, id) != original)
         return {Outcome::corrupt_manifest};
     return {};
 }
@@ -786,7 +818,7 @@ Result TransportArchive::read(size_t index, uint32_t offset, char* bytes, uint32
 }
 Result Namespace::backup_transport(const TransportMetadata& metadata, ReadTransport read, void* source, Backup& backup) {
     backup = {}; auto& lease = impl_->lease;
-    if (!read || !transport_metadata(metadata, lease.metadata.namespace_id)) return {Outcome::invalid_identity};
+    if (!read || !transport_metadata(metadata, lease.metadata.native_root)) return {Outcome::invalid_identity};
     std::wstring suffix; auto result = random_suffix(suffix); if (!result.ok()) return result;
     const auto prefix = "transport-backup-" + lease.metadata.namespace_id.substr(0, 16) + "-";
     backup.path = lease.descriptor.root + L"\\" + std::wstring(prefix.begin(), prefix.end()) + suffix;
@@ -833,7 +865,7 @@ Result Namespace::reopen_transport(std::wstring_view basename, std::unique_ptr<T
     std::string text(static_cast<size_t>(size.QuadPart), '\0'); DWORD read = 0;
     if (!ReadFile(owned->manifest.value, text.data(), static_cast<DWORD>(text.size()), &read, nullptr)) return io_error();
     if (read != text.size()) return io_error(ERROR_READ_FAULT);
-    result = parse_transport(text, lease.descriptor, lease.metadata.namespace_id, owned->metadata); if (!result.ok()) return result;
+    result = parse_transport(text, lease.descriptor, lease.metadata.namespace_id, lease.metadata.native_root, owned->metadata); if (!result.ok()) return result;
     std::vector<Entry> entries; uint64_t total = 0;
     result = collect(path, L"", 0, entries, total, true); if (!result.ok()) return result;
     if (entries.size() != owned->metadata.files.size() + 1) return {Outcome::corrupt_manifest};

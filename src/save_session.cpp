@@ -70,7 +70,7 @@ storage::Result Session::configure(const storage::Descriptor& descriptor,
         return result.ok() ? storage::Result{storage::Outcome::identity_mismatch, 0} : result;
     }
     namespace_id_ = hash;
-    native_root_ = "ap-" + hash.substr(0, 40);
+    native_root_ = lease->metadata().native_root;
     constexpr char hex[] = "0123456789abcdef";
     std::string seed;
     for (unsigned char byte : descriptor.identity.seed) {

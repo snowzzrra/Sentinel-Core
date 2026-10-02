@@ -64,13 +64,13 @@ int print_result(const char* operation, Result result,
     const auto backup_path = nullable(utf8(backup.path));
     // descriptor/parser and storage api bounds cap every emitted string and file count
     std::printf("{\"operation\":\"%s\",\"outcome\":\"%s\",\"win32_error\":%lu,"
-        "\"namespace_id\":%s,\"namespace_path\":%s,\"storage_state\":\"%s\","
+        "\"namespace_id\":%s,\"namespace_path\":%s,\"native_root\":%s,\"storage_state\":\"%s\","
         "\"backup_path\":%s,\"backup_files\":%lu,\"backup_bytes\":%llu,"
         "\"scope\":\"offline_synthetic_fixture_metadata\","
         "\"native_admitted\":false,\"native_completed\":false,"
         "\"native_persisted\":false,\"reconciliation\":\"not_performed\"}\n",
         operation, usage ? "usage" : sentinel::storage::outcome_name(result.outcome),
-        static_cast<unsigned long>(result.win32_error), id.c_str(), path.c_str(),
+        static_cast<unsigned long>(result.win32_error), id.c_str(), path.c_str(), nullable(metadata.native_root).c_str(),
         state_name(result, inspected), backup_path.c_str(), static_cast<unsigned long>(backup.files),
         static_cast<unsigned long long>(backup.bytes));
     return usage ? 2 : (result.ok() ? 0 : 1);

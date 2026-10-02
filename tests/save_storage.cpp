@@ -269,6 +269,28 @@ void transport_backups(Fixture& fixture) {
     owner.reset(); // archive independently pins its read set through later recovery reads
     CHECK(archive->read(0, 0, buffer.data(), 3).ok() && std::string(buffer.data(), 3) == "abc");
 }
+void campaign_provider_instances(Fixture& f) {
+    auto value = descriptor(f.path + L"\\ap"); value.identity.slot = 77;
+    std::unique_ptr<Namespace> owner;
+    CHECK(prepare(value, owner).ok());
+    const auto id = owner->metadata().namespace_id, legacy = owner->metadata().native_root;
+    const auto path = owner->metadata().path;
+    CHECK(legacy == "ap-" + id.substr(0, 40));
+    owner.reset();
+    value.campaign = {CampaignIntent::create, 1};
+    CHECK(prepare(value, owner).ok());
+    const auto first = owner->metadata().native_root;
+    CHECK(owner->metadata().namespace_id == id && first.size() == 43 && first != legacy);
+    CHECK(!DeleteFileW((path + L"\\native.root").c_str()));
+    owner.reset();
+    CHECK(reopen(value, owner).ok() && owner->metadata().native_root == first);
+    owner.reset();
+    CHECK(MoveFileW(path.c_str(), (path + L"-kept").c_str()));
+    CHECK(prepare(value, owner).ok() && owner->metadata().namespace_id == id && owner->metadata().native_root != first);
+    owner.reset();
+    write(path + L"\\native.root", "partial");
+    CHECK(reopen(value, owner).outcome == Outcome::corrupt_manifest && !owner);
+}
 void lifecycle_and_backup(Fixture& f) {
     const auto a = descriptor(f.path + L"\\ap");
     Metadata info;
@@ -445,6 +467,7 @@ int wmain(int argc, wchar_t** argv) {
     malformed_and_partial(fixture);
     redirect_and_links(fixture);
     transport_backups(fixture);
+    campaign_provider_instances(fixture);
     std::puts("PASS synthetic offline storage: canonical identity, process lease/reopen, bounded metadata, backup/reserved-receipt rejection, corrupt/missing/partial/foreign manifest, reparse/hardlink protection; NO NATIVE SAVE PROOF");
     return 0;
 }
