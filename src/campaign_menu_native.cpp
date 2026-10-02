@@ -711,9 +711,9 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     return true;
 }
 void present_score_found(uintptr_t score) {
-    uintptr_t widget=0,root=0;
+    uintptr_t swf=0,root=0;
     uint8_t visible=0;
-    if (!read(score,0x88,widget) || !read(widget,0x18,root) || !root) return;
+    if (!read(score,0x10,swf) || !read(swf,0x18,root) || !root) return;
     if (!active() || !read(score,0xb8,visible) || !visible) {
         if (const auto label=swf_child(root,"apFoundLabel")) original_sprite_visibility(label,0,1);
         return;
@@ -1319,6 +1319,24 @@ void present_campaign_actions(uintptr_t screen,bool entered) {
         reinterpret_cast<void(*)(uintptr_t,uintptr_t)>(select)(list,choose);
 }
 #ifdef SC_NATIVE_TESTING
+bool test_hud_score_root() {
+    std::array<unsigned char,0x180> score{},swf{},widget{},root{};
+    const auto owner=reinterpret_cast<uintptr_t>(score.data());
+    const auto expected=reinterpret_cast<uintptr_t>(root.data());
+    *reinterpret_cast<uintptr_t*>(score.data()+0x10)=reinterpret_cast<uintptr_t>(swf.data());
+    *reinterpret_cast<uintptr_t*>(score.data()+0x88)=reinterpret_cast<uintptr_t>(widget.data());
+    *reinterpret_cast<uintptr_t*>(swf.data()+0x18)=expected;
+    static uintptr_t observed=0;
+    observed=0;
+    const auto saved=swf_lookup;
+    swf_lookup=+[](uintptr_t parent,SwfValue*,const char*)->SwfValue* {
+        observed=parent; return nullptr;
+    };
+    present_score_found(owner);
+    swf_lookup=saved;
+    return observed==expected && !*reinterpret_cast<uintptr_t*>(widget.data()+0x18) &&
+        !*reinterpret_cast<uintptr_t*>(score.data()+0xf8);
+}
 bool test_question_material() {
     uintptr_t sprite[0x130/sizeof(uintptr_t)]{};
     std::array<uint8_t,0x130> owner{};

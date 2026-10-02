@@ -31,6 +31,7 @@ void assign(uintptr_t address,const char* text) {
 }
 void exercise() {
     using namespace campaign_menu;
+    CHECK(test_hud_score_root());
     std::array<unsigned char,0x878> screen_bytes{};
     std::array<unsigned char,0x160> list_bytes{};
     std::array<unsigned char,0x700> details_bytes{};

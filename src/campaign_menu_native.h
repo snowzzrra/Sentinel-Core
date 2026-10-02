@@ -25,6 +25,7 @@ struct MeterDiagnostics {
 };
 MeterDiagnostics meter_diagnostics();
 #ifdef SC_NATIVE_TESTING
+bool test_hud_score_root();
 bool test_physical_completion_edges();
 bool test_question_material();
 struct NativeCalls {
