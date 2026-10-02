@@ -238,6 +238,11 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
 #include "startup_route_fixture.h"
 int wmain(int argc,wchar_t** argv) {
     CHECK(argc==4 || argc==5);
+    std::filesystem::create_directories(argv[2]);
+    wchar_t expanded[MAX_PATH]{};
+    const auto length=GetLongPathNameW(argv[2],expanded,MAX_PATH);
+    CHECK(length && length<MAX_PATH);
+    argv[2]=expanded;
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
