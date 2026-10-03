@@ -38,6 +38,18 @@ def verify(executable):
         assert pe.get_data(callee + 48, 32) == signature
         assert sum(section.get_data().count(signature) for section in pe.sections
                    if section.Characteristics & 0x20000000) == 1
+        score_vtable = 0x2d01de8
+        frame = struct.unpack('<Q', pe.get_data(score_vtable + 0x48, 8))[0] - pe.OPTIONAL_HEADER.ImageBase
+        show = struct.unpack('<Q', pe.get_data(score_vtable + 0x20, 8))[0] - pe.OPTIONAL_HEADER.ImageBase
+        assert rvas[45] == frame == 0xed01b0
+        assert show == 0xeffd60 and frame != show
+        fast_travel = runtime.split('void install_fast_travel(', 1)[1].split('void reconcile_fast_travel(', 1)[0]
+        sites = re.findall(r'\{0x([0-9a-f]+),"([0-9a-f]+)"\}', fast_travel)
+        assert len(sites) == 2
+        for rva, signature in sites:
+            assert pe.get_data(int(rva, 16), 32) == bytes.fromhex(signature)
+        relay_activate = struct.unpack('<Q', pe.get_data(0x2c39bf8 + 0x2e8, 8))[0] - pe.OPTIONAL_HEADER.ImageBase
+        assert relay_activate == int(sites[1][0], 16) == 0xd5d660
     print(f'PASS 46 retail prologues; Populate CALL -> RVA {callee:#x}; unrelated binding rejected')
 
 

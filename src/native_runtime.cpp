@@ -207,7 +207,7 @@ void install_fast_travel(const engine::Binding& b) {
     engine::LocalMemory memory;
     const struct { uint32_t rva; const char* hex; } sites[] = {
         {0x6ca290,"48895c2408488974241048897c241841564883ec20488bf94c8bf2488b0dee70"},
-        {0xd68750,"48895c2418574883ec40488b05776244034833c44889442438488bf9488bda48"}
+        {0xd5d660,"48895c2418574883ec70488b05671345034833c44889442458488bf9488bda48"}
     };
     for (const auto& s:sites) {
         std::array<uint8_t,32> actual{},expected{};
@@ -217,7 +217,7 @@ void install_fast_travel(const engine::Binding& b) {
             memory.copy(b.image.base+s.rva,actual.data(),32).reason || actual!=expected) return;
     }
     fast_travel_find=reinterpret_cast<FastTravelFind>(b.image.base+0x6ca290);
-    fast_travel_activate=reinterpret_cast<FastTravelActivate>(b.image.base+0xd68750);
+    fast_travel_activate=reinterpret_cast<FastTravelActivate>(b.image.base+0xd5d660);
     fast_travel_ready.store(true,std::memory_order_release);
 }
 void reconcile_fast_travel(uintptr_t map,const char* map_name,uint64_t generation,uintptr_t player) {
@@ -230,16 +230,19 @@ void reconcile_fast_travel(uintptr_t map,const char* map_name,uint64_t generatio
         const auto image=binding.image.base;
         if (!map || *reinterpret_cast<uintptr_t*>(map)!=image+0x2ab30c8 ||
             *reinterpret_cast<uintptr_t*>(image+0x45f7370)!=map) return;
-        constexpr char target_name[]="ap_fast_travel_unlock_native";
+        constexpr char target_name[]="ap_fast_travel_unlock";
         auto target=fast_travel_find(map,target_name);
-        if (target && *reinterpret_cast<uintptr_t*>(target)!=image+0x2c47aa8) target=0;
-        const bool target_unlocked=target && *reinterpret_cast<uint8_t*>(target+0xb90)!=0;
+        if (target && *reinterpret_cast<uintptr_t*>(target)!=image+0x2c39bf8) target=0;
+        const auto native_target=fast_travel_find(map,"ap_fast_travel_unlock_native");
+        if (!native_target || *reinterpret_cast<uintptr_t*>(native_target)!=image+0x2c47aa8) return;
+        const bool target_unlocked=target && *reinterpret_cast<int32_t*>(target+0xb88)<0;
         const bool world_unlocked=*reinterpret_cast<uint8_t*>(map+0x1ac380)!=0;
         const auto decision=fast_travel::dispatch_policy().observe(true,generation,target,target_unlocked,world_unlocked);
         if (decision!=fast_travel::DispatchDecision::invoke) return;
         fast_travel::dispatch_policy().invoked(target,false);
         fast_travel_activate(target,player);
-        const bool post=*reinterpret_cast<uint8_t*>(target+0xb90)!=0 &&
+        const bool post=*reinterpret_cast<int32_t*>(target+0xb88)<0 &&
+            *reinterpret_cast<uint8_t*>(native_target+0xb90)!=0 &&
             *reinterpret_cast<uint8_t*>(map+0x1ac380)!=0;
         fast_travel::dispatch_policy().invoked(target,post);
     } __except(EXCEPTION_EXECUTE_HANDLER) {}

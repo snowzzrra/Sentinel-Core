@@ -44,8 +44,9 @@ Update original_category_counts=nullptr;
 Update original_start_show=nullptr;
 Populate original_boss_update=nullptr;
 Update original_hud_score_init=nullptr;
-using HudUpdate=void(*)(uintptr_t,uintptr_t);
-HudUpdate original_hud_score_update=nullptr;
+Update original_hud_score_update=nullptr;
+uintptr_t hud_score_vtable=0;
+std::atomic<uint64_t> hud_score_frame_ticks{0};
 Update original_end_items=nullptr;
 Update original_end_combat_init=nullptr;
 MeterAllocate original_meter_allocate=nullptr;
@@ -667,12 +668,13 @@ void eol_challenge_update(uintptr_t widget) {
     }
 }
 
+bool text_matches(uintptr_t field,const char* expected);
 bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     const auto label=swf_child(root,"apFoundLabel");
     const auto text_root=swf_child(label,"text");
     const auto title=swf_child(text_root,"txtVal",true);
     if (!title) {
-        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::blocked,
+        save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::blocked,
             "hud_found_text_missing",0,{{"root",root},{"label",label},{"text",text_root}},root);
         return false;
     }
@@ -689,7 +691,7 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     if (summary.known!=1) {
         original_sprite_visibility(label,0,1);
         if (meter_root) original_sprite_visibility(meter_root,0,1);
-        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::pending,
+        save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::pending,
             "hud_found_summary_unknown",0,{{"revision",projection.revision},
             {"namespace_valid",namespace_valid},{"row_found",row_found},{"known",summary.known}},root);
         return true;
@@ -698,7 +700,7 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     for (const auto leaf:{"background","corruption","glow_burst","pointCount","header"})
         if (const auto sprite=swf_child(meter_root,leaf)) original_sprite_visibility(sprite,0,1);
     char value[64]; std::snprintf(value,sizeof(value),"ITEMS FOUND %u/%u",summary.found,summary.total);
-    swf_set_text(title,value);
+    if (!text_matches(title,value)) swf_set_text(title,value);
     constexpr uint32_t slayer_green=54;
     constexpr uint32_t white=57;
     swf_color(label,white);
@@ -712,27 +714,28 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     }
     original_sprite_visibility(label,1,1);
     if (!independent) original_sprite_visibility(root,1,1);
-    save::session().btrace.record(save::BStage::mission_count_fields,
+    save::session().btrace.record(save::BStage::hud_found_fields,
         question ? save::BStatus::succeeded : save::BStatus::pending,"hud_found_presentation",0,
         {{"named_color",*reinterpret_cast<const uint32_t*>(text_root+0x6c)},{"material",question!=0},
          {"found",summary.found},{"total",summary.total},{"playing",*reinterpret_cast<const uint8_t*>(label+0x50)},
          {"question_color",image?*reinterpret_cast<const uint32_t*>(image+0x6c):0},
          {"revision",projection.revision},{"root",root},{"label",label},
          {"root_visible",*reinterpret_cast<const uint8_t*>(root+0x51)},
-         {"label_visible",*reinterpret_cast<const uint8_t*>(label+0x51)}},root);
+         {"label_visible",*reinterpret_cast<const uint8_t*>(label+0x51)},
+         {"text_matches",text_matches(title,value)}},root);
     return true;
 }
 void present_score_found(uintptr_t score) {
     uintptr_t swf=0,root=0;
     uint8_t visible=0;
     if (!read(score,0x10,swf) || !read(swf,0x18,root) || !root) {
-        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::blocked,
+        save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::blocked,
             "hud_score_root_missing",0,{{"swf",swf},{"root",root}},score);
         return;
     }
     if (!active() || !read(score,0xb8,visible) || !visible) {
         if (const auto label=swf_child(root,"apFoundLabel")) original_sprite_visibility(label,0,1);
-        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::pending,
+        save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::pending,
             "hud_score_visibility_gate",0,{{"active",active()},{"visible",visible},{"root",root}},score);
         return;
     }
@@ -740,15 +743,24 @@ void present_score_found(uintptr_t score) {
 }
 void hud_score_init(uintptr_t score) {
     original_hud_score_init(score);
+    save::session().btrace.record(save::BStage::hud_score_init,save::BStatus::entered,
+        "hud_score_initialized",0,{},score);
     __try { present_score_found(score); } __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::blocked,
+        save::session().btrace.record(save::BStage::hud_score_init,save::BStatus::blocked,
             "hud_score_init_fault",0,{},score);
     }
 }
-void hud_score_update(uintptr_t score,uintptr_t frame) {
-    original_hud_score_update(score,frame);
-    __try { present_score_found(score); } __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::blocked,
+void hud_score_update(uintptr_t score) {
+    original_hud_score_update(score);
+    __try {
+        uintptr_t vtable=0;
+        if (!read(score,0,vtable) || vtable!=hud_score_vtable) return;
+        save::session().btrace.record(save::BStage::hud_score_frame,save::BStatus::entered,
+            "hud_score_frame_entered",0,
+            {{"ticks",hud_score_frame_ticks.fetch_add(1,std::memory_order_relaxed)+1}},score);
+        present_score_found(score);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        save::session().btrace.record(save::BStage::hud_score_frame,save::BStatus::blocked,
             "hud_score_update_fault",0,{},score);
     }
 }
@@ -1434,7 +1446,7 @@ std::array<native::Target,46> native_targets(uintptr_t base) {
         0x10e08f0,0x10dc420,0x18071d0,0x1857110,0x0f9bd70,0x1864430,
         0x0f9c000,0x185c150,0x184e470,0x184e4b0,0x184e3b0,0x186db00,
         0x17a9660,0x1d69e00,0x360bb0,0x1863b00,0x15b2680,0x0effea0,0x0f5cfe0,0x0f59270,
-        0x0f489c0,0x0f4f990,0x17aa5d0,0x10ef3e0,0x0f30810,0x1859e20,0x1865280,0xf98fc0,0xf62bc0,0x1863c30,0xfaa270,0xd9d010,0x1838970,0x1863d90,0x0effd60};
+        0x0f489c0,0x0f4f990,0x17aa5d0,0x10ef3e0,0x0f30810,0x1859e20,0x1865280,0xf98fc0,0xf62bc0,0x1863c30,0xfaa270,0xd9d010,0x1838970,0x1863d90,0x0ed01b0};
     constexpr const char* bytes[]={
         "4053565741554881ec98000000488b05c4bd0d034833c4488944247033db488d",
         "40574883ec60488b05dba60d034833c44889442450488bf9488d4c2420e8ce65",
@@ -1481,7 +1493,7 @@ std::array<native::Target,46> native_targets(uintptr_t base) {
         "40534883ec20488b01488bd9ff90480d000084c00f8582000000488b03488bcb",
         "405356574154415641574881ec98000000488b05506097024833c44889842480",
         "48896c24104889742418574883ec308bf2488bf981fa0d0100000f87f7000000",
-        "40534883ec20488bd9e892d56e00488b8bf80000004885c9740a4883c4205be9"};
+        "40534883ec40488bd90f29742430488b89c8000000f30f10350bc2b70183b99c"};
     std::array<native::Target,46> targets{};
     const auto digit=[](char c) { return c<='9' ? c-'0' : c-'a'+10; };
     for (unsigned i=0;i<targets.size();++i) {
@@ -1531,6 +1543,7 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     if (!save::session().campaign_run.enabled()) return true;
     const auto targets=native_targets(binding.image.base);
     meter_visibility_return=binding.image.base+0x1116e07;
+    hud_score_vtable=binding.image.base+0x2d01de8;
     void* detours[]={reinterpret_cast<void*>(populate),reinterpret_cast<void*>(focus),reinterpret_cast<void*>(load),
         reinterpret_cast<void*>(is_available),reinterpret_cast<void*>(update),
         reinterpret_cast<void*>(root_navigation),reinterpret_cast<void*>(root_campaign),
@@ -1588,7 +1601,7 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     original_eol_challenge_update=reinterpret_cast<Update>(originals[20]);
     original_category_counts=reinterpret_cast<Update>(originals[21]);
     original_trigger_gate=reinterpret_cast<Available>(originals[22]);
-    original_hud_score_update=reinterpret_cast<HudUpdate>(originals[23]);
+    original_hud_score_update=reinterpret_cast<Update>(originals[23]);
     end_items_category_vtable=binding.image.base+0x2d10d78;
     for (unsigned i=0;i<24;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
         return MH_EnableHook(reinterpret_cast<void*>(targets[hooked[i]].address)); })!=MH_OK) return false;
