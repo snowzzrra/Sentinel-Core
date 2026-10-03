@@ -48,6 +48,23 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
                 weapons |= 1u << i;
         }
         facts.weapons = weapons;
+        const char* dash = "ability_dash";
+        const auto dash_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
+            image_base + 0x17aa5d0)(type, dash, 1);
+        const auto dash_type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631d90)();
+        if (dash_decl && dash_type) {
+            const auto path = *reinterpret_cast<const char**>(dash_decl + 8);
+            const auto get_type = *reinterpret_cast<uintptr_t*>(
+                *reinterpret_cast<uintptr_t*>(dash_decl) + 0xb0);
+            if (path && !std::strcmp(path, dash) && get_type &&
+                reinterpret_cast<uintptr_t(*)(uintptr_t)>(get_type)(dash_decl) == dash_type) {
+                const auto item = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
+                    image_base + 0x1690660)(inv, dash_decl);
+                // idAbility_Dash inventory count is independent of charges, cooldown and CanUse.
+                const auto quantity = item ? *reinterpret_cast<int*>(item + 0x40) : 0;
+                if (quantity >= 0) facts.dash = quantity > 0 ? 1 : 0;
+            }
+        }
         const char* ice = "throwable/player/ice_bomb";
         const auto ice_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
             image_base + 0x17aa5d0)(type, ice, 1);
@@ -163,6 +180,8 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {0x17aa5d0, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448"},
         {0x1690660, "48895c240848896c2410488974241848897c242041564883ec2033ff488bea4c"},
         {0x1631f90, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc"},
+        {0x1631d90, "488d05a9d00603c3cccccccccccccccc488d05f9d10603c3cccccccccccccccc"},
+        {0x4a1870, "8b4140c3cccccccccccccccccccccccc40534883ec20488bd9488b4a104883c1"},
         {0xfe37f0, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
     };
     for (const auto& site : sites) {

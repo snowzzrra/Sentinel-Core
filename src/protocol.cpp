@@ -1268,6 +1268,7 @@ template<class Codec> bool inventory_values(Codec& c, sc_inventory_result& v) {
     c.byte(v.reserved_before); c.byte(v.reserved_after);
     c.u64(v.operations_applied);
     c.byte(v.ice_bomb_before); c.byte(v.ice_bomb_after);
+    c.byte(v.dash_before); c.byte(v.dash_after);
     if (v.abi_version != SC_INVENTORY_ABI_VERSION || v.namespace_id[64] ||
         v.outcome > SC_INV_UNAVAILABLE || (v.flags & ~31u)) return false;
     const auto mask = [](uint32_t value, uint32_t allowed) {
@@ -1285,7 +1286,9 @@ template<class Codec> bool inventory_values(Codec& c, sc_inventory_result& v) {
         !mask(v.upgrades_before, SC_INV_BLOOD_PUNCH_MASK) || !mask(v.upgrades_after, SC_INV_BLOOD_PUNCH_MASK) ||
         v.reserved_before || v.reserved_after ||
         (v.ice_bomb_before > 1 && v.ice_bomb_before != SC_INVENTORY_UNKNOWN_ITEM) ||
-        (v.ice_bomb_after > 1 && v.ice_bomb_after != SC_INVENTORY_UNKNOWN_ITEM)) return false;
+        (v.ice_bomb_after > 1 && v.ice_bomb_after != SC_INVENTORY_UNKNOWN_ITEM) ||
+        (v.dash_before > 1 && v.dash_before != SC_INVENTORY_UNKNOWN_ITEM) ||
+        (v.dash_after > 1 && v.dash_after != SC_INVENTORY_UNKNOWN_ITEM)) return false;
     return true;
 }
 }

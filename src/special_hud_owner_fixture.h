@@ -607,7 +607,7 @@ bool test_hud_owner_path() {
     const auto donor_kbm = fixture.find(first_donor, "kbm");
     fixture.set_bounds(donor_kbm, 0, 4);
     update_on_hud(b);
-    ok &= !fixture.clips.at(refill_bind)->visible && !fixture.clips.at(toggle_bind)->visible;
+    ok &= fixture.clips.at(refill_bind)->visible && fixture.clips.at(toggle_bind)->visible;
     fixture.set_bounds(donor_kbm, 22, 4, 6, -22);
     update_on_hud(b);
     ok &= fixture.clips.at(refill_bind)->visible && fixture.clips.at(toggle_bind)->visible;
@@ -749,6 +749,46 @@ bool test_hud_owner_path() {
         fixture.find(missing.parent, "apAmmoRefillBind") != 0 &&
         fixture.find(missing.parent, "apSpecialSwitch") == 0 &&
         fixture.find(missing.parent, "apSpecialToggleBind") == 0;
+    Scene equipment_hidden{};
+    build(equipment_hidden, 3);
+    configured_keys.store('Y' | ('B' << 8));
+    const auto hidden_swap=fixture.find(equipment_hidden.parent,"swapEquipment");
+    const auto hidden_donor=Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(equipment_hidden.quickuse.data()),0x1f0);
+    fixture.set_visible(equipment_hidden.primary,false);
+    fixture.set_visible(hidden_swap,false);
+    fixture.set_visible(hidden_donor,false);
+    const auto clear_native_bounds=[&]() {
+        for (const auto clip:{equipment_hidden.primary,fixture.find(hidden_swap,"arrow"),
+            fixture.find(hidden_swap,"backer"),fixture.find(hidden_donor,"kbm")}) {
+            Fixture::put(clip,0xa8,hud::Point{});
+            Fixture::put(clip,0xb0,hud::Point{});
+        }
+    };
+    clear_native_bounds();
+    const bool before_hidden=ok;
+    fixture.unrendered_clones=true;
+    update_on_hud(equipment_hidden.address());
+    fixture.render(equipment_hidden.parent);
+    clear_native_bounds();
+    update_on_hud(equipment_hidden.address());
+    fixture.render(equipment_hidden.parent);
+    clear_native_bounds();
+    update_on_hud(equipment_hidden.address());
+    const auto hidden_refill_bind=fixture.find(equipment_hidden.parent,"apAmmoRefillBind");
+    const auto hidden_toggle_bind=fixture.find(equipment_hidden.parent,"apSpecialToggleBind");
+    ok &= fixture.clips.at(fixture.find(equipment_hidden.parent,"apSpecialSwitch"))->visible &&
+        hidden_refill_bind && hidden_toggle_bind && fixture.clips.at(hidden_refill_bind)->visible &&
+        fixture.clips.at(hidden_toggle_bind)->visible && !fixture.clips.at(equipment_hidden.primary)->visible &&
+        !fixture.clips.at(hidden_swap)->visible && !fixture.clips.at(hidden_donor)->visible &&
+        fixture.clips.at(fixture.find(fixture.find(hidden_refill_bind,"kbm"),"txtVal"))->text=="Y" &&
+        fixture.clips.at(fixture.find(fixture.find(hidden_toggle_bind,"kbm"),"txtVal"))->text=="B";
+    fixture.unrendered_clones=false;
+    if (!ok) std::fprintf(stderr,"HUD hidden-equipment: before=%d refill=%d toggle=%d arrow=%d failure=%s\n",before_hidden,
+        hidden_refill_bind ? fixture.clips.at(hidden_refill_bind)->visible:0,
+        hidden_toggle_bind ? fixture.clips.at(hidden_toggle_bind)->visible:0,
+        fixture.clips.at(fixture.find(equipment_hidden.parent,"apSpecialSwitch"))->visible,
+        hud_trace.snapshot().stages[static_cast<size_t>(save::BStage::profile_output)].predicate);
+    configured_keys.store(VK_F8 | (VK_F10 << 8));
     update_on_hud(b2);
     const auto rebuilt_crucible = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.crucible.data()), 0x18);
     const auto rebuilt_hammer = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.hammer.data()), 0x18);

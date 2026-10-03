@@ -9,7 +9,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ABI = {"base":1,"wire":1,"engine":1,"context":1,"native":1,"save":1,"admission":1,"backup":1,"installation":1,"weapon_points":1,"campaign_menu":1,"inventory":4,"arsenal":1,"runes":1,"special":1,"deathlink":1,"automap":1,"commands":1}
+ABI = {"base":1,"wire":1,"engine":1,"context":1,"native":1,"save":1,"admission":1,"backup":1,"installation":1,"weapon_points":1,"campaign_menu":1,"inventory":5,"arsenal":1,"runes":1,"special":1,"deathlink":1,"automap":1,"commands":1}
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()

@@ -18,6 +18,7 @@ struct SnapshotFacts {
     uint8_t ammo_tier = SC_INVENTORY_UNKNOWN_TIER;
     uint8_t reserved = 0;
     uint8_t ice_bomb = SC_INVENTORY_UNKNOWN_ITEM;
+    uint8_t dash = SC_INVENTORY_UNKNOWN_ITEM;
 };
 
 // internal code only; don't accept or serialize it as input

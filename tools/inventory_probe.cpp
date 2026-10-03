@@ -31,6 +31,7 @@ int inventory_command(int argc, wchar_t** argv) {
         "\"weapons_before\":%u,\"weapons_after\":%u,"
          "\"equipment_before\":%u,\"equipment_after\":%u,"
          "\"ice_bomb_before\":%u,\"ice_bomb_after\":%u,"
+         "\"dash_before\":%u,\"dash_after\":%u,"
         "\"special_before\":%u,\"special_after\":%u,"
         "\"upgrades_before\":%u,\"upgrades_after\":%u,"
         "\"health_tier_before\":%u,\"health_tier_after\":%u,"
@@ -42,6 +43,7 @@ int inventory_command(int argc, wchar_t** argv) {
         inv.weapons_before, inv.weapons_after,
          inv.equipment_before, inv.equipment_after,
          static_cast<uint32_t>(inv.ice_bomb_before), static_cast<uint32_t>(inv.ice_bomb_after),
+         static_cast<uint32_t>(inv.dash_before), static_cast<uint32_t>(inv.dash_after),
         inv.special_before, inv.special_after,
         inv.upgrades_before, inv.upgrades_after,
         static_cast<uint32_t>(inv.health_tier_before), static_cast<uint32_t>(inv.health_tier_after),

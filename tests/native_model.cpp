@@ -2,6 +2,7 @@
 #include "challenge_match.h"
 #include "runes.h"
 #include "special.h"
+#include "inventory.h"
 #include <Windows.h>
 #include "protocol.h"
 #include <cstdio>
@@ -24,6 +25,29 @@ sc_diagnostic_request request(uint64_t id, uint32_t deadline = 100) {
 }
 void run_backup_request_contracts();
 int main() {
+    sentinel::inventory::SnapshotFacts inventory_facts{};
+    sentinel::inventory::Calls inventory_calls{
+        &inventory_facts,
+        [](void*) { return uintptr_t{0x1234}; },
+        [](void* context, uintptr_t, sentinel::inventory::SnapshotFacts& facts) {
+            facts = *static_cast<sentinel::inventory::SnapshotFacts*>(context); return true;
+        }
+    };
+    sc_inventory_request inventory_request{};
+    std::memset(inventory_request.namespace_id, 'a', 64);
+    for (const auto dash : {uint8_t{0}, uint8_t{1}, uint8_t{255}}) {
+        inventory_facts.dash = dash;
+        auto result = sentinel::inventory::initial(inventory_request);
+        sentinel::inventory::execute(inventory_request, result, inventory_calls);
+        CHECK(result.abi_version == 5 && result.outcome == SC_INV_OBSERVED &&
+              result.dash_before == dash && result.dash_after == dash &&
+              result.equipment_after == SC_INVENTORY_UNKNOWN_MASK);
+    }
+    inventory_facts.dash = 2;
+    auto invalid_inventory = sentinel::inventory::initial(inventory_request);
+    sentinel::inventory::execute(inventory_request, invalid_inventory, inventory_calls);
+    CHECK(invalid_inventory.outcome == SC_INV_READ_FAILED &&
+          invalid_inventory.dash_after == SC_INVENTORY_UNKNOWN_ITEM);
     struct RuneFixture { sentinel::runes::SnapshotFacts facts{}; int bound = 0, reads = 0; bool active = true; } rune;
     sentinel::runes::calls = {
         &rune, nullptr,
@@ -176,6 +200,17 @@ int main() {
     ++n.context_generation; CHECK(encode_native_response(wire, WireResult::ok, native_operation, host, n, {}) == 0);
     d = {}; d.scope = r.expected; d.request_id = r.request_id; std::memcpy(d.nonce, r.nonce, 16);
     d.state = SC_DIAGNOSTIC_REJECTED; d.reason = SC_NATIVE_BUDGET;
+    inventory_facts.dash = 1;
+    auto inventory_reply = sentinel::inventory::initial(inventory_request);
+    sentinel::inventory::execute(inventory_request, inventory_reply, inventory_calls);
+    inventory_reply.execution = d;
+    size = encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply);
+    sc_inventory_result decoded_inventory{};
+    CHECK(size && decode_inventory_response(wire, size, code, inventory_result_operation, s, decoded_inventory));
+    CHECK(decoded_inventory.dash_after == 1 && decoded_inventory.equipment_after == SC_INVENTORY_UNKNOWN_MASK);
+    CHECK(!decode_inventory_response(wire, size - 1, code, inventory_result_operation, s, decoded_inventory));
+    inventory_reply.dash_after = 2;
+    CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
     detail = {}; detail.revision = 1; detail.stage = SC_STAGE_OBSERVATION_BUDGET;
     detail.observation_attempted = detail.timing_valid = 1;
     detail.observation_started_at_ms = 1000; detail.observation_elapsed_ns = 2000001;

@@ -225,7 +225,7 @@ WeaponHudUpdate original_weapon_hud_update = nullptr;
 WeaponHudProject project_crucible_hud = nullptr, project_hammer_hud = nullptr;
 using WeaponInfoLabel = uint64_t(*)(uintptr_t, const char*, bool);
 WeaponInfoLabel original_weapon_info_label = nullptr;
-std::atomic<unsigned> configured_keys{VK_F9};
+std::atomic<unsigned> configured_keys{0};
 #include "special_hud_native.h"
 std::atomic<uintptr_t> challenge_element{0};
 std::atomic<uintptr_t> completion_owner{0};
@@ -1320,7 +1320,7 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
     input_trace.record(save::BStage::special_input, enabled ? save::BStatus::succeeded : save::BStatus::pending,
         "input_gate", 0, {{"ready", installed}, {"safe_gameplay", safe_gameplay}, {"player", p != 0},
                          {"foreground", foreground_pid == GetCurrentProcessId()}, {"keys", keys}});
-    // the packaged client owns f9 refill requests and their ap ledger transaction
+    // the packaged client owns refill requests and their ap ledger transaction
     for (unsigned i = 1; i < 2; ++i) {
         const auto vk = static_cast<int>((keys >> (i * 8)) & 0xff);
         const bool down = vk && (GetAsyncKeyState(vk) & 0x8000) != 0;

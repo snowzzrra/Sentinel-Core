@@ -78,6 +78,7 @@ sc_inventory_result initial(const sc_inventory_request& r) {
     out.abi_version = SC_INVENTORY_ABI_VERSION;
     out.kind = r.kind;
     out.ice_bomb_before = out.ice_bomb_after = SC_INVENTORY_UNKNOWN_ITEM;
+    out.dash_before = out.dash_after = SC_INVENTORY_UNKNOWN_ITEM;
     std::memcpy(out.namespace_id, r.namespace_id, sizeof(out.namespace_id));
     return out;
 }
@@ -98,7 +99,8 @@ bool valid_facts(const SnapshotFacts& f) {
     return mask(f.weapons, SC_INV_ALL_WEAPONS) && mask(f.equipment, SC_INV_ALL_EQUIPMENT) &&
         !f.special_weapons && mask(f.persistent_upgrades, SC_INV_BLOOD_PUNCH_MASK) && !f.reserved &&
         tier(f.health_tier) && tier(f.armor_tier) && tier(f.ammo_tier) &&
-        (f.ice_bomb <= 1 || f.ice_bomb == SC_INVENTORY_UNKNOWN_ITEM);
+        (f.ice_bomb <= 1 || f.ice_bomb == SC_INVENTORY_UNKNOWN_ITEM) &&
+        (f.dash <= 1 || f.dash == SC_INVENTORY_UNKNOWN_ITEM);
 }
 
 void execute(const sc_inventory_request& r, sc_inventory_result& out, const Calls& calls) {
@@ -114,6 +116,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
     out.weapons_before = before.weapons;
     out.equipment_before = before.equipment;
     out.ice_bomb_before = before.ice_bomb;
+    out.dash_before = before.dash;
     out.special_before = before.special_weapons;
     out.upgrades_before = before.persistent_upgrades;
     out.health_tier_before = before.health_tier;
@@ -127,6 +130,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
         out.weapons_after = before.weapons;
         out.equipment_after = before.equipment;
         out.ice_bomb_after = before.ice_bomb;
+        out.dash_after = before.dash;
         out.special_after = before.special_weapons;
         out.upgrades_after = before.persistent_upgrades;
         out.health_tier_after = before.health_tier;
@@ -157,6 +161,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
             out.weapons_after = before.weapons;
             out.equipment_after = before.equipment;
             out.ice_bomb_after = before.ice_bomb;
+            out.dash_after = before.dash;
             out.special_after = before.special_weapons;
             out.upgrades_after = before.persistent_upgrades;
             out.health_tier_after = before.health_tier;
@@ -180,6 +185,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
             out.weapons_after = after.weapons;
             out.equipment_after = after.equipment;
             out.ice_bomb_after = after.ice_bomb;
+            out.dash_after = after.dash;
             out.special_after = after.special_weapons;
             out.upgrades_after = after.persistent_upgrades;
             out.health_tier_after = after.health_tier;
@@ -223,6 +229,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
             out.weapons_after = before.weapons;
             out.equipment_after = before.equipment;
             out.ice_bomb_after = before.ice_bomb;
+            out.dash_after = before.dash;
             out.special_after = before.special_weapons;
             out.upgrades_after = before.persistent_upgrades;
             out.health_tier_after = before.health_tier;
@@ -246,6 +253,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
             out.weapons_after = after.weapons;
             out.equipment_after = after.equipment;
             out.ice_bomb_after = after.ice_bomb;
+            out.dash_after = after.dash;
             out.special_after = after.special_weapons;
             out.upgrades_after = after.persistent_upgrades;
             out.health_tier_after = after.health_tier;

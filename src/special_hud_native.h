@@ -523,14 +523,32 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool switch_available = owner.owns_crucible && owner.owns_hammer &&
         route_ready.load(std::memory_order_acquire) && ((keys >> 8) & 0xff);
     const auto arrow_source = child(parent, "swapEquipment");
-    const auto native_arrow = child(arrow_source, "arrow");
-    const auto native_backer = child(arrow_source, "backer");
+    auto arrow_geometry = arrow_source;
+    auto native_arrow = child(arrow_source, "arrow");
+    auto native_backer = child(arrow_source, "backer");
+    Rect cached_arrow{}, cached_backer{};
+    if (switch_available && arrow_source && native_arrow && native_backer &&
+        (!bounds(native_arrow, parent, cached_arrow) || !bounds(native_backer, parent, cached_backer))) {
+        if (!special_arrow) special_arrow = clone(arrow_source, parent, "apSpecialSwitch", created);
+        if (special_arrow) {
+            hold_frame(special_arrow, 1);
+            if (const auto leaf=child(special_arrow, "arrow")) show(leaf, true);
+            if (const auto leaf=child(special_arrow, "backer")) show(leaf, true);
+            if (const auto cta=child(special_arrow, "cta")) show(cta, false);
+            if (const auto cta=child(child(special_arrow, "icon"), "cta")) show(cta, false);
+            show(special_arrow, true);
+            swf.dirty(special_arrow);
+            arrow_geometry = special_arrow;
+            native_arrow = child(special_arrow, "arrow");
+            native_backer = child(special_arrow, "backer");
+        }
+    }
     const auto active_root = owner.selected == SC_SPECIAL_WEAPON_CRUCIBLE ? context.crucible_root :
         owner.selected == SC_SPECIAL_WEAPON_HAMMER ? context.hammer_root : uintptr_t{0};
     auto& active_position = owner.selected == SC_SPECIAL_WEAPON_HAMMER ? hammer_position : crucible_position;
     auto& inactive_position = owner.selected == SC_SPECIAL_WEAPON_HAMMER ? crucible_position : hammer_position;
     const auto inactive_root = owner.selected == SC_SPECIAL_WEAPON_HAMMER ? context.crucible_root : context.hammer_root;
-    Rect equipment_bounds{}, arrow_bounds{}, backer_bounds{}, source_bounds{}, flame_bounds{}, active_bounds{};
+    Rect arrow_bounds{}, backer_bounds{}, source_bounds{}, flame_bounds{}, active_bounds{};
     Rect source_icon_bounds{}, flame_icon_bounds{}, active_icon_bounds{};
     Rect flame_plate_bounds{}, active_plate_bounds{};
     Rect clone_plate_bounds{};
@@ -539,7 +557,6 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const auto source_icon = child(layout_source, "icon");
     const auto flame_icon = child(flame_root, "icon");
     const auto active_icon = child(active_root, "icon");
-    const bool equipment_visual = bounds(primary_root, parent, equipment_bounds);
     const bool native_arrow_visual = bounds(native_arrow, parent, arrow_bounds);
     const bool native_backer_visual = bounds(native_backer, parent, backer_bounds);
     const bool source_visual = bounds(layout_source, parent, source_bounds);
@@ -625,9 +642,9 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         std::isfinite(native_gap) && native_gap > 0;
     const bool refill_visual = refill_offsets && (visible_plate || source_icon_visual) &&
         (authored_refill || (source_cached &&
-        equipment_visual && active_visual && std::isfinite(native_gap) && native_gap > 0));
+        active_visual && std::isfinite(native_gap) && native_gap > 0));
     const bool arrow_visual = native_layout &&
-        visual_offset(arrow_source, native_arrow, parent, movie, arrow_offset);
+        visual_offset(arrow_geometry, native_arrow, parent, movie, arrow_offset);
     const char* switch_failure = nullptr;
     if (switch_available) {
         if (!arrow_source) switch_failure = "switch_source_missing";
@@ -660,7 +677,6 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         }
         else if (!flame_icon_visual) switch_failure = "switch_flame_icon_bounds_missing";
         else if (!native_layout) switch_failure = "switch_native_gap_invalid";
-        else if (!equipment_visual) switch_failure = "switch_equipment_bounds_missing";
         else if (!arrow_visual) switch_failure = "switch_arrow_stage_forward_failed";
     }
     if (!switch_failure && switch_available) {
@@ -681,7 +697,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
             if (const auto leaf = child(special_arrow, "arrow")) show(leaf, true);
             else switch_failure = "switch_arrow_leaf_missing";
             if (!switch_failure &&
-                !place_visual(special_arrow, arrow_source, parent, movie, toggle_target, arrow_offset))
+                !place_visual(special_arrow, arrow_geometry, parent, movie, toggle_target, arrow_offset))
                 switch_failure = "switch_arrow_place_failed";
             const Point shift{special_target.x - original_special.x,
                               special_target.y - original_special.y};
@@ -722,7 +738,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     if (!arrow_ready) {
         restore_native(crucible_position, context.crucible_root, movie, epoch);
         restore_native(hammer_position, context.hammer_root, movie, epoch);
-        if (special_arrow) show(special_arrow, false);
+        if (special_arrow && !(switch_available && arrow_geometry == special_arrow &&
+            (!native_arrow_visual || !native_backer_visual))) show(special_arrow, false);
     }
     const float special_half_width = active_icon_width * 0.5f;
     const float special_half_height = (active_icon_bounds.br.y - active_icon_bounds.tl.y) * 0.5f;
@@ -783,7 +800,6 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
             !source_visual ? "hud_refill_source_bounds_missing" :
             !native_arrow_visual ? "hud_refill_arrow_bounds_missing" :
             !flame_visual ? "hud_refill_flame_bounds_missing" :
-            !equipment_visual ? "hud_refill_equipment_bounds_missing" :
             !active_visual ? "hud_refill_special_bounds_missing" :
             !std::isfinite(native_gap) || native_gap <= 0 ? "hud_refill_native_gap_invalid" :
             "hud_refill_stage_transform_failed", element, source, epoch);
@@ -962,11 +978,35 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         return graphics_applied;
     }
     Rect donor_bounds{};
-    const bool donor_visual = bounds(child(donor, "kbm"), parent, donor_bounds);
+    bool donor_visual = bounds(child(donor, "kbm"), parent, donor_bounds);
     if (!donor_visual) {
-        if (refill_bind) show(refill_bind, false);
-        if (special_bind) show(special_bind, false);
-        refuse("hud_keycap_donor_bounds_missing", element, donor, epoch);
+        const auto key = (keys & 0xff) ? keys & 0xff : (keys >> 8) & 0xff;
+        auto& probe = (keys & 0xff) ? refill_bind : special_bind;
+        const auto name = (keys & 0xff) ? "apAmmoRefillBind" : "apSpecialToggleBind";
+        char label[16]{};
+        if (key_name(key, label)) {
+            if (!probe) probe = clone(donor, parent, name, created);
+            if (probe) {
+                hold_frame(probe, 1);
+                const auto kbm = child(probe, "kbm");
+                const auto joy = child(probe, "joy");
+                const auto value = text_child(kbm, "txtVal");
+                if (kbm && joy && value) {
+                    hold_frame(kbm, 1);
+                    show(kbm, true);
+                    show(joy, false);
+                    if (!text_is(value, label)) swf.set_text(value, label);
+                    show(probe, true);
+                    swf.dirty(probe);
+                    donor_visual = bounds(kbm, parent, donor_bounds);
+                }
+            }
+        }
+    }
+    if (!donor_visual) {
+        if (!(keys & 0xff) && refill_bind) show(refill_bind, false);
+        if (!((keys >> 8) & 0xff) && special_bind) show(special_bind, false);
+        refuse("hud_keycap_geometry_pending", element, donor, epoch);
         return graphics_applied;
     }
     const auto donor_center = center(donor_bounds);

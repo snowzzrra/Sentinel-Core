@@ -383,7 +383,8 @@ SwfColor swf_color=nullptr;
 uintptr_t question_material(uintptr_t sprite) {
     uintptr_t swf=0;
     if (!sprite || !read(sprite,0x30,swf) || !swf) return 0;
-    swf_frame(sprite,1);
+    if (*reinterpret_cast<const uint32_t*>(sprite+0x58)!=1 ||
+        *reinterpret_cast<const uint8_t*>(sprite+0x50)) swf_frame(sprite,1);
     const int image_type=1;
     // the shared codex question texture belongs to the native ui cache class
     const auto cache_class=reinterpret_cast<uint8_t*>(swf+0x128);
@@ -670,25 +671,33 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     const auto label=swf_child(root,"apFoundLabel");
     const auto text_root=swf_child(label,"text");
     const auto title=swf_child(text_root,"txtVal",true);
-    if (!title) return false;
+    if (!title) {
+        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::blocked,
+            "hud_found_text_missing",0,{{"root",root},{"label",label},{"text",text_root}},root);
+        return false;
+    }
     const auto campaign=save::session().campaign_run.snapshot();
     const auto projection=menu().projection();
     sc_campaign_summary summary{};
-    if (projection.namespace_id==save::session().namespace_id())
+    bool row_found=false;
+    const bool namespace_valid=projection.namespace_id==save::session().namespace_id();
+    if (namespace_valid)
         for (uint32_t i=0;i<projection.count;++i)
-            if (campaign.map==projection.rows[i].map && (projection.rows[i].flags&SC_CAMPAIGN_REVEALED))
-                summary=projection.summaries[i];
+            if (campaign.map==projection.rows[i].map && (projection.rows[i].flags&SC_CAMPAIGN_REVEALED)) {
+                summary=projection.summaries[i]; row_found=true;
+            }
     if (summary.known!=1) {
         original_sprite_visibility(label,0,1);
         if (meter_root) original_sprite_visibility(meter_root,0,1);
+        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::pending,
+            "hud_found_summary_unknown",0,{{"revision",projection.revision},
+            {"namespace_valid",namespace_valid},{"row_found",row_found},{"known",summary.known}},root);
         return true;
     }
     if (independent && meter_root) original_sprite_visibility(meter_root,0,1);
     for (const auto leaf:{"background","corruption","glow_burst","pointCount","header"})
         if (const auto sprite=swf_child(meter_root,leaf)) original_sprite_visibility(sprite,0,1);
     char value[64]; std::snprintf(value,sizeof(value),"ITEMS FOUND %u/%u",summary.found,summary.total);
-    swf_frame(label,1);
-    swf_frame(text_root,1);
     swf_set_text(title,value);
     constexpr uint32_t slayer_green=54;
     constexpr uint32_t white=57;
@@ -707,26 +716,41 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
         question ? save::BStatus::succeeded : save::BStatus::pending,"hud_found_presentation",0,
         {{"named_color",*reinterpret_cast<const uint32_t*>(text_root+0x6c)},{"material",question!=0},
          {"found",summary.found},{"total",summary.total},{"playing",*reinterpret_cast<const uint8_t*>(label+0x50)},
-         {"question_color",image?*reinterpret_cast<const uint32_t*>(image+0x6c):0}});
+         {"question_color",image?*reinterpret_cast<const uint32_t*>(image+0x6c):0},
+         {"revision",projection.revision},{"root",root},{"label",label},
+         {"root_visible",*reinterpret_cast<const uint8_t*>(root+0x51)},
+         {"label_visible",*reinterpret_cast<const uint8_t*>(label+0x51)}},root);
     return true;
 }
 void present_score_found(uintptr_t score) {
     uintptr_t swf=0,root=0;
     uint8_t visible=0;
-    if (!read(score,0x10,swf) || !read(swf,0x18,root) || !root) return;
+    if (!read(score,0x10,swf) || !read(swf,0x18,root) || !root) {
+        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::blocked,
+            "hud_score_root_missing",0,{{"swf",swf},{"root",root}},score);
+        return;
+    }
     if (!active() || !read(score,0xb8,visible) || !visible) {
         if (const auto label=swf_child(root,"apFoundLabel")) original_sprite_visibility(label,0,1);
+        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::pending,
+            "hud_score_visibility_gate",0,{{"active",active()},{"visible",visible},{"root",root}},score);
         return;
     }
     present_found_root(root,swf_child(root,"demonic_corruption"),true);
 }
 void hud_score_init(uintptr_t score) {
     original_hud_score_init(score);
-    __try { present_score_found(score); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { present_score_found(score); } __except(EXCEPTION_EXECUTE_HANDLER) {
+        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::blocked,
+            "hud_score_init_fault",0,{},score);
+    }
 }
 void hud_score_update(uintptr_t score,uintptr_t frame) {
     original_hud_score_update(score,frame);
-    __try { present_score_found(score); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { present_score_found(score); } __except(EXCEPTION_EXECUTE_HANDLER) {
+        save::session().btrace.record(save::BStage::mission_count_fields,save::BStatus::blocked,
+            "hud_score_update_fault",0,{},score);
+    }
 }
 bool present_hud_found(uintptr_t meter) {
     uintptr_t root=0;
@@ -1344,8 +1368,14 @@ bool test_question_material() {
     owner[0x128]=1;
     const auto previous=swf_create_material;
     const auto previous_frame=swf_frame;
+    static unsigned frames=0;
+    frames=0;
     swf_frame=[](uintptr_t instance,uint32_t frame) {
-        if (frame==1) *reinterpret_cast<uint8_t*>(instance+0x50)=0;
+        ++frames;
+        if (frame==1) {
+            *reinterpret_cast<uint8_t*>(instance+0x50)=0;
+            *reinterpret_cast<uint32_t*>(instance+0x58)=1;
+        }
     };
     *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(sprite)+0x50)=1;
     swf_create_material=[](uintptr_t swf,const int* type,const char*,const char* texture)->uintptr_t {
@@ -1358,7 +1388,7 @@ bool test_question_material() {
     const bool refused=!question_material(reinterpret_cast<uintptr_t>(sprite)) && owner[0x128]==1;
     swf_create_material=previous;
     swf_frame=previous_frame;
-    return created && refused;
+    return created && refused && frames==1;
 }
 bool test_physical_completion_edges() {
     CompletionToast toast{};

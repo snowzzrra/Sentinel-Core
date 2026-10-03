@@ -8,7 +8,7 @@
 namespace sentinel::controls {
 inline constexpr const wchar_t* files[] = {L"ammo_refill_hotkey.state", L"special_toggle_hotkey.state"};
 inline constexpr const char* headers[] = {"AP_AMMO_REFILL_HOTKEY_V1", "AP_SPECIAL_TOGGLE_HOTKEY_V1"};
-inline constexpr int defaults[] = {VK_F9, 0};
+inline constexpr int defaults[] = {0, 0};
 
 inline int key(const char* text) {
     if (!text || std::strlen(text) > 15) return -1;

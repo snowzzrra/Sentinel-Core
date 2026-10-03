@@ -230,11 +230,30 @@ void upgrade_activate_hook(uintptr_t component, uintptr_t upgrade, uint8_t a, ui
     if (!activation_depth) reapply_masteries(component);
 }
 
+void project_mastery_ui(uintptr_t result, uintptr_t family) {
+    const auto base = *reinterpret_cast<const uintptr_t*>(family);
+    const auto mastery = *reinterpret_cast<const uintptr_t*>(family + 0x28);
+    if (!base || !mastery) return;
+    for (unsigned i = 0; i < 13; ++i) {
+        const auto bit = static_cast<uint16_t>(1u << i);
+        if ((mastery_state.desired & mastery_state.applied & bit) &&
+            !std::strcmp(*reinterpret_cast<const char* const*>(base + 8), mastery_families[i].base) &&
+            !std::strcmp(*reinterpret_cast<const char* const*>(mastery + 8), mastery_families[i].mastery)) {
+            *reinterpret_cast<uint8_t*>(result + 0x1c) = 1;
+            return;
+        }
+    }
+}
+
 uintptr_t arsenal_ui_hook(uintptr_t out, uintptr_t weapon, uintptr_t family, uintptr_t p) {
     const auto result = original_arsenal_ui(out, weapon, family, p);
     if (!active() || !native::gameplay_admitted() || !result || !family || !p) return result;
     __try {
+        if (mastery_state.player == p && mastery_state.generation && mastery_state.namespace_id[0] &&
+            !std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65))
+            project_mastery_ui(result, family);
         const auto base = *reinterpret_cast<uintptr_t*>(family);
+        const auto mastery = *reinterpret_cast<const uintptr_t*>(family + 0x28);
         if (!base || std::strcmp(*reinterpret_cast<const char* const*>(base + 8),
                                   mastery_families[4].base)) return result;
         const auto count = *reinterpret_cast<const int32_t*>(family + 0x18);
@@ -249,7 +268,6 @@ uintptr_t arsenal_ui_hook(uintptr_t out, uintptr_t weapon, uintptr_t family, uin
         const bool charge_first = first && second &&
             !std::strcmp(first, "perk/player/weapons/plasma_rifle/secondary_aoe_faster_charge") &&
             !std::strcmp(second, "perk/player/weapons/plasma_rifle/secondary_aoe_no_primary_delay");
-        const auto mastery = *reinterpret_cast<const uintptr_t*>(family + 0x28);
         const bool identity = (delay_first || charge_first) && mastery &&
             !std::strcmp(*reinterpret_cast<const char* const*>(mastery + 8),
                          mastery_families[4].mastery);
@@ -684,8 +702,28 @@ bool test_mastery_masks() {
     }
     family[5]=0; selection&=!menu::clicked_mastery(1,address);
     menu::clicked_mod_screen=previous_screen;
-    if (!selection) return false;
+    if (!selection) { std::fprintf(stderr,"mastery canonical selection failed\n"); return false; }
     const auto saved = mastery_state;
+    mastery_state = {};
+    std::array<unsigned char,0x20> ui{};
+    const auto ui_address=reinterpret_cast<uintptr_t>(ui.data());
+    perk[1]=reinterpret_cast<uintptr_t>(mastery_families[0].mastery);
+    base[1]=reinterpret_cast<uintptr_t>(mastery_families[0].base);
+    family[5]=reinterpret_cast<uintptr_t>(perk);
+    *reinterpret_cast<uint32_t*>(ui.data()+0x18)=2;
+    *reinterpret_cast<uint16_t*>(ui.data()+0x12)=0;
+    *reinterpret_cast<uint16_t*>(ui.data()+0x14)=1;
+    mastery_state.desired=593;
+    project_mastery_ui(ui_address,reinterpret_cast<uintptr_t>(family));
+    bool ui_ok=ui[0x1c]==0;
+    mastery_state.applied=593;
+    project_mastery_ui(ui_address,reinterpret_cast<uintptr_t>(family));
+    ui_ok &= ui[0x1c]==1 && *reinterpret_cast<uint32_t*>(ui.data()+0x18)==2 &&
+        *reinterpret_cast<uint16_t*>(ui.data()+0x12)==0 && *reinterpret_cast<uint16_t*>(ui.data()+0x14)==1;
+    ui[0x1c]=0;
+    base[1]=reinterpret_cast<uintptr_t>("foreign/mod");
+    project_mastery_ui(ui_address,reinterpret_cast<uintptr_t>(family));
+    ui_ok &= ui[0x1c]==0;
     mastery_state = {};
     const auto check = [](uint16_t target, uint16_t failed, uint16_t applied, uintptr_t component) {
         return mastery_state.target_unavailable == target && mastery_state.apply_failed == failed &&
@@ -706,7 +744,9 @@ bool test_mastery_masks() {
     mastery_result(0, 0, false, false);
     const bool g = check(1, 0, 0, 0);
     mastery_state = saved;
-    return a && b && c && d && e && f && g;
+    if (!ui_ok || !(a && b && c && d && e && f && g))
+        std::fprintf(stderr,"mastery UI=%d masks=%d%d%d%d%d%d%d\n",ui_ok,a,b,c,d,e,f,g);
+    return ui_ok && a && b && c && d && e && f && g;
 }
 void use_fixture(Calls value, const char* id) {
     calls = value;
