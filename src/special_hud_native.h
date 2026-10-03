@@ -520,15 +520,15 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     if (!refill) refill = clone(source, parent, "apAmmoRefill", created);
     if (!refill) { refuse("hud_refill_clone_failed", element, source, epoch); return false; }
     const bool refill_frame_changed = hold_frame(refill, owner.refill_enabled ? 1 : 2);
+    show(refill, true);
+    if (new_refill || refill_frame_changed) swf.dirty(refill);
     const bool switch_available = owner.owns_crucible && owner.owns_hammer &&
         route_ready.load(std::memory_order_acquire) && ((keys >> 8) & 0xff);
     const auto arrow_source = child(parent, "swapEquipment");
     auto arrow_geometry = arrow_source;
     auto native_arrow = child(arrow_source, "arrow");
     auto native_backer = child(arrow_source, "backer");
-    Rect cached_arrow{}, cached_backer{};
-    if (switch_available && arrow_source && native_arrow && native_backer &&
-        (!bounds(native_arrow, parent, cached_arrow) || !bounds(native_backer, parent, cached_backer))) {
+    if (switch_available && arrow_source) {
         if (!special_arrow) special_arrow = clone(arrow_source, parent, "apSpecialSwitch", created);
         if (special_arrow) {
             hold_frame(special_arrow, 1);
@@ -537,7 +537,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
             if (const auto cta=child(special_arrow, "cta")) show(cta, false);
             if (const auto cta=child(child(special_arrow, "icon"), "cta")) show(cta, false);
             show(special_arrow, true);
-            swf.dirty(special_arrow);
+            if (created) swf.dirty(special_arrow);
             arrow_geometry = special_arrow;
             native_arrow = child(special_arrow, "arrow");
             native_backer = child(special_arrow, "backer");
@@ -588,8 +588,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         remember_native(source_position, layout_source, movie, epoch) &&
         native_center(source_position, parent, original_source);
     const float arrow_width = arrow_bounds.br.x - arrow_bounds.tl.x;
-    const float native_gap = std::max(1.0f, (native_arrow_visual ? arrow_width :
-        active_icon_bounds.br.x - active_icon_bounds.tl.x) * 0.12f);
+    Rect refill_gap_bounds{};
+    const float gap_width = bounds(child(refill, "background"), parent, refill_gap_bounds) ?
+        refill_gap_bounds.br.x - refill_gap_bounds.tl.x : active_icon_bounds.br.x - active_icon_bounds.tl.x;
+    const float native_gap = std::max(1.0f, (native_arrow_visual ? arrow_width : gap_width) * 0.12f);
     const Rect switch_bounds = native_backer_visual ?
         Rect{{std::min(arrow_bounds.tl.x, backer_bounds.tl.x),
               std::min(arrow_bounds.tl.y, backer_bounds.tl.y)},
@@ -604,9 +606,15 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const float arrow_right = flame_icon_bounds.tl.x - native_gap;
     const float arrow_left = arrow_right - (switch_bounds.br.x - switch_bounds.tl.x);
     const auto native_arrow_center = center(arrow_bounds);
+    Point authored_arrow_origin{}, projected_arrow_origin{};
+    const bool arrow_origins = position(arrow_source, authored_arrow_origin) &&
+        position(arrow_geometry, projected_arrow_origin);
+    const Point authored_arrow_center{
+        authored_arrow_origin.x + native_arrow_center.x - projected_arrow_origin.x,
+        authored_arrow_origin.y + native_arrow_center.y - projected_arrow_origin.y};
     const float toggle_x = arrow_right - (switch_bounds.br.x - native_arrow_center.x);
-    const Point toggle_target{toggle_x, native_arrow_center.y +
-        (native_arrow_center.x - toggle_x) * render_row_slope};
+    const Point toggle_target{toggle_x, authored_arrow_center.y +
+        (authored_arrow_center.x - toggle_x) * render_row_slope};
     const float active_icon_width = active_icon_bounds.br.x - active_icon_bounds.tl.x;
     const float special_x = arrow_left - native_gap - active_icon_width * 0.5f;
     const Point special_target{special_x,
@@ -614,35 +622,39 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
             original_plate.y + (center(flame_plate_bounds).x -
             (special_x + original_plate.x - original_special.x)) * render_row_slope :
             icon_baseline_y};
-    const float source_icon_width = source_icon_bounds.br.x - source_icon_bounds.tl.x;
-    // swf parent coordinates measured from the accepted complete-inventory layout
-    const bool authored_refill = !native_arrow_visual || !flame_icon_visual || !active_icon_visual;
-    const Point refill_icon_target = authored_refill ? Point{97.33f, -60.93f} :
-        Point{arrow_bounds.br.x + native_gap + source_icon_width * 0.5f, icon_baseline_y};
-    Point refill_offset{}, arrow_offset{}, refill_target{}, refill_lift{};
+    // The refill follows the rightmost visible native equipment column.
+    Rect equipment_plate{}, equipment_arrow{};
+    float row_right = flame_plate_visual ? flame_plate_bounds.br.x : flame_icon_bounds.br.x;
+    if (*reinterpret_cast<const uint8_t*>(primary_root + 0x51) &&
+        bounds(child(primary_root, "background"), parent, equipment_plate))
+        row_right = std::max(row_right, equipment_plate.br.x);
+    if (arrow_source && *reinterpret_cast<const uint8_t*>(arrow_source + 0x51) &&
+        bounds(child(arrow_source, "arrow"), parent, equipment_arrow))
+        row_right = std::max(row_right, equipment_arrow.br.x);
     const auto refill_plate = child(refill_geometry, "background");
-    const auto geometry_anchor = refill_plate ? refill_plate : child(refill_geometry, "icon");
-    const bool refill_offsets = visual_offset(refill_geometry, geometry_anchor, parent, movie,
-        refill_offset) && (authored_refill ||
-        from_space(parent, *reinterpret_cast<uintptr_t*>(parent + 0x40),
-                   movie, {0, -4.0f}, refill_lift, true));
-    if (refill_offsets) refill_target = refill_icon_target;
-    const float refill_x = refill_target.x + refill_lift.x;
-    const Point refill_visual_target = authored_refill ? Point{97.33f, -23.38f} :
-        Point{refill_x, flame_plate_visual ?
-            center(flame_plate_bounds).y + (refill_x - center(flame_plate_bounds).x) * render_row_slope :
-            refill_target.y + refill_lift.y};
     Rect refill_plate_bounds{};
     Point refill_plate_offset{};
     const bool visible_plate = bounds(refill_plate, parent, refill_plate_bounds) &&
         visual_offset(refill_geometry, refill_plate, parent, movie, refill_plate_offset);
     if (!visible_plate && source_icon_visual) refill_plate_bounds = source_icon_bounds;
+    const Point refill_icon_target{row_right + native_gap +
+        (refill_plate_bounds.br.x - refill_plate_bounds.tl.x) * 0.5f, icon_baseline_y};
+    Point refill_offset{}, arrow_offset{}, refill_target{}, refill_lift{};
+    const auto geometry_anchor = refill_plate ? refill_plate : child(refill_geometry, "icon");
+    const bool refill_offsets = visual_offset(refill_geometry, geometry_anchor, parent, movie,
+        refill_offset) &&
+        from_space(parent, *reinterpret_cast<uintptr_t*>(parent + 0x40),
+                   movie, {0, -4.0f}, refill_lift, true);
+    if (refill_offsets) refill_target = refill_icon_target;
+    const float refill_x = refill_target.x + refill_lift.x;
+    const Point refill_visual_target{refill_x, flame_plate_visual ?
+            center(flame_plate_bounds).y + (refill_x - center(flame_plate_bounds).x) * render_row_slope :
+            refill_target.y + refill_lift.y};
     const bool native_layout = native_arrow_visual && flame_visual &&
         flame_icon_visual && active_stage_forward && source_cached && source_icon_visual &&
         std::isfinite(native_gap) && native_gap > 0;
     const bool refill_visual = refill_offsets && (visible_plate || source_icon_visual) &&
-        (authored_refill || (source_cached &&
-        active_visual && std::isfinite(native_gap) && native_gap > 0));
+        flame_plate_visual && std::isfinite(native_gap) && native_gap > 0;
     const bool arrow_visual = native_layout &&
         visual_offset(arrow_geometry, native_arrow, parent, movie, arrow_offset);
     const char* switch_failure = nullptr;
@@ -678,6 +690,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         else if (!flame_icon_visual) switch_failure = "switch_flame_icon_bounds_missing";
         else if (!native_layout) switch_failure = "switch_native_gap_invalid";
         else if (!arrow_visual) switch_failure = "switch_arrow_stage_forward_failed";
+        else if (!arrow_origins) switch_failure = "switch_authored_origin_missing";
     }
     if (!switch_failure && switch_available) {
         if (!(special_target.x + active_icon_width * 0.5f < arrow_left &&
@@ -777,13 +790,12 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                 {"f9_center", trace_point(refill_target)},
                 {"f10_center", trace_point(toggle_target)}}, element);
     if (!refill_visual) {
-        if (authored_refill && !refill_offsets && child(refill, "background")) {
+        if (!refill_offsets && child(refill, "background")) {
             if (!match_linear(refill, source, parent, movie)) {
                 show(refill, false);
                 refuse("hud_refill_transform_failed", element, source, epoch);
                 return false;
             }
-            place(refill, refill_visual_target);
             show(refill, true);
             swf.dirty(refill);
             if (ammo_glyph) show(ammo_glyph, false);
@@ -925,13 +937,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     if (const auto fill = child(three, "innerFill")) swf.color(fill, palette);
     if (!place_visual(refill, refill_geometry, parent, movie, refill_visual_target, refill_offset))
         return fail_refill("hud_refill_place_failed", refill);
-    Rect cloned_plate_bounds{};
-    const auto cloned_plate = child(refill, "background");
-    const Point refill_anchor = authored_refill ? refill_visual_target :
-        !refill_frame_changed && bounds(cloned_plate, parent, cloned_plate_bounds) ?
-        center(cloned_plate_bounds) :
-        Point{refill_visual_target.x - refill_offset.x + refill_plate_offset.x,
-              refill_visual_target.y - refill_offset.y + refill_plate_offset.y};
+    const Point refill_anchor{refill_visual_target.x - refill_offset.x + refill_plate_offset.x,
+                              refill_visual_target.y - refill_offset.y + refill_plate_offset.y};
     Rect rendered_glyph{};
     Point glyph_local_center{};
     if (raw_bounds(ammo_glyph, rendered_glyph) &&
@@ -987,6 +994,14 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         if (key_name(key, label)) {
             if (!probe) probe = clone(donor, parent, name, created);
             if (probe) {
+                Point origin{};
+                if (!affine_to(donor, parent, movie, {0, 0}, origin) ||
+                    !match_linear(probe, donor, parent, movie)) {
+                    show(probe, false);
+                    refuse("hud_keycap_donor_transform_failed", element, donor, epoch);
+                    return graphics_applied;
+                }
+                place(probe, origin);
                 hold_frame(probe, 1);
                 const auto kbm = child(probe, "kbm");
                 const auto joy = child(probe, "joy");

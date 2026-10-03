@@ -16,7 +16,8 @@ enum class BStage : size_t { session, profile_read, profile_output, profile_choi
     dossier_counts, dossier_challenges, end_counts, boss_presentation, hud_challenges, end_challenges,
     mission_count_fields, end_count_fields, mission_count_rewrite,
     flame_physics, crystal_physics, flame_touch, crystal_touch, flame_filter, crystal_filter,
-    flame_dispatch, crystal_dispatch, contact_observer, flame_start_touch, crystal_start_touch, flame_gate, crystal_gate, dossier_points, count };
+    flame_dispatch, crystal_dispatch, contact_observer, flame_start_touch, crystal_start_touch, flame_gate, crystal_gate, dossier_points,
+    hud_found_fields, hud_score_init, hud_score_frame, count };
 inline constexpr const char* b_stage_names[]{"session", "profile_read", "profile_output", "profile_choice", "profile_capture",
     "profile_prepare", "profile_publish", "catalog", "creation", "difficulty", "transition", "checkpoint_factory",
     "provider", "sdk_prepare", "sdk_submit", "sdk_callback", "sdk_result", "readback_create", "readback_prepare",
@@ -26,7 +27,8 @@ inline constexpr const char* b_stage_names[]{"session", "profile_read", "profile
     "dossier_counts", "dossier_challenges", "end_counts", "boss_presentation", "hud_challenges", "end_challenges",
     "mission_count_fields", "end_count_fields", "mission_count_rewrite",
     "flame_physics", "crystal_physics", "flame_touch", "crystal_touch", "flame_filter", "crystal_filter",
-    "flame_dispatch", "crystal_dispatch", "contact_observer", "flame_start_touch", "crystal_start_touch", "flame_gate", "crystal_gate", "dossier_points"};
+    "flame_dispatch", "crystal_dispatch", "contact_observer", "flame_start_touch", "crystal_start_touch", "flame_gate", "crystal_gate", "dossier_points",
+    "hud_found_fields", "hud_score_init", "hud_score_frame"};
 static_assert(std::size(b_stage_names)==static_cast<size_t>(BStage::count));
 enum class BStatus : uint32_t { entered=1, pending=2, succeeded=3, refused=4, blocked=5 };
 struct BFact {

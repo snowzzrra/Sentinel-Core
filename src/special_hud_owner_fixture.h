@@ -95,7 +95,7 @@ struct HudTestFixture {
             put(reinterpret_cast<uintptr_t>(clip->transform.data()), 0x18, y);
             put(address, 0x30, movie);
             put(address, 0x40, parent);
-            put(address, 0x48, int32_t{1});
+            put(address, 0x48, static_cast<int32_t>(storage.size() + 1));
             clips[address] = clip.get();
             storage.push_back(std::move(clip));
             set_bounds(address, 2, 2);
@@ -258,6 +258,9 @@ bool test_hud_owner_path() {
         scene.flame_root = fixture.make(scene.parent, movie, 80, 100);
         fixture.set_bounds(scene.primary, 16, 16);
         fixture.set_bounds(scene.flame_root, 16, 16);
+        fixture.set_visible(scene.primary, true);
+        fixture.set_visible(scene.flame_root, true);
+        fixture.set_bounds(fixture.add(scene.primary, movie, "background"), 12, 12);
         fixture.set_bounds(fixture.add(scene.flame_root, movie, "icon"), 12, 12);
         fixture.set_bounds(fixture.add(scene.flame_root, movie, "background"), 12, 12);
         scene.bfg_root = fixture.make(scene.parent, movie);
@@ -282,6 +285,7 @@ bool test_hud_owner_path() {
             fixture.add(three, movie, "innerFill");
         }
         const auto swap = fixture.add(scene.parent, movie, "swapEquipment", 120, 100);
+        fixture.set_visible(swap, true);
         const auto equipped_weapon = fixture.add(scene.parent, movie, "equippedWeapon");
         const auto ammo_icon = fixture.add(fixture.add(equipped_weapon, movie, "ammoIcon"), movie, "image");
         Fixture::put(e, 0x258, equipped_weapon);
@@ -504,9 +508,13 @@ bool test_hud_owner_path() {
     ok &= weapon_info_element.load() == b && challenge_element.load() == a;
     const auto clips_before = fixture.clones;
     hud::keycap_ready = true;
+    fixture.render(first.parent);
     update_on_hud(b);
     const auto refill_bind = fixture.find(first.parent, "apAmmoRefillBind");
     const auto toggle_bind = fixture.find(first.parent, "apSpecialToggleBind");
+    if (!refill_bind || !toggle_bind) {
+        return false;
+    }
     ok &= refill_bind && toggle_bind && fixture.clones > clips_before;
     ok &= fixture.clips.at(fixture.find(fixture.find(refill_bind, "kbm"), "txtVal"))->text == "F9";
     ok &= fixture.clips.at(fixture.find(fixture.find(toggle_bind, "kbm"), "txtVal"))->text == "F10";
@@ -783,6 +791,25 @@ bool test_hud_owner_path() {
         fixture.clips.at(fixture.find(fixture.find(hidden_refill_bind,"kbm"),"txtVal"))->text=="Y" &&
         fixture.clips.at(fixture.find(fixture.find(hidden_toggle_bind,"kbm"),"txtVal"))->text=="B";
     fixture.unrendered_clones=false;
+    for (unsigned equipment = 0; equipment != 3; ++equipment) {
+        fixture.set_visible(equipment_hidden.primary, equipment > 0);
+        fixture.set_visible(hidden_swap, equipment == 2);
+        fixture.render(equipment_hidden.parent);
+        if (equipment < 2) clear_native_bounds();
+        update_on_hud(equipment_hidden.address());
+        fixture.render(equipment_hidden.parent);
+        if (equipment < 2) clear_native_bounds();
+        update_on_hud(equipment_hidden.address());
+        hud::Rect flame{}, refill_plate{}, refill_key{}, toggle_key{}, switch_arrow{};
+        ok &= hud::bounds(fixture.find(equipment_hidden.flame_root, "background"), 0, flame) &&
+            hud::bounds(fixture.find(fixture.find(equipment_hidden.parent, "apAmmoRefill"), "background"), 0, refill_plate) &&
+            hud::bounds(fixture.find(hidden_refill_bind, "kbm"), 0, refill_key) &&
+            hud::bounds(fixture.find(hidden_toggle_bind, "kbm"), 0, toggle_key) &&
+            hud::bounds(fixture.find(fixture.find(equipment_hidden.parent, "apSpecialSwitch"), "arrow"), 0, switch_arrow) &&
+            flame.br.x < refill_plate.tl.x && switch_arrow.br.x < flame.tl.x &&
+            refill_key.br.y < refill_plate.tl.y && toggle_key.br.y < switch_arrow.tl.y &&
+            close_to(hud::center(refill_key).y, hud::center(toggle_key).y);
+    }
     if (!ok) std::fprintf(stderr,"HUD hidden-equipment: before=%d refill=%d toggle=%d arrow=%d failure=%s\n",before_hidden,
         hidden_refill_bind ? fixture.clips.at(hidden_refill_bind)->visible:0,
         hidden_toggle_bind ? fixture.clips.at(hidden_toggle_bind)->visible:0,
