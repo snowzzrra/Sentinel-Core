@@ -1022,6 +1022,48 @@ bool test_hud_owner_path() {
         fixture.clips.at(foreign_f9)->visible && fixture.clips.at(foreign_f10)->visible;
     if (!retail_cache_ok) std::fprintf(stderr, "HUD rendered-cache / F10 fixed-slot regression failed\n");
     ok &= retail_cache_ok;
+    Scene no_equipment{};
+    build(no_equipment, 9);
+    configured_keys.store('Y' | ('B' << 8));
+    model_facts.native_crucible = model_facts.native_hammer = 0;
+    ok &= observe_selected(SC_SPECIAL_WEAPON_NONE) && publish(0, known);
+    const uintptr_t dormant_roots[]{no_equipment.primary, no_equipment.flame_root,
+        fixture.find(no_equipment.parent, "crucible_source"),
+        fixture.find(no_equipment.parent, "hammer_source"),
+        fixture.find(no_equipment.parent, "swapEquipment")};
+    for (const auto root : dormant_roots) fixture.set_visible(root, false);
+    const auto clear_dormant_bounds = [&]() {
+        for (const auto& [address, clip] : fixture.clips) {
+            for (auto node = address; node; node = Fixture::get<uintptr_t>(node, 0x40)) {
+                if (std::find(std::begin(dormant_roots), std::end(dormant_roots), node) ==
+                    std::end(dormant_roots)) continue;
+                Fixture::put(address, 0xa8, hud::Point{});
+                Fixture::put(address, 0xb0, hud::Point{});
+                break;
+            }
+        }
+    };
+    clear_dormant_bounds();
+    fixture.unrendered_clones = true;
+    for (unsigned frame = 0; frame != 4; ++frame) {
+        update_on_hud(no_equipment.address());
+        fixture.render(no_equipment.parent);
+        clear_dormant_bounds();
+    }
+    const auto empty_refill = fixture.find(no_equipment.parent, "apAmmoRefill");
+    const auto empty_glyph = fixture.find(no_equipment.parent, "apAmmoGlyph");
+    const auto empty_bind = fixture.find(no_equipment.parent, "apAmmoRefillBind");
+    bool empty_ok = empty_refill && empty_glyph && empty_bind &&
+        fixture.clips.at(empty_refill)->visible && fixture.clips.at(empty_glyph)->visible &&
+        fixture.clips.at(empty_bind)->visible &&
+        fixture.clips.at(fixture.find(fixture.find(empty_bind, "kbm"), "txtVal"))->text == "Y";
+    for (const auto root : dormant_roots) empty_ok &= !fixture.clips.at(root)->visible;
+    if (!empty_ok) std::fprintf(stderr, "HUD no equipment / Flame Belch / special weapon regression failed: %s\n",
+        hud_trace.snapshot().stages[static_cast<size_t>(save::BStage::profile_output)].predicate);
+    ok &= empty_ok;
+    fixture.unrendered_clones = false;
+    configured_keys.store(VK_F9 | (VK_F10 << 8));
+    model_facts.native_crucible = model_facts.native_hammer = 1;
     Scene hammer_start{};
     build(hammer_start, 8);
     const auto dormant_crucible = fixture.find(hammer_start.parent, "crucible_source");

@@ -624,7 +624,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
             icon_baseline_y};
     // The refill follows the rightmost visible native equipment column.
     Rect equipment_plate{}, equipment_arrow{};
-    float row_right = flame_plate_visual ? flame_plate_bounds.br.x : flame_icon_bounds.br.x;
+    float row_right = flame_plate_visual ? flame_plate_bounds.br.x :
+        flame_icon_visual ? flame_icon_bounds.br.x : std::max(anchor.x, adjacent.x);
     if (*reinterpret_cast<const uint8_t*>(primary_root + 0x51) &&
         bounds(child(primary_root, "background"), parent, equipment_plate))
         row_right = std::max(row_right, equipment_plate.br.x);
@@ -637,6 +638,9 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool visible_plate = bounds(refill_plate, parent, refill_plate_bounds) &&
         visual_offset(refill_geometry, refill_plate, parent, movie, refill_plate_offset);
     if (!visible_plate && source_icon_visual) refill_plate_bounds = source_icon_bounds;
+    if (!flame_plate_visual && !flame_icon_visual && visible_plate)
+        row_right = std::max(row_right, std::max(anchor.x, adjacent.x) + refill_plate_offset.x +
+            (refill_plate_bounds.br.x - refill_plate_bounds.tl.x) * 0.5f);
     const Point refill_icon_target{row_right + native_gap +
         (refill_plate_bounds.br.x - refill_plate_bounds.tl.x) * 0.5f, icon_baseline_y};
     Point refill_offset{}, arrow_offset{}, refill_target{}, refill_lift{};
@@ -647,14 +651,15 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                    movie, {0, -4.0f}, refill_lift, true);
     if (refill_offsets) refill_target = refill_icon_target;
     const float refill_x = refill_target.x + refill_lift.x;
-    const Point refill_visual_target{refill_x, flame_plate_visual ?
-            center(flame_plate_bounds).y + (refill_x - center(flame_plate_bounds).x) * render_row_slope :
-            refill_target.y + refill_lift.y};
+    const Point refill_baseline = flame_plate_visual ? center(flame_plate_bounds) :
+        Point{adjacent.x + refill_offset.x, adjacent.y + refill_offset.y};
+    const Point refill_visual_target{refill_x, refill_baseline.y +
+        (refill_x - refill_baseline.x) * render_row_slope};
     const bool native_layout = native_arrow_visual && flame_visual &&
         flame_icon_visual && active_stage_forward && source_cached && source_icon_visual &&
         std::isfinite(native_gap) && native_gap > 0;
     const bool refill_visual = refill_offsets && (visible_plate || source_icon_visual) &&
-        flame_plate_visual && std::isfinite(native_gap) && native_gap > 0;
+        std::isfinite(native_gap) && native_gap > 0;
     const bool arrow_visual = native_layout &&
         visual_offset(arrow_geometry, native_arrow, parent, movie, arrow_offset);
     const char* switch_failure = nullptr;
