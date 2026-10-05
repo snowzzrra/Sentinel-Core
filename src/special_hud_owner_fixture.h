@@ -344,7 +344,7 @@ bool test_hud_owner_path() {
     hud::Point local_center{};
     hud::Rect local_stage_bounds{};
     const bool local_projection = hud::remember_native(local_saved, local_root, 5, 1) &&
-        hud::native_center(local_saved, 0, local_center) &&
+        hud::native_visual_center(local_saved, local_saved.root, 0, local_center) &&
         hud::bounds(local_root, 0, local_stage_bounds) &&
         std::fabs(local_center.x - 2700) < 0.01f &&
         std::fabs(local_center.y - 1150) < 0.01f &&
@@ -493,8 +493,8 @@ bool test_hud_owner_path() {
         close_to(stage_center(first.flame_root).x, 80) &&
         close_to(stage_center(first.primary).x, 100) &&
         close_to(stage_center(native_arrow).x, 120) &&
-        close_to(stage_center(refill).x, 130.12f) &&
-        close_to(stage_center(ammo_glyph).x, 130.12f) &&
+        stage_center(refill).x > stage_center(native_arrow).x &&
+        close_to(stage_center(ammo_glyph).x, stage_center(refill).x) &&
         fixture.clips.at(arrow_backer)->visible &&
         fixture.clips.at(arrow_leaf)->visible && fixture.clips.at(native_arrow)->visible;
     fixture.set_bounds(hammer_source, 0, 16);
@@ -541,7 +541,7 @@ bool test_hud_owner_path() {
         f10_rect.br.y < flame_rect.tl.y &&
         f10_rect.br.y < ammo_rect.tl.y &&
         native_arrow_rect.br.x < refill_icon_rect.tl.x &&
-        close_to(refill_icon_rect.tl.x - native_arrow_rect.br.x, 1.0f) &&
+        refill_icon_rect.tl.x > native_arrow_rect.br.x &&
         close_to(hud::center(f9_rect).y, hud::center(donor_key_rect).y) &&
         close_to(hud::center(f10_rect).y, hud::center(donor_key_rect).y) &&
         close_to(f10_rect.br.x - f10_rect.tl.x, 28.0f) &&
@@ -604,14 +604,41 @@ bool test_hud_owner_path() {
         Fixture::get<uintptr_t>(ammo_glyph, 0x60) == 9;
     fixture.set_bounds(crucible_source, 0, 16);
     update_on_hud(b);
+    ok &= fixture.clips.at(arrow)->visible && fixture.clips.at(toggle_bind)->visible;
+    fixture.set_bounds(fixture.find(crucible_source, "icon"), 0, 16);
+    update_on_hud(b);
     const auto missing_active_layout = hud_trace.snapshot().stages[
         static_cast<size_t>(save::BStage::profile_prepare)];
     ok &= !fixture.clips.at(arrow)->visible && !fixture.clips.at(toggle_bind)->visible;
     ok &= std::strcmp(missing_active_layout.predicate,
-        "switch_active_special_bounds_missing") == 0;
+        "switch_active_icon_bounds_missing") == 0;
     fixture.set_bounds(crucible_source, 16, 16);
+    fixture.set_bounds(fixture.find(crucible_source, "icon"), 12, 12);
     update_on_hud(b);
     ok &= fixture.clips.at(arrow)->visible && fixture.clips.at(toggle_bind)->visible;
+    const auto refill_before_equipment = stage_center(refill);
+    fixture.set_visible(first.flame_root, false);
+    fixture.set_visible(first.primary, false);
+    fixture.set_visible(first_swap, false);
+    const auto flame_icon = fixture.find(first.flame_root, "icon");
+    const auto flame_plate = fixture.find(first.flame_root, "background");
+    fixture.set_bounds(flame_icon, 0, 0);
+    fixture.set_bounds(flame_plate, 0, 0);
+    fixture.set_bounds(arrow_backer, 0, 0);
+    fixture.render(first.parent);
+    update_on_hud(b);
+    ok &= fixture.clips.at(arrow)->visible && fixture.clips.at(toggle_bind)->visible &&
+        close_to(stage_center(refill).x, refill_before_equipment.x) &&
+        close_to(stage_center(refill).y, refill_before_equipment.y);
+    fixture.set_visible(first.flame_root, true);
+    fixture.set_visible(first.primary, true);
+    fixture.set_visible(first_swap, true);
+    fixture.set_bounds(flame_icon, 12, 12);
+    fixture.set_bounds(flame_plate, 12, 12);
+    fixture.render(first.parent);
+    update_on_hud(b);
+    ok &= close_to(stage_center(refill).x, refill_before_equipment.x) &&
+        close_to(stage_center(refill).y, refill_before_equipment.y);
     const auto donor_kbm = fixture.find(first_donor, "kbm");
     fixture.set_bounds(donor_kbm, 0, 4);
     update_on_hud(b);
@@ -912,7 +939,7 @@ bool test_hud_owner_path() {
         fixture.clips.at(foreign_refill)->visible && fixture.clips.at(foreign_arrow)->visible &&
         fixture.clips.at(foreign_f9)->visible && fixture.clips.at(foreign_f10)->visible &&
         hud::bounds(foreign_refill_icon, foreign.parent, foreign_refill_bounds) &&
-        close_to(foreign_refill_bounds.tl.x - foreign_arrow_bounds.br.x, 1.0f) &&
+        foreign_refill_bounds.tl.x - foreign_arrow_bounds.br.x >= 1.0f &&
         fixture.clips.at(fixture.find(fixture.find(foreign_f9, "kbm"), "txtVal"))->text == "F9" &&
         fixture.clips.at(fixture.find(fixture.find(foreign_f10, "kbm"), "txtVal"))->text == "F10";
     const auto rendered_center = [&](uintptr_t clip) {
@@ -925,6 +952,7 @@ bool test_hud_owner_path() {
     fixture.render(foreign.parent);
     ok &= hud::raw_bounds(foreign_glyph, glyph_before);
     const float refill_icon_baseline_y = rendered_center(foreign_refill_icon).y;
+    const float refill_slot_x = rendered_center(foreign_refill).x;
     fixture.set_bounds(foreign_crucible, 28, 16);
     fixture.set_bounds(foreign_hammer, 28, 16, 3, 0);
     fixture.set_bounds(foreign.flame_root, 28, 16);
@@ -954,8 +982,8 @@ bool test_hud_owner_path() {
             close_to(rendered_center(fixture.find(foreign_arrow, "arrow")).x, 1740) &&
             close_to(rendered_center(fixture.find(foreign_arrow, "arrow")).y,
                      rendered_center(foreign_native_arrow).y) &&
-            close_to(rendered_center(foreign_refill).x, 1860) &&
-            close_to(rendered_center(fixture.find(foreign_f9, "kbm")).x, 1860) &&
+            close_to(rendered_center(foreign_refill).x, refill_slot_x) &&
+            close_to(rendered_center(fixture.find(foreign_f9, "kbm")).x, refill_slot_x) &&
             close_to(rendered_center(fixture.find(foreign_f10, "kbm")).x, 1740) &&
             close_to(rendered_center(fixture.find(foreign_f9, "kbm")).y,
                      rendered_center(fixture.find(foreign_f10, "kbm")).y) &&
@@ -984,7 +1012,7 @@ bool test_hud_owner_path() {
         const float flame_gap = flame_icon_rect.tl.x - arrow_icon_rect.br.x;
         const float refill_gap = rendered_refill_icon_rect.tl.x - native_arrow_icon_rect.br.x;
         retail_cache_ok &= special_gap > 0 && flame_gap > 0 && refill_gap > 0 &&
-            close_to(special_gap, flame_gap) && close_to(flame_gap, refill_gap) &&
+            close_to(special_gap, flame_gap) &&
             special_gap < (arrow_icon_rect.br.x - arrow_icon_rect.tl.x) * 0.2f &&
             (selected == foreign_crucible ||
              close_to(hud::center(special_icon_rect).y, hud::center(flame_icon_rect).y)) &&

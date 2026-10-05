@@ -5,7 +5,7 @@ clients access to game state, gameplay operations and campaign saves through a
 local API. [Doom Eternal Archipelago](https://github.com/snowzzrra/DoomEternal-AP-Mod)
 uses Core for its integration with the game.
 
-Current source version: **1.0.1**. Core builds for **Windows x64**.
+Current source version: **1.0.2**. Core builds for **Windows x64**.
 
 ## Features
 
