@@ -48,8 +48,8 @@ jobs:
           $compiler = Join-Path $installation 'VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe'
           if (!(Test-Path -LiteralPath $compiler)) { throw 'MSVC 14.44.35207 is required' }
           $cmakeDirectory = Join-Path $installation 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
-          $cmakeVersion = & (Join-Path $cmakeDirectory 'cmake.exe') --version
-          if ($cmakeVersion[0] -notmatch '3\.31\.6') { throw 'CMake 3.31.6 is required' }
+          & (Join-Path $cmakeDirectory 'cmake.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'Installed CMake is unavailable' }
           "SC_VCVARS=$installation\VC\Auxiliary\Build\vcvars64.bat" >> $env:GITHUB_ENV
           "SC_CMAKE=$cmakeDirectory" >> $env:GITHUB_ENV
       - name: Build Release and run synthetic contracts

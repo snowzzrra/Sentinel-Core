@@ -121,14 +121,39 @@ class ProtectionTests(unittest.TestCase):
                 protection.protect(self.args)
         self.assertFalse(self.backup.exists())
 
+    def test_stream_introduction_during_copy_is_fail_closed(self):
+        zone = Path(str(self.campaign) + ":Zone.Identifier")
+        zone.write_bytes(b"[ZoneTransfer]\r\nZoneId=3\r\n")
+        unknown = Path(str(self.campaign) + ":during-protection")
+        denied = False
+        real_copy = protection.copy_file
+        def introduce(source, destination):
+            nonlocal denied
+            result = real_copy(source, destination)
+            if destination.name == "game.details":
+                try:
+                    unknown.write_bytes(b"fixture mutation")
+                except PermissionError:
+                    denied = True
+            return result
+        with mock.patch.object(protection, "copy_file", introduce):
+            try:
+                protection.protect(self.args)
+            except protection.Refused:
+                self.assertFalse(denied)
+                self.assertFalse((self.backup / protection.MANIFEST).exists())
+            else:
+                self.assertTrue(denied)
+                self.assertFalse(unknown.exists())
+
     def test_exact_metadata_change_before_exclusive_acquisition_is_retained(self):
         real_pin = protection.pinned
         old = self.campaign.stat().st_mtime_ns
         @contextlib.contextmanager
-        def changing(path, directory=False):
+        def changing(path, directory=False, inspect_streams=True):
             if path == self.campaign:
                 os.utime(path, ns=(old, old + 1000000000))
-            with real_pin(path, directory) as stream:
+            with real_pin(path, directory, inspect_streams) as stream:
                 yield stream
         with mock.patch.object(protection, "pinned", changing):
             with self.assertRaises(protection.Refused) as caught:
@@ -148,9 +173,9 @@ class ProtectionTests(unittest.TestCase):
         real_pin = protection.pinned
         changed = False
         @contextlib.contextmanager
-        def changing(path, directory=False):
+        def changing(path, directory=False, inspect_streams=True):
             nonlocal changed
-            with real_pin(path, directory) as stream:
+            with real_pin(path, directory, inspect_streams) as stream:
                 if path == self.local / "settings.cfg" and not changed:
                     api = protection.kernel()
                     handle = api.CreateFileW(str(self.campaign), 0x100, 7, None, 3, 0, None)  # write_attributes, share all
@@ -235,8 +260,10 @@ class ProtectionTests(unittest.TestCase):
     def test_named_stream_and_hardlink_sources_refused(self):
         ads = Path(str(self.campaign) + ":fixture-extra")
         ads.write_bytes(b"must not silently drop stream")
-        with self.assertRaisesRegex(protection.Refused, "named data streams"):
+        with self.assertRaisesRegex(protection.Refused, "unsupported protected named stream") as refused:
             protection.protect(self.args)
+        self.assertEqual(refused.exception.private_metadata["path"], str(self.campaign))
+        self.assertEqual(refused.exception.private_metadata["stream"], ":fixture-extra:$DATA")
         ads.unlink()
         os.link(self.campaign, self.local / "hardlink")
         with self.assertRaisesRegex(protection.Refused, "hard-linked"):
@@ -248,6 +275,36 @@ class ProtectionTests(unittest.TestCase):
         with self.assertRaisesRegex(protection.Refused, "exit DOOM"):
             protection.protect(self.args)
         self.assertFalse(self.backup.exists())
+
+    def test_known_file_stream_roundtrip_and_unrelated_ancestor_stream(self):
+        stream = Path(str(self.campaign) + ":Zone.Identifier")
+        stream.write_bytes(b"[ZoneTransfer]\nZoneId=3\n")
+        ancestor_stream = Path(str(self.root) + ":fixture-ancestor")
+        ancestor_stream.write_bytes(b"ancestor content outside protected scope")
+        try:
+            before = stream.read_bytes()
+            receipt = protection.protect(self.args)
+            copied = Path(str(self.backup / "steam_app/remote/GAME-AUTOSAVE0/game.details") + ":Zone.Identifier")
+            self.assertEqual(copied.read_bytes(), before)
+            self.assertEqual(stream.read_bytes(), before)
+            self.assertEqual(receipt["files"], 5)
+            self.args.action = "verify"
+            protection.protect(self.args)
+            copied.write_bytes(b"tampered")
+            with self.assertRaisesRegex(protection.Refused, "integrity verification failed"):
+                protection.protect(self.args)
+        finally:
+            ancestor_stream.unlink(missing_ok=True)
+
+    def test_os_error_cause_has_paths_errno_operation_and_traceback(self):
+        error = FileNotFoundError(2, "fixture source vanished", str(self.campaign))
+        with mock.patch.object(protection, "_protect", side_effect=error):
+            with self.assertRaises(protection.Refused) as refused:
+                protection.protect(self.args)
+        self.assertIs(refused.exception.__cause__, error)
+        self.assertEqual(refused.exception.filename, str(self.campaign))
+        self.assertEqual(refused.exception.errno, 2)
+        self.assertIn("FileNotFoundError", refused.exception.private_metadata["traceback"])
 
     def test_stopped_game_backup_with_steam_allowed(self):
         self.stopped_patch.stop()

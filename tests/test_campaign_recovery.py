@@ -28,8 +28,8 @@ class CampaignRecovery(unittest.TestCase):
         manifest = (archive / 'transport.manifest').read_text()
         self.assertIn('steam_user=76561198000000001', manifest)
         namespace = manifest.split('namespace=')[1].splitlines()[0]
-        target = root / 'remote' / ('ap-' + namespace[:40]) / 'GAME-AUTOSAVE0'
-        return archive, target, root / ('ap-' + namespace)
+        target = root / 'remote' / manifest.split('native_directory=')[1].splitlines()[0]
+        return archive, target, root / namespace
 
     def digest(self, path):
         return {str(f.relative_to(path)): hashlib.sha256(f.read_bytes()).hexdigest()

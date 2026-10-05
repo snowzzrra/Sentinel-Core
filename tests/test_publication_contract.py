@@ -4,12 +4,14 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from publish_distribution import publish
+import qualify_distribution
 
 COMMIT = "a" * 40
 
@@ -73,6 +75,14 @@ class GitHubFixture:
 
 
 class PublicationContract(unittest.TestCase):
+    def test_nested_core_qualification_reads_its_own_repository(self):
+        args = type("Arguments", (), {"commit": COMMIT})()
+        with patch.object(qualify_distribution, "run", side_effect=[COMMIT, " M tracked.py"]) as run:
+            with self.assertRaisesRegex(ValueError, "Tracked CI source is dirty"):
+                qualify_distribution.qualify(args)
+        self.assertEqual(run.call_args_list[0].args, ("git", "-C", str(qualify_distribution.ROOT), "rev-parse", "HEAD"))
+        self.assertEqual(run.call_args_list[1].args, ("git", "-C", str(qualify_distribution.ROOT), "status", "--porcelain", "--untracked-files=no"))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

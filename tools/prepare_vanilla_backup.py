@@ -19,6 +19,7 @@ import re
 import stat
 import sys
 import uuid
+import traceback
 
 
 class Refused(Exception):
@@ -35,6 +36,7 @@ def failure_record(error, stage="protection"):
             "distinction": getattr(error, "distinction", None) or "OS_or_data_error_see_private_diagnostic",
             "win32_error": getattr(error, "win32_error", None) or getattr(error, "winerror", None),
             "errno": getattr(error, "errno", None), "comparison": getattr(error, "comparison", None),
+            "operation_detail": (getattr(error, "private_metadata", None) or {}).get("operation"),
             "metadata_summary": getattr(error, "summary", None)}
 
 
@@ -145,8 +147,31 @@ def verify_links(api, handle, path, operation, raw_count):
         raise Refused("path and handle link metadata disagree", distinction="link_metadata_changed", private=private)
 
 
+def named_streams(api, handle, path, directory=False):
+    streams = ctypes.create_string_buffer(65536)
+    if not api.GetFileInformationByHandleEx(handle, 7, streams, len(streams)):
+        if directory and ctypes.get_last_error() == 38:
+            return []
+        raise Refused("cannot establish complete file stream set", stage="stream_inventory",
+                      win32_error=ctypes.get_last_error(), private={"path": str(path), "operation": "stream_query"})
+    names, offset = [], 0
+    while True:
+        nxt = int.from_bytes(streams.raw[offset:offset + 4], "little")
+        length = int.from_bytes(streams.raw[offset + 4:offset + 8], "little")
+        name = streams.raw[offset + 24:offset + 24 + length].decode("utf-16-le")
+        if name not in ("", "::$DATA"):
+            if directory or name != ":Zone.Identifier:$DATA":
+                raise Refused("unsupported protected named stream", stage="stream_inventory",
+                    distinction="directory_stream_unsupported" if directory else "named_stream_unsupported",
+                    private={"path": str(path), "stream": name, "operation": "stream_inventory"})
+            names.append(":Zone.Identifier")
+        if not nxt:
+            return names
+        offset += nxt
+
+
 @contextlib.contextmanager
-def pinned(path, directory=False):
+def pinned(path, directory=False, inspect_streams=True):
     """Retain no-write/no-delete handles; regular file streams are exclusive."""
     import msvcrt
     api = kernel()
@@ -161,20 +186,8 @@ def pinned(path, directory=False):
         if (not api.GetFileInformationByHandleEx(handle, 9, attrs, len(attrs)) or
                 int.from_bytes(attrs.raw[:4], "little") & 0x400):
             raise Refused("cannot establish ordinary pinned path")
-        streams = ctypes.create_string_buffer(65536)
-        if (not api.GetFileInformationByHandleEx(handle, 7, streams, len(streams)) and
-                not (directory and ctypes.get_last_error() == 38)):  # no directory streams
-            raise Refused("cannot establish complete file stream set")
-        offset = 0
-        while True:
-            nxt = int.from_bytes(streams.raw[offset:offset + 4], "little")
-            length = int.from_bytes(streams.raw[offset + 4:offset + 8], "little")
-            name = streams.raw[offset + 24:offset + 24 + length].decode("utf-16-le")
-            if name not in ("", "::$DATA"):
-                raise Refused("named data streams require separate explicit protection")
-            if not nxt:
-                break
-            offset += nxt
+        if inspect_streams:
+            named_streams(api, handle, path, directory)
         if directory:
             yield None
         else:
@@ -198,7 +211,7 @@ def pin_ancestors(stack, paths):
             check_node(directory)
             if not directory.is_dir():
                 raise Refused("expected an existing directory")
-            stack.enter_context(pinned(directory, directory=True))
+            stack.enter_context(pinned(directory, directory=True, inspect_streams=False))
             seen.add(directory)
     return seen
 
@@ -210,7 +223,20 @@ def inventory(sources):
             info = check_node(path)
             relative = path.relative_to(root).as_posix()
             result[(label, relative)] = (info.st_ino, info.st_dev, info.st_mode,
-                                         0 if stat.S_ISDIR(info.st_mode) else info.st_size, info.st_mtime_ns)
+                                          0 if stat.S_ISDIR(info.st_mode) else info.st_size, info.st_mtime_ns)
+            api = kernel()
+            handle = api.CreateFileW(str(path), 0x80, 7, None, 3, 0x02200000, None)
+            if handle == ctypes.c_void_p(-1).value:
+                raise Refused("stream inventory path unavailable", stage="source_inventory",
+                    win32_error=ctypes.get_last_error(), private={"path": str(path), "operation": "stream_inventory_open"})
+            try:
+                for suffix in named_streams(api, handle, path, stat.S_ISDIR(info.st_mode)):
+                    stream = Path(str(path) + suffix)
+                    metadata = check_node(stream)
+                    result[(label, relative + suffix)] = (metadata.st_ino, metadata.st_dev, metadata.st_mode,
+                                                         metadata.st_size, metadata.st_mtime_ns)
+            finally:
+                api.CloseHandle(handle)
             if stat.S_ISDIR(info.st_mode):
                 for child in sorted(path.iterdir()):
                     visit(child)
@@ -347,9 +373,10 @@ def verify_backup(destination, identity):
         if not isinstance(entry, dict):
             raise Refused("invalid manifest file entry")
         label, relative = entry["origin"], entry["relative"]
+        base_relative = relative.removesuffix(":Zone.Identifier") if isinstance(relative, str) else ""
         if (label not in identity["origins"] or not isinstance(relative, str) or
-                any(part in ("", ".", "..") for part in relative.split("/")) or
-                "\\" in relative or ":" in relative):
+                any(part in ("", ".", "..") for part in base_relative.split("/")) or
+                "\\" in relative or ":" in base_relative):
             raise Refused("invalid manifest source path")
         target = f"{label}/{relative}"
         if target in expected_files:
@@ -380,9 +407,15 @@ def protect(args):
         return _protect(args)
     except (Refused, OSError, ValueError, KeyError, TypeError) as error:
         if not isinstance(error, Refused):
-            raise Refused(type(error).__name__, stage=getattr(args, "operation_stage", stage),
-                          distinction="OS_or_malformed_data_error", private={"os_error": str(error)},
-                          win32_error=getattr(error, "winerror", None)) from error
+            refused = Refused(type(error).__name__, stage=getattr(args, "operation_stage", stage),
+                distinction="OS_or_malformed_data_error", private={"os_error": str(error),
+                "operation": getattr(args, "operation_stage", stage), "filename": getattr(error, "filename", None),
+                "filename2": getattr(error, "filename2", None), "traceback": traceback.format_exc(),
+                "source_path": getattr(args, "source_path", None), "destination_path": getattr(args, "destination_path", None)},
+                win32_error=getattr(error, "winerror", None))
+            refused.errno = getattr(error, "errno", None)
+            refused.filename, refused.filename2 = getattr(error, "filename", None), getattr(error, "filename2", None)
+            raise refused from error
         if error.stage == "protection": error.stage = getattr(args, "operation_stage", stage)
         raise
 
@@ -416,6 +449,7 @@ def _protect(args):
             return {"result": "protective_backup_verified", "files": len(entries)}
         args.operation_stage = "stopped_precondition"
         require_stopped()
+        args.operation_stage = "source_ancestor_acquisition"
         pinned_dirs = pin_ancestors(stack, [*sources.values(), destination.parent])
         if run_parent:
             pin_ancestors(stack, [run_parent])
@@ -428,6 +462,8 @@ def _protect(args):
         directories = []
         for (label, relative), info in before.items():
             source = sources[label] / relative
+            args.operation_stage = "source_acquisition"
+            args.source_path = str(source)
             if stat.S_ISDIR(info[2]):
                 directories.append(label if relative == "." else f"{label}/{relative}")
                 if source not in pinned_dirs:
@@ -478,6 +514,9 @@ def _protect(args):
                 (destination / relative).mkdir(parents=True, exist_ok=True)
             entries = []
             for (label, relative), source in handles.items():
+                args.operation_stage = "copy_and_readback"
+                args.source_path = str(sources[label] / relative)
+                args.destination_path = str(destination / label / relative)
                 size, sha = copy_file(source, destination / label / relative)
                 if (size, sha) != current[(label, relative)]:
                     raise Refused("source content changed during copy", stage="snapshot_copy", distinction="concurrent_mutation")
@@ -487,12 +526,14 @@ def _protect(args):
                             "source changed during backup; partial protection retained")
             require_stopped()
             manifest = {**identity, "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        "directories": sorted(directories), "files": entries}
+                         "directories": sorted(directories), "files": entries}
+            args.operation_stage = "completion_manifest_publication"
             with (destination / MANIFEST).open("x", encoding="utf-8", newline="\n") as stream:
                 json.dump(manifest, stream, indent=2, sort_keys=True)
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
+            args.operation_stage = "complete_backup_verification"
             verify_backup(destination, identity)
         inventory_guard(sources, before, handles, acquired, "inventory_final",
                         "original source inventory changed; activation refused")

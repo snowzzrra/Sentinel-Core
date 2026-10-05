@@ -13,10 +13,10 @@ def run(*args):
 
 
 def qualify(args):
-    commit = run("git", "rev-parse", "HEAD")
+    commit = run("git", "-C", str(ROOT), "rev-parse", "HEAD")
     if not re.fullmatch("[a-f0-9]{40}", args.commit) or commit != args.commit:
         raise ValueError("Build must use the selected full source commit")
-    if run("git", "status", "--porcelain", "--untracked-files=no"):
+    if run("git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"):
         raise ValueError("Tracked CI source is dirty")
     spec = json.loads((ROOT / "version.json").read_text())
     version = ".".join(str(spec[key]) for key in ("major","minor","patch"))
