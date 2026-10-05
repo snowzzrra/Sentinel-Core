@@ -109,8 +109,13 @@ def overlap(left, right):
     return left == right or left in right.parents or right in left.parents
 
 
+def io_path(path):
+    """Use extended Windows paths for I/O; identities keep validated drive paths."""
+    return Path("\\\\?\\" + str(path)) if os.name == "nt" else path
+
+
 def check_node(path):
-    info = path.lstat()
+    info = io_path(path).lstat()
     if info.st_file_attributes & 0x400:  # file_attribute_reparse_point
         raise Refused("reparse points are not supported")
     if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
@@ -118,7 +123,7 @@ def check_node(path):
     if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
         # get the link count from file metadata if path stat can't read it; zero or unknown doesn't prove a hard link
         api = kernel()
-        handle = api.CreateFileW(str(path), 0x80, 7, None, 3, 0x00200000, None)
+        handle = api.CreateFileW(str(io_path(path)), 0x80, 7, None, 3, 0x00200000, None)
         if handle == ctypes.c_void_p(-1).value:
             raise Refused("file link metadata unavailable", distinction="path_link_count_unverified",
                 win32_error=ctypes.get_last_error(), private={"path": str(path), "operation": "path_link_attributes_open", "raw_path_nlink": info.st_nlink})
@@ -176,7 +181,7 @@ def pinned(path, directory=False, inspect_streams=True):
     import msvcrt
     api = kernel()
     flags = 0x00200000 | (0x02000000 if directory else 0x08000000)
-    handle = api.CreateFileW(str(path), 0x80 if directory else 0x80000000,
+    handle = api.CreateFileW(str(io_path(path)), 0x80 if directory else 0x80000000,
                              1 if directory else 0, None, 3, flags, None)
     if handle == ctypes.c_void_p(-1).value:
         raise Refused("cannot pin a path exclusively; close all source readers/writers",
@@ -209,7 +214,7 @@ def pin_ancestors(stack, paths):
             if directory in seen:
                 continue
             check_node(directory)
-            if not directory.is_dir():
+            if not io_path(directory).is_dir():
                 raise Refused("expected an existing directory")
             stack.enter_context(pinned(directory, directory=True, inspect_streams=False))
             seen.add(directory)
@@ -225,7 +230,7 @@ def inventory(sources):
             result[(label, relative)] = (info.st_ino, info.st_dev, info.st_mode,
                                           0 if stat.S_ISDIR(info.st_mode) else info.st_size, info.st_mtime_ns)
             api = kernel()
-            handle = api.CreateFileW(str(path), 0x80, 7, None, 3, 0x02200000, None)
+            handle = api.CreateFileW(str(io_path(path)), 0x80, 7, None, 3, 0x02200000, None)
             if handle == ctypes.c_void_p(-1).value:
                 raise Refused("stream inventory path unavailable", stage="source_inventory",
                     win32_error=ctypes.get_last_error(), private={"path": str(path), "operation": "stream_inventory_open"})
@@ -238,8 +243,8 @@ def inventory(sources):
             finally:
                 api.CloseHandle(handle)
             if stat.S_ISDIR(info.st_mode):
-                for child in sorted(path.iterdir()):
-                    visit(child)
+                for name in sorted(os.listdir(io_path(path))):
+                    visit(path / name)
         visit(root)
     return result
 
@@ -302,12 +307,12 @@ def digest(stream):
 
 def copy_file(source, destination):
     source.seek(0)
-    with destination.open("xb") as output:
+    with io_path(destination).open("xb") as output:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             output.write(chunk)
         output.flush()
         os.fsync(output.fileno())
-    with destination.open("rb") as output:
+    with io_path(destination).open("rb") as output:
         actual = digest(output)
     expected = digest(source)
     if actual != expected:
@@ -358,7 +363,7 @@ def differences(entries, current, metadata=None, affected="historical_backup"):
 def verify_backup(destination, identity):
     # inspect the complete tree, including unused entries, before trusting paths
     tree = inventory({"backup": destination})
-    if not (destination / MANIFEST).is_file():
+    if not io_path(destination / MANIFEST).is_file():
         raise Refused("incomplete protection directory; retained without repair or activation")
     with pinned(destination / MANIFEST) as stream:
         manifest = json.load(stream)
@@ -439,7 +444,7 @@ def _protect(args):
         run_parent = explicit_path(run_parent)
         if any(overlap(run_parent, p) for p in [*sources.values(), *excluded, destination]):
             raise Refused("run protection parent must be separate from source, historical backup, AP and uninstall roots")
-        if not destination.is_dir():
+        if not io_path(destination).is_dir():
             raise Refused("run protection parent requires the existing historical backup")
     identity = expected_identity(args, sources)
     with contextlib.ExitStack() as stack:
@@ -453,7 +458,7 @@ def _protect(args):
         pinned_dirs = pin_ancestors(stack, [*sources.values(), destination.parent])
         if run_parent:
             pin_ancestors(stack, [run_parent])
-        if not (steam_root / "remote").is_dir():
+        if not io_path(steam_root / "remote").is_dir():
             raise Refused("explicit Steam origin lacks the required remote directory")
         args.operation_stage = "source_inventory"
         before = inventory(sources)
@@ -480,7 +485,7 @@ def _protect(args):
         inventory_guard(sources, before, handles, acquired, "inventory_hash", "source changed during hashing")
         historical = None
         reused = False
-        if destination.exists():
+        if io_path(destination).exists():
             args.operation_stage = "historical_integrity"
             pin_ancestors(stack, [destination])
             entries = verify_backup(destination, identity)
@@ -504,14 +509,14 @@ def _protect(args):
                     destination, entries, reused = reference, candidate_entries, True
         if run_parent and destination.parent != run_parent:
             reused = False
-        if destination.exists() and not reused:
+        if io_path(destination).exists() and not reused:
             destination = (run_parent or destination.parent) / (destination.name + "-run-" + uuid.uuid4().hex)
         if not reused:
             args.operation_stage = "snapshot_copy"
-            destination.mkdir()  # create-only; never resume an interrupted directory
+            io_path(destination).mkdir()  # create-only; never resume an interrupted directory
             stack.enter_context(pinned(destination, directory=True))
             for relative in directories:
-                (destination / relative).mkdir(parents=True, exist_ok=True)
+                io_path(destination / relative).mkdir(parents=True, exist_ok=True)
             entries = []
             for (label, relative), source in handles.items():
                 args.operation_stage = "copy_and_readback"
@@ -528,7 +533,7 @@ def _protect(args):
             manifest = {**identity, "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                          "directories": sorted(directories), "files": entries}
             args.operation_stage = "completion_manifest_publication"
-            with (destination / MANIFEST).open("x", encoding="utf-8", newline="\n") as stream:
+            with io_path(destination / MANIFEST).open("x", encoding="utf-8", newline="\n") as stream:
                 json.dump(manifest, stream, indent=2, sort_keys=True)
                 stream.write("\n")
                 stream.flush()
@@ -539,7 +544,7 @@ def _protect(args):
                         "original source inventory changed; activation refused")
         require_stopped()
         return {"result": "protective_backup_ready", "files": len(entries), "reference_directory": str(destination),
-                "reference_manifest_sha256": hashlib.sha256((destination / MANIFEST).read_bytes()).hexdigest(),
+                "reference_manifest_sha256": hashlib.sha256(io_path(destination / MANIFEST).read_bytes()).hexdigest(),
                 "reused": reused, "historical_comparison": historical}
 
 
@@ -566,7 +571,7 @@ def main(argv=None):
                 raise Refused("private diagnostic must be outside original, backup and AP roots")
             # pin/check ancestors so aliases can't redirect the diagnostic into originals
             pin_ancestors(diagnostic_pins, [path.parent])
-            diagnostic = path.open("x", encoding="utf-8")
+            diagnostic = io_path(path).open("x", encoding="utf-8")
         result = protect(args)
         print(json.dumps(result))
         if diagnostic:

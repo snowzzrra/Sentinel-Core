@@ -85,7 +85,7 @@ def main(argv=None):
                     raise protection.Refused("comparison diagnostic overlaps protected input", stage="comparison_diagnostic_creation")
             args.operation_stage = "comparison_diagnostic_creation"
             protection.pin_ancestors(pins, [path.parent])
-            diagnostic = pins.enter_context(path.open("x", encoding="utf-8"))
+            diagnostic = pins.enter_context(protection.io_path(path).open("x", encoding="utf-8"))
         result = compare(args)
         if diagnostic: json.dump(args.private_comparison, diagnostic, indent=2)
         print(json.dumps(result))

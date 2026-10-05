@@ -64,6 +64,53 @@ class ProtectionTests(unittest.TestCase):
         self.args.action = "verify"
         self.assertEqual(protection.protect(self.args)["result"], "protective_backup_verified")
 
+    def test_long_paths_roundtrip_preserves_identity_streams_and_create_only(self):
+        archived = self.local / "quarantine" / "failed" / ("archived_" + "x" * 170 + ".txt")
+        protection.io_path(archived.parent).mkdir(parents=True)
+        protection.io_path(archived).write_bytes(b"retained diagnostic fixture")
+        zone = Path(str(archived) + ":Zone.Identifier")
+        protection.io_path(zone).write_bytes(b"[ZoneTransfer]\nZoneId=3\n")
+        self.backup = self.backup.parent / ("namespace_" + "a" * 110) / ("run_" + "b" * 70)
+        protection.io_path(self.backup.parent).mkdir()
+        self.args.backup_directory = str(self.backup)
+        copied = self.backup / "local_provider" / archived.relative_to(self.local)
+        self.assertGreater(len(str(archived)), 260)
+        self.assertGreater(len(str(self.backup / protection.MANIFEST)), 260)
+        self.assertGreater(len(str(copied)), 260)
+        real_open = Path.open
+        real_listdir = os.listdir
+        def extended_open(path, *args, **kwargs):
+            self.assertTrue(str(path).startswith("\\\\?\\"), str(path))
+            return real_open(path, *args, **kwargs)
+        def extended_listdir(path):
+            self.assertTrue(str(path).startswith("\\\\?\\"), str(path))
+            return real_listdir(path)
+        with mock.patch.object(Path, "open", extended_open), mock.patch.object(os, "listdir", extended_listdir):
+            receipt = protection.protect(self.args)
+            self.assertEqual(receipt["reference_directory"], str(self.backup))
+            self.assertTrue(protection.protect(self.args)["reused"])
+            self.args.action = "verify"
+            protection.protect(self.args)
+        manifest = json.loads(protection.io_path(self.backup / protection.MANIFEST).read_text())
+        self.assertEqual(manifest["origins"]["local_provider"], str(self.local))
+        self.assertFalse(any("\\\\?\\" in entry["relative"] for entry in manifest["files"]))
+        self.assertEqual(protection.io_path(archived).read_bytes(), b"retained diagnostic fixture")
+        self.assertEqual(protection.io_path(copied).read_bytes(), b"retained diagnostic fixture")
+        copied_zone = Path(str(copied) + ":Zone.Identifier")
+        self.assertEqual(protection.io_path(copied_zone).read_bytes(), protection.io_path(zone).read_bytes())
+        with protection.pinned(archived) as source:
+            with self.assertRaises(FileExistsError):
+                protection.copy_file(source, copied)
+        protection.io_path(copied_zone).write_bytes(b"tampered")
+        with self.assertRaisesRegex(protection.Refused, "integrity verification failed"):
+            protection.protect(self.args)
+
+    def test_extended_input_and_aliases_refused_before_io_conversion(self):
+        for value in ("\\\\?\\" + str(self.backup), str(self.root) + "\\..\\backup",
+                      str(self.root) + "\\backup. ", str(self.root) + "\\backup:stream"):
+            with self.subTest(value=value), self.assertRaisesRegex(protection.Refused, "without aliases"):
+                protection.explicit_path(value)
+
     def test_later_original_progress_gets_new_reference_without_overwriting_first(self):
         protection.protect(self.args)
         first = (self.backup / "steam_app" / "remote" / "GAME-AUTOSAVE0" / "game.details").read_bytes()
