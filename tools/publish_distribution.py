@@ -18,6 +18,8 @@ def github(method, path, payload=None, *, binary=False, missing=False):
     if payload is not None:
         data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         command += ["--input", "-", "-H", "Content-Type: application/octet-stream" if isinstance(payload, bytes) else "Content-Type: application/json"]
+        if isinstance(payload, bytes):
+            command += ["-H", f"Content-Length: {len(data)}"]
     result = subprocess.run(command, input=data, capture_output=True, check=False)
     if result.returncode:
         if missing and b"(HTTP 404)" in result.stderr:
