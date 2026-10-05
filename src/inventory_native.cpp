@@ -74,6 +74,18 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
                 facts.ice_bomb = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
                     image_base + 0x1690660)(inv, ice_decl) ? 1 : 0;
         }
+        const char* key = "map_objects/keycard/slayer_key";
+        const auto key_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
+            image_base + 0x17aa5d0)(type, key, 1);
+        if (key_decl) {
+            const auto path = *reinterpret_cast<const char**>(key_decl + 8);
+            if (path && !std::strcmp(path, key)) {
+                const auto item = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
+                    image_base + 0x1690660)(inv, key_decl);
+                const auto quantity = item ? *reinterpret_cast<int*>(item + 0x40) : 0;
+                if (quantity >= 0) facts.slayer_key = quantity > 0 ? 1 : 0;
+            }
+        }
         const auto perk_type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631f90)();
         if (!perk_type) return true;
         const char* const blood_punch[] = {

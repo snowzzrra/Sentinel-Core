@@ -3,8 +3,8 @@
 #include "sentinel_native.h"
 
 /* Ordinary inventory observations and AP intent. UNKNOWN values are not ownership
-   or capacity facts. Special weapons, Runes and map-local keys have other owners. */
-#define SC_INVENTORY_ABI_VERSION 5u
+   or capacity facts. Map-local AP entitlement is separate from the physical key. */
+#define SC_INVENTORY_ABI_VERSION 6u
 #define SC_INVENTORY_MAX_CAPACITY_TIER 4u
 #define SC_INVENTORY_UNKNOWN_MASK UINT32_MAX
 #define SC_INVENTORY_UNKNOWN_TIER UINT8_MAX
@@ -121,6 +121,8 @@ typedef struct sc_inventory_result {
     /* Ice is independently observable; the remaining equipment mask stays UNKNOWN. */
     uint8_t ice_bomb_before, ice_bomb_after;
     uint8_t dash_before, dash_after;
+    /* Generic physical key count > 0; 255 means the native read is inconclusive. */
+    uint8_t slayer_key_before, slayer_key_after;
 } sc_inventory_result;
 
 #endif

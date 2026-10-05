@@ -39,7 +39,7 @@ int main() {
         inventory_facts.dash = dash;
         auto result = sentinel::inventory::initial(inventory_request);
         sentinel::inventory::execute(inventory_request, result, inventory_calls);
-        CHECK(result.abi_version == 5 && result.outcome == SC_INV_OBSERVED &&
+        CHECK(result.abi_version == 6 && result.outcome == SC_INV_OBSERVED &&
               result.dash_before == dash && result.dash_after == dash &&
               result.equipment_after == SC_INVENTORY_UNKNOWN_MASK);
     }
@@ -48,6 +48,20 @@ int main() {
     sentinel::inventory::execute(inventory_request, invalid_inventory, inventory_calls);
     CHECK(invalid_inventory.outcome == SC_INV_READ_FAILED &&
           invalid_inventory.dash_after == SC_INVENTORY_UNKNOWN_ITEM);
+    inventory_facts.dash = 1;
+    for (const auto key : {uint8_t{0}, uint8_t{1}, uint8_t{255}}) {
+        inventory_facts.slayer_key = key;
+        auto result = sentinel::inventory::initial(inventory_request);
+        sentinel::inventory::execute(inventory_request, result, inventory_calls);
+        CHECK(result.outcome == SC_INV_OBSERVED && result.slayer_key_before == key &&
+              result.slayer_key_after == key && result.operations_applied == 0);
+    }
+    inventory_facts.slayer_key = 2;
+    invalid_inventory = sentinel::inventory::initial(inventory_request);
+    sentinel::inventory::execute(inventory_request, invalid_inventory, inventory_calls);
+    CHECK(invalid_inventory.outcome == SC_INV_READ_FAILED &&
+          invalid_inventory.slayer_key_after == SC_INVENTORY_UNKNOWN_ITEM);
+    inventory_facts.slayer_key = 1;
     struct RuneFixture { sentinel::runes::SnapshotFacts facts{}; int bound = 0, reads = 0; bool active = true; } rune;
     sentinel::runes::calls = {
         &rune, nullptr,
@@ -207,9 +221,13 @@ int main() {
     size = encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply);
     sc_inventory_result decoded_inventory{};
     CHECK(size && decode_inventory_response(wire, size, code, inventory_result_operation, s, decoded_inventory));
-    CHECK(decoded_inventory.dash_after == 1 && decoded_inventory.equipment_after == SC_INVENTORY_UNKNOWN_MASK);
+    CHECK(decoded_inventory.dash_after == 1 && decoded_inventory.slayer_key_before == 1 &&
+          decoded_inventory.slayer_key_after == 1 && decoded_inventory.equipment_after == SC_INVENTORY_UNKNOWN_MASK);
     CHECK(!decode_inventory_response(wire, size - 1, code, inventory_result_operation, s, decoded_inventory));
     inventory_reply.dash_after = 2;
+    CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
+    inventory_reply.dash_after = 1;
+    inventory_reply.slayer_key_after = 2;
     CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
     detail = {}; detail.revision = 1; detail.stage = SC_STAGE_OBSERVATION_BUDGET;
     detail.observation_attempted = detail.timing_valid = 1;
