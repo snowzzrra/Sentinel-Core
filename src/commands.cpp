@@ -10,10 +10,11 @@ bool process_scoped(const sc_command_request& request) {
         std::string_view(request.text) == "condump AP_SUPPORT_FILE.txt";
 }
 bool compatible_product(std::string_view version) {
-    if (version == "1.0.0") return true;
-    constexpr std::string_view prefix = "1.0.0-rc-";
-    if (version.substr(0, prefix.size()) != prefix) return false;
-    version.remove_prefix(prefix.size());
+    const auto rc = version.find("-rc-");
+    const auto base = version.substr(0, rc);
+    if (base != "1.0.0" && base != "1.0.1" && base != "1.0.2") return false;
+    if (rc == std::string_view::npos) return true;
+    version.remove_prefix(rc + 4);
     return !version.empty() && version.front() >= '1' && version.front() <= '9' &&
         version.find_first_not_of("0123456789") == std::string_view::npos;
 }
