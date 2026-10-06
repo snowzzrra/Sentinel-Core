@@ -11,9 +11,9 @@ namespace sentinel::runes { Calls calls{}; }
 namespace sentinel::special { Calls calls{}; }
 int main() {
     assert(commands::compatible_product(SC_PRODUCT_VERSION));
-    for (const char* version : {"1.0.0", "1.0.1", "1.0.2", "1.0.0-rc-1", "1.0.1-rc-1", "1.0.2-rc-10"})
+    for (const char* version : {"1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.0-rc-1", "1.0.1-rc-1", "1.0.2-rc-10", "1.0.3-rc-1"})
         assert(commands::compatible_product(version));
-    for (const char* version : {"", "1.0.3", "1.1.0-rc-1", "1.0.2-rc-01", "1.0.2-rc-0",
+    for (const char* version : {"", "1.1.0-rc-1", "1.0.2-rc-01", "1.0.2-rc-0",
             "1.0.2-rc-", "1.0.2-rc-1extra", "1.0.2+build", "1.0.02"})
         assert(!commands::compatible_product(version));
     commands::ManualRequest manual{};

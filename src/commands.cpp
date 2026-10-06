@@ -3,6 +3,7 @@
 #include <cstring>
 #include <charconv>
 #include <cmath>
+#include <string>
 
 namespace sentinel::commands {
 bool process_scoped(const sc_command_request& request) {
@@ -12,7 +13,11 @@ bool process_scoped(const sc_command_request& request) {
 bool compatible_product(std::string_view version) {
     const auto rc = version.find("-rc-");
     const auto base = version.substr(0, rc);
-    if (base != "1.0.0" && base != "1.0.1" && base != "1.0.2") return false;
+    if (base.substr(0, 4) != "1.0.") return false;
+    const auto patch = base.substr(4);
+    unsigned number = 0;
+    const auto parsed = std::from_chars(patch.data(), patch.data() + patch.size(), number);
+    if (parsed.ec != std::errc{} || parsed.ptr != patch.data() + patch.size() || std::to_string(number) != patch) return false;
     if (rc == std::string_view::npos) return true;
     version.remove_prefix(rc + 4);
     return !version.empty() && version.front() >= '1' && version.front() <= '9' &&

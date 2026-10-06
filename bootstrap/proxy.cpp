@@ -1,6 +1,7 @@
 #include "sentinel_bootstrap.h"
 #include "sentinel_version.h"
 #include <cstring>
+#include <string>
 #include <windows.h>
 
 namespace {
@@ -10,6 +11,15 @@ DWORD startup_error = ERROR_SUCCESS;
 bool stopped = false;
 
 DWORD WINAPI start_core(void*) {
+    wchar_t executable[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable, 32768);
+    if (!length || length == 32768) { startup_error = ERROR_BAD_PATHNAME; return SC_BOOTSTRAP_FAILURE; }
+    std::wstring marker(executable, length);
+    marker.resize(marker.find_last_of(L"\\/") + 1);
+    marker += L"sentinel-core-update.txt";
+    if (GetFileAttributesW(marker.c_str()) != INVALID_FILE_ATTRIBUTES || GetLastError() != ERROR_FILE_NOT_FOUND) {
+        startup_error = ERROR_BUSY; return SC_BOOTSTRAP_FAILURE;
+    }
     wchar_t path[MAX_PATH]{};
     const DWORD system = sc_bootstrap_system_path(MAX_PATH, path);
     if (system) { startup_error = system; return SC_BOOTSTRAP_FAILURE; }
