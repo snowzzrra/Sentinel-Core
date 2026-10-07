@@ -356,7 +356,8 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
         }
         if (op==campaign_row_operation) {
             const auto flags=value.row.flags;
-            if (!value.row.id || !value.row.title[0] || (flags&~63u) ||
+            if (!value.row.id || !value.row.title[0] ||
+                (flags&~(63u | SC_CAMPAIGN_SLAYER_GATE | SC_CAMPAIGN_GATE_KEY | SC_CAMPAIGN_GATE_COMPLETE)) ||
                 ((flags&SC_CAMPAIGN_UNLOCKED) && (!(flags&SC_CAMPAIGN_REVEALED) || !value.row.map[0])) ||
                 ((flags&SC_CAMPAIGN_COMPLETED) && !(flags&SC_CAMPAIGN_UNLOCKED)) ||
                 ((flags&SC_CAMPAIGN_DETAILS) && !(flags&SC_CAMPAIGN_UNLOCKED)) ||
