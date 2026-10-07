@@ -49,7 +49,10 @@ struct MasteryState {
     uint16_t host_missing = 0;
     uint16_t mod_missing = 0;
     uint16_t apply_failed = 0;
+    uint16_t projected = 0;
+    uint16_t needs_rebuild = 0;
     uintptr_t components[13]{};
+    uintptr_t upgrades[13]{};
     uint64_t next_check_ms = 0;
 };
 MasteryState mastery_state;
@@ -138,9 +141,7 @@ uintptr_t player(void*) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-// Resolve one authored upgrade without giving a perk, creating an inventory
-// item, or inserting anything into the normal active-upgrade list.
-TargetStatus mastery_target(uintptr_t p, unsigned index, uintptr_t& component, uintptr_t& upgrade) {
+TargetStatus mastery_target(uintptr_t p, unsigned index, uintptr_t& component, uintptr_t& upgrade, bool& selected) {
     __try {
         const auto type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631f90)();
         const auto find = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(image_base + 0x17aa5d0);
@@ -166,8 +167,11 @@ TargetStatus mastery_target(uintptr_t p, unsigned index, uintptr_t& component, u
         component = reinterpret_cast<uintptr_t(*)(uintptr_t)>(*reinterpret_cast<uintptr_t*>(item_vtable + 0x1c8))(item);
         if (!component || !*reinterpret_cast<uintptr_t*>(component + 0x28)) return TargetStatus::unresolved;
         const auto component_vtable = *reinterpret_cast<uintptr_t*>(component);
-        return *reinterpret_cast<uintptr_t*>(component_vtable + 0x20) == image_base + 0x164fc20 ?
-            TargetStatus::ready : TargetStatus::unresolved;
+        if (*reinterpret_cast<uintptr_t*>(component_vtable + 0x20) != image_base + 0x164fc20 ||
+            *reinterpret_cast<uintptr_t*>(component_vtable + 0x38) != image_base + 0x1650d80)
+            return TargetStatus::unresolved;
+        selected = index == 8 || reinterpret_cast<bool(*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0)(p + 0x3b40, base);
+        return TargetStatus::ready;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return TargetStatus::unresolved; }
 }
 
@@ -199,35 +203,75 @@ void mastery_result(unsigned index, uintptr_t component, bool target_found, bool
     mastery_state.components[index] = applied ? component : 0;
 }
 
-void reapply_masteries(uintptr_t component) {
+bool mastery_context() {
     if (!mastery_ready.load(std::memory_order_acquire) || applying_mastery ||
         !active() || !native::gameplay_admitted() || !mastery_state.desired ||
-        std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65)) return;
+        std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65)) return false;
     const auto p = player(nullptr);
-    if (!p || p != mastery_state.player) return;
+    return p && p == mastery_state.player;
+}
+
+bool clear_masteries(uintptr_t component) {
+    if (!mastery_context()) return false;
+    bool cleared = true;
+    applying_mastery = true;
+    for (unsigned i = 0; i < 13; ++i) {
+        const auto bit = static_cast<uint16_t>(1u << i);
+        if (!(mastery_state.projected & bit) || mastery_state.components[i] != component) continue;
+        __try {
+            const auto vtable = *reinterpret_cast<uintptr_t*>(component);
+            if (*reinterpret_cast<uintptr_t*>(vtable + 0x38) != image_base + 0x1650d80) { cleared = false; continue; }
+            reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(image_base + 0x1650d80)(component, mastery_state.upgrades[i]);
+            mastery_state.projected &= ~bit;
+        } __except(EXCEPTION_EXECUTE_HANDLER) { cleared = false; }
+    }
+    applying_mastery = false;
+    return cleared;
+}
+
+void reapply_masteries(uintptr_t component) {
+    if (!mastery_context()) return;
+    const auto p = mastery_state.player;
     for (unsigned i = 0; i < 13; ++i) {
         const auto bit = static_cast<uint16_t>(1u << i);
         if (!(mastery_state.desired & bit)) continue;
         uintptr_t owned_component = 0, upgrade = 0;
-        const auto status = mastery_target(p, i, owned_component, upgrade);
+        bool selected = false;
+        const auto status = mastery_target(p, i, owned_component, upgrade, selected);
         target_status(i, status);
         if (status != TargetStatus::ready) mastery_result(i, 0, false, false);
         else if (owned_component == component) {
-            mastery_result(i, component, true, apply_mastery(component, upgrade));
+            const auto applied = !selected || apply_mastery(component, upgrade);
+            mastery_result(i, component, true, applied);
+            mastery_state.upgrades[i] = upgrade;
+            if (selected && applied) mastery_state.projected |= bit;
         }
     }
+    for (unsigned i = 0; i < 13; ++i)
+        if (mastery_state.components[i] == component && !(mastery_state.apply_failed & (1u << i)))
+            mastery_state.needs_rebuild &= ~(1u << i);
 }
 
 void upgrade_replay_hook(uintptr_t component) {
+    for (unsigned i = 0; i < 13; ++i)
+        if (mastery_state.components[i] == component) mastery_state.needs_rebuild |= 1u << i;
+    const auto cleared = activation_depth || clear_masteries(component);
     if (original_upgrade_replay) original_upgrade_replay(component);
-    if (!activation_depth) reapply_masteries(component);
+    if (!activation_depth && cleared) reapply_masteries(component);
 }
 
 void upgrade_activate_hook(uintptr_t component, uintptr_t upgrade, uint8_t a, uint8_t b) {
+    for (unsigned i = 0; i < 13; ++i)
+        if (mastery_state.components[i] == component) mastery_state.needs_rebuild |= 1u << i;
+    const auto projected = mastery_state.projected;
+    const auto cleared = activation_depth || clear_masteries(component);
     ++activation_depth;
     if (original_upgrade_activate) original_upgrade_activate(component, upgrade, a, b);
     --activation_depth;
-    if (!activation_depth) reapply_masteries(component);
+    if (!activation_depth && cleared) {
+        if (original_upgrade_replay && projected != mastery_state.projected) original_upgrade_replay(component);
+        reapply_masteries(component);
+    }
 }
 
 void project_mastery_ui(uintptr_t result, uintptr_t family) {
@@ -545,7 +589,6 @@ void install(const engine::Binding& binding, HANDLE stop) {
 }
 } // namespace menu
 
-// other native arsenal primitives remain quarantined
 bool read(void*, uintptr_t, SnapshotFacts&) { return false; }
 uint32_t ensure_mods(void*, uintptr_t, uint32_t) { return 1; }
 uint32_t select_mod(void*, uintptr_t, uint8_t, uint8_t) { return 1; }
@@ -589,27 +632,51 @@ void tick_masteries(uint64_t generation, uintptr_t p) {
         mastery_state.host_missing = 0;
         mastery_state.mod_missing = 0;
         mastery_state.apply_failed = 0;
+        mastery_state.projected = 0;
+        mastery_state.needs_rebuild = 0;
         std::fill_n(mastery_state.components, 13, uintptr_t{0});
+        std::fill_n(mastery_state.upgrades, 13, uintptr_t{0});
         mastery_state.next_check_ms = 0;
     }
     const auto now = GetTickCount64();
     if (now < mastery_state.next_check_ms) return;
     mastery_state.next_check_ms = now + 500;
+    uint16_t selected_mask = 0;
     for (unsigned i = 0; i < 13; ++i) {
         const auto bit = static_cast<uint16_t>(1u << i);
         if (!(mastery_state.desired & bit)) continue;
         uintptr_t component = 0, upgrade = 0;
-        const auto status = mastery_target(p, i, component, upgrade);
+        bool selected = false;
+        const auto status = mastery_target(p, i, component, upgrade, selected);
         target_status(i, status);
         if (status != TargetStatus::ready) {
             mastery_result(i, 0, false, false);
             continue;
         }
-        if ((mastery_state.applied & bit) && mastery_state.components[i] == component) {
-            mastery_result(i, component, true, true);
+        if (mastery_state.components[i] != component) {
+            mastery_state.projected |= bit;
+            mastery_state.needs_rebuild |= bit;
+        }
+        mastery_result(i, component, true, true);
+        mastery_state.upgrades[i] = upgrade;
+        if (selected) selected_mask |= bit;
+    }
+    for (unsigned i = 0; i < 13; ++i) {
+        const auto component = mastery_state.components[i];
+        if (!component || std::find(mastery_state.components, mastery_state.components + i, component) != mastery_state.components + i) continue;
+        uint16_t component_mask = 0;
+        for (unsigned j = 0; j < 13; ++j)
+            if (mastery_state.components[j] == component) component_mask |= static_cast<uint16_t>(1u << j);
+        if ((mastery_state.projected & component_mask) == (selected_mask & component_mask) &&
+            !(mastery_state.needs_rebuild & component_mask)) continue;
+        // clear AP modifiers, then restore vanilla priorities before the selected mastery
+        if (!clear_masteries(component)) {
+            mastery_state.applied &= ~(selected_mask & component_mask);
+            mastery_state.apply_failed |= selected_mask & component_mask;
             continue;
         }
-        mastery_result(i, component, true, apply_mastery(component, upgrade));
+        if (original_upgrade_replay) original_upgrade_replay(component);
+        reapply_masteries(component);
     }
 }
 
@@ -677,7 +744,7 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
              {"applied", mastery_state.applied}, {"target_unavailable", mastery_state.target_unavailable},
              {"host_missing", mastery_state.host_missing}, {"mod_missing", mastery_state.mod_missing},
              {"apply_failed", mastery_state.apply_failed}, {"player", mastery_state.player},
-             {"generation", mastery_state.generation}});
+             {"generation", mastery_state.generation}, {"projected", mastery_state.projected}});
         return;
     }
     out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE;
@@ -837,6 +904,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {0x1631f90, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc", nullptr, nullptr},
         {0xfe3830, "4c8bc24885d2742b4863515833c085d27e21488b49504c8bca8bd00f1f440000", nullptr, nullptr},
         {0x164fc20, "488bc44889480855488d68a14881ecf000000048895820488970f0488978e84c", nullptr, nullptr},
+        {0x1650d80, "48895c2418564883ec204883792800488bda488bf17516488d0d525c7b01488b", nullptr, nullptr},
         {0x164e9b0, "488bc44889480855488d68e84881ec10010000488958f0488970e8488978e04c", reinterpret_cast<void*>(upgrade_replay_hook), reinterpret_cast<void**>(&original_upgrade_replay)},
         {0x1651040, "4885d20f8450030000448844241853415541574883ec4048896c2460450fb6e9", reinterpret_cast<void*>(upgrade_activate_hook), reinterpret_cast<void**>(&original_upgrade_activate)},
     };
@@ -850,6 +918,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
         if (reason) {
             const char* diagnostic = s.offset == 0x1631f90 ? "mastery_typeinfo_leaf_refused" :
                 s.offset == 0xfe3830 ? "mastery_base_reader_refused" :
+                s.offset == 0x1650d80 ? "mastery_reset_target_refused" :
                 s.offset == 0x164fc20 ? "mastery_apply_target_refused" :
                 s.offset == 0x164e9b0 ? "mastery_replay_hook_refused" : "mastery_activation_hook_refused";
             installation_trace.record(save::BStage::native_start, save::BStatus::refused,
