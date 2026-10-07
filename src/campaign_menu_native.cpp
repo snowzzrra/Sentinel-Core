@@ -398,11 +398,11 @@ uintptr_t question_material(uintptr_t sprite) {
     return material;
 }
 void present_gate_status(uintptr_t root,uint32_t flags) {
-    const auto region=swf_child(root,"apAggregate");
+    const auto region=swf_child(swf_child(root,"apAggregate"),"apSlayerStatus");
     const bool known=(flags&SC_CAMPAIGN_SLAYER_GATE)!=0;
     const auto key=swf_child(region,"apSlayerKey");
     const auto gate=swf_child(region,"apSlayerGate");
-    if (known && region) original_sprite_visibility(region,1,1);
+    if (region) original_sprite_visibility(region,known,1);
     const auto key_material=known ? find_material(material_manager,(flags&SC_CAMPAIGN_GATE_KEY)
         ? "art/ui/dossier/icons/ico_slayerkey_on" : "art/ui/dossier/icons/ico_slayerkey_off",1) : 0;
     const auto gate_material=known ? find_material(material_manager,
@@ -419,11 +419,16 @@ void present_gate_status(uintptr_t root,uint32_t flags) {
         "mission_gate_status",shown.revision,{{"available",known},{"key_owned",(flags&SC_CAMPAIGN_GATE_KEY)!=0},
         {"completed",(flags&SC_CAMPAIGN_GATE_COMPLETE)!=0},{"key_bound",key && key_material},{"gate_bound",gate && gate_material}},root);
 }
-void present_aggregate(uintptr_t root,const sc_campaign_reward& reward,const char* battery_name="sentinelBattery",bool completed=false) {
+void present_aggregate(uintptr_t root,const sc_campaign_reward& reward,const char* battery_name="sentinelBattery") {
+    const bool completed=reward.checked!=0;
     if (const auto battery=swf_child(root,battery_name)) original_sprite_visibility(battery,0,1);
     const auto region=swf_child(root,"apAggregate");
     if (const auto background=swf_child(region,"incomplete")) original_sprite_visibility(background,!completed,1);
     if (const auto background=swf_child(region,"complete")) original_sprite_visibility(background,completed,1);
+    if (const auto heading=swf_child(region,"apCompleteHeading")) {
+        original_sprite_visibility(heading,completed,1);
+        if (const auto normal=swf_child(region,"heading")) original_sprite_visibility(normal,!completed,1);
+    }
     const auto text=swf_child(swf_child(region,"apReward"),"txtVal",true);
     const auto image=swf_child(region,"question");
     const auto question=question_material(image);
@@ -453,15 +458,12 @@ void present_mission_rewards(uintptr_t screen) {
     if (read(screen,0x638,widget) && read(widget,0x18,root)) {
         const auto reward=aggregate_reward();
         bool discovered=true;
-        unsigned completed=0;
         for (unsigned i=0;i<3;++i) {
             uintptr_t card=0; uint32_t id=0; char name=0;
             discovered=discovered && read(screen,0x640+i*8,card) && read(card,0x2b0,id) &&
                 read(card,0x2b4,name) && name && mission_reward(id).location_id;
-            const auto challenge=challenge_projection(id);
-            completed+=challenge.required && challenge.checked;
         }
-        present_aggregate(root,discovered ? reward : sc_campaign_reward{},"sentinelBattery",completed==3);
+        present_aggregate(root,discovered ? reward : sc_campaign_reward{},"sentinelBattery");
         if (const auto arrow=swf_child(root,"arrow")) original_sprite_visibility(arrow,0,1);
     }
     for (unsigned i=0;i<3;++i) {

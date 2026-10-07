@@ -5,8 +5,8 @@
 /* Sentinel Core native DeathLink domain.
    Soft applies exactly one legitimate lethal event through Doom's normal
    damage/death pipeline and accepts either true death or native protection.
-   Hardcore keeps one logical remote event pending across native protection
-   cycles and resolves only on observed true death. */
+   Hardcore invokes the native death routine once, bypassing damage protection
+   and Extra Life consumption, and confirms true death. */
 #define SC_DEATHLINK_ABI_VERSION 1u
 
 enum {
