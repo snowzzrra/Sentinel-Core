@@ -397,6 +397,28 @@ uintptr_t question_material(uintptr_t sprite) {
     } __finally { *cache_class=legacy; }
     return material;
 }
+void present_gate_status(uintptr_t root,uint32_t flags) {
+    const auto region=swf_child(root,"apAggregate");
+    const bool known=(flags&SC_CAMPAIGN_SLAYER_GATE)!=0;
+    const auto key=swf_child(region,"apSlayerKey");
+    const auto gate=swf_child(region,"apSlayerGate");
+    if (known && region) original_sprite_visibility(region,1,1);
+    const auto key_material=known ? find_material(material_manager,(flags&SC_CAMPAIGN_GATE_KEY)
+        ? "art/ui/dossier/icons/ico_slayerkey_on" : "art/ui/dossier/icons/ico_slayerkey_off",1) : 0;
+    const auto gate_material=known ? find_material(material_manager,
+        "art/ui/icons/end_of_level/ico_eol_encounter_slayer_gate",1) : 0;
+    if (key && key_material) { swf_frame(key,1); swf_set_material(key,key_material,0); }
+    if (gate && gate_material) {
+        swf_frame(gate,1); swf_set_material(gate,gate_material,0);
+        swf_color(gate,(flags&SC_CAMPAIGN_GATE_COMPLETE) ? 54 : 57);
+    }
+    if (key) original_sprite_visibility(key,key_material!=0,1);
+    if (gate) original_sprite_visibility(gate,gate_material!=0,1);
+    save::session().btrace.record(save::BStage::mission_details,
+        !known || (key && key_material && gate && gate_material) ? save::BStatus::succeeded : save::BStatus::pending,
+        "mission_gate_status",shown.revision,{{"available",known},{"key_owned",(flags&SC_CAMPAIGN_GATE_KEY)!=0},
+        {"completed",(flags&SC_CAMPAIGN_GATE_COMPLETE)!=0},{"key_bound",key && key_material},{"gate_bound",gate && gate_material}},root);
+}
 void present_aggregate(uintptr_t root,const sc_campaign_reward& reward,const char* battery_name="sentinelBattery",bool completed=false) {
     if (const auto battery=swf_child(root,battery_name)) original_sprite_visibility(battery,0,1);
     const auto region=swf_child(root,"apAggregate");
@@ -670,6 +692,9 @@ void eol_challenge_update(uintptr_t widget) {
 
 bool text_matches(uintptr_t field,const char* expected);
 bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
+    if (independent && meter_root) original_sprite_visibility(meter_root,0,1);
+    for (const auto leaf:{"background","corruption","glow_burst","pointCount","header"})
+        if (const auto sprite=swf_child(meter_root,leaf)) original_sprite_visibility(sprite,0,1);
     const auto label=swf_child(root,"apFoundLabel");
     const auto text_root=swf_child(label,"text");
     const auto title=swf_child(text_root,"txtVal",true);
@@ -696,9 +721,6 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
             {"namespace_valid",namespace_valid},{"row_found",row_found},{"known",summary.known}},root);
         return true;
     }
-    if (independent && meter_root) original_sprite_visibility(meter_root,0,1);
-    for (const auto leaf:{"background","corruption","glow_burst","pointCount","header"})
-        if (const auto sprite=swf_child(meter_root,leaf)) original_sprite_visibility(sprite,0,1);
     char value[64]; std::snprintf(value,sizeof(value),"ITEMS FOUND %u/%u",summary.found,summary.total);
     if (!text_matches(title,value)) swf_set_text(title,value);
     constexpr uint32_t slayer_green=54;
@@ -975,6 +997,7 @@ void present_details(uintptr_t details) {
         discovered+=placement.location_id!=0;
     }
     present_aggregate(details_root,discovered==3 ? aggregate : sc_campaign_reward{},"batteries");
+    present_gate_status(details_root,shown.rows[index].flags);
     if (const auto completion=swf_child(details_root,"completionInfo"))
         original_sprite_visibility(completion,0,1);
     uintptr_t category=0,root=0,vtable=0;
