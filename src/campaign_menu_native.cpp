@@ -407,7 +407,10 @@ void present_gate_status(uintptr_t root,uint32_t flags) {
         ? "art/ui/dossier/icons/ico_slayerkey_on" : "art/ui/dossier/icons/ico_slayerkey_off",1) : 0;
     const auto gate_material=known ? find_material(material_manager,
         "art/ui/icons/end_of_level/ico_eol_encounter_slayer_gate",1) : 0;
-    if (key && key_material) { swf_frame(key,1); swf_set_material(key,key_material,0); }
+    if (key && key_material) {
+        swf_frame(key,1); swf_set_material(key,key_material,0);
+        swf_color(key,(flags&SC_CAMPAIGN_GATE_KEY) ? 54 : 57);
+    }
     if (gate && gate_material) {
         swf_frame(gate,1); swf_set_material(gate,gate_material,0);
         swf_color(gate,(flags&SC_CAMPAIGN_GATE_COMPLETE) ? 54 : 57);
