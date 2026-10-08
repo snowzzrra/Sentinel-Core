@@ -398,7 +398,7 @@ uintptr_t question_material(uintptr_t sprite) {
     return material;
 }
 void present_gate_status(uintptr_t root,uint32_t flags) {
-    const auto region=swf_child(swf_child(root,"apAggregate"),"apSlayerStatus");
+    const auto region=swf_child(root,"apSlayerStatus");
     const bool known=(flags&SC_CAMPAIGN_SLAYER_GATE)!=0;
     const auto key=swf_child(region,"apSlayerKey");
     const auto gate=swf_child(region,"apSlayerGate");
@@ -968,7 +968,6 @@ void present_details(uintptr_t details) {
     sc_campaign_reward aggregate{};
     for (const auto& reward:shown.rewards[index]) if (reward.kind==SC_REWARD_AGGREGATE) aggregate=reward;
     const auto challenge_rows=swf_child(swf_child(details_root,"challenges"),"list");
-    unsigned discovered=0;
     for (unsigned slot=0;slot<3;++slot) {
         char name[]="item0"; name[4]+=static_cast<char>(slot);
         const auto item=swf_child(challenge_rows,name);
@@ -996,9 +995,8 @@ void present_details(uintptr_t details) {
         }
         if (region) original_sprite_visibility(region,combined,1);
         if (description) original_sprite_visibility(description,!combined,1);
-        discovered+=placement.location_id!=0;
     }
-    present_aggregate(details_root,discovered==3 ? aggregate : sc_campaign_reward{},"batteries");
+    present_aggregate(details_root,aggregate,"batteries");
     present_gate_status(details_root,shown.rows[index].flags);
     if (const auto completion=swf_child(details_root,"completionInfo"))
         original_sprite_visibility(completion,0,1);
