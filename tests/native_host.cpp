@@ -203,6 +203,16 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro","ap_automap_location_7770001"));
     CHECK(!native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro","ap_location_visual_7770001"));
     CHECK(!native::test_automap_checked(automap,"game/sp/e1m2_battle/e1m2_battle","ap_automap_location_7770001"));
+    for (uint32_t id=7770249;id<=7770252;++id) {
+        char name[64]{}; std::snprintf(name,sizeof(name),"ap_automap_location_%u",id);
+        const auto bit=id-SC_AUTOMAP_LOCATION_BASE;
+        CHECK(!native::test_automap_checked(automap,"game/sp/e2m2_base/e2m2_base",name));
+        automap.checked_locations[bit/64]|=uint64_t{1}<<(bit%64);
+        CHECK(native::test_automap_checked(automap,"game/sp/e2m2_base/e2m2_base",name));
+        CHECK(!native::test_automap_checked(automap,"game/sp/e2m3_core/e2m3_core",name));
+        automap.checked_locations[bit/64]&=~(uint64_t{1}<<(bit%64));
+        CHECK(!native::test_automap_checked(automap,"game/sp/e2m2_base/e2m2_base",name));
+    }
     std::array<uint8_t,0x150> automap_entry{}; automap_test_object=reinterpret_cast<uintptr_t>(automap_entry.data());
     *reinterpret_cast<int32_t*>(automap_test_object+0x134)=1;
     CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));

@@ -65,14 +65,16 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
                 if (quantity >= 0) facts.dash = quantity > 0 ? 1 : 0;
             }
         }
-        const char* ice = "throwable/player/ice_bomb";
-        const auto ice_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
-            image_base + 0x17aa5d0)(type, ice, 1);
-        if (ice_decl) {
-            const auto ice_path = *reinterpret_cast<const char**>(ice_decl + 8);
-            if (ice_path && !std::strcmp(ice_path, ice))
-                facts.ice_bomb = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
-                    image_base + 0x1690660)(inv, ice_decl) ? 1 : 0;
+        const char* throwables[] = {"throwable/player/frag_grenade", "throwable/player/ice_bomb"};
+        uint8_t* observations[] = {&facts.frag_grenade, &facts.ice_bomb};
+        for (unsigned i = 0; i < _countof(throwables); ++i) {
+            const auto decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
+                image_base + 0x17aa5d0)(type, throwables[i], 1);
+            if (!decl) continue;
+            const auto path = *reinterpret_cast<const char**>(decl + 8);
+            if (path && !std::strcmp(path, throwables[i]))
+                *observations[i] = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
+                    image_base + 0x1690660)(inv, decl) ? 1 : 0;
         }
         const char* key = "map_objects/keycard/slayer_key";
         const auto key_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(

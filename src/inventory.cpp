@@ -80,6 +80,7 @@ sc_inventory_result initial(const sc_inventory_request& r) {
     out.ice_bomb_before = out.ice_bomb_after = SC_INVENTORY_UNKNOWN_ITEM;
     out.dash_before = out.dash_after = SC_INVENTORY_UNKNOWN_ITEM;
     out.slayer_key_before = out.slayer_key_after = SC_INVENTORY_UNKNOWN_ITEM;
+    out.frag_grenade_before = out.frag_grenade_after = SC_INVENTORY_UNKNOWN_ITEM;
     std::memcpy(out.namespace_id, r.namespace_id, sizeof(out.namespace_id));
     return out;
 }
@@ -102,7 +103,8 @@ bool valid_facts(const SnapshotFacts& f) {
         tier(f.health_tier) && tier(f.armor_tier) && tier(f.ammo_tier) &&
         (f.ice_bomb <= 1 || f.ice_bomb == SC_INVENTORY_UNKNOWN_ITEM) &&
         (f.dash <= 1 || f.dash == SC_INVENTORY_UNKNOWN_ITEM) &&
-        (f.slayer_key <= 1 || f.slayer_key == SC_INVENTORY_UNKNOWN_ITEM);
+        (f.slayer_key <= 1 || f.slayer_key == SC_INVENTORY_UNKNOWN_ITEM) &&
+        (f.frag_grenade <= 1 || f.frag_grenade == SC_INVENTORY_UNKNOWN_ITEM);
 }
 
 void execute(const sc_inventory_request& r, sc_inventory_result& out, const Calls& calls) {
@@ -120,6 +122,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
     out.ice_bomb_before = before.ice_bomb;
     out.dash_before = before.dash;
     out.slayer_key_before = before.slayer_key;
+    out.frag_grenade_before = before.frag_grenade;
     out.special_before = before.special_weapons;
     out.upgrades_before = before.persistent_upgrades;
     out.health_tier_before = before.health_tier;
@@ -135,6 +138,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
         out.ice_bomb_after = before.ice_bomb;
         out.dash_after = before.dash;
         out.slayer_key_after = before.slayer_key;
+        out.frag_grenade_after = before.frag_grenade;
         out.special_after = before.special_weapons;
         out.upgrades_after = before.persistent_upgrades;
         out.health_tier_after = before.health_tier;
@@ -167,6 +171,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
             out.ice_bomb_after = before.ice_bomb;
             out.dash_after = before.dash;
             out.slayer_key_after = before.slayer_key;
+            out.frag_grenade_after = before.frag_grenade;
             out.special_after = before.special_weapons;
             out.upgrades_after = before.persistent_upgrades;
             out.health_tier_after = before.health_tier;
@@ -192,6 +197,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
             out.ice_bomb_after = after.ice_bomb;
             out.dash_after = after.dash;
             out.slayer_key_after = after.slayer_key;
+            out.frag_grenade_after = after.frag_grenade;
             out.special_after = after.special_weapons;
             out.upgrades_after = after.persistent_upgrades;
             out.health_tier_after = after.health_tier;
@@ -237,6 +243,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
             out.ice_bomb_after = before.ice_bomb;
             out.dash_after = before.dash;
             out.slayer_key_after = before.slayer_key;
+            out.frag_grenade_after = before.frag_grenade;
             out.special_after = before.special_weapons;
             out.upgrades_after = before.persistent_upgrades;
             out.health_tier_after = before.health_tier;
@@ -262,6 +269,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
             out.ice_bomb_after = after.ice_bomb;
             out.dash_after = after.dash;
             out.slayer_key_after = after.slayer_key;
+            out.frag_grenade_after = after.frag_grenade;
             out.special_after = after.special_weapons;
             out.upgrades_after = after.persistent_upgrades;
             out.health_tier_after = after.health_tier;

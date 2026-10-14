@@ -33,6 +33,7 @@ int inventory_command(int argc, wchar_t** argv) {
          "\"ice_bomb_before\":%u,\"ice_bomb_after\":%u,"
          "\"dash_before\":%u,\"dash_after\":%u,"
          "\"slayer_key_before\":%u,\"slayer_key_after\":%u,"
+         "\"frag_grenade_before\":%u,\"frag_grenade_after\":%u,"
         "\"special_before\":%u,\"special_after\":%u,"
         "\"upgrades_before\":%u,\"upgrades_after\":%u,"
         "\"health_tier_before\":%u,\"health_tier_after\":%u,"
@@ -46,6 +47,7 @@ int inventory_command(int argc, wchar_t** argv) {
          static_cast<uint32_t>(inv.ice_bomb_before), static_cast<uint32_t>(inv.ice_bomb_after),
          static_cast<uint32_t>(inv.dash_before), static_cast<uint32_t>(inv.dash_after),
          static_cast<uint32_t>(inv.slayer_key_before), static_cast<uint32_t>(inv.slayer_key_after),
+         static_cast<uint32_t>(inv.frag_grenade_before), static_cast<uint32_t>(inv.frag_grenade_after),
         inv.special_before, inv.special_after,
         inv.upgrades_before, inv.upgrades_after,
         static_cast<uint32_t>(inv.health_tier_before), static_cast<uint32_t>(inv.health_tier_after),

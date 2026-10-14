@@ -63,6 +63,7 @@ set(identity_inputs CMakeLists.txt version.json include/sentinel_version.h.in re
   include/sentinel_commands.h src/commands.h src/commands.cpp src/commands_native.h src/commands_native.cpp src/commands_local.cpp
   tools/deathlink_probe.cpp
   src/native_target.h src/native_target.cpp src/native_runtime.h src/native_runtime.cpp
+  include/sentinel_automap.h src/automap_catalog.h
   include/sentinel_save.h src/save_observer.h src/save_observer.cpp
   src/save_storage.h src/save_storage.cpp src/prelaunch.h src/prelaunch.cpp src/startup_log.h src/startup_log.cpp tools/save_probe.h tools/save_probe.cpp
   src/save_b_trace.h src/save_b_io_trace.h src/save_session.h src/save_session.cpp src/save_collector.h src/save_collector.cpp

@@ -9,7 +9,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ABI = {"base":1,"wire":1,"engine":1,"context":1,"native":1,"save":1,"admission":1,"backup":1,"installation":1,"weapon_points":1,"campaign_menu":1,"inventory":6,"arsenal":1,"runes":1,"special":1,"deathlink":1,"automap":1,"commands":1}
+ABI = {"base":1,"wire":1,"engine":1,"context":1,"native":1,"save":1,"admission":1,"backup":1,"installation":1,"weapon_points":1,"campaign_menu":1,"inventory":7,"arsenal":1,"runes":1,"special":1,"deathlink":1,"automap":1,"commands":1}
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -63,7 +63,7 @@ def build(bin_dir, output, commit, dirty):
         "schema": 1, "product": "sentinel-core", "version": version, "base_version": base,
         "channel": channel, "rc_number": rc, "source_commit": commit, "source_dirty": dirty,
         "build_id": build_id, "pair_id": build_id, "mod_versions": ["0.6.0"],
-        "mod_version_range": ">=0.6.0,<0.7.0", "minimum_launcher_version": "0.6.1",
+        "mod_version_range": ">=0.6.0,<0.7.0", "minimum_launcher_version": "0.6.3",
         "platform": "windows", "architecture": "x64", "abi": ABI, "required_capabilities": [2097152],
         "qualified_game": {"image_size": 0x7431000, "timestamp": 0x6a7b9b8c, "entry_rva": 0x286caa8},
         "toolchain": {"msvc": "14.44.35207", "crt": "static", "configuration": "Release"},
