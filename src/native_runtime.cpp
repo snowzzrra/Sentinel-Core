@@ -42,6 +42,7 @@ std::atomic<bool> accepting{false}, pinned{false};
 std::atomic<bool> stopping{true};
 thread_local uint32_t frame_depth = 0;
 thread_local uint32_t event_depth = 0;
+thread_local bool loading_checkpoint = false;
 std::atomic<uint32_t> event_thread{0};
 using Frame = void (*)(uintptr_t);
 using Change = uint64_t (*)(uintptr_t, uintptr_t, uintptr_t);
@@ -141,6 +142,7 @@ bool begin_event(uintptr_t root, bool change, uintptr_t descriptor, save::Campai
     }
     if (transition) transition->generation_before=lifetime.generation;
     lifetime.begin(change, known, (flag & 2) != 0, GetTickCount64(), GetCurrentThreadId());
+    if (event_depth == 1) loading_checkpoint = change && known && (flag & 2) != 0;
     if (transition) {
         transition->event_id=lifetime.sequence; transition->generation_after=lifetime.generation;
         transition->depth=lifetime.depth; transition->observed=true;
@@ -150,6 +152,7 @@ bool begin_event(uintptr_t root, bool change, uintptr_t descriptor, save::Campai
     return true;
 }
 void end_event(bool change, bool success, bool abnormal, save::CampaignTransition* transition=nullptr) {
+    if (event_depth == 1) loading_checkpoint = false;
     uint32_t game = UINT32_MAX;
     bool readable = false;
 #ifdef SC_NATIVE_TESTING
@@ -742,6 +745,12 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
     ReleaseSRWLockExclusive(&startup);
 }
 bool gameplay_admitted() { return gameplay_admitted_locked_scope(); }
+bool checkpoint_loading() {
+    return loading_checkpoint && event_depth == 1 &&
+        event_thread.load(std::memory_order_acquire) == GetCurrentThreadId() &&
+        accepting.load(std::memory_order_acquire) &&
+        !stopping.load(std::memory_order_acquire) && !fault.load(std::memory_order_acquire);
+}
 uint64_t observation_stamp() { return epoch.load(std::memory_order_acquire); }
 void publish_context(const sc_context_snapshot& observed, uint64_t before) {
     special::refresh_input_config(); // observer thread: no game-thread file i/o

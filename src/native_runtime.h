@@ -39,5 +39,6 @@ sc_command_result command_result(const sc_command_request&, bool cancel, bool re
 bool stop();
 bool retained();
 bool gameplay_admitted();
+bool checkpoint_loading();
 save::CampaignTransition checkpoint_transition();
 }

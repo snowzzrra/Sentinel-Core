@@ -126,6 +126,13 @@ constexpr uint32_t rva_crucible_resolver = 0x145d640;
 constexpr uint32_t rva_input_down = 0x146b850;
 constexpr uint32_t rva_hammer_input_return = 0x14433f0;
 constexpr uint32_t rva_weapon_cast = 0x21107c0;
+constexpr uint32_t rva_best_weapon = 0x145a410;
+constexpr uint32_t rva_weapon_mode_decl = 0x16c0f90;
+constexpr uint32_t rva_hands_reset_return = 0x136779a;
+constexpr uint32_t rva_hands_refresh_return = 0x14641bf;
+constexpr uint32_t rva_hands_init_return = 0x1361503;
+using BestWeapon = uintptr_t(*)(uintptr_t, bool, uintptr_t);
+BestWeapon original_best_weapon = nullptr;
 constexpr uint64_t special_button = UINT64_C(0x400000000);
 using CrucibleResolver = bool(*)(uintptr_t);
 // the checked leaf returns setnz al; its callers test al, not rax
@@ -679,6 +686,105 @@ uintptr_t current_weapon_decl(uintptr_t p) {
     if (!weapon) return 0;
     __try { return *reinterpret_cast<uintptr_t*>(weapon + 0x38); }
     __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+uintptr_t hands_restore_weapon(uintptr_t p, int16_t& subweb, uint32_t& ordinal) {
+    const char* const paths[] = {
+        "weapon/player/shotgun", "weapon/player/heavy_cannon", "weapon/player/plasma_rifle",
+        "weapon/player/rocket_launcher", "weapon/player/double_barrel",
+        "weapon/player/gauss_rifle", "weapon/player/chaingun"
+    };
+    const auto hands = *reinterpret_cast<uintptr_t*>(p + 0xd2c8);
+    if (!hands || *reinterpret_cast<uintptr_t*>(hands + 0x358) != p) return 0;
+    const auto table = *reinterpret_cast<uintptr_t*>(hands + 0x2f8);
+    const auto count = *reinterpret_cast<int32_t*>(hands + 0x300);
+    if (!table || count <= 0 || count > INT16_MAX) return 0;
+    const auto inv = inventory_of(p);
+    if (!inv) return 0;
+    const auto current = current_weapon_decl(p);
+    for (unsigned pass = 0; pass < 2; ++pass) for (uint32_t i = 0; i < std::size(paths); ++i) {
+        const auto decl = find_decl(paths[i]);
+        if (!decl || (pass == 0 ? decl != current : decl == current)) continue;
+        const auto weapon = reinterpret_cast<uintptr_t(*)(uintptr_t)>(image_base + rva_weapon_cast)(find_item(inv, decl));
+        if (!weapon || !*reinterpret_cast<uint8_t*>(weapon + 0x47) ||
+            *reinterpret_cast<uint8_t*>(weapon + 0x23ca)) continue;
+        const auto mode = *reinterpret_cast<int32_t*>(weapon + 0x19e8);
+        if (mode < 0) continue;
+        const auto reflection = reinterpret_cast<uintptr_t(*)(uintptr_t, int32_t)>(
+            image_base + rva_weapon_mode_decl)(weapon, mode);
+        if (!reflection || !*reinterpret_cast<uint8_t*>(reflection + 0xbe9) ||
+            !*reinterpret_cast<uint8_t*>(reflection + 0xbea) ||
+            !*reinterpret_cast<uint8_t*>(reflection + 0xbeb)) continue;
+        auto index = *reinterpret_cast<int16_t*>(weapon + 0x190 + static_cast<uintptr_t>(mode) * 36);
+        if (index < 0) index = *reinterpret_cast<int16_t*>(weapon + 0x190);
+        if (index < 0 || index >= count) continue;
+        subweb = index;
+        ordinal = i;
+        return weapon;
+    }
+    return 0;
+}
+
+__declspec(noinline) uintptr_t best_weapon_detour(uintptr_t p, bool exclude_current, uintptr_t excluded) {
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress()) - image_base;
+    const auto selected = original_best_weapon(p, exclude_current, excluded);
+    if (selected || exclude_current || excluded ||
+        (caller != rva_hands_reset_return && caller != rva_hands_refresh_return && caller != rva_hands_init_return))
+        return selected;
+    if (save::session().state() != save::SessionState::admitted || !save::session().accepts_requests())
+        return selected;
+    const bool checkpoint = native::checkpoint_loading();
+    if (!checkpoint && !route_scope(p)) return selected;
+    uintptr_t fallback = 0;
+    int16_t subweb = -1;
+    uint32_t ordinal = UINT32_MAX;
+    __try {
+        if (p && (checkpoint || caller != rva_hands_init_return || *reinterpret_cast<uint8_t*>(p + 0x4ea2)))
+            fallback = hands_restore_weapon(p, subweb, ordinal);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    record_use("hands_restore_fallback", fallback ? save::BStatus::succeeded : save::BStatus::refused,
+        {{"caller_rva", caller}, {"checkpoint", checkpoint}, {"subweb", static_cast<uint16_t>(subweb)},
+         {"weapon_ordinal", ordinal}, {"epoch", native::observation_stamp()}});
+    return fallback;
+}
+
+void install_hands_restore(const engine::Binding& binding, HANDLE stop) {
+    engine::LocalMemory memory;
+    const struct { uint32_t rva; const char* bytes; uint32_t owner, call_length; } sites[] = {
+        {rva_best_weapon, "88542410565741554883ec4083b9d84e0000004d8be80fb6fa488bf17e0d4883", 0, 0},
+        {rva_weapon_mode_decl, "448bc283faff7507448b81e8190000488b51384d63c8496bc138488b84082001", 0, 0},
+        {rva_weapon_cast, "40534883ec20488bd94885c97427488b01ff50104885c0741c8b40683b05a6cb", 0, 0},
+        {0x1367790, "4533c033d2e8762c0f00488bd04885c07441486382e8190000488d0cc5640000", 0x1367530, 10},
+        {0x14641a2, "80bba24e0000000f848d00000041b1014533c033d2488bcbe85162ffff4885c0", 0x1464140, 29},
+        {0x13614f0, "8b8e5803000041b1014533c033d2e80d8f0f004c8bf84885c07517488b8e5803", 0x13612fd, 19},
+    };
+    for (const auto& site : sites) {
+        native::Target target{};
+        target.address = image_base + site.rva;
+        const auto hex = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
+        for (size_t i = 0; i < target.bytes.size(); ++i)
+            target.bytes[i] = static_cast<uint8_t>(hex(site.bytes[i*2])*16 + hex(site.bytes[i*2+1]));
+        std::array<uint8_t, 32> actual{};
+        const bool section = binding.image.contains(site.rva, actual.size(),
+            IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE);
+        const bool valid = section && !memory.copy(target.address, actual.data(), actual.size()).reason &&
+            actual == target.bytes && (!site.owner || native::function_window(memory, binding.image,
+                image_base + site.owner, target.address, site.call_length));
+        const auto validation = !valid ? SC_NATIVE_TARGET_BYTES : site.rva == rva_best_weapon ?
+            native::validate_target(memory, binding.image, target, stop, GetTickCount64() + 10000) : SC_NATIVE_NONE;
+        installation_trace.record(save::BStage::native_start,
+            validation ? save::BStatus::refused : save::BStatus::entered, "hands_restore_site", 0,
+            {{"rva", site.rva}, {"validation", validation}});
+        if (validation) return;
+    }
+    const auto target = reinterpret_cast<void*>(image_base + rva_best_weapon);
+    const auto created = MH_CreateHook(target, reinterpret_cast<void*>(best_weapon_detour),
+        reinterpret_cast<void**>(&original_best_weapon));
+    const auto enabled = created == MH_OK ? MH_EnableHook(target) : MH_UNKNOWN;
+    if (created == MH_OK && enabled != MH_OK) MH_RemoveHook(target);
+    installation_trace.record(save::BStage::native_start,
+        enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused, "hands_restore_install", 0,
+        {{"rva", rva_best_weapon}, {"create_status", created}, {"enable_status", enabled}});
 }
 
 uint32_t item_count(uintptr_t item) {
@@ -1464,6 +1570,8 @@ void install(const engine::Binding& binding, HANDLE stop) {
              {"observed2", actual_words[2]}, {"observed3", actual_words[3]}});
         if (!valid) return;
     }
+
+    install_hands_restore(binding, stop);
 
     constexpr uint32_t expected_vtable_slots[] = {0x1641b80, 0x16466a0, 0x1647be0, 0x355140};
     std::array<uintptr_t, std::size(expected_vtable_slots)> actual_vtable{};
