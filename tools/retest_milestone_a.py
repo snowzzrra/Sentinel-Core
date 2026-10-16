@@ -995,6 +995,7 @@ class Run:
         protection.require_stopped()
         self.recover_previous()
         params = self.source_arguments(self.config["OriginalBackupDirectory"])
+        params += ["--slot-data-revision", "0.7.0", "--mod-contract-revision", "2"]
         if self.config.get('RunBackupParent'):
             params += ['--run-backup-parent', self.config['RunBackupParent']]
         params += ["--ap-root", self.config["APRoot"], "--diagnostic-file", str(self.directory / "private/protection.private.json")]
@@ -1018,7 +1019,7 @@ class Run:
             return
         seed = "sentinel-a-" + self.state["run_id"]
         descriptor = root / (seed + ".txt")
-        text = "sentinel-test-session-v1\nseed_hex=" + seed.encode().hex() + "\nteam=0\nslot=1\ngeneration_fingerprint=" + uuid.uuid4().hex + uuid.uuid4().hex + "\nprovenance=synthetic-fixture\nroot=" + str(root) + "\n"
+        text = "sentinel-test-session-v3\nseed_hex=" + seed.encode().hex() + "\nteam=0\nslot=1\ngeneration_fingerprint=" + uuid.uuid4().hex + uuid.uuid4().hex + "\nslot_data_revision=0.7.0\nsession_mod_contract_revision=2\nprovenance=synthetic-fixture\nroot=" + str(root) + "\n"
         with descriptor.open("x", encoding="utf-8", newline="\n") as stream: stream.write(text)
         probe = Path(self.config["CandidateManifest"]).parent / "sentinel_probe.exe"
         record, raw, response = self.execute("namespace_prepare", [str(probe), "--save-session-prepare", str(descriptor)], 20)
@@ -1070,8 +1071,8 @@ class Run:
         source = self.directory / 'private/generated-slot.private.json'
         write_json(source, generated, create=True)
         fingerprint = sha(source)
-        base = ('sentinel-test-session-v2\nseed_hex=' + seed.encode().hex() + '\nteam=0\nslot=1\ngeneration_fingerprint=' +
-                fingerprint + '\nprovenance=synthetic-fixture\nroot=' + str(root) + '\ncampaign=base\nstarting_stage=base_start\ndifficulty=' +
+        base = ('sentinel-test-session-v3\nseed_hex=' + seed.encode().hex() + '\nteam=0\nslot=1\ngeneration_fingerprint=' +
+                fingerprint + '\nslot_data_revision=0.7.0\nsession_mod_contract_revision=2\nprovenance=synthetic-fixture\nroot=' + str(root) + '\ncampaign=base\nstarting_stage=base_start\ndifficulty=' +
                 str(options['difficulty']) + '\nintent=')
         descriptors = {}
         for phase in ('create', 'resume'):
@@ -1191,6 +1192,7 @@ class Run:
                 raise Refused('generated_slot_options_changed')
             if case['phase'] == 'prepare_resume':
                 params = self.source_arguments(self.config['OriginalBackupDirectory'])
+                params += ['--slot-data-revision', '0.7.0', '--mod-contract-revision', '2']
                 if self.config.get('RunBackupParent'):
                     params += ['--run-backup-parent', self.config['RunBackupParent']]
                 params += ['--ap-root', self.config['APRoot'], '--reference-directory', self.state['protection']['reference_directory'],

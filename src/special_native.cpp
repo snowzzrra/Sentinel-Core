@@ -2,6 +2,8 @@
 #include "native_target.h"
 #include "native_runtime.h"
 #include "local_controls.h"
+#include "ap_controls_native.h"
+#include "combat_presentation.h"
 #include "save_session.h"
 #include "inventory.h"
 #include "MinHook.h"
@@ -23,6 +25,7 @@
 #endif
 
 namespace sentinel::special {
+void present_combat_milestone(uintptr_t, const char*, uint64_t);
 namespace {
 
 std::atomic<bool> ready{false};
@@ -234,6 +237,7 @@ using WeaponInfoLabel = uint64_t(*)(uintptr_t, const char*, bool);
 WeaponInfoLabel original_weapon_info_label = nullptr;
 std::atomic<unsigned> configured_keys{0};
 #include "special_hud_native.h"
+#include "combat_progress_hud.h"
 std::atomic<uintptr_t> challenge_element{0};
 std::atomic<uintptr_t> completion_owner{0};
 std::atomic<uintptr_t> challenge_player{0};
@@ -392,6 +396,9 @@ void project_special_hud(uintptr_t element) {
             }
             bool clips_applied = false;
             hud::project(element, owner, graphics, keys, epoch, clips_applied);
+            const auto progress = combat::presentation().view(namespace_id);
+            hud::project_progress(graphics, progress);
+            if (progress.milestone) present_combat_milestone(current_player, namespace_id, progress.milestone);
             if (clips_applied) {
                 note_hud_update(element, epoch, true);
                 hud_trace.record(save::BStage::profile_capture, save::BStatus::succeeded,
@@ -1281,6 +1288,25 @@ bool test_physical_completion_owner() {
     return ok && stale && presented==1;
 }
 #endif
+void present_combat_milestone(uintptr_t player, const char* namespace_id, uint64_t milestone) {
+    static uint64_t presented_at = 0;
+    const auto now = GetTickCount64();
+    if (presented_at && now - presented_at < 5000) return;
+    const auto element = challenge_element.load(std::memory_order_acquire);
+    if (!element || challenge_player.load(std::memory_order_acquire) != player) return;
+    char text[64]{};
+    std::snprintf(text, sizeof(text), "KILLS %llu", milestone);
+    __try {
+        if (*reinterpret_cast<uintptr_t*>(element) != image_base + rva_mission_challenge_vtable) return;
+        auto append = reinterpret_cast<EarningsAppend>(image_base + rva_hud_earnings);
+#ifdef SC_NATIVE_TESTING
+        if (test_earnings_append) append = test_earnings_append;
+#endif
+        append(element, text, "", 5000, 0, 0);
+        combat::presentation().notice_presented(namespace_id, milestone);
+        presented_at = now;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
 void present_selection(uintptr_t p) {
     SnapshotFacts facts{};
 #ifdef SC_NATIVE_TESTING
@@ -1422,7 +1448,8 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
     const auto keys = configured_keys.load(std::memory_order_relaxed);
     DWORD foreground_pid = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &foreground_pid);
-    const bool enabled = installed && safe_gameplay && p && foreground_pid == GetCurrentProcessId();
+    const bool enabled = installed && safe_gameplay && p && foreground_pid == GetCurrentProcessId() &&
+        !ap_controls::input_inhibited();
     input_trace.record(save::BStage::special_input, enabled ? save::BStatus::succeeded : save::BStatus::pending,
         "input_gate", 0, {{"ready", installed}, {"safe_gameplay", safe_gameplay}, {"player", p != 0},
                          {"foreground", foreground_pid == GetCurrentProcessId()}, {"keys", keys}});

@@ -407,6 +407,9 @@ def verify_backup(destination, identity):
 
 
 def protect(args):
+    if (getattr(args, "slot_data_revision", None) != "0.7.0" or
+            type(getattr(args, "mod_contract_revision", None)) is not int or args.mod_contract_revision != 2):
+        raise Refused("slot-data 0.7.0 and mod contract 2 required", stage="session_contract")
     stage = "source_identity"
     try:
         return _protect(args)
@@ -551,6 +554,8 @@ def _protect(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("prepare", "verify"))
+    parser.add_argument("--slot-data-revision", required=True, choices=("0.7.0",))
+    parser.add_argument("--mod-contract-revision", required=True, type=int, choices=(2,))
     parser.add_argument("--steam-account", required=True)
     parser.add_argument("--steam-app-root", required=True)
     parser.add_argument("--local-provider-root", required=True)

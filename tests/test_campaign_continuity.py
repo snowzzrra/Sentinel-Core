@@ -169,11 +169,12 @@ class CampaignContinuity(unittest.TestCase):
             checkpoint.write_bytes(original[:-1])
             self.stage('resume', root, 3, 'refuse_configuration')
 
-    def test_v2_descriptor_requires_explicit_supported_immutable_options(self):
+    def test_descriptor_requires_explicit_supported_immutable_options(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-campaign-descriptor-') as root:
             path = Path(root) / 'input.txt'
-            valid = ('sentinel-test-session-v2\nseed_hex=74657374\nteam=0\nslot=1\ngeneration_fingerprint=' + 'b' * 64 +
-                '\nprovenance=synthetic-fixture\nroot=' + root + '\ncampaign=base\nstarting_stage=base_start\ndifficulty=3\nintent=create\n')
+            valid = ('sentinel-test-session-v3\nseed_hex=74657374\nteam=0\nslot=1\ngeneration_fingerprint=' + 'b' * 64 +
+                '\nslot_data_revision=0.7.0\nsession_mod_contract_revision=2\nprovenance=synthetic-fixture\nroot=' + root +
+                '\ncampaign=base\nstarting_stage=base_start\ndifficulty=3\nintent=create\n')
             for invalid in (valid.replace('difficulty=3\n', ''), valid.replace('difficulty=3', 'difficulty=4'),
                     valid.replace('difficulty=3', 'difficulty=-1'), valid.replace('intent=create', 'intent=guess'),
                     valid.replace('campaign=base', 'campaign=tag1')):

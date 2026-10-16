@@ -26,21 +26,13 @@ int local_controls_command(int argc, wchar_t** argv) {
             token[i] = static_cast<char>(argv[5][i]);
         }
     } else if (!std::wcscmp(argv[3], L"clear") && argc == 5) strcpy_s(token, "UNBOUND");
-    else if (!std::wcscmp(argv[3], L"reset") && argc == 5) strcpy_s(token, action ? "UNBOUND" : "F9");
+    else if (!std::wcscmp(argv[3], L"reset") && argc == 5) strcpy_s(token, sentinel::controls::token(reset_defaults[action]).c_str());
     else return 2;
     const auto vk = key(token);
     if (vk < 0) return 2;
-    bindings.keys[action] = vk;
-    if (bindings.conflict()) { std::fprintf(stderr, "Key already assigned to the other local action.\n"); return 2; }
-    const auto path = directory + L"\\" + files[action];
-    const auto temporary = path + L".tmp";
-    FILE* file = nullptr;
-    if (_wfopen_s(&file, temporary.c_str(), L"wb") || !file) return 1;
-    const bool written = std::fprintf(file, "%s %s\n", headers[action], token) > 0;
-    const bool closed = std::fclose(file) == 0;
-    if (!written || !closed || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        DeleteFileW(temporary.c_str()); return 1;
-    }
+    const auto result = write(directory, static_cast<unsigned>(action), vk);
+    if (result == WriteResult::conflict) { std::fprintf(stderr, "Key already assigned to the other local action.\n"); return 2; }
+    if (result != WriteResult::saved) return 1;
     std::printf("%s=%s; native_conflict=UNKNOWN\n", action ? "toggle" : "refill", token);
     return 0;
 }

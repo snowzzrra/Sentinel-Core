@@ -1,4 +1,8 @@
 #include "native_runtime.h"
+#include "combat_native.h"
+#include "expanded_native.h"
+#include "combat_presentation.h"
+#include "ap_controls_native.h"
 #include "inventory.h"
 #include "arsenal.h"
 #include "runes.h"
@@ -142,6 +146,7 @@ bool begin_event(uintptr_t root, bool change, uintptr_t descriptor, save::Campai
     }
     if (transition) transition->generation_before=lifetime.generation;
     lifetime.begin(change, known, (flag & 2) != 0, GetTickCount64(), GetCurrentThreadId());
+    combat::transition(lifetime.generation);
     if (event_depth == 1) loading_checkpoint = change && known && (flag & 2) != 0;
     if (transition) {
         transition->event_id=lifetime.sequence; transition->generation_after=lifetime.generation;
@@ -389,6 +394,9 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
     ReleaseSRWLockExclusive(&automap_lock);
 }
 
+void execute_client_command(const sc_command_request& request, sc_command_result& result, uintptr_t player) {
+    commands::execute_native(request, result, player);
+}
 void post_frame() {
     if (!accepting.load(std::memory_order_acquire) || fault.load(std::memory_order_acquire)) return;
     if (owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); return; }
@@ -481,6 +489,19 @@ void post_frame() {
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
     if (!why) reconcile_automap(expected_map_address, facts.current_map.bytes, scope.lifecycle_generation);
+    combat::Context combat_context{};
+    if (!why && player && gameplay_admitted()) {
+        combat_context.generation = scope.lifecycle_generation;
+        combat_context.stamp = before;
+        combat_context.sampled_at_ms = GetTickCount64();
+        combat_context.world = expected_map_address;
+        combat_context.player = player;
+        combat_context.owner_thread = GetCurrentThreadId();
+        combat_context.map = facts.current_map;
+        const auto& namespace_id = save::session().namespace_id();
+        if (namespace_id.size() == 64) std::memcpy(combat_context.namespace_id, namespace_id.c_str(), 65);
+    }
+    combat::observe(combat_context);
     if (!why && player) arsenal::tick_masteries(scope.lifecycle_generation, player);
     commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); });
     if (!slot) return;
@@ -524,7 +545,7 @@ void post_frame() {
         if (slot->is_inventory)
             inventory::execute_native(slot->inventory_request, slot->inventory_result);
         if (slot->is_command)
-            commands::execute_native(slot->command_request, slot->command_result, player);
+            execute_client_command(slot->command_request, slot->command_result, player);
         if (slot->is_arsenal)
             arsenal::execute_native(slot->arsenal_request, slot->arsenal_result);
         if (slot->is_runes)
@@ -590,6 +611,7 @@ void free_detour(uintptr_t root, uintptr_t slot) {
 }
 
 void prepare(const Snapshot& identity) {
+    combat::prepare(identity);
     save::configure_prelaunch();
     AcquireSRWLockExclusive(&lock);
     status = {}; status.size = sizeof(status); status.abi_version = SC_NATIVE_ABI_VERSION;
@@ -718,6 +740,14 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
             why=SC_NATIVE_EXCEPTION;
         }
+        if (!why && !stopping.load(std::memory_order_acquire) && !ap_controls::install(binding, stop_event)) {
+            save::session().campaign_run.refuse("native_ap_controls_installation_failed");
+            why = SC_NATIVE_EXCEPTION;
+        }
+        if (!why && !stopping.load(std::memory_order_acquire) && !expanded::install(binding, stop_event)) {
+            save::session().campaign_run.refuse("native_expanded_movement_installation_failed");
+            why = SC_NATIVE_EXCEPTION;
+        }
         // special checks the shared hud earnings entry before wup owns its detour
         if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
         // The WUP owner validates and patches the 13ce4c0 entry first; the
@@ -729,6 +759,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         if (!why && !stopping.load(std::memory_order_acquire)) arsenal::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) runes::install(binding, stop_event);
     if (!why && !stopping.load(std::memory_order_acquire)) deathlink::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire)) combat::install(binding, stop_event);
     if (!why && !stopping.load(std::memory_order_acquire)) install_automap(binding);
     if (!why && !stopping.load(std::memory_order_acquire)) install_fast_travel(binding);
         if (!why && !stopping.load(std::memory_order_acquire) && !campaign_menu::install(binding,stop_event)) {
@@ -744,7 +775,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
     }
     ReleaseSRWLockExclusive(&startup);
 }
-bool gameplay_admitted() { return gameplay_admitted_locked_scope(); }
+bool gameplay_admitted() { return !ap_controls::input_inhibited() && gameplay_admitted_locked_scope(); }
 bool checkpoint_loading() {
     return loading_checkpoint && event_depth == 1 &&
         event_thread.load(std::memory_order_acquire) == GetCurrentThreadId() &&
@@ -852,6 +883,15 @@ sc_campaign_result campaign_request(uint16_t operation,const sc_campaign_request
         save::session().namespace_id()==request.namespace_id;
     const auto out=campaign_menu::menu().request(operation,request,admitted,summary,rewards);
     ReleaseSRWLockShared(&lock); return out;
+}
+sc_combat_presentation_result combat_presentation_request(const sc_combat_presentation_request& request) {
+    AcquireSRWLockShared(&lock);
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    const bool admitted = same_scope(scope, request.execution.expected) &&
+        save::session().state() == save::SessionState::admitted && save::session().accepts_requests() &&
+        save::session().namespace_id() == request.namespace_id;
+    const auto result = combat::presentation().submit(request, scope, admitted);
+    ReleaseSRWLockShared(&lock); return result;
 }
 sc_weapon_points_result submit_weapon_points(const sc_weapon_points_request& request) {
     AcquireSRWLockExclusive(&lock);
@@ -996,6 +1036,9 @@ sc_save_backup_snapshot backup_result(const sc_save_backup_request& request, boo
     ReleaseSRWLockExclusive(&lock); return out;
 }
 bool stop() {
+    expanded::stop();
+    ap_controls::stop();
+    combat::stop();
     commands::disable();
     save::session().stop_requests();
     stopping.store(true, std::memory_order_release);
