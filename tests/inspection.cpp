@@ -276,9 +276,9 @@ void prelaunch_contract(const std::wstring& dll, const std::wstring& probe_path)
     lease.reset();
     {
         std::ofstream out(fixture_file, std::ios::binary);
-        out << "sentinel-test-session-v1\nseed_hex=61646d697373696f6e2d66697874757265\nteam=0\nslot=1\n"
+        out << "sentinel-test-session-v3\nseed_hex=61646d697373696f6e2d66697874757265\nteam=0\nslot=1\n"
             "generation_fingerprint=" << std::string(64, 'a') <<
-            "\nprovenance=synthetic-fixture\nroot=" << root.u8string() << '\n';
+            "\nslot_data_revision=0.7.0\nsession_mod_contract_revision=2\nprovenance=synthetic-fixture\nroot=" << root.u8string() << '\n';
         out.close(); CHECK(out.good());
     }
     CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", fixture_file.c_str()));
@@ -444,6 +444,14 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(context.result == ProbeResult::ok && context.snapshot.instance == initial.snapshot.instance);
     CHECK(context.context.current_map.reason == SC_REASON_PROFILE_UNRECOGNIZED);
     CHECK(context.context.fields[SC_CONTEXT_LOAD_SERIAL].reason == SC_CONTEXT_UNSUPPORTED);
+    sc_combat_query combat_query{}; std::memset(combat_query.namespace_id, 'a', 64);
+    combat_query.map_count = 1; strcpy_s(combat_query.maps[0], "game/sp/hellonearth/hellonearth");
+    const auto combat = query_combat(first.child.pid, 2000, combat_query);
+    CHECK(combat.result == ProbeResult::ok && combat.snapshot.instance == initial.snapshot.instance);
+    CHECK(combat.combat.abi_version == SC_COMBAT_ABI_VERSION && combat.combat.scope.pid == first.child.pid);
+    CHECK(combat.combat.scope.process_created == initial.snapshot.process_created);
+    CHECK(std::memcmp(combat.combat.scope.instance_id, initial.snapshot.instance.data(), 16) == 0);
+    CHECK(combat.combat.qualified_kills == 0 && !std::strcmp(combat.combat.namespace_id, combat_query.namespace_id));
     const auto context_json = probe(probe_path, args + L" --context --json", 0);
     CHECK(context_json.find("\"operation\":\"context\"") != std::string::npos);
     CHECK(context_json.find("\"core_version\":\"" SC_PRODUCT_VERSION "\"") != std::string::npos);

@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL save_storage line %d: %s (win32=%lu)\n", \
@@ -131,8 +132,9 @@ void identities_and_descriptor() {
     missing = a; missing.identity.slot.reset(); CHECK(!namespace_id(missing.identity, changed).ok());
     missing = a; missing.identity.seed.clear(); CHECK(!namespace_id(missing.identity, changed).ok());
     missing = a; missing.identity.generation_fingerprint.clear(); CHECK(!namespace_id(missing.identity, changed).ok());
-    const std::string text = "sentinel-test-session-v1\nseed_hex=666978747572652d73656564\nteam=0\nslot=1\n"
-        "generation_fingerprint=" + std::string(64, 'a') + "\nprovenance=synthetic-fixture\nroot=C:\\synthetic\n";
+    const std::string text = "sentinel-test-session-v3\nseed_hex=666978747572652d73656564\nteam=0\nslot=1\n"
+        "generation_fingerprint=" + std::string(64, 'a') + "\nslot_data_revision=0.7.0\nsession_mod_contract_revision=2\n"
+        "provenance=synthetic-fixture\nroot=C:\\synthetic\n";
     Descriptor parsed;
     CHECK(parse_descriptor(text, parsed).ok() && parsed.root == a.root);
     CHECK(namespace_id(parsed.identity, changed).ok() && changed == id);
@@ -152,6 +154,20 @@ void identities_and_descriptor() {
     CHECK(!parse_descriptor(text + "root=C:\\other\n", parsed).ok());
     CHECK(!parse_descriptor(text.substr(0, text.size() - 1), parsed).ok());
     CHECK(!parse_descriptor(std::string(2049, 'a'), parsed).ok());
+    for (const char* header : {"sentinel-test-session-v1", "sentinel-test-session-v2"}) {
+        auto unsupported = text;
+        unsupported.replace(0, std::strlen(header), header);
+        CHECK(!parse_descriptor(unsupported, parsed).ok());
+    }
+    for (const auto& revisions : {
+        std::pair{"slot_data_revision=0.7.0\n", "slot_data_revision=0.6.0\n"},
+        std::pair{"slot_data_revision=0.7.0\n", ""},
+        std::pair{"session_mod_contract_revision=2\n", "session_mod_contract_revision=1\n"},
+        std::pair{"session_mod_contract_revision=2\n", ""}}) {
+        auto unsupported = text;
+        unsupported.replace(unsupported.find(revisions.first), std::strlen(revisions.first), revisions.second);
+        CHECK(!parse_descriptor(unsupported, parsed).ok());
+    }
     auto malformed = text;
     malformed.replace(malformed.find("team=0"), 6, "team=00"); CHECK(!parse_descriptor(malformed, parsed).ok());
     malformed = text;

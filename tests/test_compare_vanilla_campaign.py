@@ -45,7 +45,8 @@ class CampaignComparisonTests(unittest.TestCase):
         (self.steam / "remote" / "PROFILE").write_bytes(b"fixture selection")
         (self.local / "settings.cfg").write_bytes(b"fixture settings")
         self.backup = self.root / "first-backup"
-        self.args = argparse.Namespace(action="prepare", steam_account="12345", steam_app_root=str(self.steam),
+        self.args = argparse.Namespace(action="prepare", steam_account="12345", slot_data_revision="0.7.0", mod_contract_revision=2,
+            steam_app_root=str(self.steam),
             local_provider_root=str(self.local), backup_directory=str(self.backup),
             ap_root=str(self.root / "ap"), uninstall_root=[str(self.root / "fixture-install")])
         stopped = mock.patch.object(protection, "require_stopped")

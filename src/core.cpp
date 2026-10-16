@@ -7,6 +7,7 @@
 #include "save_session.h"
 #include "sentinel_save_installation.h"
 #include "native_runtime.h"
+#include "combat_native.h"
 #include <cstring>
 #include <bcrypt.h>
 
@@ -115,6 +116,13 @@ sc_result sc_native_inspect(uint32_t abi, uint32_t size, sc_native_snapshot* sna
     if (abi != SC_NATIVE_ABI_VERSION) return SC_ABI_MISMATCH;
     if (!snapshot || size != sizeof(sc_native_snapshot)) return SC_INVALID_ARGUMENT;
     *snapshot = sentinel::native::inspect();
+    return SC_OK;
+}
+
+sc_result sc_combat_inspect(uint32_t abi, uint32_t size, const sc_combat_query* query, sc_combat_snapshot* snapshot) {
+    if (abi != SC_COMBAT_ABI_VERSION) return SC_ABI_MISMATCH;
+    if (!snapshot || size != sizeof(sc_combat_snapshot) || !query || !sentinel::combat::valid_query(*query)) return SC_INVALID_ARGUMENT;
+    *snapshot = sentinel::combat::inspect(*query);
     return SC_OK;
 }
 

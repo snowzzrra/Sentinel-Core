@@ -1,5 +1,7 @@
 #include "protocol.h"
 #include "commands.h"
+#include "combat_presentation.h"
+#include "combat.h"
 #include <cstring>
 
 namespace sentinel {
@@ -66,17 +68,49 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
                           sc_inventory_request* inventory, sc_arsenal_request* arsenal,
                           sc_runes_request* runes, sc_special_request* special,
                           sc_deathlink_request* deathlink, sc_automap_request* automap, sc_campaign_summary* summary,
-                          sc_campaign_rewards* rewards, sc_command_request* command) {
+                          sc_campaign_rewards* rewards, sc_command_request* command,
+                          sc_combat_presentation_request* combat_presentation, sc_combat_query* combat) {
     if (operation) *operation = inspect_operation;
     if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && op >= engine_operation && op <= command_release_operation) *operation = static_cast<uint16_t>(op);
+    if (operation && op >= engine_operation && op <= combat_presentation_operation) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op < inspect_operation || op > command_release_operation) return WireResult::unsupported_operation;
-    if (op >= command_submit_operation) {
+    if (op < inspect_operation || op > combat_presentation_operation) return WireResult::unsupported_operation;
+    if (op == combat_presentation_operation) {
+        if (length != 185) return WireResult::malformed;
+        if (r.number(8) != combat_presentation_capability) return WireResult::capability_unavailable;
+        Message identity = in;
+        Writer fixed{identity, 6}; fixed.number(diagnostic_submit_operation, 2); fixed.number(72, 4);
+        Writer capability{identity, header_size}; capability.number(diagnostic_capability, 8);
+        sc_combat_presentation_request value{};
+        const auto decoded = decode_request(identity, 88, nullptr, &value.execution);
+        if (decoded != WireResult::ok) return decoded;
+        r.pos = 88;
+        if (r.number(4) != SC_COMBAT_PRESENTATION_ABI_VERSION) return WireResult::incompatible_protocol;
+        for (auto& c : value.namespace_id) c = static_cast<char>(r.number(1));
+        r.u64(value.total); r.u64(value.target); r.u64(value.first_milestone);
+        r.u64(value.milestone); r.u64(value.milestone_step); r.u32(value.visible);
+        if (!r.valid || r.pos != size || !combat::valid_presentation(value)) return WireResult::malformed;
+        if (combat_presentation) *combat_presentation = value;
+        return WireResult::ok;
+    }
+    if (op == combat_operation) {
+        if (r.number(8) != combat_capability) return WireResult::capability_unavailable;
+        if (r.number(4) != SC_COMBAT_ABI_VERSION) return WireResult::incompatible_protocol;
+        const auto pid = static_cast<uint32_t>(r.number(4));
+        sc_combat_query value{};
+        r.text(value.namespace_id); r.u32(value.map_count);
+        if (value.map_count > SC_COMBAT_MAX_MAPS) return WireResult::malformed;
+        for (uint32_t n = 0; n < value.map_count; ++n) r.text(value.maps[n]);
+        if (!pid || !r.valid || r.pos != size || !combat::valid_query(value)) return WireResult::malformed;
+        if (diagnostic) diagnostic->expected.pid = pid;
+        if (combat) *combat = value;
+        return WireResult::ok;
+    }
+    if (op >= command_submit_operation && op <= command_release_operation) {
         if (length != 2193) return WireResult::malformed;
         if (r.number(8) != command_capability) return WireResult::capability_unavailable;
         Message identity = in;
@@ -1508,6 +1542,119 @@ const char* backup_state_name(uint32_t state) {
     constexpr const char* names[] = {"unknown", "queued", "claimed", "waiting_native", "copying", "copied",
         "complete", "failed", "rejected", "cancelled", "expired"};
     return state <= SC_BACKUP_EXPIRED ? names[state] : "invalid";
+}
+namespace {
+template<class C> bool combat_values(C& c, sc_combat_snapshot& value) {
+    scope_values(c, value.scope);
+    c.u32(value.availability); c.u32(value.reason);
+    c.u64(value.observation_gaps);
+    c.text(value.namespace_id); c.u64(value.qualified_kills);
+    if (value.availability > SC_NATIVE_RETAINED || value.reason > SC_NATIVE_EXCEPTION ||
+        std::strlen(value.namespace_id) != 64) return false;
+    for (size_t n = 0; n < 64; ++n) {
+        const auto ch = value.namespace_id[n];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return false;
+    }
+    return true;
+}
+}
+size_t encode_combat_request(Message& out, uint32_t pid, const sc_combat_query& query) {
+    if (!pid || !combat::valid_query(query)) return 0;
+    Writer w{out}; header(w, wire_version, combat_operation, 0, WireResult::ok);
+    w.number(combat_capability, 8); w.number(SC_COMBAT_ABI_VERSION, 4); w.number(pid, 4);
+    w.text(query.namespace_id); w.number(query.map_count, 4);
+    for (uint32_t n = 0; n < query.map_count; ++n) w.text(query.maps[n]);
+    Writer length{out, 8}; length.number(w.pos - header_size, 4);
+    return w.valid ? w.pos : 0;
+}
+size_t encode_combat_response(Message& out, WireResult result, const Snapshot& source, const sc_combat_snapshot& value) {
+    Writer w{out}; header(w, wire_version, combat_operation, 0, result);
+    if (result == WireResult::ok) {
+        w.number(combat_capability, 8);
+        w.number(source.pid, 4); w.number(source.process_created, 8);
+        for (auto b : source.instance) w.number(b, 1);
+        w.number(source.core.abi_version, 4); w.text(source.core.version); w.text(source.core.build_id);
+        w.number(SC_COMBAT_ABI_VERSION, 4);
+        auto copy = value;
+        if (!combat_values(w, copy)) return 0;
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4);
+    return w.valid ? w.pos : 0;
+}
+bool decode_combat_response(const Message& in, size_t size, WireResult& result, Snapshot& source, sc_combat_snapshot& value) {
+    if (size < header_size || size > max_message) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != combat_operation ||
+        r.number(4) != size - header_size) return false;
+    const auto code = r.number(4);
+    if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code);
+    if (result != WireResult::ok) return size == header_size;
+    if (r.number(8) != combat_capability) return false;
+    source = {}; value = {};
+    source.core.size = sizeof(source.core); value.size = sizeof(value); value.abi_version = SC_COMBAT_ABI_VERSION;
+    r.u32(source.pid); r.u64(source.process_created); for (auto& b : source.instance) r.byte(b);
+    r.u32(source.core.abi_version); r.text(source.core.version); r.text(source.core.build_id);
+    if (r.number(4) != SC_COMBAT_ABI_VERSION || source.core.abi_version != SC_ABI_VERSION ||
+        !source.pid || !source.process_created || std::strlen(source.core.build_id) != 64) return false;
+    for (size_t n = 0; n < 64; ++n) {
+        const auto ch = source.core.build_id[n];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return false;
+    }
+    if (!combat_values(r, value) || value.scope.pid != source.pid ||
+        value.scope.process_created != source.process_created ||
+        std::memcmp(value.scope.instance_id, source.instance.data(), 16)) return false;
+    return r.valid && r.pos == size;
+}
+namespace {
+template<class C> bool combat_presentation_values(C& c, sc_combat_presentation_result& value) {
+    c.u32(value.abi_version); scope_values(c, value.scope); c.u64(value.request_id);
+    for (auto& b : value.nonce) c.byte(b);
+    c.u32(value.status); c.u32(value.reason); c.u64(value.total); c.u64(value.target);
+    c.u64(value.milestone); c.u32(value.visible);
+    return value.abi_version == SC_COMBAT_PRESENTATION_ABI_VERSION && value.status <= 1 &&
+        value.reason <= SC_NATIVE_EXCEPTION && value.visible <= 1 &&
+        (value.status == 0) == (value.reason == SC_NATIVE_NONE);
+}
+}
+size_t encode_combat_presentation_request(Message& out, const sc_combat_presentation_request& request) {
+    if (!combat::valid_presentation(request)) return 0;
+    const auto end = encode_native_request(out, diagnostic_submit_operation, request.execution);
+    Writer h{out}; header(h, wire_version, combat_presentation_operation, 185, WireResult::ok);
+    h.number(combat_presentation_capability, 8);
+    Writer w{out, end}; w.number(SC_COMBAT_PRESENTATION_ABI_VERSION, 4);
+    for (auto ch : request.namespace_id) w.number(static_cast<uint8_t>(ch), 1);
+    w.number(request.total, 8); w.number(request.target, 8); w.number(request.first_milestone, 8);
+    w.number(request.milestone, 8); w.number(request.milestone_step, 8); w.number(request.visible, 4);
+    return w.valid ? w.pos : 0;
+}
+size_t encode_combat_presentation_response(Message& out, WireResult result, const Snapshot& source,
+                                         const sc_combat_presentation_result& value) {
+    Writer w{out}; header(w, wire_version, combat_presentation_operation, 0, result);
+    if (result == WireResult::ok) {
+        w.number(combat_presentation_capability, 8); w.number(source.pid, 4); w.number(source.process_created, 8);
+        for (auto b : source.instance) w.number(b, 1);
+        w.number(source.core.abi_version, 4); w.text(source.core.version); w.text(source.core.build_id);
+        auto copy = value; if (!combat_presentation_values(w, copy)) return 0;
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.valid ? w.pos : 0;
+}
+bool decode_combat_presentation_response(const Message& in, size_t size, WireResult& result, Snapshot& source,
+                                       sc_combat_presentation_result& value) {
+    if (size < header_size || size > max_message) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != combat_presentation_operation ||
+        r.number(4) != size - header_size) return false;
+    const auto code = r.number(4); if (code > static_cast<uint32_t>(WireResult::malformed)) return false;
+    result = static_cast<WireResult>(code); if (result != WireResult::ok) return size == header_size;
+    if (r.number(8) != combat_presentation_capability) return false;
+    source = {}; value = {}; source.core.size = sizeof(source.core); value.size = sizeof(value);
+    r.u32(source.pid); r.u64(source.process_created); for (auto& b : source.instance) r.byte(b);
+    r.u32(source.core.abi_version); r.text(source.core.version); r.text(source.core.build_id);
+    return source.core.abi_version == SC_ABI_VERSION && combat_presentation_values(r, value) &&
+        r.valid && r.pos == size && value.scope.pid == source.pid &&
+        value.scope.process_created == source.process_created &&
+        !std::memcmp(value.scope.instance_id, source.instance.data(), 16);
 }
 size_t encode_native_request(Message& out, uint16_t op, const sc_diagnostic_request& request, uint64_t after) {
     Writer w{out}; header(w, wire_version, op, 0, WireResult::ok);

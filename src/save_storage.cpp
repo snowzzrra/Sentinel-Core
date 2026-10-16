@@ -528,18 +528,18 @@ const char* outcome_name(Outcome outcome) {
 }
 Result parse_descriptor(std::string_view text, Descriptor& descriptor) {
     descriptor = {};
-    constexpr std::string_view magic = "sentinel-test-session-v1\n";
-    const bool campaign = text.substr(0, magic.size()) == "sentinel-test-session-v2\n";
-    if (text.size() > metadata_limit || (!campaign && text.substr(0, magic.size()) != magic) ||
+    constexpr std::string_view magic = "sentinel-test-session-v3\n";
+    if (text.size() > metadata_limit || text.substr(0, magic.size()) != magic ||
         text.find('\r') != std::string_view::npos || text.find('\0') != std::string_view::npos)
         return {Outcome::invalid_descriptor};
     text.remove_prefix(magic.size());
     Descriptor parsed;
     std::string_view value;
-    if (!identity_fields(text, parsed.identity) || !line(text, "provenance=", value) ||
+    if (!identity_fields(text, parsed.identity) || !line(text, "slot_data_revision=", value) || value != "0.7.0" ||
+        !line(text, "session_mod_contract_revision=", value) || value != "2" || !line(text, "provenance=", value) ||
         value != "synthetic-fixture" || !line(text, "root=", value) || !utf8(value, parsed.root))
         return {Outcome::invalid_descriptor};
-    if (campaign) {
+    if (!text.empty()) {
         if (!line(text, "campaign=", value) || (value != "base" && value != "unified"))
             return {Outcome::invalid_descriptor};
         const bool unified = value == "unified";

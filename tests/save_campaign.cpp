@@ -15,6 +15,7 @@
 #include "protocol.h"
 #include "arsenal.h"
 #include "special.h"
+#include "ap_controls_native.h"
 #include <windows.h>
 #include <array>
 #include <cstdio>
@@ -246,6 +247,10 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
+    if (defect==L"controls_focus") {
+        CHECK(sentinel::ap_controls::test_text_capture());
+        std::puts("PASS text capture inhibits AP input until close or destruction"); return 0;
+    }
     if (defect==L"presentation_edges") {
         CHECK(sentinel::campaign_menu::test_question_material());
         CHECK(sentinel::campaign_menu::test_physical_completion_edges());

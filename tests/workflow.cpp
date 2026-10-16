@@ -20,8 +20,8 @@ int main() {
         const uint64_t created = (static_cast<uint64_t>(creation.dwHighDateTime)<<32) | creation.dwLowDateTime;
         const std::string run(32,'a'), reference(64,'b');
         const auto text = "sentinel-run-v1\nrun=" + run + "\nprotection=" + reference + "\nowner=" + std::to_string(GetCurrentProcessId()) +
-            "\ncreated=" + std::to_string(created) + "\nsentinel-test-session-v1\nseed_hex=74657374\nteam=0\nslot=1\ngeneration_fingerprint=" +
-            std::string(64,'c') + "\nprovenance=synthetic-fixture\nroot=" + root.u8string() + "\n";
+            "\ncreated=" + std::to_string(created) + "\nsentinel-test-session-v3\nseed_hex=74657374\nteam=0\nslot=1\ngeneration_fingerprint=" +
+            std::string(64,'c') + "\nslot_data_revision=0.7.0\nsession_mod_contract_revision=2\nprovenance=synthetic-fixture\nroot=" + root.u8string() + "\n";
         const auto file = root / "prelaunch.txt";
         sentinel::storage::Descriptor descriptor;
         bool requested = false;

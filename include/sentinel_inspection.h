@@ -15,6 +15,7 @@
 #include "sentinel_special.h"
 #include "sentinel_deathlink.h"
 #include "sentinel_commands.h"
+#include "sentinel_combat.h"
 #include "sentinel_automap.h"
 #include <array>
 #include <cstddef>
@@ -74,6 +75,10 @@ constexpr uint16_t automap_operation = 45;
 constexpr uint16_t command_submit_operation = 46, command_result_operation = 47,
     command_cancel_operation = 48, command_release_operation = 49;
 constexpr uint64_t command_capability = 2097152;
+constexpr uint16_t combat_operation = 50;
+constexpr uint64_t combat_capability = 4194304;
+constexpr uint16_t combat_presentation_operation = 51;
+constexpr uint64_t combat_presentation_capability = 8388608;
 constexpr uint64_t automap_capability = 262144;
 constexpr size_t max_request = 16384, max_message = 16384;
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
@@ -120,6 +125,8 @@ struct Inspection {
     sc_special_result special{};
     sc_deathlink_result deathlink{};
     sc_command_result command{};
+    sc_combat_snapshot combat{};
+    sc_combat_presentation_result combat_presentation{};
     sc_automap_result automap{};
 };
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required = inspect_capability);
@@ -145,6 +152,8 @@ const char* save_write_state_name(uint32_t state);
 const char* save_session_state_name(uint32_t state);
 const char* save_session_fault_name(uint32_t fault);
 Inspection query_native(uint32_t pid, uint32_t timeout_ms, uint64_t after_event = 0);
+Inspection query_combat(uint32_t pid, uint32_t timeout_ms, const sc_combat_query&);
+Inspection query_combat_presentation(uint32_t pid, uint32_t timeout_ms, const sc_combat_presentation_request&);
 Inspection query_diagnostic(uint32_t pid, uint32_t timeout_ms, uint16_t operation,
                             const sc_diagnostic_request& request);
 const char* native_reason_name(uint32_t reason);
