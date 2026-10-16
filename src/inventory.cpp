@@ -3,6 +3,13 @@
 #include <algorithm>
 
 namespace sentinel::inventory {
+uint8_t capacity_stage(uint32_t owned, uint32_t active, int saved_count, int host_level) {
+    if (saved_count < 0 || saved_count > SC_INVENTORY_MAX_CAPACITY_TIER ||
+        host_level != saved_count || owned != ((1u << saved_count) - 1) || active != owned)
+        return SC_INVENTORY_UNKNOWN_TIER;
+    return static_cast<uint8_t>(saved_count);
+}
+
 namespace {
 SRWLOCK state_lock = SRWLOCK_INIT;
 SnapshotFacts shared_state{0, 0, 0, 0, 0, 0, 0, 0};

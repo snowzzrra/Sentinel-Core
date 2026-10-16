@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstring>
 #include <algorithm>
+#include <cstdio>
 
 namespace sentinel::inventory {
 namespace {
@@ -18,6 +19,42 @@ uintptr_t player(void*) {
         const auto map = *reinterpret_cast<uintptr_t*>(engine_root + 0x50);
         return map ? reinterpret_cast<uintptr_t(*)(uintptr_t, uint32_t)>(image_base + 0x69af70)(map, 0) : 0;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+uint8_t read_capacity(uintptr_t p, uintptr_t inv, uintptr_t type, uintptr_t perk_type,
+                      const char* family, unsigned index) {
+    __try {
+        const auto suit = p + 0x192f0;
+        const auto list = *reinterpret_cast<const uintptr_t**>(suit + 8);
+        const auto count = *reinterpret_cast<const int*>(suit + 0x10);
+        if (count < 0 || count > 4096 || (count && !list)) return SC_INVENTORY_UNKNOWN_TIER;
+        const char* host_path = "abilities/environmentsuit";
+        const auto host_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
+            image_base + 0x17aa5d0)(type, host_path, 1);
+        if (!host_decl) return SC_INVENTORY_UNKNOWN_TIER;
+        const auto host_name = *reinterpret_cast<const char**>(host_decl + 8);
+        if (!host_name || std::strcmp(host_name, host_path)) return SC_INVENTORY_UNKNOWN_TIER;
+        const auto host = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
+            image_base + 0x1690660)(inv, host_decl);
+        if (!host) return SC_INVENTORY_UNKNOWN_TIER;
+        uint32_t owned = 0, active = 0;
+        for (unsigned stage = 0; stage < 4; ++stage) {
+            char path[80]{};
+            std::snprintf(path, sizeof(path), "perk/player/argent/%s_capacity_%u", family, stage);
+            const auto decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
+                image_base + 0x17aa5d0)(perk_type, path, 1);
+            if (!decl) return SC_INVENTORY_UNKNOWN_TIER;
+            const auto name = *reinterpret_cast<const char**>(decl + 8);
+            if (!name || std::strcmp(name, path)) return SC_INVENTORY_UNKNOWN_TIER;
+            for (int i = 0; i < count; ++i)
+                if (list[i] == decl) { owned |= 1u << stage; break; }
+            if (reinterpret_cast<uint8_t(*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0)(p + 0x3b40, decl))
+                active |= 1u << stage;
+        }
+        return capacity_stage(owned, active,
+            *reinterpret_cast<const int*>(suit + 0x2b8 + 4 * index),
+            *reinterpret_cast<const int*>(host + 0x318 + 4 * index));
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return SC_INVENTORY_UNKNOWN_TIER; }
 }
 
 bool read(void*, uintptr_t p, SnapshotFacts& facts) {
@@ -90,6 +127,9 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         }
         const auto perk_type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631f90)();
         if (!perk_type) return true;
+        facts.health_tier = read_capacity(p, inv, type, perk_type, "health", 0);
+        facts.armor_tier = read_capacity(p, inv, type, perk_type, "armor", 1);
+        facts.ammo_tier = read_capacity(p, inv, type, perk_type, "ammo", 2);
         const char* const blood_punch[] = {
             "perk/player/blood_punch/base", "perk/player/blood_punch/area_of_effect",
             "perk/player/blood_punch/ai_charge_rate", "perk/player/blood_punch/max_charges"};
@@ -197,6 +237,8 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {0x1631d90, "488d05a9d00603c3cccccccccccccccc488d05f9d10603c3cccccccccccccccc"},
         {0x4a1870, "8b4140c3cccccccccccccccccccccccc40534883ec20488bd9488b4a104883c1"},
         {0xfe37f0, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
+        {0x1284720, "48895c24185556574154415541564157488dac2450c0ffffb8b0400000e85e76"},
+        {0xfd8330, "4056574883ec58488b059a661d034833c44889442448488bf24889ac24880000"},
     };
     for (const auto& site : sites) {
         std::array<uint8_t, 32> expected{}, actual{};
