@@ -59,6 +59,7 @@ public:
     Publication publish(const Capture&, const DeathRecord&, uint64_t now,
                         uint64_t stamp, uint32_t thread) noexcept;
     bool ready(uint64_t now) const noexcept;
+    bool confirmed_dead(uintptr_t world, uintptr_t object, uint32_t slot, uint32_t spawn_id) const noexcept;
     uint64_t generation() const noexcept { return generation_; }
     void snapshot(const sc_combat_query&, sc_combat_snapshot&) const noexcept;
 private:

@@ -745,7 +745,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             why = SC_NATIVE_EXCEPTION;
         }
         if (!why && !stopping.load(std::memory_order_acquire) && !expanded::install(binding, stop_event)) {
-            save::session().campaign_run.refuse("native_expanded_movement_installation_failed");
+            save::session().campaign_run.refuse("native_expanded_installation_failed");
             why = SC_NATIVE_EXCEPTION;
         }
         // special checks the shared hud earnings entry before wup owns its detour

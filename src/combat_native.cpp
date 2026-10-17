@@ -4,6 +4,11 @@
 #include <MinHook.h>
 #include <atomic>
 #include <cstring>
+#ifdef SC_NATIVE_TESTING
+#include <memory>
+#include <thread>
+#include <vector>
+#endif
 
 namespace sentinel::combat {
 namespace {
@@ -44,7 +49,7 @@ void register_detour(uintptr_t world, uintptr_t object, int32_t requested_slot,
     if (!enabled.load(std::memory_order_acquire) || world != primary_world()) return;
     uint32_t slot = 0, spawn_id = 0;
     if (!object_identity(world, object, slot, spawn_id)) { ++observation_gaps; return; }
-    if (!TryAcquireSRWLockExclusive(&lock)) { ++observation_gaps; return; }
+    AcquireSRWLockExclusive(&lock);
     model.registered(world, object, slot, spawn_id);
     ReleaseSRWLockExclusive(&lock);
 }
@@ -55,7 +60,7 @@ Capture capture(uintptr_t compiler, uintptr_t victim) {
     if (!world || compiler != world + 0xac660) return value;
     uint32_t slot = 0, spawn_id = 0;
     if (!object_identity(world, victim, slot, spawn_id)) { ++observation_gaps; return value; }
-    if (!TryAcquireSRWLockExclusive(&lock)) { ++observation_gaps; return value; }
+    AcquireSRWLockExclusive(&lock);
     value = model.capture(world, victim, slot, spawn_id, GetTickCount64(),
                           native::observation_stamp(), GetCurrentThreadId());
     ReleaseSRWLockExclusive(&lock);
@@ -83,8 +88,8 @@ void notify_detour(uintptr_t analytics, const void* record) {
         pending_death->context.world && analytics == pending_death->context.world + 0xac678) {
         std::array<uint8_t, 0x128> bytes{};
         if (!read(reinterpret_cast<uintptr_t>(record), bytes)) ++observation_gaps;
-        else if (!TryAcquireSRWLockExclusive(&lock)) ++observation_gaps;
         else {
+            AcquireSRWLockExclusive(&lock);
             const auto result = model.publish(*pending_death, decode_record(bytes), GetTickCount64(),
                                                native::observation_stamp(), GetCurrentThreadId());
             if (result == Publication::missing_registration) ++observation_gaps;
@@ -148,7 +153,7 @@ void transition(uint64_t generation) {
 }
 void observe(const Context& context) {
     if (!enabled.load(std::memory_order_acquire)) return;
-    if (!TryAcquireSRWLockExclusive(&lock)) { ++observation_gaps; return; }
+    AcquireSRWLockExclusive(&lock);
     model.context(context);
     ReleaseSRWLockExclusive(&lock);
 }
@@ -165,8 +170,111 @@ sc_combat_snapshot inspect(const sc_combat_query& query) {
     ReleaseSRWLockShared(&lock);
     return out;
 }
+bool confirmed_dead(uintptr_t world, uintptr_t actor) {
+    if (!enabled.load(std::memory_order_acquire)) return false;
+    uint32_t slot = 0, spawn_id = 0;
+    if (!object_identity(world, actor, slot, spawn_id)) return false;
+    AcquireSRWLockShared(&lock);
+    const auto dead = model.confirmed_dead(world, actor, slot, spawn_id);
+    ReleaseSRWLockShared(&lock);
+    return dead;
+}
 void stop() {
     enabled.store(false, std::memory_order_release);
     install_reason.store(SC_NATIVE_STOPPED);
 }
+#ifdef SC_NATIVE_TESTING
+namespace {
+template<class F> void with_combat_reader(F operation) {
+    std::atomic<bool> acquired{false}, begun{false};
+    std::thread reader([&] {
+        AcquireSRWLockShared(&lock);
+        acquired.store(true);
+        while (!begun.load()) SwitchToThread();
+        Sleep(20);
+        ReleaseSRWLockShared(&lock);
+    });
+    while (!acquired.load()) SwitchToThread();
+    begun.store(true);
+    operation();
+    reader.join();
+}
+std::array<uint8_t, 0x128> test_death_record{};
+void test_register(uintptr_t, uintptr_t, int32_t, uint32_t, uint8_t, uint8_t) {}
+void test_notify(uintptr_t, const void*) {}
+void test_dispatch(uintptr_t compiler, uintptr_t, uintptr_t, uintptr_t, int32_t, int32_t,
+                   uintptr_t, const void*, uint8_t, float) {
+    with_combat_reader([&] { notify_detour(compiler + 0x18, test_death_record.data()); });
+}
+}
+bool test_observation_contention() {
+    const auto saved_model = std::make_unique<Model>(model);
+    const auto saved_root = root_address;
+    const auto saved_enabled = enabled.load();
+    const auto saved_gaps = observation_gaps.load();
+    const auto saved_register = original_register;
+    const auto saved_dispatch = original_dispatch;
+    const auto saved_notify = original_notify;
+    std::vector<uint8_t> world(0x21b10);
+    std::array<uint8_t, 0x58> root{};
+    std::array<uint8_t, 0x18> victim{};
+    const auto world_address = reinterpret_cast<uintptr_t>(world.data());
+    const auto victim_address = reinterpret_cast<uintptr_t>(victim.data());
+    const uint32_t slot = 1, spawn_id = 7;
+    std::memcpy(root.data() + 0x50, &world_address, sizeof(world_address));
+    std::memcpy(victim.data() + 0x10, &slot, sizeof(slot));
+    std::memcpy(world.data() + 0x1af8 + slot * 8, &victim_address, sizeof(victim_address));
+    std::memcpy(world.data() + 0x21af8 + slot * 4, &spawn_id, sizeof(spawn_id));
+    root_address = reinterpret_cast<uintptr_t>(root.data());
+    original_register = test_register;
+    original_dispatch = test_dispatch;
+    original_notify = test_notify;
+    enabled.store(true);
+    model.transition(1);
+    Context context{};
+    context.generation = 1;
+    context.stamp = native::observation_stamp();
+    context.sampled_at_ms = GetTickCount64();
+    context.world = world_address;
+    context.player = 1;
+    context.owner_thread = GetCurrentThreadId();
+    std::memset(context.namespace_id, 'f', 64);
+    std::memcpy(context.map.bytes, "e1m1_intro", sizeof("e1m1_intro"));
+    context.map.length = static_cast<uint32_t>(std::strlen(context.map.bytes));
+    context.map.validity = SC_OBSERVATION_OBSERVED;
+    sc_combat_query query{};
+    std::memcpy(query.namespace_id, context.namespace_id, sizeof(query.namespace_id));
+    query.map_count = 1;
+    std::memcpy(query.maps[0], context.map.bytes, sizeof(query.maps[0]));
+    const auto before = inspect(query).qualified_kills;
+    with_combat_reader([&] { observe(context); });
+    with_combat_reader([&] { register_detour(world_address, victim_address, slot, spawn_id, 0, 0); });
+    const auto initially_alive = !confirmed_dead(world_address, victim_address);
+    test_death_record = {};
+    const auto field = [&](size_t offset, auto value) {
+        std::memcpy(test_death_record.data() + offset, &value, sizeof(value));
+    };
+    field(0x48, spawn_id);
+    field(0x4c, int32_t{1});
+    field(0x38, int32_t{1});
+    field(0xf0, int64_t{1});
+    field(0x124, int32_t{1});
+    const auto die = [&] { dispatch_detour(world_address + 0xac660, 0, 0, victim_address, 0, 0, 0, nullptr, 0, 1); };
+    with_combat_reader(die);
+    die();
+    const auto result = inspect(query);
+    const auto passed = initially_alive && confirmed_dead(world_address, victim_address) &&
+        result.qualified_kills == before + 1 && result.observation_gaps == saved_gaps;
+    register_detour(world_address, victim_address, slot, spawn_id, 0, 0);
+    const auto reused = !confirmed_dead(world_address, victim_address);
+    model = *saved_model;
+    root_address = saved_root;
+    enabled.store(saved_enabled);
+    observation_gaps.store(saved_gaps);
+    original_register = saved_register;
+    original_dispatch = saved_dispatch;
+    original_notify = saved_notify;
+    return passed && reused;
+}
+#endif
 }

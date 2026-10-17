@@ -62,6 +62,11 @@ bool Model::ready(uint64_t now) const noexcept {
         context_.map.length && context_.map.length < SC_CONTEXT_MAP_CAPACITY &&
         now >= context_.sampled_at_ms && now - context_.sampled_at_ms <= 1000;
 }
+bool Model::confirmed_dead(uintptr_t world, uintptr_t object, uint32_t slot, uint32_t spawn_id) const noexcept {
+    if (slot >= registrations_.size()) return false;
+    const auto& entry = registrations_[slot];
+    return entry.emitted && entry.world == world && entry.object == object && entry.spawn_id == spawn_id;
+}
 void Model::registered(uintptr_t world, uintptr_t object, uint32_t slot, uint32_t spawn_id) noexcept {
     if (!world || !object || slot >= registrations_.size() || spawn_id == 0x1fffffeu) return;
     registrations_[slot] = {world, object, spawn_id, ++serial_};
