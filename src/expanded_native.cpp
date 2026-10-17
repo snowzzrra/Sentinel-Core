@@ -15,6 +15,7 @@ using Movement = float(__fastcall*)(uintptr_t);
 using Controller = float(__fastcall*)(uintptr_t, uintptr_t, uintptr_t, float);
 using DefinitionName = const char*(__fastcall*)(uintptr_t);
 Movement original_movement = nullptr;
+Movement original_haste = nullptr;
 Controller original_controller = nullptr;
 DefinitionName definition_name = nullptr;
 struct HostList { uintptr_t* data; int32_t count, capacity; uint8_t allocator[8]; };
@@ -192,14 +193,18 @@ float __fastcall movement_detour(uintptr_t ai) {
     const auto value = original_movement(ai);
     return !stopped.load(std::memory_order_acquire) && active_ai == ai ? value * active_speed : value;
 }
+float __fastcall haste_detour(uintptr_t ai) {
+    const auto value = original_haste(ai);
+    return stopped.load(std::memory_order_acquire) ? value : scale_movement(ai, value);
+}
 float __fastcall controller_detour(uintptr_t controller, uintptr_t frame, uintptr_t output, float distance) {
     if (stopped.load(std::memory_order_acquire)) return original_controller(controller, frame, output, distance);
     const auto previous_ai = active_ai;
     const auto previous_speed = active_speed;
     active_ai = *reinterpret_cast<const uintptr_t*>(controller);
     active_speed = scale_movement(active_ai, 1.0f);
-    // scale distance and limits together; animation playback keeps its native factor.
-    const auto result = original_controller(controller, frame, output, distance * active_speed);
+    // haste scales animation displacement; only the controller limits need the same factor.
+    const auto result = original_controller(controller, frame, output, distance);
     active_ai = previous_ai;
     active_speed = previous_speed;
     return result;
@@ -210,6 +215,9 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
     const native::Target movement{binding.image.base + 0x7c7940,
         {0x48,0x8b,0x05,0x09,0xf6,0xe3,0x03,0x0f,0x57,0xc9,0xf3,0x0f,0x10,0x40,0x0c,0x0f,
          0x2f,0xc1,0x73,0x0f,0x48,0x8b,0x81,0x60,0x59,0x00,0x00,0xf3,0x0f,0x10,0x80,0xe8}};
+    const native::Target haste{binding.image.base + 0x7c78f0,
+        {0x48,0x8b,0x05,0xd9,0xf6,0xe3,0x03,0x0f,0x57,0xc9,0xf3,0x0f,0x10,0x40,0x0c,0x0f,
+         0x2f,0xc1,0x73,0x1f,0x48,0x8b,0x81,0x60,0x59,0x00,0x00,0xf3,0x0f,0x10,0x80,0xf0}};
     const native::Target name{binding.image.base + 0x6e4e90,
         {0x48,0x8b,0x81,0xa8,0x00,0x00,0x00,0x48,0x85,0xc0,0x75,0x08,0x48,0x8d,0x05,0x1d,
          0x2b,0x37,0x02,0xc3,0x48,0x8b,0x40,0x08,0xc3,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc}};
@@ -231,6 +239,7 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
     engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 10000;
     if (native::validate_leaf_target(memory, binding.image, movement, 36, stop_event, deadline) ||
+        native::validate_leaf_target(memory, binding.image, haste, 52, stop_event, deadline) ||
         native::validate_leaf_target(memory, binding.image, name, 25, stop_event, deadline) ||
         native::validate_target(memory, binding.image, controller, stop_event, deadline) ||
         native::validate_target(memory, binding.image, hosts, stop_event, deadline) ||
@@ -243,13 +252,16 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
     native_admission = reinterpret_cast<NativeAdmission>(binding.image.base + 0xb99c80);
 
     world_global = binding.image.base + 0x45f7370;
-    void* sites[] = {reinterpret_cast<void*>(movement.address), reinterpret_cast<void*>(controller.address),
+    void* sites[] = {reinterpret_cast<void*>(movement.address), reinterpret_cast<void*>(haste.address),
+                     reinterpret_cast<void*>(controller.address),
                      reinterpret_cast<void*>(hosts.address), reinterpret_cast<void*>(spawn.address),
                      reinterpret_cast<void*>(group.address), reinterpret_cast<void*>(registered.address)};
-    void* detours[] = {reinterpret_cast<void*>(movement_detour), reinterpret_cast<void*>(controller_detour),
+    void* detours[] = {reinterpret_cast<void*>(movement_detour), reinterpret_cast<void*>(haste_detour),
+                       reinterpret_cast<void*>(controller_detour),
                        reinterpret_cast<void*>(occupied_hosts_detour), reinterpret_cast<void*>(spawn_detour),
                        reinterpret_cast<void*>(group_detour), reinterpret_cast<void*>(register_spawn_detour)};
-    void** originals[] = {reinterpret_cast<void**>(&original_movement), reinterpret_cast<void**>(&original_controller),
+    void** originals[] = {reinterpret_cast<void**>(&original_movement), reinterpret_cast<void**>(&original_haste),
+                           reinterpret_cast<void**>(&original_controller),
                            reinterpret_cast<void**>(&original_hosts), reinterpret_cast<void**>(&original_spawn),
                            reinterpret_cast<void**>(&original_group), reinterpret_cast<void**>(&original_register_spawn)};
     size_t created = 0;
@@ -273,14 +285,18 @@ void stop() { stopped.store(true, std::memory_order_release); }
 #include <memory>
 bool test_movement_inputs() {
     static float distances[4]{}, limits[4]{};
+    static float native_haste = 1.0f;
+    static bool restored_actor = false;
     static bool abi = true;
     const auto previous_movement = original_movement;
+    const auto previous_haste = original_haste;
     const auto previous_controller = original_controller;
     const auto previous_name = definition_name;
     const auto was_stopped = stopped.exchange(false);
     original_movement = [](uintptr_t) { return 2.0f; };
+    original_haste = [](uintptr_t) { return native_haste; };
     definition_name = [](uintptr_t ai) -> const char* {
-        if (ai == 1) return "ap_v070_ai_slow__ap_v070_s00050";
+        if (ai == 1) return restored_actor ? "ap_v070_ai_new__ap_v070_s00025" : "ap_v070_ai_slow__ap_v070_s00050";
         if (ai == 2) return "ap_v070_ai_fast__ap_v070_s00200";
         return "ai_fodder_imp";
     };
@@ -289,22 +305,32 @@ bool test_movement_inputs() {
         abi = abi && frame == 11 && output == 12;
         if (ai == 1) {
             uintptr_t child = 2;
-            controller_detour(reinterpret_cast<uintptr_t>(&child), frame, output, 0.25f);
+            controller_detour(reinterpret_cast<uintptr_t>(&child), frame, output, 0.25f * haste_detour(child));
         }
         distances[ai] = distance;
         limits[ai] = movement_detour(ai);
         return distance;
     };
     uintptr_t ai = 1;
-    const auto result = controller_detour(reinterpret_cast<uintptr_t>(&ai), 11, 12, 0.5f);
+    native_haste = 1.0f; restored_actor = false;
+    const auto result = controller_detour(reinterpret_cast<uintptr_t>(&ai), 11, 12, 0.5f * haste_detour(ai));
     bool ok = result == 0.25f && distances[1] == 0.25f && limits[1] == 1.0f &&
         distances[2] == 0.5f && limits[2] == 4.0f && movement_detour(ai) == 2.0f;
+    native_haste = 2.0f;
+    ok = ok && haste_detour(ai) == 1.0f && haste_detour(2) == 4.0f && haste_detour(3) == 2.0f;
+    native_haste = 1.0f;
+    ok = ok && haste_detour(ai) == 0.5f && haste_detour(2) == 2.0f;
+    restored_actor = true;
+    ok = ok && haste_detour(ai) == 0.25f;
+    restored_actor = false;
     ai = 3;
     ok = ok && controller_detour(reinterpret_cast<uintptr_t>(&ai), 11, 12, 0.5f) == 0.5f && limits[3] == 2.0f;
     stopped.store(true);
     ai = 1;
-    ok = ok && controller_detour(reinterpret_cast<uintptr_t>(&ai), 11, 12, 0.5f) == 0.5f && limits[1] == 2.0f && abi;
-    original_movement = previous_movement; original_controller = previous_controller; definition_name = previous_name;
+    ok = ok && controller_detour(reinterpret_cast<uintptr_t>(&ai), 11, 12, 0.5f) == 0.5f &&
+        limits[1] == 2.0f && haste_detour(ai) == 1.0f && abi;
+    original_movement = previous_movement; original_haste = previous_haste;
+    original_controller = previous_controller; definition_name = previous_name;
     stopped.store(was_stopped);
     return ok;
 }

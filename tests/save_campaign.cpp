@@ -267,7 +267,7 @@ int wmain(int argc,wchar_t** argv) {
     }
     if (defect==L"movement_inputs") {
         CHECK(sentinel::expanded::test_movement_inputs());
-        std::puts("PASS per-instance movement distance, limits, nested actors, native animation and stop"); return 0;
+        std::puts("PASS per-instance haste, native buffs, restored definitions, movement limits and stop"); return 0;
     }
     if (defect==L"controls_focus") {
         CHECK(sentinel::ap_controls::test_text_capture());
