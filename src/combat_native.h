@@ -10,6 +10,10 @@ void install(const engine::Binding&, HANDLE stop);
 void transition(uint64_t generation);
 void observe(const Context&);
 sc_combat_snapshot inspect(const sc_combat_query&);
+bool confirmed_dead(uintptr_t world, uintptr_t actor);
 void stop();
+#ifdef SC_NATIVE_TESTING
+bool test_observation_contention();
+#endif
 }
 #endif

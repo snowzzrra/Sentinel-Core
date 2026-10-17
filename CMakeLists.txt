@@ -146,7 +146,7 @@ target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)
 target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_native_model sentinel_minhook sentinel_save_session sentinel_protocol)
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures")
-foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write controls_focus)
+foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write controls_focus movement_inputs supply_inputs limit_inputs tracking_inputs combat_contention)
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures/${case}")
   file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/campaign-fixtures/${case}" campaign_fixture)
   add_test(NAME native_campaign_${case}_contract COMMAND sentinel_campaign_tests create "${campaign_fixture}" 1 ${case})

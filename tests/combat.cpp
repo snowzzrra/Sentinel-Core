@@ -51,11 +51,18 @@ int main(int argc, char** argv) {
     model->registered(ctx.world, 0x30000, 3, 0x123456);
     auto outer = model->capture(ctx.world, 0x30000, 3, 0x123456, 101, 20, 17);
     check(outer.registration_serial != 0, "initial registration missing");
+    check(!model->confirmed_dead(ctx.world, 0x30000, 3, 0x123456), "live registration released a special slot");
     model->registered(ctx.world, 0x30000, 3, 0x123456);
     auto inner = model->capture(ctx.world, 0x30000, 3, 0x123456, 102, 20, 17);
     check(inner.registration_serial > outer.registration_serial, "forced ID reused registration identity");
     const auto record = death(ctx);
     check(model->publish(inner, record, 103, 20, 17) == Publication::published, "nested death lost");
+    check(model->confirmed_dead(ctx.world, 0x30000, 3, 0x123456), "confirmed death retained its special slot");
+    check(!model->confirmed_dead(ctx.world + 1, 0x30000, 3, 0x123456) &&
+          !model->confirmed_dead(ctx.world, 0x30001, 3, 0x123456) &&
+          !model->confirmed_dead(ctx.world, 0x30000, 3, 0x123457) &&
+          !model->confirmed_dead(ctx.world, 0x30000, managed_slots, 0x123456),
+          "another world, body or life reused a death");
     check(model->publish(outer, record, 104, 20, 17) == Publication::published, "outer frozen registration lost");
     check(model->publish(outer, record, 105, 20, 17) == Publication::duplicate, "duplicate death got a new sequence");
     const auto query = query_for(ctx);
@@ -136,6 +143,7 @@ int main(int argc, char** argv) {
     check(!valid_query(invalid_query) && !encode_combat_request(request, source.pid, invalid_query),
           "duplicate map selection accepted");
     const auto ctx2 = context(2); model->registered(ctx2.world, 0x30000, 3, 0x123456);
+    check(!model->confirmed_dead(ctx2.world, 0x30000, 3, 0x123456), "reused registration kept a prior death");
     const auto next = model->capture(ctx2.world, 0x30000, 3, 0x123456, 109, 20, 17);
     const auto nested_same_life = model->capture(ctx2.world, 0x30000, 3, 0x123456, 109, 20, 17);
     check(model->publish(nested_same_life, record, 110, 20, 17) == Publication::published &&

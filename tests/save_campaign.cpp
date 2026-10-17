@@ -16,6 +16,8 @@
 #include "arsenal.h"
 #include "special.h"
 #include "ap_controls_native.h"
+#include "expanded_native.h"
+#include "combat_native.h"
 #include <windows.h>
 #include <array>
 #include <cstdio>
@@ -247,6 +249,26 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
+    if (defect==L"combat_contention") {
+        CHECK(sentinel::combat::test_observation_contention());
+        std::puts("PASS combat observations survive concurrent readers and duplicate death notifications"); return 0;
+    }
+    if (defect==L"tracking_inputs") {
+        CHECK(sentinel::expanded::test_tracking_inputs());
+        std::puts("PASS generated physical species preserve native source slots, flags, retries, nested records and stop"); return 0;
+    }
+    if (defect==L"limit_inputs") {
+        CHECK(sentinel::expanded::test_limit_inputs());
+        std::puts("PASS global special limits include native actors, overlapping managers, death, occupancy and stop"); return 0;
+    }
+    if (defect==L"supply_inputs") {
+        CHECK(sentinel::expanded::test_supply_inputs());
+        std::puts("PASS private supply excluded from Spirit searches, native hosts, allocator, duplicates and stop"); return 0;
+    }
+    if (defect==L"movement_inputs") {
+        CHECK(sentinel::expanded::test_movement_inputs());
+        std::puts("PASS per-instance movement distance, limits, nested actors, native animation and stop"); return 0;
+    }
     if (defect==L"controls_focus") {
         CHECK(sentinel::ap_controls::test_text_capture());
         std::puts("PASS text capture inhibits AP input until close or destruction"); return 0;
