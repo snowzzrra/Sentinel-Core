@@ -47,7 +47,8 @@ set(identity_inputs CMakeLists.txt version.json include/sentinel_version.h.in re
   include/sentinel_context.h src/context_observer.h src/context_observer.cpp
   include/sentinel_native.h src/native_model.h src/native_model.cpp
   include/sentinel_combat.h src/combat.h src/combat.cpp src/combat_native.h src/combat_native.cpp src/combat_presentation.h src/combat_progress_hud.h
-  src/expanded.h src/expanded.cpp src/expanded_native.h src/expanded_native.cpp
+  src/expanded.h src/expanded.cpp src/expanded_native.h src/expanded_native.cpp src/enemy_recipe_state.h src/enemy_recipe_state.cpp
+  src/enemy_checkpoint_native.h src/enemy_checkpoint_native.cpp
   include/sentinel_weapon_points.h src/weapon_points.h src/weapon_points.cpp src/weapon_points_native.cpp
   tools/weapon_points_probe.cpp
   src/challenge_match.h src/challenge_seam_layout.h src/challenge_suppression.h src/challenge_suppression.cpp
@@ -126,7 +127,7 @@ target_include_directories(sentinel_minhook PUBLIC third_party/minhook/include t
 # Pinned upstream uses intentional byte casts/anonymous unions; HDE initializes
 # its prefix byte in the loop. Keep upstream unchanged and Core warnings strict.
 target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
-add_library(sentinel_native_model STATIC src/native_model.cpp src/combat.cpp src/expanded.cpp src/weapon_points.cpp src/campaign_menu.cpp src/inventory.cpp src/arsenal.cpp src/runes.cpp src/special.cpp src/deathlink.cpp)
+add_library(sentinel_native_model STATIC src/native_model.cpp src/combat.cpp src/expanded.cpp src/enemy_recipe_state.cpp src/weapon_points.cpp src/campaign_menu.cpp src/inventory.cpp src/arsenal.cpp src/runes.cpp src/special.cpp src/deathlink.cpp)
 target_link_libraries(sentinel_native_model PUBLIC sentinel_protocol)
 target_include_directories(sentinel_native_model PUBLIC include src)
 add_executable(sentinel_combat_tests tests/combat.cpp)
@@ -136,6 +137,9 @@ set_tests_properties(native_combat_registration_delivery PROPERTIES TIMEOUT 10)
 add_executable(sentinel_expanded_tests tests/expanded.cpp)
 target_link_libraries(sentinel_expanded_tests PRIVATE sentinel_native_model)
 add_test(NAME native_expanded_movement COMMAND sentinel_expanded_tests)
+add_executable(sentinel_enemy_recipe_tests tests/enemy_recipe_state.cpp)
+target_link_libraries(sentinel_enemy_recipe_tests PRIVATE sentinel_native_model)
+add_test(NAME native_enemy_recipe_state COMMAND sentinel_enemy_recipe_tests)
 set_tests_properties(native_expanded_movement PROPERTIES TIMEOUT 10)
 add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp src/save_campaign.cpp)
 target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
@@ -146,7 +150,7 @@ target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)
 target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_native_model sentinel_minhook sentinel_save_session sentinel_protocol)
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures")
-foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write controls_focus movement_inputs supply_inputs limit_inputs tracking_inputs combat_contention)
+foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write controls_focus movement_inputs supply_inputs limit_inputs tracking_inputs immediate_inputs spirit_inputs quantity_inputs recipe_inputs summon_inputs samuel_inputs show_inputs independent_inputs traversal_inputs point_inputs death_actions functional_inputs recipe_checkpoint combat_contention)
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures/${case}")
   file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/campaign-fixtures/${case}" campaign_fixture)
   add_test(NAME native_campaign_${case}_contract COMMAND sentinel_campaign_tests create "${campaign_fixture}" 1 ${case})
@@ -265,7 +269,7 @@ add_test(NAME missing_core_dependency COMMAND "${CMAKE_COMMAND}"
   "-DPROXY=$<TARGET_FILE:sentinel_bootstrap>" "-DHARNESS=$<TARGET_FILE:sentinel_harness>"
   "-DSTAGE=${CMAKE_BINARY_DIR}/missing-core" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/missing_dependency.cmake")
 foreach(target sentinel_native sentinel_campaign_tests sentinel_native_host)
-  target_sources(${target} PRIVATE src/weapon_points_native.cpp src/challenge_suppression.cpp src/inventory_native.cpp src/arsenal_native.cpp src/runes_native.cpp src/special_native.cpp src/ap_controls_native.cpp src/expanded_native.cpp src/deathlink_native.cpp src/commands_native.cpp src/commands_local.cpp)
+  target_sources(${target} PRIVATE src/weapon_points_native.cpp src/challenge_suppression.cpp src/inventory_native.cpp src/arsenal_native.cpp src/runes_native.cpp src/special_native.cpp src/ap_controls_native.cpp src/expanded_native.cpp src/enemy_checkpoint_native.cpp src/deathlink_native.cpp src/commands_native.cpp src/commands_local.cpp)
 endforeach()
 add_executable(sentinel_weapon_points_tests tests/weapon_points.cpp)
 target_link_libraries(sentinel_weapon_points_tests PRIVATE sentinel_native_model sentinel_protocol)

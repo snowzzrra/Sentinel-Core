@@ -502,6 +502,7 @@ void post_frame() {
         if (namespace_id.size() == 64) std::memcpy(combat_context.namespace_id, namespace_id.c_str(), 65);
     }
     combat::observe(combat_context);
+    if (combat_context.world) expanded::observe(combat_context.world);
     if (!why && player) arsenal::tick_masteries(scope.lifecycle_generation, player);
     commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); });
     if (!slot) return;
@@ -606,7 +607,10 @@ void free_detour(uintptr_t root, uintptr_t slot) {
     if (primary && !readable && accepting.load()) invalidate(SC_NATIVE_READ_FAILED);
     const bool observe = primary && readable && map && begin_event(root, false, 0);
     __try { original_free(root, slot); }
-    __finally { if (observe) end_event(false, true, AbnormalTermination() != FALSE); }
+    __finally {
+        if (primary && readable && map) expanded::map_freed();
+        if (observe) end_event(false, true, AbnormalTermination() != FALSE);
+    }
 }
 }
 

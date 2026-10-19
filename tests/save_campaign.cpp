@@ -17,6 +17,7 @@
 #include "special.h"
 #include "ap_controls_native.h"
 #include "expanded_native.h"
+#include "enemy_checkpoint_native.h"
 #include "combat_native.h"
 #include <windows.h>
 #include <array>
@@ -252,6 +253,58 @@ int wmain(int argc,wchar_t** argv) {
     if (defect==L"combat_contention") {
         CHECK(sentinel::combat::test_observation_contention());
         std::puts("PASS combat observations survive concurrent readers and duplicate death notifications"); return 0;
+    }
+    if (defect==L"recipe_checkpoint") {
+        CHECK(sentinel::expanded::test_recipe_checkpoint());
+        std::puts("PASS recipe state uses the native checkpoint archive and rejects corrupt capture or restore"); return 0;
+    }
+    if (defect==L"quantity_inputs") {
+        CHECK(sentinel::expanded::test_quantity_inputs());
+        std::puts("PASS weighted native remaining populations preserve partial thresholds and pause conditions"); return 0;
+    }
+    if (defect==L"recipe_inputs") {
+        CHECK(sentinel::expanded::test_recipe_inputs());
+        std::puts("PASS native recipe factories preserve workers, retries, logical identity and finite partial credits"); return 0;
+    }
+    if (defect==L"summon_inputs") {
+        CHECK(sentinel::expanded::test_summon_inputs());
+        std::puts("PASS native summons preserve batch quantities, admission retries, physical identity and component completion"); return 0;
+    }
+    if (defect==L"samuel_inputs") {
+        CHECK(sentinel::expanded::test_samuel_inputs());
+        std::puts("PASS Samuel setup preserves native effects with physical Spirit and other species"); return 0;
+    }
+    if (defect==L"show_inputs") {
+        CHECK(sentinel::expanded::test_show_inputs());
+        std::puts("PASS deferred native Show preserves actor identity, admission, cancellation and exception cleanup"); return 0;
+    }
+    if (defect==L"independent_inputs") {
+        CHECK(sentinel::expanded::test_independent_inputs());
+        std::puts("PASS independent bodies retain native identity, admission, memberships and checkpoint progress"); return 0;
+    }
+    if (defect==L"traversal_inputs") {
+        CHECK(sentinel::expanded::test_traversal_inputs());
+        std::puts("PASS missing traversal animations use the native endpoint and retain native completion"); return 0;
+    }
+    if (defect==L"point_inputs") {
+        CHECK(sentinel::expanded::test_point_inputs());
+        std::puts("PASS native point limits use logical births and test the selected body's bounds"); return 0;
+    }
+    if (defect==L"death_actions") {
+        CHECK(sentinel::expanded::test_death_actions());
+        std::puts("PASS death triggers preserve logical credits, out-of-order deaths and native exception cleanup"); return 0;
+    }
+    if (defect==L"functional_inputs") {
+        CHECK(sentinel::expanded::test_functional_inputs());
+        std::puts("PASS source references select physical variants through point and inherited group definitions"); return 0;
+    }
+    if (defect==L"immediate_inputs") {
+        CHECK(sentinel::expanded::test_immediate_inputs());
+        std::puts("PASS immediate requests retain admission, physical selection and native retry on failure"); return 0;
+    }
+    if (defect==L"spirit_inputs") {
+        CHECK(sentinel::expanded::test_spirit_inputs());
+        std::puts("PASS Spirit requests share admission and preserve native creation and registration"); return 0;
     }
     if (defect==L"tracking_inputs") {
         CHECK(sentinel::expanded::test_tracking_inputs());

@@ -9,6 +9,7 @@
 #include "save_write.h"
 #include "native_runtime.h"
 #include "native_target.h"
+#include "enemy_checkpoint_native.h"
 #include "MinHook.h"
 #include <cstring>
 #include <intrin.h>
@@ -369,6 +370,17 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
     auto result=original_parse(data,files,prepared,request);
     if (!result && mission_checkpoint && !restore_mission_spawn(prepared,request)) {
         session().campaign_run.refuse("native_mission_checkpoint_missing",BStage::parser); result=0x10;
+    }
+    if (!result && !metadata_only && expanded::recipe_checkpoint_enabled()) {
+        const auto checkpoint=session().campaign_run.snapshot();
+        if (checkpoint.resumed && (checkpoint.native_subtype==1 || mission_checkpoint)) {
+            uintptr_t map=0,table=0,serializer=0;
+            if (!read(root,0x50,map) || !read(map,0,table) || table!=image+0x2ab30c8 ||
+                !read(map,0xae5e0,serializer) ||
+                !expanded::read_recipe_checkpoint(serializer,checkpoint.map,checkpoint.native_subtype)) {
+                session().campaign_run.refuse("native_enemy_checkpoint_invalid",BStage::parser); result=0x10;
+            }
+        }
     }
     session().campaign_run.parser_leave(static_cast<uint32_t>(result),metadata_only); return result;
 }
