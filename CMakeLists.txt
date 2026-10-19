@@ -79,7 +79,6 @@ set(identity_inputs CMakeLists.txt version.json include/sentinel_version.h.in re
   src/save_recovery.h src/save_recovery.cpp
   tools/backup_probe.cpp tools/installation_probe.h tools/installation_probe.cpp
   include/sentinel_save_installation.h src/save_installation.h src/save_installation.cpp
-  tools/retest_milestone_a.py tools/Retest-MilestoneA.ps1
   tools/prepare_vanilla_backup.py tools/compare_vanilla_campaign.py
   src/save_profile.h src/save_profile.cpp
   src/save_campaign.h src/save_campaign.cpp src/save_campaign_native.h src/save_campaign_native.cpp
