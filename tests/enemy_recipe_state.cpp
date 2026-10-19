@@ -134,6 +134,21 @@ int main() {
     CHECK(credit_at_least(restored.deaths("manager-a", 16, "empty"), 2));
     CHECK(state.request("empty/1", {"manager-a", "origin-empty", "cancelled", 16, 2, 0, 0}));
     CHECK(state.cancel("empty/1") && !state.complete_empty("empty/1"));
+    CHECK(state.request("empty/adopted", {"source", "origin-empty", "", 16, 1, 0, 0}));
+    CHECK(state.join_empty("empty/adopted", "manager-b", "first"));
+    CHECK(state.join_empty("empty/adopted", "manager-b", "current"));
+    CHECK(state.pending_empty("manager-b", 16, "current") && !state.pending_empty("manager-b", 16, "first"));
+    CHECK(state.capture(linked_snapshot));
+    CHECK(restored.restore(linked_snapshot, state.plan(), state.map()));
+    CHECK(restored.pending_empty("manager-b", 16, "current"));
+    CHECK(restored.cancel("empty/adopted") && !restored.pending_empty("manager-b", 16, "current"));
+    CHECK(!restored.complete_empty("empty/adopted") && restored.complete_empty("empty/adopted", true));
+    CHECK(restored.join_empty("empty/adopted", "manager-b", "current"));
+    CHECK(credit_at_least(restored.deaths("manager-b", 16, "current"), 1));
+    CHECK(!restored.complete_empty("empty/adopted", true));
+    CHECK(restored.capture(linked_snapshot));
+    CHECK(state.restore(linked_snapshot, state.plan(), state.map()));
+    CHECK(credit_at_most(state.deaths("manager-b", 16, "current"), 1));
     CHECK(!credit_at_least(state.deaths("manager-a", 16, "cancelled"), 1));
 
     RecipeState partial; CHECK(partial.reset("plan-partial", "game/test"));
@@ -192,10 +207,13 @@ int main() {
     CHECK(migration.detach_actor(migrated.actor, "manager-a", "before"));
     CHECK(migration.join_actor(migrated.actor, "manager-b", "after"));
     CHECK(migration.join_actor(migrated.actor, "manager-b", "after"));
+    CHECK(migration.join_actor(migrated.actor, "manager-b", "other-label"));
     CHECK(credit_at_most(migration.alive("manager-a", 16, "before"), 0));
     CHECK(!credit_at_most(migration.outstanding("manager-a", 16, "before"), 0));
     CHECK(!credit_at_most(migration.alive("manager-b", 16, "after"), 0));
     CHECK(migration.capture(saved) && restored.restore(saved, "plan", "map"));
+    CHECK(restored.requests().at("source").actors.at(migrated.actor).memberships.size() == 2);
+    CHECK(!credit_at_most(restored.alive("manager-b", 16, "other-label"), 0));
     CHECK(restored.actor_changed(migrated.actor, RecipeActorState::dead));
     CHECK(credit_at_most(restored.deaths("manager-a", 16, "before"), 0));
     CHECK(!credit_at_most(restored.deaths("manager-b", uint64_t{1} << 44, "after"), 0));

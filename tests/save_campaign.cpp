@@ -294,6 +294,14 @@ int wmain(int argc,wchar_t** argv) {
         CHECK(sentinel::expanded::test_death_actions());
         std::puts("PASS death triggers preserve logical credits, out-of-order deaths and native exception cleanup"); return 0;
     }
+    if (defect==L"resurrection_inputs") {
+        CHECK(sentinel::expanded::test_resurrection_inputs());
+        return 0;
+    }
+    if (defect==L"direct_inputs") {
+        CHECK(sentinel::expanded::test_direct_inputs());
+        return 0;
+    }
     if (defect==L"functional_inputs") {
         CHECK(sentinel::expanded::test_functional_inputs());
         std::puts("PASS source references select physical variants through point and inherited group definitions"); return 0;

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -71,12 +72,16 @@ public:
     std::optional<RecipeEmission> reserve(std::string_view key);
     bool release(std::string_view key);
     bool created(std::string_view key, const RecipeEmission&, std::string native_name = {});
+    bool rebind_actor(std::string_view actor, std::string native_name);
     bool parent_pending(std::string_view actor) const;
-    bool complete_empty(std::string_view key);
+    bool complete_empty(std::string_view key, bool reactivated = false);
+    bool join_empty(std::string_view key, std::string owner, std::string label);
+    bool pending_empty(std::string_view owner, uint64_t mask, std::string_view label) const;
     bool cancel(std::string_view key);
     bool native_quota(std::string_view key, uint64_t maximum_emissions);
     bool join_actor(std::string_view actor, std::string owner, std::string label);
     bool detach_actor(std::string_view actor, std::string_view owner, std::string_view label);
+    std::vector<RecipeMembership> request_memberships(std::string_view key) const;
     bool actor_changed(std::string_view actor, RecipeActorState);
     RecipeBaseline death_baseline(std::string_view owner, uint64_t mask, std::string_view label) const;
     std::vector<RecipeCredit> deaths(std::string_view owner, uint64_t mask, std::string_view label,
@@ -92,6 +97,7 @@ public:
     const std::string& map() const { return map_; }
     bool capture(std::string&) const;
     bool capture(std::string&, std::string_view request_prefix) const;
+    bool capture(std::string&, const std::vector<std::string_view>& request_prefixes) const;
     bool restore(std::string_view bytes, std::string_view expected_plan, std::string_view expected_map);
 private:
     std::string plan_, map_;
@@ -105,6 +111,45 @@ struct RecipeNativeCheckpoint {
     std::map<std::string, std::array<float, 12>> shows;
     struct Action { uint64_t units = 0, sent = 0; uint32_t denominator = 0; };
     std::map<std::pair<std::string, std::string>, Action> actions;
+    struct Source {
+        uint64_t monster = 0, mask = 0;
+        float offset = 0;
+        std::array<float, 3> position{};
+        std::string origin, label, template_name;
+    };
+    struct Summon {
+        std::string key, origin;
+        uint64_t body_offset = 0;
+        bool completed = false;
+        std::vector<Source> sources;
+        std::vector<RecipeMembership> memberships;
+    };
+    struct Component {
+        std::string parent, definition;
+        std::string template_name;
+        uint64_t mask = 0;
+        uint8_t phase = 0;
+        float playback = 1;
+        bool paused = false, template_mode = false;
+        uint64_t epoch = 0;
+        bool completed = false;
+        std::vector<Summon> requests;
+        std::map<std::string, std::set<std::string>> notifications;
+    };
+    struct Child {
+        std::string parent, body;
+        std::array<float, 12> pose{};
+        std::array<float, 4> health{};
+    };
+    uint64_t next_request = 0;
+    std::vector<Component> summons;
+    std::map<std::string, Child> children;
+    struct Identity {
+        std::string request, body;
+        uint64_t ordinal = 0, units = 0;
+        uint32_t denominator = 0;
+    };
+    std::map<std::string, Identity> identities;
     bool capture(std::string&) const;
     bool restore(std::string_view bytes, std::string_view expected_map);
 };

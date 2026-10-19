@@ -165,6 +165,34 @@ struct Reader {
         scope.units = static_cast<uint32_t>(units); return true;
     }
 };
+template<size_t N> void floats(std::string& out, const std::array<float, N>& values) {
+    for (const auto value : values) {
+        uint32_t bits; std::memcpy(&bits, &value, sizeof(bits)); integer(out, bits, 4);
+    }
+}
+template<size_t N> bool floats(Reader& in, std::array<float, N>& values) {
+    for (auto& value : values) {
+        uint64_t number = 0;
+        if (!in.integer(number, 4)) return false;
+        const auto bits = static_cast<uint32_t>(number); std::memcpy(&value, &bits, sizeof(bits));
+        if (!std::isfinite(value)) return false;
+    }
+    return true;
+}
+void summon_source(std::string& out, const RecipeNativeCheckpoint::Source& source) {
+    integer(out, source.monster, 8); integer(out, source.mask, 8);
+    floats(out, std::array<float, 1>{source.offset}); floats(out, source.position);
+    text(out, source.origin); text(out, source.label); text(out, source.template_name);
+}
+bool summon_source(Reader& in, RecipeNativeCheckpoint::Source& source) {
+    std::array<float, 1> offset{};
+    if (!in.integer(source.monster, 8) || !in.integer(source.mask, 8) || !source.mask ||
+        !floats(in, offset) || !floats(in, source.position) || !in.text(source.origin, 20) || source.origin.size() != 20 ||
+        source.origin.find_first_not_of("0123456789abcdef") != source.origin.npos ||
+        !in.text(source.label, 1024) || source.label.find('\0') != source.label.npos ||
+        !in.text(source.template_name, 511) || source.template_name.find('\0') != source.template_name.npos) return false;
+    source.offset = offset[0]; return true;
+}
 }
 bool credit_at_least(const std::vector<RecipeCredit>& value, uint64_t threshold) {
     return compare_credit(value, threshold) >= 0;
@@ -236,13 +264,35 @@ bool RecipeState::parent_pending(std::string_view actor) const {
     const auto request = requests_.find(std::string(actor.substr(0, separator)));
     return request != requests_.end() && !request->second.closed && !request->second.emitted;
 }
-bool RecipeState::complete_empty(std::string_view key) {
+bool RecipeState::complete_empty(std::string_view key, bool reactivated) {
     const auto found = requests_.find(std::string(key));
     if (found == requests_.end()) return false;
     auto& value = found->second;
-    if (value.closed || value.request.physical_units) return false;
+    if (value.empty_completed || (value.closed && !reactivated) || value.request.physical_units) return false;
     credits_.emplace(RecipeCreditScope{found->first, value.request.owner, value.request.label}, 1);
+    for (auto& [scope, count] : credits_) if (scope.request == key) count = 1;
     value.closed = true; value.empty_completed = true; return true;
+}
+bool RecipeState::join_empty(std::string_view key, std::string owner, std::string label) {
+    const auto found = requests_.find(std::string(key));
+    if (found == requests_.end() || found->second.request.physical_units || !valid_member({owner, label})) return false;
+    for (auto previous = credits_.begin(); previous != credits_.end(); ++previous) {
+        if (previous->first.request != key || previous->first.owner != owner || previous->first.label == label) continue;
+        if (found->second.empty_completed) return true;
+        credits_.erase(previous); break;
+    }
+    const RecipeCreditScope scope{found->first, std::move(owner), std::move(label)};
+    if (!credits_.count(scope) && credits_.size() >= max_requests) return false;
+    credits_.emplace(scope, found->second.empty_completed ? 1 : 0); return true;
+}
+bool RecipeState::pending_empty(std::string_view owner, uint64_t mask, std::string_view label) const {
+    for (const auto& [scope, count] : credits_) {
+        (void)count;
+        const auto& progress = requests_.at(scope.request);
+        if (!progress.request.physical_units && !progress.closed && selects(progress.request, mask) &&
+            selects(scope.owner, scope.label, owner, label)) return true;
+    }
+    return false;
 }
 bool RecipeState::created(std::string_view key, const RecipeEmission& emission, std::string native_name) {
     if (native_name.size() > 511 || native_name.find('\0') != native_name.npos) return false;
@@ -278,10 +328,25 @@ bool RecipeState::join_actor(std::string_view actor, std::string owner, std::str
     RecipeMembership member{std::move(owner), std::move(label)};
     if (!found.second || !valid_member(member)) return false;
     auto& members = found.second->memberships;
-    const auto existing = std::find_if(members.begin(), members.end(), [&](const auto& value) { return value.owner == member.owner; });
-    if (existing != members.end()) { existing->label = std::move(member.label); return true; }
+    if (std::find(members.begin(), members.end(), member) != members.end()) return true;
     if (members.size() >= max_requests) return false;
     members.push_back(std::move(member)); return true;
+}
+bool RecipeState::rebind_actor(std::string_view actor, std::string native_name) {
+    const auto found = actor_state(actor);
+    if (!found.second || native_name.empty() || native_name.size() > 511 || native_name.find('\0') != native_name.npos) return false;
+    found.second->native_name = std::move(native_name); return true;
+}
+std::vector<RecipeMembership> RecipeState::request_memberships(std::string_view key) const {
+    const auto found = requests_.find(std::string(key));
+    if (found == requests_.end()) return {};
+    std::vector<RecipeMembership> result{{found->second.request.owner, found->second.request.label}};
+    const auto append = [&](RecipeMembership member) {
+        if (std::find(result.begin(), result.end(), member) == result.end()) result.push_back(std::move(member));
+    };
+    for (const auto& [role, actor] : found->second.actors) { (void)role; for (const auto& member : actor.memberships) append(member); }
+    for (const auto& [scope, count] : credits_) { (void)count; if (scope.request == key) append({scope.owner, scope.label}); }
+    return result;
 }
 bool RecipeState::detach_actor(std::string_view actor, std::string_view owner, std::string_view label) {
     const auto found = actor_state(actor);
@@ -376,8 +441,9 @@ bool RecipeNativeCheckpoint::capture(std::string& out) const {
     out.clear();
     RecipeState checked;
     if (!identifier(plan) || !identifier(map) || !checked.restore(state, plan, map) ||
-        shows.size() > max_actors || actions.size() > max_requests) return false;
-    std::string bytes("EAPN\1", 5);
+        shows.size() > max_actors || actions.size() > max_requests || summons.size() > max_requests ||
+        children.size() > max_actors || identities.size() > max_actors) return false;
+    std::string bytes("EAPN\2", 5);
     text(bytes, plan); text(bytes, map); text(bytes, state); integer(bytes, shows.size(), 4);
     for (const auto& [name, pose] : shows) {
         if (name.empty() || name.size() > 511 || name.find('\0') != name.npos) return false;
@@ -397,11 +463,44 @@ bool RecipeNativeCheckpoint::capture(std::string& out) const {
         integer(bytes, credit.units, 8); integer(bytes, credit.sent, 8); integer(bytes, credit.denominator, 4);
         if (bytes.size() > max_bytes) return false;
     }
-    if (bytes.size() > max_bytes) return false;
+    integer(bytes, next_request, 8); integer(bytes, summons.size(), 4);
+    for (const auto& component : summons) {
+        text(bytes, component.parent); text(bytes, component.definition);
+        text(bytes, component.template_name); integer(bytes, component.mask, 8); integer(bytes, component.phase, 1);
+        floats(bytes, std::array<float, 1>{component.playback}); integer(bytes, component.paused, 1); integer(bytes, component.template_mode, 1);
+        integer(bytes, component.epoch, 8); integer(bytes, component.completed, 1); integer(bytes, component.requests.size(), 4);
+        for (const auto& request : component.requests) {
+            text(bytes, request.key); text(bytes, request.origin); integer(bytes, request.body_offset, 8);
+            integer(bytes, request.completed, 1); integer(bytes, request.sources.size(), 4);
+            for (const auto& source : request.sources) summon_source(bytes, source);
+            integer(bytes, request.memberships.size(), 4);
+            for (const auto& member : request.memberships) { text(bytes, member.owner); text(bytes, member.label); }
+        }
+        integer(bytes, component.notifications.size(), 4);
+        for (const auto& [target, dependencies] : component.notifications) {
+            text(bytes, target); integer(bytes, dependencies.size(), 4);
+            for (const auto& key : dependencies) text(bytes, key);
+        }
+        if (bytes.size() > max_bytes) return false;
+    }
+    integer(bytes, children.size(), 4);
+    for (const auto& [role, child] : children) {
+        text(bytes, role); text(bytes, child.parent); text(bytes, child.body);
+        floats(bytes, child.pose); floats(bytes, child.health);
+        if (bytes.size() > max_bytes) return false;
+    }
+    integer(bytes, identities.size(), 4);
+    for (const auto& [name, identity] : identities) {
+        text(bytes, name); text(bytes, identity.request); text(bytes, identity.body);
+        integer(bytes, identity.ordinal, 8); integer(bytes, identity.units, 8); integer(bytes, identity.denominator, 4);
+    }
+    RecipeNativeCheckpoint roundtrip;
+    if (bytes.size() > max_bytes || !roundtrip.restore(bytes, map)) return false;
     out = std::move(bytes); return true;
 }
 bool RecipeNativeCheckpoint::restore(std::string_view bytes, std::string_view expected_map) {
-    if (bytes.size() > max_bytes || bytes.substr(0, 5) != std::string_view("EAPN\1", 5)) return false;
+    if (bytes.size() > max_bytes || bytes.substr(0, 4) != "EAPN" || bytes.size() < 5 || (bytes[4] != 1 && bytes[4] != 2)) return false;
+    const bool autonomous = bytes[4] == 2;
     Reader in{bytes.substr(5)}; RecipeNativeCheckpoint restored;
     RecipeState checked;
     uint64_t count = 0;
@@ -428,13 +527,98 @@ bool RecipeNativeCheckpoint::restore(std::string_view bytes, std::string_view ex
         credit.denominator = static_cast<uint32_t>(denominator);
         if (!restored.actions.emplace(identity, credit).second) return false;
     }
+    if (autonomous) {
+        uint64_t size = 0, flag = 0;
+        std::set<std::string> parents, requests;
+        const auto name = [&in](std::string& value) { return in.text(value, 511) && !value.empty() && value.find('\0') == value.npos; };
+        const auto autonomous_key = [](const std::string& key) { return key.rfind("summon/", 0) == 0 || key.rfind("direct/", 0) == 0; };
+        if (!in.integer(restored.next_request, 8) || !in.integer(count, 4) || count > max_requests) return false;
+        for (uint64_t i = 0; i < count; ++i) {
+            Component component;
+            if (!name(component.parent) || !parents.insert(component.parent).second || !name(component.definition) ||
+                !in.text(component.template_name, 511) || component.template_name.find('\0') != component.template_name.npos ||
+                !in.integer(component.mask, 8) || !in.integer(flag, 1) || flag > 3) return false;
+            component.phase = static_cast<uint8_t>(flag);
+            std::array<float, 1> playback{};
+            if (!floats(in, playback) || playback[0] < 0 || !in.integer(flag, 1) || flag > 1) return false;
+            component.playback = playback[0]; component.paused = flag != 0;
+            if (!in.integer(flag, 1) || flag > 1) return false;
+            component.template_mode = flag != 0;
+            if (!in.integer(component.epoch, 8) || !in.integer(flag, 1) || flag > 1 || !in.integer(size, 4) || size > max_requests) return false;
+            component.completed = flag != 0;
+            for (uint64_t j = 0; j < size; ++j) {
+                Summon request; uint64_t sources = 0;
+                if (!in.text(request.key, 191) || !autonomous_key(request.key) || !requests.insert(request.key).second ||
+                    !in.text(request.origin, 20) || !in.integer(request.body_offset, 8) || !in.integer(flag, 1) || flag > 1 ||
+                    !in.integer(sources, 4) || !sources || sources > max_requests) return false;
+                const auto progress = checked.requests().find(request.key);
+                if (progress == checked.requests().end() || progress->second.request.origin != request.origin) return false;
+                request.completed = flag != 0;
+                for (uint64_t k = 0; k < sources; ++k) {
+                    Source source;
+                    if (!summon_source(in, source) || source.origin != request.origin || source.label != progress->second.request.label) return false;
+                    request.sources.push_back(std::move(source));
+                }
+                uint64_t members = 0;
+                if (!in.integer(members, 4) || members > max_requests) return false;
+                for (uint64_t k = 0; k < members; ++k) {
+                    RecipeMembership member;
+                    if (!name(member.owner) || !in.text(member.label, 1024) || member.label.find('\0') != member.label.npos ||
+                        std::find(request.memberships.begin(), request.memberships.end(), member) != request.memberships.end()) return false;
+                    request.memberships.push_back(std::move(member));
+                }
+                component.requests.push_back(std::move(request));
+            }
+            if (!in.integer(size, 4) || size > max_requests) return false;
+            for (uint64_t j = 0; j < size; ++j) {
+                std::string target; uint64_t dependencies = 0;
+                if (!name(target) || component.notifications.count(target) || !in.integer(dependencies, 4) || dependencies > max_requests) return false;
+                auto& values = component.notifications[target];
+                for (uint64_t k = 0; k < dependencies; ++k) {
+                    std::string key;
+                    if (!in.text(key, 191) || !autonomous_key(key) || !checked.requests().count(key) || !values.insert(key).second) return false;
+                }
+            }
+            restored.summons.push_back(std::move(component));
+        }
+        if (!in.integer(count, 4) || count > max_actors) return false;
+        for (uint64_t i = 0; i < count; ++i) {
+            std::string role; Child child;
+            if (!in.text(role, 191) || !in.text(child.parent, 511) || child.parent.find('\0') != child.parent.npos ||
+                (!child.parent.empty() && !parents.count(child.parent)) || !name(child.body) || !floats(in, child.pose) || !floats(in, child.health) ||
+                std::any_of(child.health.begin(), child.health.end(), [](float value) { return value < 0; })) return false;
+            const auto progress = checked.requests().find(role.substr(0, role.rfind('/')));
+            if (progress == checked.requests().end() || !autonomous_key(role) || !progress->second.actors.count(role) ||
+                !restored.children.emplace(role, std::move(child)).second) return false;
+        }
+        for (const auto& [key, progress] : checked.requests()) {
+            if (!autonomous_key(key)) continue;
+            if (!progress.closed && !requests.count(key)) return false;
+            for (const auto& [role, actor] : progress.actors) {
+                (void)actor;
+                if (!restored.children.count(role)) return false;
+            }
+        }
+        if (!in.integer(count, 4) || count > max_actors) return false;
+        for (uint64_t i = 0; i < count; ++i) {
+            std::string native_name; Identity identity; uint64_t denominator = 0;
+            if (!name(native_name) || !in.text(identity.request, 191) || !identifier(identity.request) || !name(identity.body) ||
+                !in.integer(identity.ordinal, 8) || identity.ordinal > INT32_MAX || !in.integer(identity.units, 8) || !identity.units || identity.units > INT32_MAX ||
+                !in.integer(denominator, 4) || !denominator || denominator > INT32_MAX) return false;
+            identity.denominator = static_cast<uint32_t>(denominator);
+            if (!restored.identities.emplace(native_name, std::move(identity)).second) return false;
+        }
+    }
     if (!in.bytes.empty()) return false;
     *this = std::move(restored); return true;
 }
 bool RecipeState::capture(std::string& out, std::string_view prefix) const {
+    return capture(out, std::vector<std::string_view>{prefix});
+}
+bool RecipeState::capture(std::string& out, const std::vector<std::string_view>& prefixes) const {
     RecipeState selected = *this;
     for (auto item = selected.requests_.begin(); item != selected.requests_.end();) {
-        if (item->first.compare(0, prefix.size(), prefix) == 0) ++item;
+        if (std::any_of(prefixes.begin(), prefixes.end(), [&](auto prefix) { return item->first.compare(0, prefix.size(), prefix) == 0; })) ++item;
         else item = selected.requests_.erase(item);
     }
     for (const auto& [key, progress] : selected.requests_) {
@@ -522,11 +706,11 @@ bool RecipeState::restore(std::string_view bytes, std::string_view expected_plan
                 !in.text(actor.native_name, 511) || actor.native_name.find('\0') != actor.native_name.npos ||
                 !in.integer(members, 4) || total_members + members > max_actors) return false;
             actor.ordinal = ordinal;
-            std::set<std::string> owners;
+            std::set<std::pair<std::string, std::string>> memberships;
             for (uint64_t j = 0; j < members; ++j) {
                 RecipeMembership member;
                 if (!in.text(member.owner, 191) || !in.text(member.label, 1024) || !valid_member(member) ||
-                    !owners.insert(member.owner).second) return false;
+                    !memberships.emplace(member.owner, member.label).second) return false;
                 actor.memberships.push_back(std::move(member));
             }
             total_members += members;
@@ -557,22 +741,23 @@ bool RecipeState::restore(std::string_view bytes, std::string_view expected_plan
         for (const auto& visited : path) ancestry[visited] = 2;
     }
     if (!in.integer(count, 4) || count > max_requests) return false;
-    std::map<std::pair<std::string, std::string>, uint64_t> credited;
+    std::map<std::tuple<std::string, std::string, std::string>, uint64_t> credited;
     for (uint64_t i = 0; i < count; ++i) {
         RecipeCreditScope scope; uint64_t dead = 0;
         if (!in.credit_scope(scope) || !in.integer(dead, 8)) return false;
         const auto request = restored.requests_.find(scope.request);
-        if (request == restored.requests_.end() || !dead || dead > request->second.dead + request->second.empty_completed ||
+        if (request == restored.requests_.end() ||
+            (!dead && (request->second.request.physical_units || request->second.empty_completed || scope.units)) ||
+            dead > request->second.dead + request->second.empty_completed ||
             (scope.units != request->second.request.logical_units &&
              (!request->second.request.credit_limit || scope.units != request->second.request.final_credit_units) &&
-             !(request->second.empty_completed && !scope.units)) ||
+              !(!request->second.request.physical_units && !scope.units)) ||
             (scope.units != request->second.request.logical_units && scope.units && dead > 1) ||
             (scope.units && scope.units != request->second.request.logical_units &&
              (request->second.emitted < request->second.request.credit_limit ||
               request->second.actors.count(scope.request + "/" + std::to_string(request->second.request.credit_limit - 1)))) ||
-            (request->second.empty_completed && (scope.owner != request->second.request.owner || scope.label != request->second.request.label)) ||
             !restored.credits_.emplace(scope, dead).second) return false;
-        auto& total = credited[{scope.request, scope.owner}]; total += dead;
+        auto& total = credited[{scope.request, scope.owner, scope.label}]; total += dead;
         if (total > request->second.dead + request->second.empty_completed) return false;
     }
     for (const auto& [key, value] : restored.requests_)

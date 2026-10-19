@@ -120,7 +120,7 @@ bool parse_recipe_library(std::string_view text, RecipeLibrary& out) {
         auto line = field(text, '\n');
         const auto origin = field(line, '|'), family = field(line, '|'), source = field(line, '|'), owner = field(line, '|');
         const auto logical = field(line, '|');
-        if (!lower_hex(origin, 20) || family.size() != 1 || std::string_view("igtmaspbdu").find(family[0]) == family.npos ||
+        if (!lower_hex(origin, 20) || family.size() != 1 || std::string_view("igtmaspbduf").find(family[0]) == family.npos ||
             !identifier(source) || !identifier(owner) || result.recipes.size() >= 100000 ||
             !origins.emplace(origin).second) return false;
         RecipeLibraryEntry entry; uint64_t mask = 0;

@@ -21,6 +21,8 @@ bool test_show_inputs();
 bool test_independent_inputs();
 bool test_traversal_inputs();
 bool test_point_inputs();
+bool test_resurrection_inputs();
+bool test_direct_inputs();
 bool test_death_actions();
 bool test_functional_inputs();
 #endif
