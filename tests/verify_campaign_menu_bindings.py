@@ -45,11 +45,13 @@ def verify(executable):
         assert show == 0xeffd60 and frame != show
         fast_travel = runtime.split('void install_fast_travel(', 1)[1].split('void reconcile_fast_travel(', 1)[0]
         sites = re.findall(r'\{0x([0-9a-f]+),"([0-9a-f]+)"\}', fast_travel)
-        assert len(sites) == 2
+        assert len(sites) == 3
         for rva, signature in sites:
             assert pe.get_data(int(rva, 16), 32) == bytes.fromhex(signature)
         relay_activate = struct.unpack('<Q', pe.get_data(0x2c39bf8 + 0x2e8, 8))[0] - pe.OPTIONAL_HEADER.ImageBase
         assert relay_activate == int(sites[1][0], 16) == 0xd5d660
+        crystal_activate = struct.unpack('<Q', pe.get_data(0x2b7d4a0 + 0x2e8, 8))[0] - pe.OPTIONAL_HEADER.ImageBase
+        assert crystal_activate == int(sites[2][0], 16) == 0xda2360
     print(f'PASS 46 retail prologues; Populate CALL -> RVA {callee:#x}; unrelated binding rejected')
 
 

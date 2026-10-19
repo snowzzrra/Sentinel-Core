@@ -215,7 +215,8 @@ void install_fast_travel(const engine::Binding& b) {
     engine::LocalMemory memory;
     const struct { uint32_t rva; const char* hex; } sites[] = {
         {0x6ca290,"48895c2408488974241048897c241841564883ec20488bf94c8bf2488b0dee70"},
-        {0xd5d660,"48895c2418574883ec70488b05671345034833c44889442458488bf9488bda48"}
+        {0xd5d660,"48895c2418574883ec70488b05671345034833c44889442458488bf9488bda48"},
+        {0xda2360,"405356574881ecb0000000488b0566c640034833c448898424a8000000488b05"}
     };
     for (const auto& s:sites) {
         std::array<uint8_t,32> actual{},expected{};
@@ -227,6 +228,24 @@ void install_fast_travel(const engine::Binding& b) {
     fast_travel_find=reinterpret_cast<FastTravelFind>(b.image.base+0x6ca290);
     fast_travel_activate=reinterpret_cast<FastTravelActivate>(b.image.base+0xd5d660);
     fast_travel_ready.store(true,std::memory_order_release);
+}
+bool arm_first_contact(uintptr_t target,uintptr_t activate,uintptr_t player) {
+    if (!target || !activate || !player || *reinterpret_cast<const uint8_t*>(target+0xb9e)!=1) return false;
+    reinterpret_cast<FastTravelActivate>(activate)(target,player);
+    return *reinterpret_cast<const uint8_t*>(target+0xb9e)==0;
+}
+void repair_crystal_first_contact(uintptr_t map,const char* map_name,uintptr_t player) {
+    if (!player || !fast_travel_ready.load(std::memory_order_acquire) ||
+        !save::session().campaign_run.enabled() || std::strcmp(map_name,"game/hub/hub")) return;
+    __try {
+        const auto target=fast_travel_find(map,"ap_independent_progress_argent_cell_1_1072112848");
+        if (!target || *reinterpret_cast<const uint8_t*>(target+0xb9e)!=1) return;
+        const auto vtable=*reinterpret_cast<const uintptr_t*>(target);
+        const auto activate=*reinterpret_cast<const uintptr_t*>(vtable+0x2e8);
+        if (activate!=binding.image.base+0xda2360) return;
+        // the first activation arms saved triggers without delivering their check.
+        arm_first_contact(target,activate,player);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 void reconcile_fast_travel(uintptr_t map,const char* map_name,uint64_t generation,uintptr_t player) {
     const auto& namespace_id=save::session().namespace_id();
@@ -503,6 +522,7 @@ void post_frame() {
     }
     combat::observe(combat_context);
     if (combat_context.world) expanded::observe(combat_context.world);
+    if (!why && player) repair_crystal_first_contact(expected_map_address,facts.current_map.bytes,player);
     if (!why && player) arsenal::tick_masteries(scope.lifecycle_generation, player);
     commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); });
     if (!slot) return;
@@ -1074,6 +1094,9 @@ void test_events(const engine::Binding& source, uint64_t (*change)(uintptr_t,uin
     lifetime.end(true,true,SC_GAME_MAIN_MENU,GetTickCount64(),GetCurrentThreadId());
     status={}; status.game_state=SC_GAME_MAIN_MENU; event_depth=0; event_thread=0;
     original_change=change; fault=0; gaps=0; accepting=true;
+}
+bool test_arm_first_contact(uintptr_t target,uintptr_t activate,uintptr_t player) {
+    return arm_first_contact(target,activate,player);
 }
 void test_cold_events(const engine::Binding& source, uint64_t (*change)(uintptr_t,uintptr_t,uintptr_t)) {
     binding=source; fixture={}; fixture.owner=[]() -> uint32_t { return GetCurrentThreadId(); }; fixture_active=true;
