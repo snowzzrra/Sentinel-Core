@@ -449,6 +449,8 @@ bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t ima
     if (count<=0 || count!=primary_count) return reject("resume_file_count_mismatch",
         {{"actual_count",count},{"expected_count",primary_count},{"persisted_count",expected_.size()},{"metadata_only",metadata_only}});
     bool backup_group=false;
+    bool checkpoint_changed=false;
+    std::vector<SdkFileWrite> loaded;
     std::vector<std::string> seen;
     for (int32_t i=0;i<count;++i) {
         owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_payload_validate",state_.operation,{{"file_index",i},{"file_count",count}},data);
@@ -465,22 +467,40 @@ bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t ima
         if (expected==expected_.end()) return reject("resume_file_not_in_checkpoint",{{"file_index",i},{"expected_count",expected_.size()}});
         if (std::find(seen.begin(),seen.end(),expected->name.data())!=seen.end()) return reject("resume_file_duplicate",{{"file_index",i}});
         if (!read(memory,file,0x150,size)) return reject("resume_file_size_unreadable");
-        if (size!=expected->size) return reject("resume_file_size_mismatch",{{"file_index",i},{"actual_size",size},{"expected_size",expected->size}});
+        if (!size || size>100u*1024u*1024u) return reject("resume_file_size_invalid",{{"file_index",i},{"actual_size",size}});
         if (!read(memory,file,0x158,capacity)) return reject("resume_file_capacity_unreadable");
         if (size>capacity) return reject("resume_file_exceeds_capacity",{{"file_index",i},{"size",size},{"capacity",capacity}});
         if (!read(memory,file,0x168,buffer)) return reject("resume_file_buffer_unreadable");
         const auto begin=GetTickCount64(), deadline=begin+1000;
         owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_payload_digest",state_.operation,
             {{"file_index",i},{"size",size},{"expected_size",expected->size},{"buffer_present",buffer!=0},{"deadline_ms",deadline}},data);
-        if (!digest_payload(memory,buffer,expected->size,hash,deadline,&owner_->btrace,BStage::resume,state_.operation,i)) return reject("resume_payload_digest_failed",
+        if (!digest_payload(memory,buffer,static_cast<uint32_t>(size),hash,deadline,&owner_->btrace,BStage::resume,state_.operation,i)) return reject("resume_payload_digest_failed",
             {{"file_index",i},{"size",size},{"elapsed_ms",GetTickCount64()-begin},{"deadline_elapsed",GetTickCount64()>=deadline},{"buffer_present",buffer!=0}});
-        if (hash!=expected->sha256) return reject("resume_payload_hash_mismatch",{{"file_index",i},{"actual_size",size},{"expected_size",expected->size},{"hash_equal",false}});
+        if (size!=expected->size || hash!=expected->sha256) {
+            checkpoint_changed=true;
+            owner_->btrace.record(diagnostic_stage_,BStatus::pending,"resume_checkpoint_drift",state_.operation,
+                {{"file_index",i},{"actual_size",size},{"expected_size",expected->size},{"hash_equal",hash==expected->sha256},{"backup_group",backup_group}},data);
+        }
+        auto actual=*expected; actual.size=static_cast<uint32_t>(size); actual.sha256=hash;
+        loaded.push_back(actual);
         seen.emplace_back(expected->name.data());
+    }
+    if (checkpoint_changed) {
+        std::vector<SdkFileWrite> current;
+        if (!snapshot_campaign_manifest(*owner_,memory,directory_,current)) return reject("resume_current_provider_unavailable");
+        for (size_t i=0;i<loaded.size();++i) {
+            const auto& file=loaded[i];
+            const auto match=std::find_if(current.begin(),current.end(),[&](const auto& candidate){return steam_name_equal(candidate.name.data(),file.name.data());});
+            if (match==current.end() || match->size!=file.size || match->sha256!=file.sha256)
+                return reject("resume_payload_hash_mismatch",{{"file_index",i},{"actual_size",file.size},{"expected_size",match==current.end()?0:match->size},{"hash_equal",false}});
+        }
+        // the native decoder authenticates this owned snapshot; future partial saves use its complete inventory
+        expected_=std::move(current);
     }
     state_.source_verified=true; state_.phase="source_verified";
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"resume_source_verified",state_.operation,
         {{"file_count",count},{"expected_count",primary_count},{"persisted_count",expected_.size()},{"backup_group",backup_group},
-         {"metadata_only",metadata_only},{"all_hashes_equal",true},{"source_checkpoint",state_.source_checkpoint}},data); return true;
+         {"metadata_only",metadata_only},{"all_hashes_equal",!checkpoint_changed},{"source_checkpoint",state_.source_checkpoint}},data); return true;
 }
 void Campaign::observe_parser(ParserObservation observation,bool metadata_only) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);

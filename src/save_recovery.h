@@ -30,5 +30,6 @@ struct RecoveryResult {
 };
 // pending without an exact completion remains a durable admission barrier
 bool recovery_clear(storage::Namespace&);
+bool snapshot_campaign_files(const RecoveryTransport&, const std::string& directory, storage::TransportMetadata&);
 RecoveryResult recover_campaign(storage::Namespace&, const storage::Descriptor&, const RecoveryTransport&);
 }

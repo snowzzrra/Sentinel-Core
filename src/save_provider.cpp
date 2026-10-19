@@ -299,6 +299,27 @@ bool Session::persist_profile_write(const ProfileWrite& write, engine::Memory& m
         return true;
     } catch (const std::bad_alloc&) { return refuse("selection_persistence_allocation_failed"); }
 }
+bool snapshot_campaign_manifest(Session& owner,engine::Memory& memory,const std::string& directory,std::vector<SdkFileWrite>& files) {
+    RecoveryTransport transport{}; uintptr_t table=0;
+    if (!owner.native_provider(transport.remote) || !owner.collecting(transport.remote,owner.native_root()) ||
+        directory!=owner.native_root()+"/GAME-AUTOSAVE0" || !at(memory,transport.remote,0,table) ||
+        !at(memory,table,8,transport.read) || !at(memory,table,0x78,transport.size) ||
+        !at(memory,table,0x90,transport.count) || !at(memory,table,0x98,transport.name)) return false;
+    storage::TransportMetadata metadata;
+    if (!snapshot_campaign_files(transport,directory,metadata) ||
+        !owner.collecting(transport.remote,owner.native_root()) || (metadata.files.size()!=2 && metadata.files.size()!=4)) return false;
+    for (const auto* required:{"game.details","game_duration.dat"})
+        if (std::none_of(metadata.files.begin(),metadata.files.end(),[&](const auto& file){return file.name==required;})) return false;
+    std::vector<SdkFileWrite> current;
+    for (const auto& source:metadata.files) {
+        SdkFileWrite file{}; const auto full=directory+"/"+source.name;
+        if (full.size()>=file.name.size()) return false;
+        std::memcpy(file.name.data(),full.c_str(),full.size()+1);
+        file.size=source.size; file.sha256=source.sha256; current.push_back(file);
+    }
+    files=std::move(current); return true;
+}
+
 bool bind_root_provider(Session& owner, engine::Memory& memory, const ProviderCalls& calls) {
     uintptr_t root = 0, manager = 0;
     // An earlier unbound import, stop or abnormal return permanently closes this

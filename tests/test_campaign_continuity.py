@@ -144,6 +144,14 @@ class CampaignContinuity(unittest.TestCase):
                     resumed = self.stage('resume', root, 2, 'native_read_delta_resume')
                     self.assertIn('separate-process partial-save catalog/parser/resume', resumed)
 
+    def test_owned_provider_rollback_opens_then_partial_save_reopens_in_new_process(self):
+        with tempfile.TemporaryDirectory(prefix='sentinel-provider-rollback-') as root:
+            self.stage('create', root, 2, 'native_read_c_rollback')
+            result = self.stage('resume', root, 2, 'native_read_c_rollback')
+            self.assertIn('complete inventory/readback/catalog/Continue/backup', result)
+            self.assertIn('separate-process partial-save catalog/parser/resume',
+                          self.stage('resume', root, 2, 'native_read_delta_resume'))
+
 
 
     def test_native_menu_and_continue_refuse_missing_duplicate_mixed_failed_or_uncorrelated_reads(self):

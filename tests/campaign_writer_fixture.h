@@ -54,7 +54,10 @@ ReadWorkerResult* prepare(uintptr_t context,ReadWorkerResult* out,SaveReference*
     waiter->control=0; *out={0,1,0}; return out;
 }
 ReadWorkerResult* decode(uintptr_t,ReadWorkerResult* out) {
-    *out=model->read_failure?ReadWorkerResult{1,4,0}:ReadWorkerResult{0,0x80009101u,0xa5a5a5a5u};
+    const bool invalid=std::any_of(model->remote.files.begin(),model->remote.files.end(),[](const auto& file) {
+        return file.first.rfind(model->directory+"/",0)==0 && !file.second.empty() && file.second[0]=='X';
+    });
+    *out=model->read_failure || invalid?ReadWorkerResult{1,4,0}:ReadWorkerResult{0,0x80009101u,0xa5a5a5a5u};
     return out;
 }
 SaveResult* poll_read(SaveFuture* base,SaveResult* out,void*) {

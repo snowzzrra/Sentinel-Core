@@ -18,6 +18,7 @@ SaveFuture** query_exists_scoped(Session&, engine::Memory&, SaveFuture**, SaveRe
 // receive its own marker under the retained local mutex; existing data without
 // that marker refuses. This is namespace preparation, not creation of a game save.
 bool provider_initialized(Session&, engine::Memory&, uintptr_t manager, const ProviderCalls&);
+bool snapshot_campaign_manifest(Session&, engine::Memory&, const std::string& directory, std::vector<SdkFileWrite>&);
 // RootInit publishes the selected manager after its constructor initialized the
 // provider. Called only after normal RootInit return, before startup_leave.
 bool bind_root_provider(Session&, engine::Memory&, const ProviderCalls&);

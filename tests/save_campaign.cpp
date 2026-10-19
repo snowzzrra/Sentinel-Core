@@ -344,6 +344,7 @@ int wmain(int argc,wchar_t** argv) {
     store(data,0,text(native_directory)); store(data,0x1c0,reinterpret_cast<uintptr_t>(file_list.data())); store(data,0x1c8,int32_t{1}); store(data,0x1cc,int32_t{1});
     std::array<std::string,3> extra_names{"game_duration.dat","game.details-BACKUP","game_duration.dat-BACKUP"};
     std::array<std::string,3> extra_payloads{"encoded duration checkpoint","older details checkpoint","older duration checkpoint"};
+    if (!resume && defect==L"native_read_c_rollback") extra_payloads[0]=std::string(92135,'d');
     std::array<std::array<unsigned char,0x190>,3> extra_files{};
     std::array<uintptr_t,4> all_files{files};
     if (native_read || profile_overlap) {
@@ -489,6 +490,11 @@ int wmain(int argc,wchar_t** argv) {
             navigation_fixture::continue_files();
             const std::string destination=defect.rfind(L"native_read_mission",0)==0?"game/dlc2/e5m1_spear/e5m1_spear":"";
             CHECK(owner.campaign_run.begin_resume(destination));
+            const bool rollback=defect==L"native_read_c_rollback";
+            if (rollback) {
+                remote.files[directory+"/game_duration.dat"]=std::string(64379,'d');
+                remote.files[directory+"/game.details"]="older valid fixture details";
+            }
             if (corrupt) remote.files[directory+"/game.details"][0]='X';
             const bool loaded=writer_fixture::load(reader,false,defect);
             if (!loaded && expected.count(defect)) {
@@ -505,9 +511,9 @@ int wmain(int argc,wchar_t** argv) {
             }
             if (corrupt) {
                 CHECK(!loaded); const auto first=owner.btrace.snapshot().first_failure;
-                CHECK(std::strcmp(first.predicate,"resume_payload_hash_mismatch")==0 && diagnostic_fact(first,"file_index")==1);
+                CHECK(std::strcmp(first.predicate,"ordinary_native_decode_result")==0);
                 CHECK(!owner.campaign_run.snapshot().parser_completed);
-                std::puts("PASS explicit gameplay source hash failure after successful menu hydration"); return 0;
+                std::puts("PASS native authentication failure after successful menu hydration"); return 0;
             }
             CHECK(loaded && owner.campaign_run.allow_difficulty(difficulty));
             if (defect==L"native_read_delta_resume" || defect==L"native_read_checkpoint_resume") {
@@ -515,7 +521,7 @@ int wmain(int argc,wchar_t** argv) {
                 CHECK(owner.campaign_run.snapshot().source_checkpoint==2);
                 std::puts("PASS separate-process partial-save catalog/parser/resume"); return 0;
             }
-            if (defect.rfind(L"native_read_delta",0)==0) {
+            if (defect.rfind(L"native_read_delta",0)==0 || rollback) {
                 const auto previous_details=remote.files.at(directory+"/game.details");
                 extra_payloads[0]+=" / incremental checkpoint";
                 store(extra_files[0],0x150,uint64_t(extra_payloads[0].size()));
@@ -647,7 +653,7 @@ int wmain(int argc,wchar_t** argv) {
                     remote.files[directory+"/game.details"][0]='X';
                     CHECK(!writer_fixture::load(reader,false,L"native_read"));
                     CHECK(owner.campaign_run.snapshot().checkpoint==2);
-                    CHECK(std::strcmp(owner.btrace.snapshot().first_failure.predicate,"resume_payload_hash_mismatch")==0);
+                    CHECK(std::strcmp(owner.btrace.snapshot().first_failure.predicate,"ordinary_native_decode_result")==0);
                     std::puts("PASS repeated Continue rejects changed payload"); return 0;
                 }
                 CHECK(writer_fixture::load(reader,false,L"native_read"));
@@ -663,6 +669,8 @@ int wmain(int argc,wchar_t** argv) {
         CHECK(owner.campaign_run.begin_resume());
         CHECK(owner.campaign_run.allow_access(source,directory,false,false));
         if (defect==L"wrong_source") {
+            remote.files[directory+"/game_duration.dat"]="native fixture duration";
+            remote.files[directory+"/game.details"]=payload;
             payload[0]='X'; CHECK(!owner.campaign_run.verify_source(memory,source,image));
             const auto failure=owner.btrace.snapshot().first_failure;
             CHECK(failure.stage==BStage::resume && std::strcmp(failure.predicate,"resume_payload_hash_mismatch")==0);

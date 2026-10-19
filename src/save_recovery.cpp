@@ -119,6 +119,11 @@ bool capture(const RecoveryTransport& t,const std::string& directory,storage::Tr
     return true;
 }
 }
+bool snapshot_campaign_files(const RecoveryTransport& transport,const std::string& directory,storage::TransportMetadata& metadata) {
+    if (!transport.remote || !transport.read || !transport.size || !transport.count || !transport.name) return false;
+    Payloads payloads;
+    return capture(transport,directory,metadata,payloads);
+}
 bool recovery_clear(storage::Namespace& lease) {
     std::string pending,complete;
     const auto p=lease.recovery_record(false,pending),c=lease.recovery_record(true,complete);
