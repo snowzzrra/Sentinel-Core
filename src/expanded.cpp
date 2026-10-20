@@ -5,6 +5,11 @@
 #include <set>
 
 namespace sentinel::expanded {
+float spawn_lift(std::string_view name) noexcept {
+    const auto tracking = spawn_tracking(name);
+    constexpr uint64_t airborne = 0x40 | 0x2000 | 0x40000 | 0x80000 | 0x1000000;
+    return tracking && tracking->physical == 0x40000 && !(tracking->source & airborne) ? 1.25f : 0.0f;
+}
 float movement_speed(float native_speed, std::string_view name) noexcept {
     constexpr std::string_view prefix = "ap_v070_ai_";
     constexpr std::string_view suffix = "__ap_v070_s";

@@ -650,7 +650,9 @@ void lock_recipe_checkpoint() { admission_mutex.lock(); quantity_mutex.lock(); }
 void unlock_recipe_checkpoint() { quantity_mutex.unlock(); admission_mutex.unlock(); }
 bool capture_recipe_checkpoint(std::string& bytes) {
     uintptr_t root = 0;
-    if (recipe_fault.load(std::memory_order_acquire) || !recipe_checkpoint_root(root) || (root && !load_native_recipes())) return false;
+    if (!recipe_checkpoint_root(root)) return false;
+    if (!root) { bytes = "EAPC1|-\n"; return true; }
+    if (recipe_fault.load(std::memory_order_acquire) || !load_native_recipes()) return false;
     if (!session_recipe_plan.empty()) {
         const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
         for (auto actor = recipe_actors.begin(); actor != recipe_actors.end();) {
@@ -1058,17 +1060,24 @@ uint64_t create_special_recipe(uintptr_t manager, std::string_view origin, std::
 }
 uintptr_t actor_factory_detour(uintptr_t info) {
     const auto creation = recipe_creation;
-    if (!creation || !creation->creating || creation->recipe->definition.family != 'u' || actor_factory_active)
+    if (!creation || !creation->creating || actor_factory_active)
         return original_actor_factory(info);
+    const auto name = creation->body ? *reinterpret_cast<const char**>(creation->body + 8) : nullptr;
+    const float lift = name && !creation->restoring ? spawn_lift(name) : 0.0f;
+    const bool summoned = creation->recipe->definition.family == 'u';
+    if (!summoned && !lift) return original_actor_factory(info);
     const auto override_state = *reinterpret_cast<const uint32_t*>(info + 0x70);
+    const auto height = *reinterpret_cast<const float*>(info + 0x48);
     uintptr_t actor = 0;
     __try {
         actor_factory_active = true;
-        *reinterpret_cast<uint32_t*>(info + 0x70) = physical_spawn_override(override_state);
+        if (summoned) *reinterpret_cast<uint32_t*>(info + 0x70) = physical_spawn_override(override_state);
+        *reinterpret_cast<float*>(info + 0x48) = height + lift;
         actor = original_actor_factory(info);
-        if (actor) { creation->actor = actor; initialize_physical_recipe(creation, actor); }
+        if (actor && summoned) { creation->actor = actor; initialize_physical_recipe(creation, actor); }
     } __finally {
         *reinterpret_cast<uint32_t*>(info + 0x70) = override_state;
+        *reinterpret_cast<float*>(info + 0x48) = height;
         actor_factory_active = false;
     }
     return actor;
@@ -4281,6 +4290,27 @@ bool test_direct_inputs() {
         recipe_state.requests().at(second).emitted == 2 && recipe_state.requests().at(cancelled).closed && !reserved_actors && valid;
     if (!ok) std::fprintf(stderr, "direct orphan restore: pending=%d producers=%zu births=%u attempts=%u valid=%d fault=%d\n",
         pending_summon_checkpoint.has_value(), direct_points.size(), births, attempts, valid, recipe_fault.load());
+    static float spawned_height;
+    original_actor_factory = [](uintptr_t info) -> uintptr_t { spawned_height = *reinterpret_cast<float*>(info + 0x48); return 0; };
+    NativeRecipe airborne_recipe; airborne_recipe.definition.family = 'i';
+    std::string airborne_body = "ap_v070_ai_a_t00000000000000010000000000040000_l00000001000000010000000100000002_kn__ap_v070_s00100";
+    auto airborne_text = recipe_text(airborne_body);
+    RecipeCreation airborne_creation; airborne_creation.recipe = &airborne_recipe; airborne_creation.creating = true;
+    airborne_creation.body = reinterpret_cast<uintptr_t>(&airborne_text);
+    std::array<uint8_t, 0x80> spawn_info{};
+    const auto spawn_address = reinterpret_cast<uintptr_t>(spawn_info.data());
+    *reinterpret_cast<float*>(spawn_address + 0x48) = 4;
+    recipe_creation = &airborne_creation;
+    actor_factory_detour(spawn_address);
+    ok &= spawned_height > 4 && *reinterpret_cast<float*>(spawn_address + 0x48) == 4;
+    airborne_creation.restoring = true;
+    actor_factory_detour(spawn_address);
+    ok &= spawned_height == 4;
+    recipe_creation = nullptr;
+    map_freed(); root = 0;
+    std::string hub_checkpoint;
+    ok &= !session_recipe_plan.empty() && capture_recipe_checkpoint(hub_checkpoint) && hub_checkpoint == "EAPC1|-\n" &&
+        restore_recipe_checkpoint(hub_checkpoint, "game/hub/hub");
     original_point_factory = old_factory; original_point_available = old_available;
     original_actor_factory = old_actor_factory; definition_database = old_database;
     lookup_definition = old_lookup; construct_native_string = old_string;

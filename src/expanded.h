@@ -13,6 +13,7 @@ float movement_speed(float native_speed, std::string_view entity_definition) noe
 inline constexpr std::uint64_t encounter_ai_mask = (std::uint64_t{1} << 44) - 1;
 struct SpawnTracking { std::uint64_t source, physical; };
 std::optional<SpawnTracking> spawn_tracking(std::string_view definition) noexcept;
+float spawn_lift(std::string_view definition) noexcept;
 struct SpawnRecipe {
     std::array<char, 20> origin;
     std::uint32_t body, logical_units, physical_units, credit_units;

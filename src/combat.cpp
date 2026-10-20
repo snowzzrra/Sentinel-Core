@@ -109,7 +109,7 @@ Publication Model::publish(const Capture& saved, const DeathRecord& record, uint
         saved.context.world != context_.world || saved.context.player != context_.player ||
         std::memcmp(saved.context.namespace_id, context_.namespace_id, 65) ||
         record.victim_spawn_id != saved.victim_spawn_id || record.victim_type != 1 ||
-        record.game_mode != 1 || record.death_time == 0 ||
+        record.game_mode != 1 ||
         record.attack_type == 2) return Publication::ignored;
     if (!saved.registration_serial) return Publication::missing_registration;
     if (saved.claim_index >= claims_.size()) return Publication::missing_registration;

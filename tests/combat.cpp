@@ -29,7 +29,7 @@ DeathRecord death(const Context& ctx) {
     record.victim_spawn_id = 0x123456;
     record.attacker_spawn_id = 9; record.inflictor_spawn_id = 10;
     record.victim_type = 1; record.attacker_type = 0; record.attacker_player = ctx.player;
-    record.victim_ai_type = 0x1234; record.death_time = 999960;
+    record.victim_ai_type = 0x1234;
     record.game_mode = 1; record.attack_type = 0;
     return record;
 }
@@ -82,8 +82,10 @@ int main(int argc, char** argv) {
         check(model->publish(inner, rejected, 106, 20, 17) == Publication::duplicate,
               "damage source changed the same death identity");
     }
-    rejected = record; rejected.death_time = 0;
-    check(model->publish(inner, rejected, 106, 20, 17) == Publication::ignored, "death without native state evidence counted");
+    for (const auto type : {0, 2, 3, 4}) {
+        rejected = record; rejected.victim_type = type;
+        check(model->publish(inner, rejected, 106, 20, 17) == Publication::ignored, "non-AI victim counted");
+    }
     rejected = record; rejected.attack_type = 3;
     check(model->publish(inner, rejected, 106, 20, 17) == Publication::duplicate, "glory end repeated an emitted life");
     model->release(outer); model->release(inner);
@@ -102,7 +104,7 @@ int main(int argc, char** argv) {
     write<uint64_t>(bytes, 0x50, 0x1234); write<uint32_t>(bytes, 0x80, 9);
     write<int32_t>(bytes, 0x84, 0); write<uint64_t>(bytes, 0x98, ctx.player);
     write<uint32_t>(bytes, 0xb8, 10); write<int32_t>(bytes, 0x38, 3);
-    write<int64_t>(bytes, 0xf0, 999960); write<int32_t>(bytes, 0x124, 1);
+    write<int32_t>(bytes, 0x124, 1);
     const auto decoded = decode_record(bytes);
     check(decoded.victim_spawn_id == record.victim_spawn_id && decoded.attacker_player == ctx.player &&
         decoded.death_time == record.death_time && decoded.attack_type == 3, "native record fixture decoded incorrectly");

@@ -44,6 +44,12 @@ int main() {
             "ap_v070_spawn_a_l0000000z000000020000000300000004_km__ap_v070_s00100"})
         require(!spawn_limits(name), "unmarked or malformed limit marker");
     using sentinel::expanded::spawn_tracking;
+    using sentinel::expanded::spawn_lift;
+    require(spawn_lift("ap_v070_ai_a_t00000000000000010000000000040000_l00000001000000010000000100000002_kn__ap_v070_s00100") > 0,
+        "ground replacement gives a cacodemon floor clearance");
+    require(spawn_lift("ap_v070_ai_a_t00000000000400000000000000040000_l00000001000000010000000100000002_kn__ap_v070_s00100") == 0,
+        "native airborne points preserve their height");
+    require(spawn_lift("ai/fodder/zombie") == 0, "unmarked actors preserve spawn height");
     const std::string slot = "ap_v070_group_a_t00000000000000100000000000000020_l00000001000000010000000100000002_kn__ap_v070_s00100";
     const auto tracking = spawn_tracking(slot);
     require(tracking && tracking->source == 16 && tracking->physical == 32, "original slot and physical species are distinct");

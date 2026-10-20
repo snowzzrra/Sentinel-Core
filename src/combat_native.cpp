@@ -257,7 +257,6 @@ bool test_observation_contention() {
     field(0x48, spawn_id);
     field(0x4c, int32_t{1});
     field(0x38, int32_t{1});
-    field(0xf0, int64_t{1});
     field(0x124, int32_t{1});
     const auto die = [&] { dispatch_detour(world_address + 0xac660, 0, 0, victim_address, 0, 0, 0, nullptr, 0, 1); };
     with_combat_reader(die);

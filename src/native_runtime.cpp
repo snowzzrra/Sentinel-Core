@@ -768,12 +768,12 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             save::session().campaign_run.refuse("native_ap_controls_installation_failed");
             why = SC_NATIVE_EXCEPTION;
         }
+        // hud validation needs the shared string entry before enemizer hooks it.
+        if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire) && !expanded::install(binding, stop_event)) {
             save::session().campaign_run.refuse("native_expanded_installation_failed");
             why = SC_NATIVE_EXCEPTION;
         }
-        // special checks the shared hud earnings entry before wup owns its detour
-        if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
         // The WUP owner validates and patches the 13ce4c0 entry first; the
         // challenge scope then qualifies the untouched seam/continuation windows
         // and coexists with that detour on the same function.

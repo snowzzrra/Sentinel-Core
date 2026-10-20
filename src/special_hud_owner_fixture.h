@@ -1136,6 +1136,33 @@ bool test_hud_owner_path() {
     ok &= std::strcmp(presentations.predicate, "hud_projection_clips_applied") == 0 &&
         presentations.status == save::BStatus::succeeded && presentations.facts[5].value >= 1 &&
         presentations.facts[11].value == 0;
+    const auto score_root = fixture.make(0, 19);
+    const auto found_label = fixture.add(score_root, 19, "apFoundLabel", 40, 20);
+    fixture.set_bounds(found_label, 120, 16);
+    const auto found_text = fixture.add(found_label, 19, "text");
+    const auto found_value = fixture.add(found_text, 19, "txtVal");
+    fixture.set_text(found_value, "ITEMS FOUND 2/12");
+    fixture.add(found_label, 19, "question");
+    fixture.render(score_root);
+    hud::keycap_ready = false;
+    combat::ProgressView progress{};
+    progress.visible = true; progress.total = 7; progress.target = 100;
+    hud::project_progress(score_root, found_label, progress);
+    const auto kills = fixture.find(score_root, "apCombatProgress");
+    const auto kills_value = fixture.find(fixture.find(kills, "text"), "txtVal");
+    hud::Point found_position{}, kill_position{};
+    ok &= kills && kills_value && fixture.clips.at(kills)->visible &&
+        fixture.clips.at(kills_value)->text == "KILLS 7 / 100" &&
+        fixture.clips.at(found_value)->text == "ITEMS FOUND 2/12" &&
+        hud::position(found_label, found_position) && hud::position(kills, kill_position) &&
+        kill_position.x == found_position.x && kill_position.y > found_position.y;
+    const auto clones = fixture.clones;
+    progress.total = 8;
+    hud::project_progress(score_root, found_label, progress);
+    ok &= fixture.clones == clones && fixture.clips.at(kills_value)->text == "KILLS 8 / 100";
+    progress.visible = false;
+    hud::project_progress(score_root, found_label, progress);
+    ok &= !fixture.clips.at(kills)->visible;
     hud::swf = saved_swf;
     original_hud_element_setup = saved_setup;
     original_weapon_hud_update = saved_update;

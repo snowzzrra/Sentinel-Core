@@ -704,6 +704,7 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     const auto text_root=swf_child(label,"text");
     const auto title=swf_child(text_root,"txtVal",true);
     if (!title) {
+        special::present_combat_progress(root,0,false);
         save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::blocked,
             "hud_found_text_missing",0,{{"root",root},{"label",label},{"text",text_root}},root);
         return false;
@@ -720,6 +721,7 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
             }
     if (summary.known!=1) {
         original_sprite_visibility(label,0,1);
+        special::present_combat_progress(root,label,false);
         if (meter_root) original_sprite_visibility(meter_root,0,1);
         save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::pending,
             "hud_found_summary_unknown",0,{{"revision",projection.revision},
@@ -741,6 +743,7 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     }
     original_sprite_visibility(label,1,1);
     if (!independent) original_sprite_visibility(root,1,1);
+    special::present_combat_progress(root,label,true);
     save::session().btrace.record(save::BStage::hud_found_fields,
         question ? save::BStatus::succeeded : save::BStatus::pending,"hud_found_presentation",0,
         {{"named_color",*reinterpret_cast<const uint32_t*>(text_root+0x6c)},{"material",question!=0},
@@ -762,6 +765,7 @@ void present_score_found(uintptr_t score) {
     }
     if (!active() || !read(score,0xb8,visible) || !visible) {
         if (const auto label=swf_child(root,"apFoundLabel")) original_sprite_visibility(label,0,1);
+        special::present_combat_progress(root,0,false);
         save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::pending,
             "hud_score_visibility_gate",0,{{"active",active()},{"visible",visible},{"root",root}},score);
         return;

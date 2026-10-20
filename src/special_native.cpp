@@ -397,7 +397,6 @@ void project_special_hud(uintptr_t element) {
             bool clips_applied = false;
             hud::project(element, owner, graphics, keys, epoch, clips_applied);
             const auto progress = combat::presentation().view(namespace_id);
-            hud::project_progress(graphics, progress);
             if (progress.milestone) present_combat_milestone(current_player, namespace_id, progress.milestone);
             if (clips_applied) {
                 note_hud_update(element, epoch, true);
@@ -1517,6 +1516,12 @@ save::BSnapshot installation_diagnostics() { return installation_trace.snapshot(
 save::BSnapshot input_diagnostics() { return input_trace.snapshot(); }
 save::BSnapshot route_diagnostics() { return route_trace.snapshot(); }
 save::BSnapshot hud_diagnostics() { return hud_trace.snapshot(); }
+void present_combat_progress(uintptr_t root, uintptr_t anchor, bool visible) {
+    combat::ProgressView progress{};
+    const auto& namespace_id = save::session().namespace_id();
+    if (visible && namespace_id.size() == 64) progress = combat::presentation().view(namespace_id.c_str());
+    hud::project_progress(root, anchor, progress);
+}
 UseHistory use_history() {
     AcquireSRWLockShared(&use_history_lock);
     auto snapshot = use_events;
