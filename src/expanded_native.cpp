@@ -2380,12 +2380,43 @@ bool empty_request_pending(uintptr_t manager, uint64_t mask, uintptr_t label) {
     return manager && read_definition_name(manager, owner) && (!label || native_text(label, filter, 1024)) &&
         recipe_state.pending_empty(owner, selected, filter);
 }
+bool remaining_encounter_heavy(uintptr_t command) {
+    if (stopped.load(std::memory_order_acquire)) return false;
+    const auto mask = *reinterpret_cast<const uint64_t*>(command + 0x88);
+    if (!mask || !(mask & (mask - 1))) return false;
+    std::string label;
+    char owner[512];
+    if (!native_text(command + 0x58, label, 1024) || !label.empty() ||
+        !read_definition_name(remaining_manager(command), owner)) return false;
+    for (const auto& [key, progress] : recipe_state.requests()) {
+        (void)key;
+        if (progress.request.logical_mask & mask) continue;
+        for (const auto& [identity, member] : progress.actors) {
+            (void)identity;
+            if (member.native_name.empty() || std::none_of(member.memberships.begin(), member.memberships.end(),
+                    [&](const auto& value) { return value.owner == owner; })) continue;
+            const auto world = world_global ? *reinterpret_cast<const uintptr_t*>(world_global) : 0;
+            const auto actor = world ? find_entity(world, member.native_name.c_str()) : 0;
+            char body[512];
+            if (!actor || !read_recipe_definition(actor, body)) continue;
+            const auto tracking = spawn_tracking(body);
+            // heavy replacements of ignored fodder still have to die before the arena clears.
+            if (tracking && (tracking->physical & 0xffffc000ULL)) return true;
+        }
+    }
+    return false;
+}
+bool remaining_encounter_heavy_safe(uintptr_t command) noexcept {
+    __try { return remaining_encounter_heavy(command); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return true; }
+}
 uint64_t remaining_result(uintptr_t command) {
     std::vector<RecipeCredit> total, living;
     std::vector<RemainingItem> present;
     bool tracked = false, blocked = false; int32_t threshold = 0;
     if (!remaining_inputs(command, total, living, present, tracked, blocked, threshold))
         return tracked || pending_autonomous_emissions() ? 0 : original_remaining(command);
+    if (threshold == 0 && remaining_encounter_heavy_safe(command)) return 0;
     if (!tracked) return original_remaining(command);
     if (empty_request_pending(remaining_manager(command), *reinterpret_cast<const uint64_t*>(command + 0x88), command + 0x58)) return 0;
     if (threshold < 0) return 0;
@@ -6696,6 +6727,31 @@ bool test_quantity_inputs() {
     ok = ok && health_detour(health) == 1;
     *reinterpret_cast<float*>(health + 0xc0) = 0.9f;
     ok = ok && recipe_state.cancel("remainder") && remaining_detour(cmd) == 42 && health_detour(health) == 1;
+    const auto previous_world = world_global;
+    const auto previous_find = find_entity;
+    uintptr_t arena_world = 77;
+    world_global = reinterpret_cast<uintptr_t>(&arena_world);
+    find_entity = [](uintptr_t, const char* name) -> uintptr_t {
+        return std::strcmp(name, "extra_heavy") == 0 ? reinterpret_cast<uintptr_t>(actors[0].bytes.data()) : 0;
+    };
+    recipe_state.reset(std::string(64, 'a'), "game/test");
+    ok &= recipe_state.request("outside", {"ai/fodder/imp", "0123456789abcdef0123", "maintenance", 1, 1, 1, 1});
+    const auto outside = recipe_state.reserve("outside");
+    ok &= outside && recipe_state.created("outside", *outside, "extra_heavy");
+    actors[0].name = "ap_v070_ai_r0123456789abcdef0123_00000000_q0000000100000001_t00000000000000010000000000080000_l00000001000000010000000100000002_kn__ap_v070_s00100";
+    *reinterpret_cast<int32_t*>(command.data() + 0xb0) = 0;
+    *reinterpret_cast<int32_t*>(command.data() + 0xc0) = 0;
+    *reinterpret_cast<uint64_t*>(command.data() + 0x88) = 16 | 32;
+    *reinterpret_cast<save::NativeString*>(command.data() + 0x58) = {};
+    ok &= remaining_detour(cmd) == 0;
+    *reinterpret_cast<uint64_t*>(command.data() + 0x88) = 16;
+    ok &= remaining_detour(cmd) == 42;
+    *reinterpret_cast<uint64_t*>(command.data() + 0x88) = 16 | 32;
+    actors[0].name.replace(actors[0].name.find("0000000000080000"), 16, "0000000000000020");
+    ok &= remaining_detour(cmd) == 42;
+    actors[0].name.replace(actors[0].name.find("0000000000000020", actors[0].name.find("_t")), 16, "0000000000080000");
+    ok &= recipe_state.actor_changed(outside->actor, RecipeActorState::dead) && remaining_detour(cmd) == 42;
+    world_global = previous_world; find_entity = previous_find;
     native_recipes = std::move(previous_recipes); worker_recipes = std::move(previous_workers);
     kill_progress = std::move(previous_kills); recipe_state = std::move(previous_recipe_state);
     original_kill = previous_kill; original_kill_dead = previous_kill_dead;
