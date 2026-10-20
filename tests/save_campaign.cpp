@@ -263,6 +263,7 @@ int wmain(int argc,wchar_t** argv) {
         std::puts("PASS weighted native remaining populations preserve partial thresholds and pause conditions"); return 0;
     }
     if (defect==L"recipe_inputs") {
+        CHECK(sentinel::expanded::test_recipe_transport());
         CHECK(sentinel::expanded::test_recipe_inputs());
         std::puts("PASS native recipe factories preserve workers, retries, logical identity and finite partial credits"); return 0;
     }

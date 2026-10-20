@@ -15,6 +15,7 @@ bool test_immediate_inputs();
 bool test_spirit_inputs();
 bool test_quantity_inputs();
 bool test_recipe_inputs();
+bool test_recipe_transport();
 bool test_summon_inputs();
 bool test_samuel_inputs();
 bool test_show_inputs();

@@ -427,13 +427,44 @@ bool native_cstring(uintptr_t string, std::string& out, size_t maximum) {
         out.assign(data, size); return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
+uint64_t functional_token(std::string_view value);
+bool read_recipe_metadata(uintptr_t world, uintptr_t root, std::string& metadata) {
+    if (!native_text(root + 0xbe0, metadata, maximum_recipe_metadata)) return false;
+    if (metadata.rfind("EAPC1|", 0) != 0) return true;
+    if (metadata.size() != 40 || metadata[14] != '|' || metadata[23] != '|') return false;
+    uint64_t count = 0, size = 0, checksum = 0;
+    const auto number = [&](size_t at, size_t length, uint64_t& value) {
+        const auto field = std::string_view(metadata).substr(at, length);
+        const auto parsed = std::from_chars(field.data(), field.data() + field.size(), value, 16);
+        return parsed.ec == std::errc{} && parsed.ptr == field.data() + field.size();
+    };
+    if (!number(6, 8, count) || !number(15, 8, size) || !number(24, 16, checksum) ||
+        !size || size > maximum_recipe_metadata || count != (size + 1799) / 1800) return false;
+    std::string combined;
+    combined.reserve(static_cast<size_t>(size));
+    for (uint64_t i = 0; i < count; ++i) {
+        const auto chunk = find_entity(world, ("ap_v070_recipe_plan_" + std::to_string(i)).c_str());
+        std::string text;
+        if (!chunk || !native_text(chunk + 0xbe0, text, 1800) ||
+            text.size() != std::min<uint64_t>(1800, size - combined.size())) return false;
+        combined += text;
+    }
+    if (functional_token(combined) != checksum) return false;
+    metadata = std::move(combined);
+    return true;
+}
 bool load_native_recipes() {
     if (!native_recipes.empty() && !restored_independent) return true;
     const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
     const auto root = find_entity(world, "ap_v070_recipe_plan");
     std::string metadata;
     RecipeLibrary parsed;
-    if (!root || !native_text(root + 0xbe0, metadata, maximum_recipe_metadata) || !parse_recipe_library(metadata, parsed)) return false;
+    if (!root) return false;
+    if (!read_recipe_metadata(world, root, metadata) || !parse_recipe_library(metadata, parsed)) {
+        recipe_fault.store(true, std::memory_order_release);
+        if (save::session().campaign_run.enabled()) save::session().campaign_run.refuse("native_enemy_recipe_metadata_invalid");
+        return false;
+    }
     if (checkpoint_recipe_missing || (!checkpoint_recipe_plan.empty() && parsed.plan != checkpoint_recipe_plan) ||
         (!session_recipe_plan.empty() && parsed.plan != session_recipe_plan)) {
         recipe_fault.store(true, std::memory_order_release);
@@ -1827,7 +1858,7 @@ bool queue_recipe_delay(uintptr_t manager) {
 bool dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
                               uintptr_t label, bool group, const std::string& origin, uintptr_t& result) {
     result = output;
-    if (!load_native_recipes()) { retry_immediate(manager); return true; }
+    if (!load_native_recipes()) { if (!recipe_fault.load()) retry_immediate(manager); return true; }
     const auto found = native_recipes.find(origin);
     if (found == native_recipes.end()) { retry_immediate(manager); return true; }
     auto& key = pending_recipes[{manager, origin}];
@@ -1875,7 +1906,7 @@ bool dispatch_recipe_immediate(uintptr_t manager, uintptr_t output, uint64_t typ
 }
 uintptr_t possessed_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t host, uintptr_t label,
                                    uintptr_t spirit, const std::string& host_origin, const std::string& spirit_origin) {
-    if (!load_native_recipes()) { retry_immediate(manager); return output; }
+    if (!load_native_recipes()) { if (!recipe_fault.load()) retry_immediate(manager); return output; }
     const auto host_recipe = native_recipes.find(host_origin), spirit_recipe = native_recipes.find(spirit_origin);
     if (host_recipe == native_recipes.end() || spirit_recipe == native_recipes.end() ||
         host_recipe->second.definition.family != 'p' || spirit_recipe->second.definition.family != 's') {
@@ -3118,7 +3149,8 @@ bool recipe_library_point(uintptr_t point) {
     if (!read_definition_name(point, name)) return false;
     const std::string_view value(name);
     if (recipe_creation && recipe_creation->source == point && recipe_creation->recipe->definition.family == 'd') return false;
-    return value == "ap_v070_recipe_plan" || value.rfind("ap_v070_bodies_r", 0) == 0 || value.rfind("ap_v070_direct_r", 0) == 0 ||
+    return value == "ap_v070_recipe_plan" || value.rfind("ap_v070_recipe_plan_", 0) == 0 ||
+        value.rfind("ap_v070_bodies_r", 0) == 0 || value.rfind("ap_v070_direct_r", 0) == 0 ||
         value.rfind("ap_v070_functional_", 0) == 0 || value.rfind("ap_v070_independent_", 0) == 0;
 }
 uint64_t __fastcall point_candidate_detour(uintptr_t manager, uintptr_t point, uint64_t type) {
@@ -5393,6 +5425,76 @@ bool test_summon_inputs() {
     original_summon_request_complete = old_request_complete;
     original_summon_cleanup = old_cleanup;
     return ok && valid;
+}
+bool test_recipe_transport() {
+    static uintptr_t root, library;
+    static std::vector<std::array<uint8_t, 0xc00>> chunks;
+    static bool missing = false;
+    const auto previous_world = world_global;
+    const auto previous_find = find_entity;
+    const auto previous_name = definition_name;
+    auto world = std::make_unique<std::array<uint8_t, 0x126680>>();
+    uintptr_t address = reinterpret_cast<uintptr_t>(world->data());
+    world_global = reinterpret_cast<uintptr_t>(&address);
+    std::array<uint8_t, 0xc50> root_storage{}, library_storage{};
+    root = reinterpret_cast<uintptr_t>(root_storage.data());
+    library = reinterpret_cast<uintptr_t>(library_storage.data());
+    std::string metadata = "EAP1|" + std::string(64, 'a') + "|game/test\n";
+    for (unsigned i = 0; i < 414; ++i) {
+        char origin[21]; sprintf_s(origin, "%020x", i);
+        metadata += std::string(origin) + "|i|" + std::string(128, 's') + std::to_string(i) +
+            "|arena|0000000000000010|00000001|00000000|00000000|00000000\n";
+    }
+    std::vector<std::string> texts;
+    for (size_t at = 0; at < metadata.size(); at += 1800) texts.push_back(metadata.substr(at, 1800));
+    chunks.resize(texts.size());
+    for (size_t i = 0; i < texts.size(); ++i)
+        *reinterpret_cast<save::NativeString*>(chunks[i].data() + 0xbe0) = recipe_text(texts[i]);
+    char header[41];
+    sprintf_s(header, "EAPC1|%08x|%08x|%016llx", static_cast<unsigned>(texts.size()),
+        static_cast<unsigned>(metadata.size()), functional_token(metadata));
+    std::string transport = header;
+    const auto publish = [&] { *reinterpret_cast<save::NativeString*>(root + 0xbe0) = recipe_text(transport); };
+    publish();
+    find_entity = [](uintptr_t, const char* name) -> uintptr_t {
+        const std::string_view value(name);
+        if (value == "ap_v070_recipe_plan") return root;
+        if (value.rfind("ap_v070_bodies_r", 0) == 0) return library;
+        if (value.rfind("ap_v070_recipe_plan_", 0) != 0) return 0;
+        size_t index = 0; const auto at = value.find_last_of('_') + 1;
+        const auto parsed = std::from_chars(value.data() + at, value.data() + value.size(), index);
+        return !missing && parsed.ec == std::errc{} && index < chunks.size() ?
+            reinterpret_cast<uintptr_t>(chunks[index].data()) : 0;
+    };
+    definition_name = [](uintptr_t) { return "ap_v070_recipe_plan_0"; };
+    map_freed(); session_recipe_plan.clear();
+    std::string decoded, checkpoint;
+    RecipeLibrary parsed;
+    bool ok = metadata.size() > 65536 && read_recipe_metadata(address, root, decoded) && decoded == metadata &&
+        parse_recipe_library(decoded, parsed) && parsed.recipes.size() == 414 && recipe_library_point(root) &&
+        load_native_recipes() && native_recipes.size() == 414 && capture_recipe_checkpoint(checkpoint);
+    map_freed();
+    ok &= restore_recipe_checkpoint(checkpoint, "game/test") && load_native_recipes() && native_recipes.size() == 414;
+    missing = true; ok &= !read_recipe_metadata(address, root, decoded); missing = false;
+    std::swap(texts[0][0], texts[1][0]); ok &= !read_recipe_metadata(address, root, decoded);
+    std::swap(texts[0][0], texts[1][0]);
+    --reinterpret_cast<save::NativeString*>(chunks[0].data() + 0xbe0)->length;
+    ok &= !read_recipe_metadata(address, root, decoded);
+    ++reinterpret_cast<save::NativeString*>(chunks[0].data() + 0xbe0)->length;
+    for (const size_t offset : {6u, 15u, 24u}) {
+        transport = header; transport[offset] = 'f'; publish();
+        ok &= !read_recipe_metadata(address, root, decoded);
+    }
+    transport = metadata.substr(0, 2046); publish(); map_freed(); session_recipe_plan.clear();
+    ok &= !load_native_recipes() && recipe_fault.load() && !capture_recipe_checkpoint(checkpoint);
+    uintptr_t result = 0;
+    ok &= dispatch_recipe_locked(0, 0x1234, 0, 0, 0, false, "unused", result) && result == 0x1234;
+    transport = metadata; publish(); map_freed(); session_recipe_plan.clear();
+    ok &= load_native_recipes() && native_recipes.size() == 414;
+    map_freed(); session_recipe_plan.clear();
+    world_global = previous_world; find_entity = previous_find; definition_name = previous_name;
+    chunks.clear();
+    return ok;
 }
 bool recipe_fault_call(uintptr_t worker) {
     __try { maintain_tick_detour(worker); }
