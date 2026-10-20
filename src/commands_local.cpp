@@ -72,6 +72,10 @@ const char* safe_effect(const ManualRequest& r, uintptr_t player, uint64_t expec
     __except (EXCEPTION_EXECUTE_HANDLER) { return "native fault; effect unknown, automatic retry disabled"; }
 }
 }
+void enemy_spawn_trace(const char* state, const char* origin, const char* body, const char* point, uintptr_t actor) {
+    if (print) print("AP_ENEMY_SPAWN state=%s origin=%s body=%s point=%s actor=%llx\n",
+        state, origin, body, point, static_cast<unsigned long long>(actor));
+}
 uint32_t prepare_local(const engine::Binding& binding, HANDLE stop) {
     image = binding.image; engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 5000;

@@ -6,6 +6,7 @@
 #include "native_target.h"
 #include "save_session.h"
 #include "save_collector.h"
+#include "commands_native.h"
 #include <MinHook.h>
 #include <atomic>
 #include <cstring>
@@ -229,6 +230,7 @@ struct TraversalEntry {
 };
 thread_local TraversalEntry* traversal_entry = nullptr;
 std::atomic<bool> recipe_fault{false};
+std::map<std::string, uint8_t> recipe_spawn_traces;
 using AllocateWorker = uintptr_t(*)(size_t, uint32_t);
 using ConstructStagger = uintptr_t(*)(uintptr_t, int32_t, uint64_t, uint64_t, uintptr_t, uint64_t, const char*);
 using AssignManager = void(*)(uintptr_t, uintptr_t);
@@ -302,6 +304,7 @@ std::atomic<bool> stopped{true};
 thread_local uintptr_t active_ai = 0;
 thread_local float active_speed = 1.0f;
 bool generated_admission(const SpawnLimits&);
+void trace_recipe_spawn(const RecipeCreation&, uintptr_t body, uintptr_t point, uint8_t stage);
 void reserve_admission(const SpawnLimits&);
 void release_admission(const SpawnLimits&);
 void retry_immediate(uintptr_t);
@@ -793,6 +796,7 @@ bool settle_recipe_creation(RecipeCreation& creation) noexcept {
 }
 void end_recipe_creation(RecipeCreation& creation) noexcept {
     try {
+        if (!creation.actor) trace_recipe_spawn(creation, creation.body, creation.source, 2);
         if (creation.actor && creation.active_point && !record_point_credit(creation.active_point, &creation))
             recipe_fault.store(true, std::memory_order_release);
     } catch (...) { recipe_fault.store(true, std::memory_order_release); }
@@ -949,6 +953,20 @@ uint64_t point_available_detour(uintptr_t point, uintptr_t group, uint8_t time, 
     __try { return point_available_locked(point, group, time, player, fov, los); }
     __finally { admission_mutex.unlock(); }
 }
+void trace_recipe_spawn(const RecipeCreation& creation, uintptr_t body, uintptr_t point, uint8_t stage) {
+    if (!creation.recipe || creation.emission.actor.empty()) return;
+    const auto key = creation.emission.actor;
+    if (!recipe_spawn_traces.count(key) && recipe_spawn_traces.size() >= 256) return;
+    auto& stages = recipe_spawn_traces[key];
+    if (stages & stage) return;
+    stages |= stage;
+    std::string definition;
+    char point_name[512]{};
+    if (!native_text(body, definition, 511)) return;
+    if (point) read_definition_name(point, point_name);
+    commands::enemy_spawn_trace(stage == 1 ? "attempt" : stage == 2 ? "retry" : "created",
+        creation.recipe->definition.origin.c_str(), definition.c_str(), point_name, creation.actor);
+}
 uintptr_t recipe_factory(uintptr_t point, uintptr_t group) {
     const auto creation = recipe_creation;
     creation->original = read_point_state(point); creation->active_point = point;
@@ -960,10 +978,12 @@ uintptr_t recipe_factory(uintptr_t point, uintptr_t group) {
         if (!body) { recipe_fault.store(true, std::memory_order_release); return 0; }
         write_point_state(point, {body, 1, 0, 0, physical_spawn_override(creation->original.state)});
         creation->creating = creation->override_active = true;
+        trace_recipe_spawn(*creation, body, point, 1);
         actor = original_point_factory(point, group);
         if (actor) {
             creation->actor = actor; initialize_physical_recipe(creation, actor);
         }
+        trace_recipe_spawn(*creation, body, point, actor ? 4 : 2);
     } __finally {
         creation->creating = creation->override_active = false;
         write_point_state(point, creation->original);
@@ -1015,6 +1035,7 @@ uint64_t invoke_recipe_creation(RecipeCreation* creation, uintptr_t manager, uin
     uint64_t result = 0;
     __try {
         suspend_recipe_points(creation);
+        trace_recipe_spawn(*creation, creation->body, creation->source, 1);
         if (special_recipe_call(creation, manager)) result = creation->actor ? 1 : 0;
         else if (!creation->source && (creation->recipe->definition.family == 'i' || creation->recipe->definition.family == 'p')) result = 0;
         else result = group && creation->recipe->definition.family != 'i' && creation->recipe->definition.family != 'p' ?
@@ -3987,6 +4008,7 @@ void map_freed() {
     restored_actor_identities.clear();
     death_action_credits.clear();
     point_credits.clear();
+    recipe_spawn_traces.clear();
     recipe_state = {}; next_recipe_request = 0; native_string_table = 0; recipe_fault.store(false);
 }
 #ifdef SC_NATIVE_TESTING
@@ -5428,7 +5450,7 @@ bool test_summon_inputs() {
 }
 bool test_recipe_transport() {
     static uintptr_t root, library;
-    static std::vector<std::array<uint8_t, 0xc00>> chunks;
+    static std::vector<std::array<uint8_t, 0xbe0 + sizeof(save::NativeString)>> chunks;
     static bool missing = false;
     const auto previous_world = world_global;
     const auto previous_find = find_entity;
@@ -5652,7 +5674,8 @@ bool test_recipe_inputs() {
     stopped.store(false);
     fail = true;
     maintain_tick_detour(reinterpret_cast<uintptr_t>(worker.data()));
-    bool ok = attempts == 1 && !calls && recipe_state.requests().size() == 1 &&
+    bool ok = attempts == 1 && !calls && recipe_spawn_traces.size() == 1 && recipe_spawn_traces.begin()->second == 3 &&
+        recipe_state.requests().size() == 1 &&
         !recipe_state.requests().begin()->second.emitted && !recipe_state.requests().begin()->second.reserved && !reserved_actors;
     const auto first = selected_name;
     collection.count = collection.capacity;
@@ -5660,7 +5683,7 @@ bool test_recipe_inputs() {
     ok = ok && attempts == 1 && !recipe_state.requests().begin()->second.emitted;
     collection.count = 0; fail = false; nested = true;
     maintain_tick_detour(reinterpret_cast<uintptr_t>(worker.data()));
-    ok = ok && calls == 1 && selected_name == first && nested_calls == 1;
+    ok = ok && calls == 1 && selected_name == first && nested_calls == 1 && recipe_spawn_traces.begin()->second == 7;
     std::string checkpoint;
     ok = ok && capture_recipe_checkpoint(checkpoint);
     for (int i = 0; i < 4; ++i) maintain_tick_detour(reinterpret_cast<uintptr_t>(worker.data()));
