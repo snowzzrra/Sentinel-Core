@@ -796,6 +796,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         status.availability = why ? SC_NATIVE_DISABLED : SC_NATIVE_ENABLED;
         accepting.store(!why && !stopping.load(std::memory_order_acquire), std::memory_order_release);
         ReleaseSRWLockExclusive(&lock);
+        save::complete_native_installation(accepting.load(std::memory_order_acquire), stop_event);
     }
     ReleaseSRWLockExclusive(&startup);
 }
