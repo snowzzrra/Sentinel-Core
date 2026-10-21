@@ -7,6 +7,7 @@
 #include "runes.h"
 #include "weapon_points.h"
 #include "deathlink.h"
+#include "combat_native.h"
 #include <filesystem>
 #include <windows.h>
 #include <string>
@@ -249,6 +250,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"special_input\":"+b_trace(special::input_diagnostics())+
                 ",\"special_route\":"+b_trace(special::route_diagnostics())+
                 ",\"special_hud\":"+b_trace(special::hud_diagnostics())+
+                ",\"combat\":"+b_trace(combat::diagnostics())+
                 ",\"special_use_history\":"+use_json+
                 ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
             if (facts != last) {

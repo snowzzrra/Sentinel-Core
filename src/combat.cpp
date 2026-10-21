@@ -74,20 +74,20 @@ void Model::registered(uintptr_t world, uintptr_t object, uint32_t slot, uint32_
 Capture Model::capture(uintptr_t world, uintptr_t object, uint32_t slot, uint32_t spawn_id,
                        uint64_t now, uint64_t stamp, uint32_t thread) noexcept {
     if (!ready(now) || world != context_.world || stamp != context_.stamp ||
-        thread != context_.owner_thread || slot >= registrations_.size()) return {};
+        !thread || slot >= registrations_.size()) return {};
     auto& entry = registrations_[slot];
     if (!entry.serial || entry.world != world || entry.object != object || entry.spawn_id != spawn_id)
-        return {context_, 0, spawn_id};
+        return {context_, 0, spawn_id, UINT32_MAX, thread};
     auto claim_index = entry.claim_index;
     if (claim_index >= claims_.size()) {
         for (claim_index = 0; claim_index < claims_.size(); ++claim_index)
             if (!claims_[claim_index].references) break;
-        if (claim_index == claims_.size()) return {context_, 0, spawn_id};
+        if (claim_index == claims_.size()) return {context_, 0, spawn_id, UINT32_MAX, thread};
         claims_[claim_index] = {entry.serial, slot, 0, entry.emitted};
         entry.claim_index = claim_index;
     }
     ++claims_[claim_index].references;
-    Capture value{context_, entry.serial, spawn_id, claim_index};
+    Capture value{context_, entry.serial, spawn_id, claim_index, thread};
     return value;
 }
 void Model::release(const Capture& saved) noexcept {
@@ -105,7 +105,7 @@ void Model::release(const Capture& saved) noexcept {
 Publication Model::publish(const Capture& saved, const DeathRecord& record, uint64_t now,
                            uint64_t stamp, uint32_t thread) noexcept {
     if (!ready(now) || saved.context.generation != generation_ ||
-        saved.context.stamp != stamp || stamp != context_.stamp || thread != context_.owner_thread ||
+        saved.context.stamp != stamp || stamp != context_.stamp || !saved.callback_thread || thread != saved.callback_thread ||
         saved.context.world != context_.world || saved.context.player != context_.player ||
         std::memcmp(saved.context.namespace_id, context_.namespace_id, 65) ||
         record.victim_spawn_id != saved.victim_spawn_id || record.victim_type != 1 ||

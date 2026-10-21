@@ -19,6 +19,7 @@ DWORD observe(void*) {
     engine::LocalMemory memory;
     engine::Binding binding;
     uint64_t sequence = 0;
+    uint64_t diagnostic_at = 0;
     try {
         if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return 0;
         binding = engine::bind_host(memory, stop);
@@ -31,7 +32,10 @@ DWORD observe(void*) {
             native::publish_context(observed, before);
             publish_context(observed);
             publish_save(save::sample(memory, binding, sequence, stop));
-            startup_log::record(current_snapshot(), binding.metadata.sample_reason);
+            if (GetTickCount64() >= diagnostic_at) {
+                startup_log::record(current_snapshot(), binding.metadata.sample_reason);
+                diagnostic_at = GetTickCount64() + 1000;
+            }
         } while (WaitForSingleObject(stop, 100) == WAIT_TIMEOUT);
     } catch (...) {
         binding.metadata = engine::unavailable(SC_REASON_INTERNAL_ERROR);

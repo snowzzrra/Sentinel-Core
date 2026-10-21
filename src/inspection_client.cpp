@@ -159,7 +159,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::invalid_response; return result;
     }
     const auto& execution = command ? result.command.execution : (deathlink ? result.deathlink.execution : (special ? result.special.execution : (runes ? result.runes.execution : (arsenal ? result.arsenal.execution : (inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic)))))));
-    if (request && !campaign && !automap && (execution.request_id != request->request_id ||
+    if (request && !campaign && !automap && !combat_presentation && (execution.request_id != request->request_id ||
         std::memcmp(execution.nonce, request->nonce, sizeof(request->nonce)))) {
         result.result = ProbeResult::invalid_response; return result;
     }

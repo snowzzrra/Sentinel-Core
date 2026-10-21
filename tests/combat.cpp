@@ -47,6 +47,22 @@ sc_combat_query query_for(const Context& ctx) {
 int main(int argc, char** argv) {
     auto model = std::make_unique<Model>();
     const auto ctx = context();
+    {
+        auto worker = std::make_unique<Model>();
+        worker->transition(1); worker->context(ctx);
+        worker->registered(ctx.world, 0x30000, 3, 0x123456);
+        auto captured = worker->capture(ctx.world, 0x30000, 3, 0x123456, 101, ctx.stamp, 18);
+        check(captured.registration_serial != 0, "worker death was discarded before analytics");
+        check(worker->publish(captured, death(ctx), 102, ctx.stamp, 17) == Publication::ignored,
+              "another thread consumed a pending death");
+        check(worker->publish(captured, death(ctx), 102, ctx.stamp, 18) == Publication::published,
+              "worker analytics lost a registered AI death");
+        check(worker->publish(captured, death(ctx), 102, ctx.stamp, 18) == Publication::duplicate,
+              "worker analytics duplicated a death");
+        worker->release(captured);
+        sc_combat_snapshot snapshot{}; worker->snapshot(query_for(ctx), snapshot);
+        check(snapshot.qualified_kills == 1, "worker death did not reach cumulative counter");
+    }
     model->transition(1); model->context(ctx);
     model->registered(ctx.world, 0x30000, 3, 0x123456);
     auto outer = model->capture(ctx.world, 0x30000, 3, 0x123456, 101, 20, 17);

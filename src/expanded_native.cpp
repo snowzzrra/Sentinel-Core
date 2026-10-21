@@ -1058,6 +1058,25 @@ uint64_t create_special_recipe(uintptr_t manager, std::string_view origin, std::
     if (!ready) { admission_mutex.unlock(); return 0; }
     return invoke_recipe_creation(&creation, manager, 0, 0, 0, false);
 }
+bool recipe_landing_pose(const RecipeCreation& creation, float* pose) {
+    if (!creation.active_point || creation.restoring || (creation.original.state != 6 &&
+        creation.original.state != 7 && creation.original.state != 9)) return false;
+    char point[512], marker[64];
+    if (!read_definition_name(creation.active_point, point)) return false;
+    sprintf_s(marker, "ap_v070_landing_%016llx", functional_token(point));
+    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
+    const auto helper = find_entity(world, marker);
+    if (!helper) return false;
+    std::string name;
+    if (!native_text(helper + 0xbe0, name, 191)) { recipe_fault.store(true); return false; }
+    const auto target = find_entity(world, name.c_str());
+    if (!target) { recipe_fault.store(true); return false; }
+    std::memcpy(pose, reinterpret_cast<const void*>(target + 0x74), 12 * sizeof(float));
+    if (!std::all_of(pose, pose + 12, [](float value) { return std::isfinite(value); })) {
+        recipe_fault.store(true); return false;
+    }
+    return true;
+}
 uintptr_t actor_factory_detour(uintptr_t info) {
     const auto creation = recipe_creation;
     if (!creation || !creation->creating || actor_factory_active)
@@ -1065,19 +1084,23 @@ uintptr_t actor_factory_detour(uintptr_t info) {
     const auto name = creation->body ? *reinterpret_cast<const char**>(creation->body + 8) : nullptr;
     const float lift = name && !creation->restoring ? spawn_lift(name) : 0.0f;
     const bool summoned = creation->recipe->definition.family == 'u';
-    if (!summoned && !lift) return original_actor_factory(info);
+    float landing[12];
+    const bool relocated = recipe_landing_pose(*creation, landing);
+    if (recipe_fault.load()) return 0;
+    if (!summoned && !lift && !relocated) return original_actor_factory(info);
     const auto override_state = *reinterpret_cast<const uint32_t*>(info + 0x70);
-    const auto height = *reinterpret_cast<const float*>(info + 0x48);
+    float pose[12]; std::memcpy(pose, reinterpret_cast<const void*>(info + 0x40), sizeof(pose));
     uintptr_t actor = 0;
     __try {
         actor_factory_active = true;
         if (summoned) *reinterpret_cast<uint32_t*>(info + 0x70) = physical_spawn_override(override_state);
-        *reinterpret_cast<float*>(info + 0x48) = height + lift;
+        if (relocated) std::memcpy(reinterpret_cast<void*>(info + 0x40), landing, sizeof(landing));
+        *reinterpret_cast<float*>(info + 0x48) += lift;
         actor = original_actor_factory(info);
         if (actor && summoned) { creation->actor = actor; initialize_physical_recipe(creation, actor); }
     } __finally {
         *reinterpret_cast<uint32_t*>(info + 0x70) = override_state;
-        *reinterpret_cast<float*>(info + 0x48) = height;
+        std::memcpy(reinterpret_cast<void*>(info + 0x40), pose, sizeof(pose));
         actor_factory_active = false;
     }
     return actor;
@@ -3201,6 +3224,9 @@ uintptr_t buff_detour(uintptr_t manager, uintptr_t output, uintptr_t point, uint
     return original_buff(manager, output, point, label, group);
 }
 bool tracked_point_type(uintptr_t manager, uintptr_t point, uint64_t type) {
+    if (recipe_creation && !recipe_creation->creating && recipe_creation->source == point &&
+        recipe_creation->recipe->definition.logical_mask == type && !*reinterpret_cast<const int32_t*>(point + 0xc40))
+        return true;
     return immediate_request && immediate_request->direct_factory && immediate_request->reserved &&
         manager == immediate_request->manager && point == immediate_request->origin &&
         type == immediate_request->tracking.source && *reinterpret_cast<const int32_t*>(point + 0xc40) == 1;
@@ -3212,7 +3238,8 @@ bool recipe_library_point(uintptr_t point) {
     if (recipe_creation && recipe_creation->source == point && recipe_creation->recipe->definition.family == 'd') return false;
     return value == "ap_v070_recipe_plan" || value.rfind("ap_v070_recipe_plan_", 0) == 0 ||
         value.rfind("ap_v070_bodies_r", 0) == 0 || value.rfind("ap_v070_direct_r", 0) == 0 ||
-        value.rfind("ap_v070_functional_", 0) == 0 || value.rfind("ap_v070_independent_", 0) == 0;
+        value.rfind("ap_v070_functional_", 0) == 0 || value.rfind("ap_v070_independent_", 0) == 0 ||
+        value.rfind("ap_v070_landing_", 0) == 0;
 }
 uint64_t __fastcall point_candidate_detour(uintptr_t manager, uintptr_t point, uint64_t type) {
     admission_mutex.lock();
@@ -4960,6 +4987,9 @@ bool test_samuel_inputs() {
 }
 bool test_functional_inputs() {
     static uintptr_t point, library, body, variant;
+    static uintptr_t landing_marker, landing_target;
+    static bool marker_present, expect_landing;
+    static unsigned actor_calls;
     static bool valid, present, fail;
     static unsigned calls;
     std::array<uint8_t, 0xe30> point_storage{}, library_storage{}, group_storage{};
@@ -4972,6 +5002,8 @@ bool test_functional_inputs() {
     const auto old_world = world_global;
     const auto old_find = find_entity;
     const auto old_factory = original_point_factory;
+    const auto old_actor_factory = original_actor_factory;
+    const auto old_name = definition_name;
     uintptr_t world = 88; world_global = reinterpret_cast<uintptr_t>(&world);
     point = reinterpret_cast<uintptr_t>(point_storage.data()); library = reinterpret_cast<uintptr_t>(library_storage.data());
     body = reinterpret_cast<uintptr_t>(body_entry.data()); variant = reinterpret_cast<uintptr_t>(variant_entry.data());
@@ -5007,8 +5039,44 @@ bool test_functional_inputs() {
     present = true; *reinterpret_cast<int32_t*>(library + 0xc40) = 0;
     ok &= !recipe_factory(point, 0) && calls == 4 && recipe_fault.load() && valid && !creation.creating &&
         read_point_state(point).definitions == original.definitions;
-    recipe_creation = nullptr; original_point_factory = old_factory;
-    world_global = old_world; find_entity = old_find;
+    map_freed();
+    std::array<uint8_t, 0xe30> landing_storage{}, target_storage{};
+    std::array<uint8_t, 0x148> info{};
+    landing_marker = reinterpret_cast<uintptr_t>(landing_storage.data());
+    landing_target = reinterpret_cast<uintptr_t>(target_storage.data());
+    const std::string target_name = "safe_ground";
+    *reinterpret_cast<save::NativeString*>(landing_marker + 0xbe0) = recipe_text(target_name);
+    const float pose[]{100, 200, -10, 1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const float landing[]{1, 2, 3, 0, 1, 0, -1, 0, 0, 0, 0, 1};
+    std::memcpy(info.data() + 0x40, pose, sizeof(pose));
+    std::memcpy(target_storage.data() + 0x74, landing, sizeof(landing));
+    *reinterpret_cast<uint32_t*>(info.data() + 0x70) = 12;
+    definition_name = [](uintptr_t) { return "entrance"; };
+    find_entity = [](uintptr_t value, const char* name) -> uintptr_t {
+        valid &= value == 88;
+        if (!std::strncmp(name, "ap_v070_landing_", 16)) return marker_present ? landing_marker : 0;
+        return !std::strcmp(name, "safe_ground") ? landing_target : 0;
+    };
+    original_actor_factory = [](uintptr_t address) -> uintptr_t {
+        ++actor_calls;
+        const auto position = reinterpret_cast<const float*>(address + 0x40);
+        valid &= position[0] == (expect_landing ? 1 : 100) && position[1] == (expect_landing ? 2 : 200) &&
+            position[2] == (expect_landing ? 3 : -10) && *reinterpret_cast<const uint32_t*>(address + 0x70) == 12;
+        return 55;
+    };
+    NativeRecipe recipe; recipe.definition.family = 'i'; creation.recipe = &recipe;
+    creation.active_point = point; creation.original.state = 6; creation.creating = true;
+    recipe_creation = &creation; marker_present = expect_landing = true; actor_calls = 0;
+    const auto address = reinterpret_cast<uintptr_t>(info.data());
+    ok &= actor_factory_detour(address) == 55 && !std::memcmp(info.data() + 0x40, pose, sizeof(pose));
+    creation.restoring = true; expect_landing = false;
+    ok &= actor_factory_detour(address) == 55;
+    creation.restoring = false; marker_present = false;
+    ok &= actor_factory_detour(address) == 55;
+    marker_present = true; landing_target = 0;
+    ok &= !actor_factory_detour(address) && actor_calls == 3 && valid && recipe_fault.load() && !actor_factory_active;
+    recipe_creation = nullptr; original_point_factory = old_factory; original_actor_factory = old_actor_factory;
+    world_global = old_world; find_entity = old_find; definition_name = old_name;
     map_freed(); return ok;
 }
 bool point_fault_call(uintptr_t point) {
@@ -5026,6 +5094,7 @@ bool test_point_inputs() {
     const auto previous_available = original_point_available;
     const auto previous_name = definition_name;
     const auto previous_candidate = original_point_candidate;
+    const auto previous_index = original_point_index;
     valid = true; blocked = fault = false; calls = 0;
     const RecipeCreation::PointState original{0x1111, 2, 1, 9, 7};
     write_point_state(point, original);
@@ -5083,8 +5152,18 @@ bool test_point_inputs() {
     ok &= !candidates;
     point_name = "authored_spawn";
     ok &= point_candidate_detour(1, point, 16) == 7 && candidates == 1;
+    original_point_index = [](uintptr_t, uintptr_t, uint64_t) -> int32_t { return -7; };
+    creation.source = point; recipe.definition.logical_mask = 16;
+    *reinterpret_cast<int32_t*>(point + 0xc40) = 0; recipe_creation = &creation;
+    ok &= point_candidate_detour(1, point, 16) == 1 && point_index_detour(1, point, 16) == 0 && candidates == 1;
+    ok &= point_candidate_detour(1, point, 32) == 7 && point_index_detour(1, point, 32) == -7;
+    creation.creating = true;
+    ok &= point_candidate_detour(1, point, 16) == 7 && point_index_detour(1, point, 16) == -7;
+    recipe_creation = nullptr;
+    ok &= point_candidate_detour(1, point, 16) == 7 && point_index_detour(1, point, 16) == -7;
     original_point_available = previous_available;
     definition_name = previous_name; original_point_candidate = previous_candidate;
+    original_point_index = previous_index;
     map_freed(); stopped.store(true);
     return ok;
 }
@@ -5622,6 +5701,8 @@ bool test_recipe_inputs() {
     const auto previous_group = original_group;
     const auto previous_spawn = original_spawn;
     const auto previous_register = original_register_spawn;
+    const auto previous_candidate = original_point_candidate;
+    const auto previous_index = original_point_index;
     const auto previous_tick = original_maintain_tick;
     const auto previous_resolve = resolve_actor;
     const auto previous_single = original_single;
@@ -5708,6 +5789,9 @@ bool test_recipe_inputs() {
     };
     original_spawn = [](uintptr_t manager_address, uintptr_t record, uintptr_t point, uintptr_t, uintptr_t) -> uint64_t {
         valid = valid && manager_address == owner && point == source_point && *reinterpret_cast<uint64_t*>(record) == expected_logical;
+        if (!*reinterpret_cast<int32_t*>(point + 0xc40) &&
+            (!point_candidate_detour(manager_address, point, expected_logical) || point_index_detour(manager_address, point, expected_logical)))
+            return 0;
         const auto actor = point_factory_detour(point, 0);
         if (!actor) return 0;
         reinterpret_cast<uint64_t*>(record)[2] = actor;
@@ -5888,6 +5972,9 @@ bool test_recipe_inputs() {
     };
     for (const auto family : {'i', 'a', 'b', 's'}) {
         map_freed(); unique_bodies = true;
+        *reinterpret_cast<int32_t*>(source_point + 0xc40) = family == 'i' ? 0 : 2;
+        original_point_candidate = [](uintptr_t, uintptr_t, uint64_t) -> uint64_t { return 0; };
+        original_point_index = [](uintptr_t, uintptr_t, uint64_t) -> int32_t { return -1; };
         const uint32_t source_override = family == 'i' ? 1 : family == 'a' ? 3 : family == 'b' ? 8 : 9;
         expected_override = family == 's' ? 10 : source_override;
         *reinterpret_cast<uint32_t*>(source_point + 0xd00) = source_override;
@@ -6001,6 +6088,7 @@ bool test_recipe_inputs() {
     world_global = previous_world; definition_name = previous_name; find_entity = previous_find;
     original_point_factory = previous_factory; original_group = previous_group; original_spawn = previous_spawn;
     original_register_spawn = previous_register; original_maintain_tick = previous_tick; resolve_actor = previous_resolve;
+    original_point_candidate = previous_candidate; original_point_index = previous_index;
     original_single = previous_single; original_archvile = previous_archvile; original_buff = previous_buff;
     original_spirit_helper = previous_helper; allocate_worker = previous_allocate; construct_stagger = previous_construct;
     assign_manager = previous_assign; original_queue_command = previous_queue; original_stagger_tick = previous_stagger;

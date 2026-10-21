@@ -14,6 +14,7 @@ namespace sentinel::combat {
 namespace {
 SRWLOCK lock = SRWLOCK_INIT;
 Model model;
+save::BTrace death_trace;
 sc_native_scope identity{};
 uintptr_t root_address = 0;
 std::atomic<bool> enabled{false};
@@ -57,12 +58,24 @@ Capture capture(uintptr_t compiler, uintptr_t victim) {
     Capture value{};
     if (!enabled.load(std::memory_order_acquire)) return value;
     const auto world = primary_world();
-    if (!world || compiler != world + 0xac660) return value;
+    if (!world || compiler != world + 0xac660) {
+        death_trace.record(save::BStage::combat_capture, save::BStatus::pending, "death_compiler_scope",
+            0, {{"world_present", world != 0}, {"compiler_matches", world && compiler == world + 0xac660}});
+        return value;
+    }
     uint32_t slot = 0, spawn_id = 0;
-    if (!object_identity(world, victim, slot, spawn_id)) { ++observation_gaps; return value; }
+    if (!object_identity(world, victim, slot, spawn_id)) {
+        ++observation_gaps;
+        death_trace.record(save::BStage::combat_capture, save::BStatus::refused, "victim_registration_unavailable");
+        return value;
+    }
     AcquireSRWLockExclusive(&lock);
     value = model.capture(world, victim, slot, spawn_id, GetTickCount64(),
                           native::observation_stamp(), GetCurrentThreadId());
+    death_trace.record(save::BStage::combat_capture, value.registration_serial ? save::BStatus::succeeded : save::BStatus::pending,
+        "death_callback_capture", 0, {{"context_ready", model.ready(GetTickCount64())},
+        {"generation", model.generation()}, {"callback_thread", GetCurrentThreadId()},
+        {"context_thread", value.context.owner_thread}, {"registered", value.registration_serial != 0}});
     ReleaseSRWLockExclusive(&lock);
     return value;
 }
@@ -90,8 +103,15 @@ void notify_detour(uintptr_t analytics, const void* record) {
         if (!read(reinterpret_cast<uintptr_t>(record), bytes)) ++observation_gaps;
         else {
             AcquireSRWLockExclusive(&lock);
-            const auto result = model.publish(*pending_death, decode_record(bytes), GetTickCount64(),
+            const auto decoded = decode_record(bytes);
+            const auto result = model.publish(*pending_death, decoded, GetTickCount64(),
                                                native::observation_stamp(), GetCurrentThreadId());
+            death_trace.record(save::BStage::combat_publication, result == Publication::published ?
+                save::BStatus::succeeded : save::BStatus::pending, "death_analytics_publication", 0,
+                {{"result", static_cast<unsigned>(result)}, {"victim_type", decoded.victim_type},
+                 {"game_mode", decoded.game_mode}, {"attack_type", decoded.attack_type},
+                 {"spawn_matches", decoded.victim_spawn_id == pending_death->victim_spawn_id},
+                 {"callback_thread", GetCurrentThreadId()}, {"context_thread", pending_death->context.owner_thread}});
             if (result == Publication::missing_registration) ++observation_gaps;
             ReleaseSRWLockExclusive(&lock);
         }
@@ -170,6 +190,7 @@ sc_combat_snapshot inspect(const sc_combat_query& query) {
     ReleaseSRWLockShared(&lock);
     return out;
 }
+save::BSnapshot diagnostics() { return death_trace.snapshot(); }
 bool confirmed_dead(uintptr_t world, uintptr_t actor) {
     if (!enabled.load(std::memory_order_acquire)) return false;
     uint32_t slot = 0, spawn_id = 0;

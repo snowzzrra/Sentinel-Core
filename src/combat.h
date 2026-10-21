@@ -20,6 +20,7 @@ struct Capture {
     uint64_t registration_serial = 0;
     uint32_t victim_spawn_id = 0;
     uint32_t claim_index = UINT32_MAX;
+    uint32_t callback_thread = 0;
 };
 struct DeathRecord {
     uint32_t victim_spawn_id = 0, attacker_spawn_id = 0, inflictor_spawn_id = 0;
