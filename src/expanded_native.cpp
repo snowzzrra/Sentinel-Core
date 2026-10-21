@@ -271,6 +271,7 @@ struct KillProgress {
     std::string owner, label;
     uint64_t mask = 0;
     uint32_t seen = 0;
+    uint8_t traced = 0;
     bool initialized = false, tracked = false;
     std::map<std::pair<uint32_t, uint32_t>, uint64_t> deaths;
     RecipeBaseline baseline;
@@ -947,7 +948,9 @@ uint64_t point_available_locked(uintptr_t point, uintptr_t group, uint8_t time, 
             for (const auto& [denominator, units] : credits.units) values.push_back({units, denominator});
             if (credit_at_least(values, maximum)) return 0;
         }
-        return invoke_point_available(point, group, time, player, fov, los, creation);
+        const auto result = invoke_point_available(point, group, time, player, fov, los, creation);
+        if (!result && creation) trace_recipe_spawn(*creation, creation->body, point, 64);
+        return result;
     } catch (...) { recipe_fault.store(true, std::memory_order_release); return 0; }
 }
 uint64_t point_available_detour(uintptr_t point, uintptr_t group, uint8_t time, uint8_t player, uint8_t fov, uint8_t los) {
@@ -966,12 +969,17 @@ void trace_recipe_spawn(const RecipeCreation& creation, uintptr_t body, uintptr_
     char point_name[512]{};
     if (!native_text(body, definition, 511)) return;
     if (point) read_definition_name(point, point_name);
-    commands::enemy_spawn_trace(stage == 1 ? "attempt" : stage == 2 ? "retry" : "created",
+    commands::enemy_spawn_trace(stage == 1 ? "attempt" : stage == 2 ? "retry" : stage == 4 ? "created" :
+        stage == 8 ? "factory" : stage == 16 ? "candidate_rejected" : stage == 32 ? "index_rejected" : "unavailable",
         creation.recipe->definition.origin.c_str(), definition.c_str(), point_name, creation.actor);
 }
 uintptr_t recipe_factory(uintptr_t point, uintptr_t group) {
     const auto creation = recipe_creation;
-    creation->original = read_point_state(point); creation->active_point = point;
+    const auto state = read_point_state(point);
+    const bool prepared = creation->override_active && creation->active_point == point;
+    if (!prepared) creation->original = state;
+    creation->active_point = point;
+    trace_recipe_spawn(*creation, creation->body, point, 8);
     uintptr_t actor = 0;
     __try {
         auto& credits = point_credits[point];
@@ -987,8 +995,8 @@ uintptr_t recipe_factory(uintptr_t point, uintptr_t group) {
         }
         trace_recipe_spawn(*creation, body, point, actor ? 4 : 2);
     } __finally {
-        creation->creating = creation->override_active = false;
-        write_point_state(point, creation->original);
+        creation->creating = false; creation->override_active = prepared;
+        write_point_state(point, prepared ? state : creation->original);
     }
     return actor;
 }
@@ -1032,6 +1040,14 @@ bool special_recipe_call(RecipeCreation* creation, uintptr_t manager) {
     }
     return true;
 }
+uint64_t empty_recipe_type(uintptr_t point) {
+    if (!recipe_creation || recipe_creation->creating || recipe_creation->source != point || !point ||
+        *reinterpret_cast<const int32_t*>(point + 0xc40)) return 0;
+    const auto name = *reinterpret_cast<const char**>(recipe_creation->body + 8);
+    const auto tracking = spawn_tracking(name ? name : "");
+    return tracking ? tracking->physical : 0;
+}
+uint64_t create_tracked(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uint64_t);
 uint64_t invoke_recipe_creation(RecipeCreation* creation, uintptr_t manager, uintptr_t record,
                                 uintptr_t fourth, uintptr_t fifth, bool group) {
     uint64_t result = 0;
@@ -1040,9 +1056,13 @@ uint64_t invoke_recipe_creation(RecipeCreation* creation, uintptr_t manager, uin
         trace_recipe_spawn(*creation, creation->body, creation->source, 1);
         if (special_recipe_call(creation, manager)) result = creation->actor ? 1 : 0;
         else if (!creation->source && (creation->recipe->definition.family == 'i' || creation->recipe->definition.family == 'p')) result = 0;
-        else result = group && creation->recipe->definition.family != 'i' && creation->recipe->definition.family != 'p' ?
-            original_group(manager, reinterpret_cast<uint64_t*>(record), creation->source) :
-            original_spawn(manager, record, creation->source, fourth, fifth);
+        else if (group && creation->recipe->definition.family != 'i' && creation->recipe->definition.family != 'p')
+            result = original_group(manager, reinterpret_cast<uint64_t*>(record), creation->source);
+        else {
+            const auto physical = empty_recipe_type(creation->source);
+            result = physical ? create_tracked(manager, record, creation->source, fourth, fifth, physical) :
+                original_spawn(manager, record, creation->source, fourth, fifth);
+        }
     } __finally {
         resume_recipe_points(creation);
         end_recipe_creation(*creation);
@@ -2496,12 +2516,12 @@ void kill_dead_detour(uintptr_t command, uintptr_t record) {
         }
     } __finally { quantity_mutex.unlock(); admission_mutex.unlock(); }
 }
-bool empty_recipe_scope(std::string_view owner, uint64_t mask, std::string_view label) {
+bool recipe_scope(std::string_view owner, uint64_t mask, std::string_view label, bool empty_only) {
     if (mask & (uint64_t{1} << 44)) mask = encounter_ai_mask;
     for (const auto& [key, progress] : recipe_state.requests()) {
         (void)key;
         const auto& request = progress.request;
-        if (!request.physical_units && request.owner == owner && (request.logical_mask & mask) &&
+        if ((!empty_only || !request.physical_units) && request.owner == owner && (request.logical_mask & mask) &&
             (label.empty() || label == request.label)) return true;
     }
     return false;
@@ -2562,7 +2582,7 @@ uint64_t kill_result(uintptr_t command) {
     const auto target = *reinterpret_cast<const int32_t*>(command + 0xac);
     if (target <= 0) return 1;
     auto deaths = recipe_state.deaths(progress.owner, progress.mask, progress.label, progress.baseline, true);
-    bool tracked = progress.tracked || empty_recipe_scope(progress.owner, progress.mask, progress.label) ||
+    bool tracked = progress.tracked || recipe_scope(progress.owner, progress.mask, progress.label, false) ||
         std::any_of(deaths.begin(), deaths.end(), [](auto value) { return value.numerator != 0; });
     for (const auto& [credit, count] : progress.deaths) deaths.push_back({credit.first * count, credit.second});
     std::vector<RecipeCredit> living;
@@ -2597,7 +2617,17 @@ uint64_t kill_result(uintptr_t command) {
 uint64_t kill_detour(uintptr_t command) {
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> quantity(quantity_mutex);
-    try { return kill_result(command); } catch (...) { return 0; }
+    try {
+        const auto result = kill_result(command);
+        auto& progress = kill_progress[command];
+        const uint8_t stage = (result & 0xff) ? 2 : 1;
+        if (progress.initialized && !(progress.traced & stage)) {
+            progress.traced |= stage;
+            commands::enemy_kill_wait_trace(progress.owner.c_str(), progress.label.c_str(), progress.mask,
+                *reinterpret_cast<const int32_t*>(command + 0xac), progress.seen, stage == 2);
+        }
+        return result;
+    } catch (...) { return 0; }
 }
 RemainingWeight health_weight(uintptr_t command, uintptr_t record) {
     const auto id = *reinterpret_cast<const uint32_t*>(record + 12);
@@ -2655,7 +2685,7 @@ uint64_t health_result(uintptr_t command) {
     std::string label;
     char owner[512];
     const auto empty = manager && native_text(command + 0x58, label, 1024) && read_definition_name(manager, owner) &&
-        empty_recipe_scope(owner, mask, label);
+        recipe_scope(owner, mask, label, true);
     std::vector<RecipeHealth> health;
     if (!health_remainders(command, health)) return 0;
     const auto pending = !health.empty();
@@ -3224,9 +3254,6 @@ uintptr_t buff_detour(uintptr_t manager, uintptr_t output, uintptr_t point, uint
     return original_buff(manager, output, point, label, group);
 }
 bool tracked_point_type(uintptr_t manager, uintptr_t point, uint64_t type) {
-    if (recipe_creation && !recipe_creation->creating && recipe_creation->source == point &&
-        recipe_creation->recipe->definition.logical_mask == type && !*reinterpret_cast<const int32_t*>(point + 0xc40))
-        return true;
     return immediate_request && immediate_request->direct_factory && immediate_request->reserved &&
         manager == immediate_request->manager && point == immediate_request->origin &&
         type == immediate_request->tracking.source && *reinterpret_cast<const int32_t*>(point + 0xc40) == 1;
@@ -3245,14 +3272,20 @@ uint64_t __fastcall point_candidate_detour(uintptr_t manager, uintptr_t point, u
     admission_mutex.lock();
     __try {
         if (recipe_library_point(point)) return 0;
-        return tracked_point_type(manager, point, type) ? 1 : original_point_candidate(manager, point, type);
+        const auto result = tracked_point_type(manager, point, type) ? 1 : original_point_candidate(manager, point, type);
+        if (!result && recipe_creation && recipe_creation->source == point)
+            trace_recipe_spawn(*recipe_creation, recipe_creation->body, point, 16);
+        return result;
     } __finally { admission_mutex.unlock(); }
 }
 int32_t __fastcall point_index_detour(uintptr_t manager, uintptr_t point, uint64_t type) {
     admission_mutex.lock();
     __try {
         if (recipe_library_point(point)) return -1;
-        return tracked_point_type(manager, point, type) ? 0 : original_point_index(manager, point, type);
+        const auto result = tracked_point_type(manager, point, type) ? 0 : original_point_index(manager, point, type);
+        if (result < 0 && recipe_creation && recipe_creation->source == point)
+            trace_recipe_spawn(*recipe_creation, recipe_creation->body, point, 32);
+        return result;
     } __finally { admission_mutex.unlock(); }
 }
 uintptr_t invoke_direct_creation(RecipeCreation* creation, uintptr_t point) {
@@ -3358,11 +3391,23 @@ uintptr_t __fastcall point_factory_detour(uintptr_t point, uintptr_t group) {
 uint64_t create_tracked(uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth,
                         uint64_t physical) {
     const auto original_type = *reinterpret_cast<uint64_t*>(record);
+    const auto creation = empty_recipe_type(point) ? recipe_creation : nullptr;
     uint64_t result = 0;
     __try {
+        if (creation) {
+            creation->original = read_point_state(point); creation->active_point = point;
+            creation->override_active = true;
+            // native selection must see the body before it validates and stores the definition index.
+            write_point_state(point, {creation->body, 1, 0, creation->original.animation, creation->original.state});
+        }
         *reinterpret_cast<uint64_t*>(record) = (original_type & ~encounter_ai_mask) | physical;
         result = original_spawn(manager, record, point, fourth, fifth);
-    } __finally { *reinterpret_cast<uint64_t*>(record) = original_type; }
+    } __finally {
+        if (creation) {
+            write_point_state(point, creation->original); creation->override_active = false;
+        }
+        *reinterpret_cast<uint64_t*>(record) = original_type;
+    }
     return result;
 }
 uint64_t spawn_marked(uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth,
@@ -3386,7 +3431,11 @@ uint64_t spawn_marked(uintptr_t manager, uintptr_t record, uintptr_t point, uint
     return result;
 }
 uint64_t __fastcall spawn_detour(uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth) {
-    if (recipe_creation && !recipe_creation->creating) return original_spawn(manager, record, point, fourth, fifth);
+    if (recipe_creation && !recipe_creation->creating) {
+        const auto physical = empty_recipe_type(point);
+        return physical ? create_tracked(manager, record, point, fourth, fifth, physical) :
+            original_spawn(manager, record, point, fourth, fifth);
+    }
     if (!stopped.load(std::memory_order_acquire)) {
         uint64_t result;
         if (try_recipe_creation(manager, record, point, fourth, fifth, false, result)) return result;
@@ -5153,10 +5202,13 @@ bool test_point_inputs() {
     point_name = "authored_spawn";
     ok &= point_candidate_detour(1, point, 16) == 7 && candidates == 1;
     original_point_index = [](uintptr_t, uintptr_t, uint64_t) -> int32_t { return -7; };
+    const std::string body_name = "ap_v070_ai_r" + std::string(20, 'b') +
+        "_00000000_q0000000100000001_t00000000000000100000000000000020_l00000001000000010000000100000003_kn__ap_v070_s00100";
+    auto body_text = recipe_text(body_name); creation.body = reinterpret_cast<uintptr_t>(&body_text);
     creation.source = point; recipe.definition.logical_mask = 16;
     *reinterpret_cast<int32_t*>(point + 0xc40) = 0; recipe_creation = &creation;
-    ok &= point_candidate_detour(1, point, 16) == 1 && point_index_detour(1, point, 16) == 0 && candidates == 1;
-    ok &= point_candidate_detour(1, point, 32) == 7 && point_index_detour(1, point, 32) == -7;
+    ok &= point_candidate_detour(1, point, 32) == 7 && point_index_detour(1, point, 32) == -7 && candidates == 2;
+    ok &= point_candidate_detour(1, point, 16) == 7 && point_index_detour(1, point, 16) == -7;
     creation.creating = true;
     ok &= point_candidate_detour(1, point, 16) == 7 && point_index_detour(1, point, 16) == -7;
     recipe_creation = nullptr;
@@ -5672,7 +5724,7 @@ bool test_recipe_inputs() {
     static std::string metadata, origin, selected_name;
     static unsigned calls, attempts, registrations, nested_calls;
     static bool fail, valid, nested, fault, unique_bodies;
-    static uint64_t expected_logical;
+    static uint64_t expected_logical, expected_physical;
     static uint32_t expected_override;
     auto world = std::make_unique<std::array<uint8_t, 0x126680>>();
     std::array<uint8_t, 0xe30> root_storage{}, library_storage{}, alias_storage{}, group_storage{}, point_storage{}, manager{};
@@ -5788,10 +5840,15 @@ bool test_recipe_inputs() {
         valid = valid && manager_address == owner && record[0] == expected_logical; ++registrations;
     };
     original_spawn = [](uintptr_t manager_address, uintptr_t record, uintptr_t point, uintptr_t, uintptr_t) -> uint64_t {
-        valid = valid && manager_address == owner && point == source_point && *reinterpret_cast<uint64_t*>(record) == expected_logical;
-        if (!*reinterpret_cast<int32_t*>(point + 0xc40) &&
-            (!point_candidate_detour(manager_address, point, expected_logical) || point_index_detour(manager_address, point, expected_logical)))
-            return 0;
+        const auto type = *reinterpret_cast<uint64_t*>(record);
+        const bool supplied = recipe_creation && *reinterpret_cast<uintptr_t*>(point + 0xc38) == recipe_creation->body;
+        valid = valid && manager_address == owner && point == source_point && type == (supplied ? expected_physical : expected_logical);
+        if (supplied) {
+            if (!point_candidate_detour(manager_address, point, type)) return 0;
+            const auto index = point_index_detour(manager_address, point, type);
+            *reinterpret_cast<int32_t*>(point + 0xc54) = index >= 0 && index < *reinterpret_cast<int32_t*>(point + 0xc40) ? index : -1;
+            valid = valid && *reinterpret_cast<int32_t*>(point + 0xc54) >= 0;
+        }
         const auto actor = point_factory_detour(point, 0);
         if (!actor) return 0;
         reinterpret_cast<uint64_t*>(record)[2] = actor;
@@ -5819,7 +5876,7 @@ bool test_recipe_inputs() {
     stopped.store(false);
     fail = true;
     maintain_tick_detour(reinterpret_cast<uintptr_t>(worker.data()));
-    bool ok = attempts == 1 && !calls && recipe_spawn_traces.size() == 1 && recipe_spawn_traces.begin()->second == 3 &&
+    bool ok = attempts == 1 && !calls && recipe_spawn_traces.size() == 1 &&
         recipe_state.requests().size() == 1 &&
         !recipe_state.requests().begin()->second.emitted && !recipe_state.requests().begin()->second.reserved && !reserved_actors;
     const auto first = selected_name;
@@ -5828,7 +5885,7 @@ bool test_recipe_inputs() {
     ok = ok && attempts == 1 && !recipe_state.requests().begin()->second.emitted;
     collection.count = 0; fail = false; nested = true;
     maintain_tick_detour(reinterpret_cast<uintptr_t>(worker.data()));
-    ok = ok && calls == 1 && selected_name == first && nested_calls == 1 && recipe_spawn_traces.begin()->second == 7;
+    ok = ok && calls == 1 && selected_name == first && nested_calls == 1;
     std::string checkpoint;
     ok = ok && capture_recipe_checkpoint(checkpoint);
     for (int i = 0; i < 4; ++i) maintain_tick_detour(reinterpret_cast<uintptr_t>(worker.data()));
@@ -5973,14 +6030,29 @@ bool test_recipe_inputs() {
     for (const auto family : {'i', 'a', 'b', 's'}) {
         map_freed(); unique_bodies = true;
         *reinterpret_cast<int32_t*>(source_point + 0xc40) = family == 'i' ? 0 : 2;
-        original_point_candidate = [](uintptr_t, uintptr_t, uint64_t) -> uint64_t { return 0; };
-        original_point_index = [](uintptr_t, uintptr_t, uint64_t) -> int32_t { return -1; };
+        original_point_candidate = [](uintptr_t, uintptr_t point, uint64_t type) -> uint64_t {
+            if (*reinterpret_cast<int32_t*>(point + 0xc40) != 1) return 0;
+            const auto name = *reinterpret_cast<const char**>(*reinterpret_cast<uintptr_t*>(point + 0xc38) + 8);
+            const auto tracking = spawn_tracking(name);
+            return tracking && tracking->physical == type;
+        };
+        original_point_index = [](uintptr_t manager_address, uintptr_t point, uint64_t type) -> int32_t {
+            return original_point_candidate(manager_address, point, type) ? 0 : -1;
+        };
         const uint32_t source_override = family == 'i' ? 1 : family == 'a' ? 3 : family == 'b' ? 8 : 9;
         expected_override = family == 's' ? 10 : source_override;
         *reinterpret_cast<uint32_t*>(source_point + 0xd00) = source_override;
+        const auto source_state = read_point_state(source_point);
+        const auto source_unchanged = [&] {
+            const auto current = read_point_state(source_point);
+            return current.definitions == source_state.definitions && current.count == source_state.count &&
+                current.index == source_state.index && current.animation == source_state.animation && current.state == source_state.state;
+        };
         expected_logical = family == 's' ? uint64_t{1} << 40 : family == 'a' ? uint64_t{1} << 30 :
-            family == 'b' ? uint64_t{1} << 37 : 16;
+            family == 'b' ? uint64_t{1} << 37 : uint64_t{1} << 26;
+        expected_physical = family == 'i' ? 1 : 32;
         char logical[17]; sprintf_s(logical, "%016llx", expected_logical);
+        char physical[17]; sprintf_s(physical, "%016llx", expected_physical);
         metadata = "EAP2|" + std::string(64, 'a') + "|game/test\n" + origin + "|" + family +
             "|original_point|arena|" + logical + "|00000001|00000002|00000002|00000001|" +
             (family == 'a' ? "arch_template" : "") + "|" +
@@ -5990,7 +6062,7 @@ bool test_recipe_inputs() {
         *reinterpret_cast<int32_t*>(library + 0xc40) = 2;
         for (unsigned i = 0; i < 2; ++i) {
             names[i] = "ap_v070_ai_r" + origin + "_0000000" + std::to_string(i) + "_q0000000100000002_t" + logical +
-                "0000000000000020_l00000001000000010000000100000003_kn__ap_v070_s00100";
+                physical + std::string("_l00000001000000010000000100000003_kn__ap_v070_s00100");
             *reinterpret_cast<Text*>(bodies.data() + i * 0x80) = {0, names[i].data(), static_cast<int32_t>(names[i].size()), 0};
         }
         calls = attempts = registrations = retries = helper_records = 0; fail = false; allocation_allowed = false;
@@ -6001,7 +6073,7 @@ bool test_recipe_inputs() {
         collection.count = 0; fail = true;
         dispatch_recipe_immediate(owner, 88, expected_logical, alias, reinterpret_cast<uintptr_t>(label.c_str()), false, result);
         const auto chosen = selected_name;
-        ok = ok && attempts == 1 && !calls && retries == 2;
+        ok = ok && attempts == 1 && !calls && retries == 2 && source_unchanged();
         fail = false;
         dispatch_recipe_immediate(owner, 88, expected_logical, alias, reinterpret_cast<uintptr_t>(label.c_str()), false, result);
         ok = ok && calls == 1 && selected_name == chosen && retries == 3 && recipe_state.requests().begin()->second.emitted == 1;
@@ -6014,7 +6086,7 @@ bool test_recipe_inputs() {
         stagger_tick_detour(reinterpret_cast<uintptr_t>(queued_worker.data()));
         ok = ok && valid && calls == 2 && attempts == 3 && recipe_state.requests().begin()->second.emitted == 2 &&
             recipe_state.requests().begin()->second.closed && (family == 's' ? helper_records == 2 && !registrations : registrations == 2) &&
-            !reserved_actors && !recipe_creation && !recipe_fault.load();
+            !reserved_actors && !recipe_creation && !recipe_fault.load() && source_unchanged();
     }
     map_freed(); expected_logical = 16;
     std::array<uint8_t, 0xe30> spirit_alias_storage{}, spirit_library_storage{}, spirit_point_storage = point_storage;
@@ -6741,6 +6813,37 @@ bool test_quantity_inputs() {
     ok = ok && kill_detour(kill) == 1;
     kill_progress.erase(kill); initialize_kill(kill, reinterpret_cast<uintptr_t>(manager.data()));
     ok = ok && kill_detour(kill) == 0;
+    recipe_state.reset("plan", "map");
+    bool scope_ok = true;
+    const uint64_t hunter_mask = uint64_t{1} << 26;
+    scope_ok &= recipe_state.request("hunter", {"ai/fodder/imp", "origin", "", hunter_mask, 1, 1, 1});
+    const auto hunter = recipe_state.reserve("hunter");
+    scope_ok &= hunter && recipe_state.created("hunter", *hunter) && recipe_state.actor_changed(hunter->actor, RecipeActorState::dead);
+    *reinterpret_cast<uint64_t*>(kill + 0x88) = hunter_mask;
+    *reinterpret_cast<int32_t*>(kill + 0xac) = 2;
+    *reinterpret_cast<int32_t*>(kill + 0xa8) = 1;
+    *reinterpret_cast<uint64_t*>(future_worker.data() + 0x88) = 16;
+    *reinterpret_cast<int32_t*>(manager.data() + 0xc88) = 1;
+    actors[0].dead = false;
+    *reinterpret_cast<uint64_t*>(records.data()) = 16;
+    kill_progress.erase(kill); initialize_kill(kill, reinterpret_cast<uintptr_t>(manager.data()));
+    scope_ok &= kill_detour(kill) == 1;
+    *reinterpret_cast<uint64_t*>(future_worker.data() + 0x88) = hunter_mask;
+    scope_ok &= kill_detour(kill) == 0;
+    *reinterpret_cast<uint64_t*>(future_worker.data() + 0x88) = 16;
+    *reinterpret_cast<uint64_t*>(records.data()) = hunter_mask;
+    scope_ok &= kill_detour(kill) == 0;
+    actors[0].dead = true;
+    scope_ok &= kill_detour(kill) == 1;
+    *reinterpret_cast<uint64_t*>(records.data()) = 16;
+    *reinterpret_cast<save::NativeString*>(kill + 0x58) = {0, const_cast<char*>("unrelated"), 9, 0x40000000U, {}};
+    kill_progress.erase(kill); initialize_kill(kill, reinterpret_cast<uintptr_t>(manager.data()));
+    scope_ok &= kill_detour(kill) == 0;
+    *reinterpret_cast<save::NativeString*>(kill + 0x58) = {};
+    *reinterpret_cast<uint64_t*>(kill + 0x88) = 16;
+    *reinterpret_cast<uint64_t*>(records.data()) = 16;
+    *reinterpret_cast<int32_t*>(kill + 0xac) = 1;
+    recipe_state.reset("plan", "map");
     std::array<uint8_t, 0xd0> health_command{};
     std::array<uint8_t, 0x68 * 6> health_records{};
     const auto health = reinterpret_cast<uintptr_t>(health_command.data());
@@ -6880,7 +6983,7 @@ bool test_quantity_inputs() {
     definition_name = previous_name; original_remaining = previous_remaining;
     original_remaining_dead = previous_dead;
     refresh_entity = previous_entity; refresh_manager = previous_manager; ignored_actor = previous_ignored;
-    stopped.store(was_stopped); return ok;
+    stopped.store(was_stopped); return ok && scope_ok;
 }
 #endif
 }

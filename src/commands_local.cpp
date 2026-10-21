@@ -76,6 +76,10 @@ void enemy_spawn_trace(const char* state, const char* origin, const char* body, 
     if (print) print("AP_ENEMY_SPAWN state=%s origin=%s body=%s point=%s actor=%llx\n",
         state, origin, body, point, static_cast<unsigned long long>(actor));
 }
+void enemy_kill_wait_trace(const char* owner, const char* label, uint64_t mask, int32_t target, uint32_t seen, bool complete) {
+    if (print) print("AP_ENEMY_KILL_WAIT owner=%s label=%s mask=%llx target=%d seen=%u complete=%d\n",
+        owner, label, static_cast<unsigned long long>(mask), target, seen, complete ? 1 : 0);
+}
 uint32_t prepare_local(const engine::Binding& binding, HANDLE stop) {
     image = binding.image; engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 5000;
