@@ -136,6 +136,15 @@ void identities_and_descriptor() {
     Descriptor parsed;
     CHECK(parse_descriptor(text, parsed).ok() && parsed.root == a.root);
     CHECK(namespace_id(parsed.identity, changed).ok() && changed == id);
+    Fixture fixture;
+    const auto file = fixture.path + L"\\descriptor.txt";
+    write(file, text);
+    CHECK(read_descriptor_file(file.c_str(), parsed).ok() && parsed.root == a.root);
+    CHECK(namespace_id(parsed.identity, changed).ok() && changed == id);
+    const auto alias = fixture.path + L"\\descriptor-alias.txt";
+    CHECK(CreateHardLinkW(alias.c_str(), file.c_str(), nullptr));
+    CHECK(read_descriptor_file(file.c_str(), parsed).outcome == Outcome::unsafe_path);
+    CHECK(DeleteFileW(alias.c_str()));
     CHECK(!parse_descriptor(text + "root=C:\\other\n", parsed).ok());
     CHECK(!parse_descriptor(text.substr(0, text.size() - 1), parsed).ok());
     CHECK(!parse_descriptor(std::string(2049, 'a'), parsed).ok());

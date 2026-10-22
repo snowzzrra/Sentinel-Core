@@ -47,9 +47,10 @@ Result read_descriptor_text(const wchar_t* filename, std::string& text) {
     for (;;) {
         const bool leaf = end == absolute.size();
         const std::wstring current = absolute.substr(0, end);
+        // wine maps drive roots through reparse points
         HANDLE handle = CreateFileW(current.c_str(), leaf ? GENERIC_READ : FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+            (end == 3 ? 0 : FILE_FLAG_OPEN_REPARSE_POINT) | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
         if (handle == INVALID_HANDLE_VALUE) return {Outcome::io_error, GetLastError()};
         handles.values.push_back(handle);
         BY_HANDLE_FILE_INFORMATION info{};
@@ -245,6 +246,11 @@ Result validate_streams(HANDLE handle, bool directory) {
     if (!GetFileInformationByHandleEx(handle, FileStreamInfo, buffer.data(), static_cast<DWORD>(buffer.size()))) {
         const DWORD error = GetLastError();
         if (directory && error == ERROR_HANDLE_EOF) return {};
+        if (error == ERROR_INVALID_FUNCTION) {
+            DWORD flags = 0;
+            if (GetVolumeInformationByHandleW(handle, nullptr, 0, nullptr, nullptr, &flags, nullptr, 0) &&
+                !(flags & FILE_NAMED_STREAMS)) return {};
+        }
         return error == ERROR_MORE_DATA || error == ERROR_INSUFFICIENT_BUFFER ?
             Result{Outcome::unsafe_path, error} : io_error(error);
     }
@@ -261,7 +267,7 @@ Result open_directory(const std::wstring& path, Handle& handle, bool payload = f
     // block write and delete sharing with the read-only directory handle
     handle = Handle(CreateFileW(path.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        FILE_FLAG_BACKUP_SEMANTICS | (path.size() == 3 ? 0 : FILE_FLAG_OPEN_REPARSE_POINT), nullptr));
     if (!handle) return io_error();
     auto result = validate_handle(handle.value, path, true);
     return result.ok() && payload ? validate_streams(handle.value, true) : result;

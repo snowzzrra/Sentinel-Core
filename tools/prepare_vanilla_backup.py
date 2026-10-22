@@ -56,6 +56,10 @@ def kernel():
     api.CloseHandle.argtypes = [wintypes.HANDLE]
     api.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int,
                                                ctypes.c_void_p, wintypes.DWORD]
+    api.GetVolumeInformationByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPWSTR, wintypes.DWORD]
+    api.GetVolumeInformationByHandleW.restype = wintypes.BOOL
     api.GetDriveTypeW.argtypes = [wintypes.LPCWSTR]
     return api
 
@@ -116,7 +120,7 @@ def io_path(path):
 
 def check_node(path):
     info = io_path(path).lstat()
-    if info.st_file_attributes & 0x400:  # file_attribute_reparse_point
+    if info.st_file_attributes & 0x400 and not (len(path.anchor) == 3 and path == Path(path.anchor)):
         raise Refused("reparse points are not supported")
     if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
         raise Refused("non-regular source entry")
@@ -155,10 +159,16 @@ def verify_links(api, handle, path, operation, raw_count):
 def named_streams(api, handle, path, directory=False):
     streams = ctypes.create_string_buffer(65536)
     if not api.GetFileInformationByHandleEx(handle, 7, streams, len(streams)):
-        if directory and ctypes.get_last_error() == 38:
+        error = ctypes.get_last_error()
+        if directory and error == 38:
             return []
+        if error == 1:
+            flags = wintypes.DWORD()
+            if (api.GetVolumeInformationByHandleW(handle, None, 0, None, None, ctypes.byref(flags), None, 0)
+                    and not flags.value & 0x40000):
+                return []
         raise Refused("cannot establish complete file stream set", stage="stream_inventory",
-                      win32_error=ctypes.get_last_error(), private={"path": str(path), "operation": "stream_query"})
+                      win32_error=error, private={"path": str(path), "operation": "stream_query"})
     names, offset = [], 0
     while True:
         nxt = int.from_bytes(streams.raw[offset:offset + 4], "little")
@@ -180,7 +190,8 @@ def pinned(path, directory=False, inspect_streams=True):
     """Retain no-write/no-delete handles; regular file streams are exclusive."""
     import msvcrt
     api = kernel()
-    flags = 0x00200000 | (0x02000000 if directory else 0x08000000)
+    drive_root = directory and len(path.anchor) == 3 and path == Path(path.anchor)
+    flags = (0 if drive_root else 0x00200000) | (0x02000000 if directory else 0x08000000)
     handle = api.CreateFileW(str(io_path(path)), 0x80 if directory else 0x80000000,
                              1 if directory else 0, None, 3, flags, None)
     if handle == ctypes.c_void_p(-1).value:
