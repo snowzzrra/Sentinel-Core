@@ -46,6 +46,11 @@ Update original_start_show=nullptr;
 Populate original_boss_update=nullptr;
 Update original_secret_rewards_show=nullptr,original_escalation_rewards_show=nullptr;
 Populate original_reward_card=nullptr,original_escalation_card=nullptr;
+Update original_campaign_pump=nullptr;
+using CachedText=uintptr_t(*)(uintptr_t,const char*);
+using CachedSprite=uintptr_t(*)(uintptr_t);
+CachedText cached_text=nullptr;
+CachedSprite cached_sprite=nullptr;
 using RewardPack=void(*)(uintptr_t,const char*,const void*);
 RewardPack original_escalation_perk=nullptr;
 Update original_hud_score_init=nullptr;
@@ -195,6 +200,17 @@ void root_campaign(uintptr_t screen,uintptr_t declaration) {
         save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
                                       "main_logo_widget_fault",0,{},screen);
     }
+}
+void campaign_pump(uintptr_t screen) {
+    uintptr_t declaration=0;
+    if (!active() || !read(screen,0x100,declaration) || !declaration) {
+        original_campaign_pump(screen); return;
+    }
+    const auto count=*reinterpret_cast<const uint32_t*>(declaration+0x1b8);
+    __try {
+        *reinterpret_cast<uint32_t*>(declaration+0x1b8)=0;
+        original_campaign_pump(screen);
+    } __finally { *reinterpret_cast<uint32_t*>(declaration+0x1b8)=count; }
 }
 uintptr_t list_for(uintptr_t screen) {
     uintptr_t table=0,method=0;
@@ -418,8 +434,12 @@ void capture_encounter_popup(uintptr_t screen,bool escalation) {
     sc_campaign_reward reward{};
     uintptr_t widget=0;
     const auto now=GetTickCount64();
-    if (menu().encounter_reward(campaign.map,ns,now,reward) && read(screen,0x158,widget) && widget)
+    const bool known=menu().encounter_reward(campaign.map,ns,now,reward);
+    if (known && read(screen,0x158,widget) && widget)
         popup={screen,widget,campaign.map,ns,now};
+    save::session().btrace.record(save::BStage::encounter_rewards,
+        popup.screen ? save::BStatus::succeeded : save::BStatus::pending,"encounter_popup_binding",0,
+        {{"projection",known},{"widget",widget},{"location",reward.location_id}},screen);
 }
 bool popup_reward(uintptr_t owner,bool screen,sc_campaign_reward& reward) {
     const auto campaign=save::session().campaign_run.snapshot();
@@ -435,18 +455,23 @@ const char* encounter_text(const sc_campaign_reward& reward) {
     return reward.location_id ? reward.text : "AP REWARD PENDING";
 }
 void present_encounter_card(uintptr_t widget,const sc_campaign_reward& reward) {
-    uintptr_t root=0;
-    if (!read(widget,0x18,root) || !root) return;
-    const auto info=swf_child(root,"info");
-    const auto title=swf_child(swf_child(info,"rewardName"),"txtVal",true);
-    const auto category=swf_child(swf_child(info,"rewardType"),"txtVal",true);
-    if (!title || !category) return;
+    if (!cached_text || !cached_sprite) return;
+    const auto title=cached_text(widget+0x210,"txtVal");
+    const auto category=cached_text(widget+0x240,"txtVal");
+    if (!title || !category) {
+        save::session().btrace.record(save::BStage::encounter_rewards,save::BStatus::pending,
+            "encounter_card_fields_missing",0,{{"title",title},{"category",category}},widget);
+        return;
+    }
     swf_set_text(title,encounter_text(reward));
     swf_set_text(category,"ARCHIPELAGO");
-    for (const auto* name:{"item","details","lock","tier","tierColor","progressText"})
-        if (const auto child=swf_child(info,name)) original_sprite_visibility(child,0,1);
-    if (const auto pips=swf_child(root,"selectionPips")) original_sprite_visibility(pips,0,1);
-    const auto image=swf_child(info,"bigbox");
+    for (const size_t offset:{0x1b0u,0x1e0u,0x270u,0x300u})
+        if (const auto child=cached_sprite(widget+offset)) original_sprite_visibility(child,0,1);
+    for (const size_t offset:{0x380u,0x388u,0x390u}) {
+        uintptr_t child=0;
+        if (read(widget,offset,child) && child) widget_state(child,0);
+    }
+    const auto image=cached_sprite(widget+0x2a0);
     const auto material=question_material(image);
     if (image) {
         if (material) swf_set_material(image,material,0);
@@ -1539,7 +1564,30 @@ bool test_question_material() {
     const bool refused=!question_material(reinterpret_cast<uintptr_t>(sprite)) && owner[0x128]==1;
     swf_create_material=previous;
     swf_frame=previous_frame;
-    return created && refused && frames==1;
+    const auto saved_text=cached_text;
+    const auto saved_sprite=cached_sprite;
+    const auto saved_set_text=swf_set_text;
+    static uintptr_t card=0;
+    static unsigned written=0;
+    std::array<uint8_t,0x398> reward_widget{};
+    card=reinterpret_cast<uintptr_t>(reward_widget.data());
+    written=0;
+    cached_text=[](uintptr_t field,const char*)->uintptr_t {
+        return field==card+0x210 ? 1 : field==card+0x240 ? 2 : 0;
+    };
+    cached_sprite=[](uintptr_t)->uintptr_t { return 0; };
+    swf_set_text=[](uintptr_t field,const char* text) {
+        if (field==1 && !std::strcmp(text,"Ballista")) written|=1;
+        if (field==2 && !std::strcmp(text,"ARCHIPELAGO")) written|=2;
+    };
+    sc_campaign_reward reward{};
+    reward.location_id=7770001;
+    std::memcpy(reward.text,"Ballista",9);
+    present_encounter_card(card,reward);
+    cached_text=saved_text;
+    cached_sprite=saved_sprite;
+    swf_set_text=saved_set_text;
+    return created && refused && frames==1 && written==3;
 }
 bool test_physical_completion_edges() {
     CompletionToast toast{};
@@ -1562,6 +1610,7 @@ void test_calls(const NativeCalls& c) {
     original_meter_allocate=c.meter_allocate;
     original_sprite_visibility=c.sprite_visibility;
     original_meter_update=c.meter_update;
+    original_campaign_pump=c.campaign_pump;
     ready.store(true,std::memory_order_release);
 }
 void test_populate(uintptr_t screen,uintptr_t list) { populate(screen,list); }
@@ -1571,6 +1620,7 @@ void test_load(uintptr_t screen,int index) { load(screen,index); }
 void test_update(uintptr_t screen) { update(screen); }
 void test_root_navigation(uintptr_t screen,uint8_t reset) { root_navigation(screen,reset); }
 void test_root_campaign(uintptr_t screen,uintptr_t declaration) { root_campaign(screen,declaration); }
+void test_campaign_pump(uintptr_t screen) { campaign_pump(screen); }
 void test_meter_allocate(uintptr_t meter,uintptr_t encounters,uintptr_t decl) { meter_allocate_detour(meter,encounters,decl); }
 void test_sprite_visibility(uintptr_t sprite,uint32_t visible,uint32_t flag) {
     sprite_visibility_detour(sprite,visible,flag);
@@ -1754,7 +1804,10 @@ bool install(const engine::Binding& binding,HANDLE stop) {
         {0xf6b340,"405556488dac2488fcffff4881ec78040000488b057f3624034833c448898560",reinterpret_cast<void*>(escalation_rewards_show),reinterpret_cast<void**>(&original_escalation_rewards_show)},
         {0xf67a20,"b868400000e876439001482be0488b05a46f24034833c4488984243040000048",reinterpret_cast<void*>(reward_card),reinterpret_cast<void**>(&original_reward_card)},
         {0xf6c7f0,"48895c240848896c24104889742418574883ec50488bda488bf9e811b2ffff8b",reinterpret_cast<void*>(escalation_card),reinterpret_cast<void**>(&original_escalation_card)},
-        {0xf6ba10,"48895c2420564883ec50488bd9498bf0488b89900200004885c90f843b010000",reinterpret_cast<void*>(escalation_perk),reinterpret_cast<void**>(&original_escalation_perk)}};
+        {0xf6ba10,"48895c2420564883ec50488bd9498bf0488b89900200004885c90f843b010000",reinterpret_cast<void*>(escalation_perk),reinterpret_cast<void**>(&original_escalation_perk)},
+        {0x10a6fa0,"40555357488dac24e0bfffffb820410000e8ea4d7c01482be0488b05187a1003",reinterpret_cast<void*>(campaign_pump),reinterpret_cast<void**>(&original_campaign_pump)},
+        {0x185d670,"48895c2408574883ec30488bd9488bfa488b49104885c97516394b207e56488b",nullptr,reinterpret_cast<void**>(&cached_text)},
+        {0x185d1a0,"40534883ec20488b4110488bd94885c075143941207f064883c4205bc3e8ae1f",nullptr,reinterpret_cast<void**>(&cached_sprite)}};
     engine::LocalMemory optional_memory;
     for (const auto& page:pages) {
         native::Target target; target.address=binding.image.base+page.rva;
@@ -1762,10 +1815,10 @@ bool install(const engine::Binding& binding,HANDLE stop) {
             unsigned value=0; sscanf_s(page.bytes+n*2,"%2x",&value); target.bytes[n]=static_cast<uint8_t>(value);
         }
         auto reason=native::validate_target(optional_memory,binding.image,target,stop,GetTickCount64()+3000);
-        if (!reason) {
+        if (!reason && page.hook) {
             reason=MH_CreateHook(reinterpret_cast<void*>(target.address),page.hook,page.original);
             if (!reason) reason=MH_EnableHook(reinterpret_cast<void*>(target.address));
-        }
+        } else if (!reason) *page.original=reinterpret_cast<void*>(target.address);
         save::session().btrace.record(save::BStage::dossier_challenges,
             reason ? save::BStatus::refused : save::BStatus::succeeded,"campaign_page_binding",0,
             {{"rva",page.rva},{"reason",reason}});

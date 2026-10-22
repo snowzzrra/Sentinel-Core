@@ -22,6 +22,7 @@
 #include <intrin.h>
 #include <cstring>
 #include <cstdio>
+#include <chrono>
 #ifdef SC_NATIVE_TESTING
 #include "native_test_adapter.h"
 #endif
@@ -390,7 +391,7 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
             }
             const auto marker_status=automap_status(snapshot,map_name,name);
             if (marker_status==1) {
-                if (!automap_set_uncollected(object)) { automap_fault.store(3); break; }
+                automap_set_uncollected(object);
                 ++automap_cursor; continue;
             }
             if (marker_status!=2 || *reinterpret_cast<int32_t*>(object+0x134)==3) {
@@ -416,9 +417,24 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
 void execute_client_command(const sc_command_request& request, sc_command_result& result, uintptr_t player) {
     commands::execute_native(request, result, player);
 }
+struct FrameCost {
+    std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+    ~FrameCost() {
+        static uint64_t calls=0,total=0,maximum=0,slow=0,next=0;
+        const auto us=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now()-start).count());
+        ++calls; total+=us; maximum=std::max(maximum,us); slow+=us>=16000;
+        const auto now=GetTickCount64();
+        if (now<next) return;
+        next=now+5000;
+        save::session().btrace.record(save::BStage::native_frame_cost,save::BStatus::succeeded,"native_frame_cost_us",0,
+            {{"calls",calls},{"total_us",total},{"max_us",maximum},{"over_16ms",slow}});
+    }
+};
 void post_frame() {
     if (!accepting.load(std::memory_order_acquire) || fault.load(std::memory_order_acquire)) return;
     if (owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); return; }
+    FrameCost cost;
     commands::console_tick(epoch.load(std::memory_order_acquire));
     deathlink::expire_pending(GetTickCount64());
     // Missing this diagnostic opportunity is harmless; unlike a lifecycle event,

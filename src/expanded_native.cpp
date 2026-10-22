@@ -53,6 +53,21 @@ struct ObserveCost {
              {"scan_us",value.scan},{"scan_max_us",value.scan_max}},world);
     }
 };
+struct WaitCost {
+    CostClock::time_point start=CostClock::now();
+    ~WaitCost() {
+        static std::mutex mutex;
+        static uint64_t calls=0,total=0,maximum=0,slow=0,next=0;
+        const auto us=elapsed_us(start);
+        std::lock_guard<std::mutex> lock(mutex);
+        ++calls; total+=us; maximum=std::max(maximum,us); slow+=us>=16000;
+        const auto now=GetTickCount64();
+        if (now<next) return;
+        next=now+5000;
+        save::session().btrace.record(save::BStage::enemy_wait_cost,save::BStatus::succeeded,"enemy_wait_cost_us",0,
+            {{"calls",calls},{"total_us",total},{"max_us",maximum},{"over_16ms",slow}});
+    }
+};
 using Movement = float(__fastcall*)(uintptr_t);
 using Controller = float(__fastcall*)(uintptr_t, uintptr_t, uintptr_t, float);
 using DefinitionName = const char*(__fastcall*)(uintptr_t);
@@ -321,7 +336,7 @@ struct HealthProgress {
 std::map<uintptr_t, HealthProgress> health_progress;
 std::recursive_mutex quantity_mutex;
 std::recursive_mutex admission_mutex;
-std::array<uint32_t, 5> reserved_special{};
+std::array<uint32_t, 6> reserved_special{};
 uint32_t reserved_actors = 0;
 struct ImmediateRequest {
     ImmediateRequest* previous;
@@ -1031,6 +1046,7 @@ void trace_recipe_spawn(const RecipeCreation& creation, uintptr_t body, uintptr_
         stage == 8 ? "factory" : stage == 16 ? "candidate_rejected" : stage == 32 ? "index_rejected" : "unavailable",
         creation.recipe->definition.origin.c_str(), definition.c_str(), point_name, creation.actor);
 }
+bool recipe_landing_pose(const RecipeCreation&, float*);
 uintptr_t recipe_factory(uintptr_t point, uintptr_t group) {
     const auto creation = recipe_creation;
     const auto state = read_point_state(point);
@@ -1049,6 +1065,12 @@ uintptr_t recipe_factory(uintptr_t point, uintptr_t group) {
         trace_recipe_spawn(*creation, body, point, 1);
         actor = original_point_factory(point, group);
         if (actor) {
+            float landing[12];
+            if (recipe_landing_pose(*creation, landing)) {
+                const auto name=*reinterpret_cast<const char**>(creation->body+8);
+                landing[2]+=name ? spawn_lift(name) : 0.0f;
+                independent_pose(actor,landing);
+            }
             creation->actor = actor; initialize_physical_recipe(creation, actor);
         }
         trace_recipe_spawn(*creation, body, point, actor ? 4 : 2);
@@ -1114,8 +1136,14 @@ uint64_t invoke_recipe_creation(RecipeCreation* creation, uintptr_t manager, uin
         trace_recipe_spawn(*creation, creation->body, creation->source, 1);
         if (special_recipe_call(creation, manager)) result = creation->actor ? 1 : 0;
         else if (!creation->source && (creation->recipe->definition.family == 'i' || creation->recipe->definition.family == 'p')) result = 0;
-        else if (group && creation->recipe->definition.family != 'i' && creation->recipe->definition.family != 'p')
-            result = original_group(manager, reinterpret_cast<uint64_t*>(record), creation->source);
+        else if (group && creation->recipe->definition.family != 'i' && creation->recipe->definition.family != 'p') {
+            const auto type = *reinterpret_cast<uint64_t*>(record);
+            __try {
+                // group points can contain a different vanilla species than the script requests.
+                *reinterpret_cast<uint64_t*>(record) = (type & ~encounter_ai_mask) | encounter_ai_mask;
+                result = original_group(manager, reinterpret_cast<uint64_t*>(record), creation->source);
+            } __finally { *reinterpret_cast<uint64_t*>(record) = type; }
+        }
         else {
             const auto physical = recipe_point_type(creation->source);
             result = physical ? create_tracked(manager, record, creation->source, fourth, fifth, physical) :
@@ -2551,6 +2579,7 @@ uint64_t remaining_result(uintptr_t command) {
     return credit_at_most(total, threshold) || (!blocked && credit_at_most(living, threshold));
 }
 uint64_t __fastcall remaining_detour(uintptr_t command) {
+    WaitCost cost;
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> lock(quantity_mutex);
     try { const auto result = remaining_result(command); trace_quantity_wait(command, 'r', result); return result; }
@@ -2691,6 +2720,7 @@ uint64_t kill_result(uintptr_t command) {
     return 0;
 }
 uint64_t kill_detour(uintptr_t command) {
+    WaitCost cost;
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> quantity(quantity_mutex);
     try {
@@ -2804,6 +2834,7 @@ uint64_t health_result(uintptr_t command) {
     return result && *result;
 }
 uint64_t health_detour(uintptr_t command) {
+    WaitCost cost;
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> lock(quantity_mutex);
     try { const auto result = health_result(command); trace_quantity_wait(command, 'h', result); return result; }
@@ -2858,6 +2889,7 @@ unsigned special_kind(uintptr_t actor) {
         if (!value) continue;
         const std::string_view inherited(value);
         if (inherited=="ai/ambient/buffpod") return 4;
+        if (inherited=="ai/fodder/zombie_t1_screecher") return 5;
         if (inherited.substr(0, 8) == "ai/boss/") return 3;
         for (unsigned kind = 0; kind < std::size(kinds); ++kind) if (inherited == kinds[kind]) return kind;
     }
@@ -2869,7 +2901,7 @@ bool special_admission(const SpawnLimits& limits) {
         const auto collection = *reinterpret_cast<uintptr_t*>(world + 0x62088);
         const auto references = *reinterpret_cast<uintptr_t*>(collection);
         const auto count = *reinterpret_cast<int32_t*>(collection + 8);
-        std::array<uint32_t, 5> active{};
+        std::array<uint32_t, 6> active{};
         for (int32_t index = 0; index < count; ++index) {
             const auto actor = resolve_actor(references + index * 24);
             if (!actor || combat::confirmed_dead(world, actor)) continue;
@@ -5217,6 +5249,27 @@ bool test_functional_inputs() {
     ok &= actor_factory_detour(address) == 55;
     creation.restoring = false; marker_present = false;
     ok &= actor_factory_detour(address) == 55;
+    std::array<uintptr_t,0xe80/sizeof(uintptr_t)> actor_table{};
+    std::array<uintptr_t,0x60/sizeof(uintptr_t)> physics_table{};
+    static uintptr_t physics_address=0;
+    physics_address=reinterpret_cast<uintptr_t>(&physics_table);
+    const auto physics_object=reinterpret_cast<uintptr_t>(&physics_address);
+    static uintptr_t test_physics=0;
+    test_physics=physics_object;
+    actor_table[0xe78/sizeof(uintptr_t)]=reinterpret_cast<uintptr_t>(+[](uintptr_t)->uintptr_t { return test_physics; });
+    physics_table[0x50/sizeof(uintptr_t)]=reinterpret_cast<uintptr_t>(+[](uintptr_t,uintptr_t,int32_t) {});
+    physics_table[0x58/sizeof(uintptr_t)]=physics_table[0x50/sizeof(uintptr_t)];
+    std::array<uint8_t,0xb0> spawned{};
+    actor_table[0xb8/sizeof(uintptr_t)]=reinterpret_cast<uintptr_t>(+[](uintptr_t actor,uintptr_t rotation) {
+        std::memcpy(reinterpret_cast<void*>(actor+0x80),reinterpret_cast<const void*>(rotation),9*sizeof(float));
+    });
+    *reinterpret_cast<uintptr_t*>(spawned.data())=reinterpret_cast<uintptr_t>(actor_table.data());
+    static uintptr_t spawned_address=0;
+    spawned_address=reinterpret_cast<uintptr_t>(spawned.data());
+    original_point_factory=[](uintptr_t,uintptr_t)->uintptr_t { return spawned_address; };
+    marker_present=true; creation.creating=false; write_point_state(point,{body,1,0,0,6});
+    ok &= recipe_factory(point,0)==spawned_address && !std::memcmp(spawned.data()+0x74,landing,sizeof(landing));
+    creation.creating=true;
     marker_present = true; landing_target = 0;
     ok &= !actor_factory_detour(address) && actor_calls == 3 && valid && recipe_fault.load() && !actor_factory_active;
     recipe_creation = nullptr; original_point_factory = old_factory; original_actor_factory = old_actor_factory;
@@ -5939,7 +5992,7 @@ bool test_recipe_inputs() {
         const bool supplied = recipe_creation && *reinterpret_cast<uintptr_t*>(point + 0xc38) == recipe_creation->body;
         const bool immediate = recipe_creation && recipe_creation->recipe->definition.family == 'i';
         valid = valid && manager_address == owner && point == source_point &&
-            (type == (supplied ? expected_physical : expected_logical) || (supplied && type == encounter_ai_mask));
+            (type == (supplied ? expected_physical : expected_logical) || type == encounter_ai_mask);
         if (immediate && !supplied) return 0;
         if (supplied) {
             uint64_t selected = type;
@@ -5969,6 +6022,7 @@ bool test_recipe_inputs() {
     };
     original_group = [](uintptr_t manager_address, uint64_t* record, uintptr_t group) -> uint64_t {
         valid = valid && group == source_group;
+        if ((*record & encounter_ai_mask) != encounter_ai_mask) return 0;
         return spawn_detour(manager_address, reinterpret_cast<uintptr_t>(record), source_point, 0, 0);
     };
     const std::string label = "public_label";
@@ -6599,7 +6653,7 @@ bool test_immediate_inputs() {
     ok = ok && multiple_detour(owner, 77, 16, 1, 22, 0x55) == 77 && created == 2 && rewinds == 3 && abi;
     fault = true;
     ok = ok && catches_immediate_fault(owner) && reserved_actors == 0 &&
-        reserved_special == std::array<uint32_t, 5>{} && immediate_request == nullptr;
+        reserved_special == std::array<uint32_t, 6>{} && immediate_request == nullptr;
     fault = false;
     collection.capacity = 1;
     reserved_actors = 1;
@@ -6613,7 +6667,7 @@ bool test_immediate_inputs() {
     original_register_spawn = previous_register; rewind_timeline = previous_rewind;
     definition_name = previous_name; world_global = previous_world; native_admission = previous_admission;
     stopped.store(previous_stopped);
-    return ok && immediate_request == nullptr && reserved_actors == 0 && reserved_special == std::array<uint32_t, 5>{};
+    return ok && immediate_request == nullptr && reserved_actors == 0 && reserved_special == std::array<uint32_t, 6>{};
 }
 
 bool test_spirit_inputs() {
@@ -6687,7 +6741,7 @@ bool test_spirit_inputs() {
     original_point_candidate = previous_candidate; original_point_index = previous_index;
     rewind_timeline = previous_rewind; definition_name = previous_name;
     world_global = previous_world; native_admission = previous_admission; stopped.store(previous_stopped);
-    return ok && reserved_actors == 0 && reserved_special == std::array<uint32_t, 5>{} && immediate_request == nullptr;
+    return ok && reserved_actors == 0 && reserved_special == std::array<uint32_t, 6>{} && immediate_request == nullptr;
 }
 
 bool test_tracking_inputs() {

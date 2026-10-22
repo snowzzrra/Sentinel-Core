@@ -200,6 +200,9 @@ void exercise() {
         CHECK(at<uint32_t>(owner,0x1c8)==0); ++root_campaigns;
     };
     calls.campaign_definitions=[]()->uintptr_t { return root_definitions; };
+    calls.campaign_pump=[](uintptr_t owner) {
+        CHECK(at<uint32_t>(at<uintptr_t>(owner,0x100),0x1b8)==0);
+    };
     calls.sprite_changed=[](uintptr_t) { ++root_moves; };
     test_calls(calls);
     std::array<unsigned char,0x200> root_bytes{},definitions_bytes{};
@@ -210,6 +213,10 @@ void exercise() {
     const auto root_screen=reinterpret_cast<uintptr_t>(root_bytes.data());
     root_definitions=reinterpret_cast<uintptr_t>(definitions_bytes.data());
     at<uintptr_t>(root_definitions,0x148)=campaign;
+    at<uintptr_t>(root_screen,0x100)=root_definitions;
+    at<uint32_t>(root_definitions,0x1b8)=7;
+    sentinel::campaign_menu::test_campaign_pump(root_screen);
+    CHECK(at<uint32_t>(root_definitions,0x1b8)==7);
     constexpr size_t offsets[]{0x140,0x148,0x150,0x158,0x160,0x168,0x178,0x180,0x188};
     const auto render_address=reinterpret_cast<uintptr_t>(renderer.data());
     const auto transform_address=reinterpret_cast<uintptr_t>(transforms.data());

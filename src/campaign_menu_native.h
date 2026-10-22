@@ -47,6 +47,7 @@ struct NativeCalls {
     void (*meter_allocate)(uintptr_t,uintptr_t,uintptr_t);
     void (*sprite_visibility)(uintptr_t,uint32_t,uint32_t);
     void (*meter_update)(uintptr_t);
+    void (*campaign_pump)(uintptr_t);
 };
 void test_calls(const NativeCalls&);
 void test_populate(uintptr_t,uintptr_t);
@@ -56,6 +57,7 @@ void test_load(uintptr_t,int);
 void test_update(uintptr_t);
 void test_root_navigation(uintptr_t,uint8_t);
 void test_root_campaign(uintptr_t,uintptr_t);
+void test_campaign_pump(uintptr_t);
 void test_meter_allocate(uintptr_t,uintptr_t,uintptr_t);
 void test_sprite_visibility(uintptr_t,uint32_t,uint32_t);
 void test_meter_update(uintptr_t);

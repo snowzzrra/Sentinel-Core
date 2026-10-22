@@ -40,6 +40,10 @@ int main() {
     require(!spawn_allowed(*totem,{0,0,0,0,1}), "buff totem respects its individual cap");
     require(!spawn_allowed(*totem,{1,1,0,0,0}), "buff totem shares the combined special cap");
     require(!spawn_allowed(*marauder,{0,1,2,0,1}), "buff totem counts against other special admissions");
+    const auto screecher=spawn_limits("ap_v070_ai_test_l00000001000000010000000100000002_kc__ap_v070_s00100");
+    require(screecher && spawn_allowed(*screecher,{0,0,0,0,0,0}), "screecher has a free special slot");
+    require(!spawn_allowed(*screecher,{0,0,0,0,0,1}), "screecher respects its individual cap");
+    require(!spawn_allowed(*totem,{1,0,0,0,0,1}), "screecher shares the combined special cap");
     const auto banned = spawn_limits("ap_v070_spawn_a_l00000000000000020000000300000004_km__ap_v070_s00100");
     require(banned && !spawn_allowed(*banned, {0, 0, 0}), "zero species limit");
     const auto ordinary = spawn_limits("ap_v070_ai_a_l00000001000000020000000300000004_kn__ap_v070_s00100");
