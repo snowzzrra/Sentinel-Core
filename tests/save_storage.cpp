@@ -145,6 +145,10 @@ void identities_and_descriptor() {
     CHECK(CreateHardLinkW(alias.c_str(), file.c_str(), nullptr));
     CHECK(read_descriptor_file(file.c_str(), parsed).outcome == Outcome::unsafe_path);
     CHECK(DeleteFileW(alias.c_str()));
+    const auto parent_link = fixture.path + L"\\descriptor-parent";
+    junction(parent_link, fixture.path);
+    CHECK(read_descriptor_file((parent_link + L"\\descriptor.txt").c_str(), parsed).outcome == Outcome::unsafe_path);
+    CHECK(RemoveDirectoryW(parent_link.c_str()));
     CHECK(!parse_descriptor(text + "root=C:\\other\n", parsed).ok());
     CHECK(!parse_descriptor(text.substr(0, text.size() - 1), parsed).ok());
     CHECK(!parse_descriptor(std::string(2049, 'a'), parsed).ok());
@@ -458,6 +462,10 @@ void redirect_and_links(Fixture& f) {
 }
 } // namespace
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--descriptor-guards") {
+        identities_and_descriptor();
+        return 0;
+    }
     if (argc == 3) {
         const auto a = descriptor(argv[2]);
         std::string id;

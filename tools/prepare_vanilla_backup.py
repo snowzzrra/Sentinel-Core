@@ -61,6 +61,13 @@ def kernel():
         wintypes.LPWSTR, wintypes.DWORD]
     api.GetVolumeInformationByHandleW.restype = wintypes.BOOL
     api.GetDriveTypeW.argtypes = [wintypes.LPCWSTR]
+    api.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    api.GetModuleHandleW.restype = wintypes.HANDLE
+    api.GetProcAddress.argtypes = [wintypes.HANDLE, wintypes.LPCSTR]
+    api.GetProcAddress.restype = ctypes.c_void_p
+    api.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    api.DeviceIoControl.restype = wintypes.BOOL
     return api
 
 
@@ -118,9 +125,10 @@ def io_path(path):
     return Path("\\\\?\\" + str(path)) if os.name == "nt" else path
 
 
-def check_node(path):
+def check_node(path, *, ancestor=False):
     info = io_path(path).lstat()
-    if info.st_file_attributes & 0x400 and not (len(path.anchor) == 3 and path == Path(path.anchor)):
+    if (info.st_file_attributes & 0x400 and not (len(path.anchor) == 3 and path == Path(path.anchor))
+            and not (ancestor and stat.S_ISDIR(info.st_mode))):
         raise Refused("reparse points are not supported")
     if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
         raise Refused("non-regular source entry")
@@ -185,8 +193,20 @@ def named_streams(api, handle, path, directory=False):
         offset += nxt
 
 
+def wine_mount_point(api, handle, attrs):
+    if (not int.from_bytes(attrs.raw[:4], "little") & 0x10
+            or int.from_bytes(attrs.raw[4:8], "little") != 0xa0000003
+            or not api.GetProcAddress(api.GetModuleHandleW("ntdll.dll"), b"wine_get_version")):
+        return False
+    # wine labels Unix mounts as reparse points without reparse data
+    data = ctypes.create_string_buffer(16384)
+    returned = wintypes.DWORD()
+    return (not api.DeviceIoControl(handle, 0x900a8, None, 0, data, len(data), ctypes.byref(returned), None)
+            and ctypes.get_last_error() == 4390)
+
+
 @contextlib.contextmanager
-def pinned(path, directory=False, inspect_streams=True):
+def pinned(path, directory=False, inspect_streams=True, *, ancestor=False):
     """Retain no-write/no-delete handles; regular file streams are exclusive."""
     import msvcrt
     api = kernel()
@@ -200,7 +220,8 @@ def pinned(path, directory=False, inspect_streams=True):
     try:
         attrs = ctypes.create_string_buffer(8)
         if (not api.GetFileInformationByHandleEx(handle, 9, attrs, len(attrs)) or
-                int.from_bytes(attrs.raw[:4], "little") & 0x400):
+                (int.from_bytes(attrs.raw[:4], "little") & 0x400
+                 and not (ancestor and directory and wine_mount_point(api, handle, attrs)))):
             raise Refused("cannot establish ordinary pinned path")
         if inspect_streams:
             named_streams(api, handle, path, directory)
@@ -224,10 +245,10 @@ def pin_ancestors(stack, paths):
         for directory in reversed((path, *path.parents)):
             if directory in seen:
                 continue
-            check_node(directory)
+            check_node(directory, ancestor=True)
             if not io_path(directory).is_dir():
                 raise Refused("expected an existing directory")
-            stack.enter_context(pinned(directory, directory=True, inspect_streams=False))
+            stack.enter_context(pinned(directory, directory=True, inspect_streams=False, ancestor=True))
             seen.add(directory)
     return seen
 

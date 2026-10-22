@@ -4,6 +4,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <winioctl.h>
 #include <bcrypt.h>
 #include <algorithm>
 #include <array>
@@ -20,6 +21,19 @@ struct ReadHandles {
     std::vector<HANDLE> values;
     ~ReadHandles() { for (HANDLE value : values) CloseHandle(value); }
 };
+
+bool wine_mount_point(HANDLE handle) {
+    if (!GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")) return false;
+    FILE_ATTRIBUTE_TAG_INFO info{};
+    if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &info, sizeof(info)) ||
+        !(info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) || info.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT)
+        return false;
+    // wine labels Unix mounts as reparse points without reparse data
+    std::array<unsigned char, MAXIMUM_REPARSE_DATA_BUFFER_SIZE> data{};
+    DWORD returned = 0;
+    return !DeviceIoControl(handle, FSCTL_GET_REPARSE_POINT, nullptr, 0, data.data(),
+        static_cast<DWORD>(data.size()), &returned, nullptr) && GetLastError() == ERROR_NOT_A_REPARSE_POINT;
+}
 
 Result read_descriptor_text(const wchar_t* filename, std::string& text) {
     // only local drive paths; no device names, alternate streams or unc providers
@@ -56,7 +70,7 @@ Result read_descriptor_text(const wchar_t* filename, std::string& text) {
         BY_HANDLE_FILE_INFORMATION info{};
         if (!GetFileInformationByHandle(handle, &info)) return {Outcome::io_error, GetLastError()};
         if (GetFileType(handle) != FILE_TYPE_DISK ||
-            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && (leaf || !wine_mount_point(handle))) ||
             (leaf ? ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || info.nNumberOfLinks != 1)
                   : !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)))
             return {Outcome::unsafe_path, ERROR_ACCESS_DENIED};
@@ -225,10 +239,10 @@ bool valid_root(std::wstring_view path) {
     }
     return true;
 }
-Result validate_handle(HANDLE handle, const std::wstring& path, bool directory) {
+Result validate_handle(HANDLE handle, const std::wstring& path, bool directory, bool ancestor = false) {
     BY_HANDLE_FILE_INFORMATION info{};
     if (!GetFileInformationByHandle(handle, &info)) return io_error();
-    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+    if (((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !(ancestor && wine_mount_point(handle))) ||
         !!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != directory ||
         (!directory && info.nNumberOfLinks != 1)) return {Outcome::unsafe_path};
     std::array<wchar_t, 512> resolved{};
@@ -269,7 +283,7 @@ Result open_directory(const std::wstring& path, Handle& handle, bool payload = f
         FILE_SHARE_READ, nullptr, OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | (path.size() == 3 ? 0 : FILE_FLAG_OPEN_REPARSE_POINT), nullptr));
     if (!handle) return io_error();
-    auto result = validate_handle(handle.value, path, true);
+    auto result = validate_handle(handle.value, path, true, !payload);
     return result.ok() && payload ? validate_streams(handle.value, true) : result;
 }
 Result admit_root(const std::wstring& root, std::vector<Handle>& directories) {

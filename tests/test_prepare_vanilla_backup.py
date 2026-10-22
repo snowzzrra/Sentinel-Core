@@ -6,6 +6,8 @@ import io
 import json
 import os
 from pathlib import Path
+import struct
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -15,6 +17,50 @@ spec = importlib.util.spec_from_file_location(
     "protection", Path(__file__).parents[1] / "tools" / "prepare_vanilla_backup.py")
 protection = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(protection)
+
+
+class MountPointTests(unittest.TestCase):
+    def test_only_wine_directory_mount_without_reparse_data_is_accepted(self):
+        for wine, attrs, tag, query_ok, error, accepted in (
+            (True, 0x410, 0xa0000003, False, 4390, True),
+            (True, 0x410, 0xa0000003, True, 0, False),
+            (False, 0x410, 0xa0000003, False, 4390, False),
+            (True, 0x410, 0xa000000c, False, 4390, False),
+            (True, 0x400, 0xa0000003, False, 4390, False),
+            (True, 0x410, 0xa0000003, False, 5, False),
+            (True, 0x410, 0xa0000003, False, 1, False),
+        ):
+            with self.subTest(wine=wine, attrs=attrs, tag=tag, query_ok=query_ok, error=error):
+                api = mock.Mock()
+                api.GetProcAddress.return_value = wine
+                api.DeviceIoControl.return_value = query_ok
+                info = protection.ctypes.create_string_buffer(struct.pack("<II", attrs, tag), 8)
+                with mock.patch.object(protection.ctypes, "get_last_error", return_value=error, create=True):
+                    self.assertEqual(protection.wine_mount_point(api, 123, info), accepted)
+
+    def test_mount_exception_is_limited_to_ancestor_directories(self):
+        api = mock.Mock()
+        api.CreateFileW.return_value = 123
+        api.GetProcAddress.return_value = True
+        api.DeviceIoControl.return_value = False
+
+        def attributes(handle, kind, target, size):
+            protection.ctypes.memmove(target, struct.pack("<II", 0x410, 0xa0000003), 8)
+            return True
+
+        api.GetFileInformationByHandleEx.side_effect = attributes
+        for ancestor, directory, accepted in ((True, True, True), (False, True, False), (True, False, False)):
+            with self.subTest(ancestor=ancestor, directory=directory), \
+                    mock.patch.object(protection, "kernel", return_value=api), \
+                    mock.patch.object(protection.ctypes, "get_last_error", return_value=4390, create=True), \
+                    mock.patch.dict(sys.modules, {"msvcrt": mock.Mock()}):
+                if accepted:
+                    with protection.pinned(Path("fixture"), directory=directory, inspect_streams=False, ancestor=ancestor):
+                        pass
+                else:
+                    with self.assertRaises(protection.Refused):
+                        with protection.pinned(Path("fixture"), directory=directory, inspect_streams=False, ancestor=ancestor):
+                            self.fail("reparse payload accepted")
 
 
 @unittest.skipUnless(os.name == "nt", "Windows exclusive-handle contract")
@@ -197,10 +243,10 @@ class ProtectionTests(unittest.TestCase):
         real_pin = protection.pinned
         old = self.campaign.stat().st_mtime_ns
         @contextlib.contextmanager
-        def changing(path, directory=False, inspect_streams=True):
+        def changing(path, directory=False, inspect_streams=True, *, ancestor=False):
             if path == self.campaign:
                 os.utime(path, ns=(old, old + 1000000000))
-            with real_pin(path, directory, inspect_streams) as stream:
+            with real_pin(path, directory, inspect_streams, ancestor=ancestor) as stream:
                 yield stream
         with mock.patch.object(protection, "pinned", changing):
             with self.assertRaises(protection.Refused) as caught:
@@ -220,9 +266,9 @@ class ProtectionTests(unittest.TestCase):
         real_pin = protection.pinned
         changed = False
         @contextlib.contextmanager
-        def changing(path, directory=False, inspect_streams=True):
+        def changing(path, directory=False, inspect_streams=True, *, ancestor=False):
             nonlocal changed
-            with real_pin(path, directory, inspect_streams) as stream:
+            with real_pin(path, directory, inspect_streams, ancestor=ancestor) as stream:
                 if path == self.local / "settings.cfg" and not changed:
                     api = protection.kernel()
                     handle = api.CreateFileW(str(self.campaign), 0x100, 7, None, 3, 0, None)  # write_attributes, share all
@@ -316,6 +362,34 @@ class ProtectionTests(unittest.TestCase):
         with self.assertRaisesRegex(protection.Refused, "hard-linked"):
             protection.protect(self.args)
         self.assertFalse(self.backup.exists())
+
+    def test_junction_ancestor_refused_without_source_changes(self):
+        link = self.root / "provider-link"
+        link.mkdir()
+        target = str(self.local.resolve())
+        substitute = ("\\??\\" + target).encode("utf-16le")
+        printable = target.encode("utf-16le")
+        names = substitute + b"\0\0" + printable + b"\0\0"
+        data = struct.pack("<IHHHHHH", 0xa0000003, 8 + len(names), 0, 0,
+                           len(substitute), len(substitute) + 2, len(printable)) + names
+        api = protection.kernel()
+        handle = api.CreateFileW(str(link), 0x40000000, 0, None, 3, 0x02200000, None)
+        self.assertNotEqual(handle, protection.ctypes.c_void_p(-1).value)
+        try:
+            returned = protection.wintypes.DWORD()
+            self.assertTrue(api.DeviceIoControl(handle, 0x900a4, data, len(data), None, 0,
+                                                protection.ctypes.byref(returned), None))
+        finally:
+            api.CloseHandle(handle)
+        original = self.snapshot()
+        self.args.local_provider_root = str(link)
+        try:
+            with self.assertRaises(protection.Refused):
+                protection.protect(self.args)
+            self.assertFalse(self.backup.exists())
+            self.assertEqual(self.snapshot(), original)
+        finally:
+            link.rmdir()
 
     def test_game_running_refuses_without_copy(self):
         self.stopped.side_effect = protection.Refused("exit DOOM completely before preparation")
