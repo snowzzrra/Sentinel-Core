@@ -14,6 +14,7 @@ bool available();
 sc_campaign_reward mastery_reward(const char* perk);
 void reward_scroll(uintptr_t text);
 void present_campaign_actions(uintptr_t screen, bool entered);
+void pump_campaign(uintptr_t screen, void (*pump)(uintptr_t));
 bool mission_request(uintptr_t request, std::string& destination);
 bool request_map(uintptr_t request, const std::string& map);
 struct MeterDiagnostics {

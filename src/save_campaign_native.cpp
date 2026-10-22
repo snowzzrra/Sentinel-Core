@@ -209,7 +209,7 @@ void campaign_pump(uintptr_t screen) {
         *reinterpret_cast<uint32_t*>(screen+0x10c)=2;
         session().btrace.record(BStage::creation,BStatus::succeeded,"single_campaign_actions_requested",0,{{"slot",0}},screen);
     }
-    original_pump(screen);
+    campaign_menu::pump_campaign(screen,original_pump);
     campaign_menu::present_campaign_actions(screen,before!=2 || next==1);
 }
 void invoke_bootstrap_devmenu(uintptr_t arguments,uintptr_t previous) {

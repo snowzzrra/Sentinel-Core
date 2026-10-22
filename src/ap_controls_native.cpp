@@ -398,12 +398,12 @@ void stop() { enabled.store(false, std::memory_order_release); }
 bool input_inhibited() noexcept {
     if (visible_popup.load(std::memory_order_acquire) || editing_chat.load(std::memory_order_acquire)) return true;
     if (!console_object) return false;
-    uint8_t open = 0, capturing = 0;
-    if (!read(console_object + 0xd0, open) || !read(console_object + 0x608108, capturing) ||
-        open || capturing) return true;
-    uintptr_t menu = 0;
-    if (!read(menu_pointer, menu)) return true;
-    __try { return menu && menu_active(menu); }
+    __try {
+        if (*reinterpret_cast<const uint8_t*>(console_object + 0xd0) ||
+            *reinterpret_cast<const uint8_t*>(console_object + 0x608108)) return true;
+        const auto menu = *reinterpret_cast<const uintptr_t*>(menu_pointer);
+        return menu && menu_active(menu);
+    }
     __except (EXCEPTION_EXECUTE_HANDLER) { return true; }
 }
 #ifdef SC_NATIVE_TESTING

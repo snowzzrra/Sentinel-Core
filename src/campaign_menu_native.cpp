@@ -46,7 +46,6 @@ Update original_start_show=nullptr;
 Populate original_boss_update=nullptr;
 Update original_secret_rewards_show=nullptr,original_escalation_rewards_show=nullptr;
 Populate original_reward_card=nullptr,original_escalation_card=nullptr;
-Update original_campaign_pump=nullptr;
 using CachedText=uintptr_t(*)(uintptr_t,const char*);
 using CachedSprite=uintptr_t(*)(uintptr_t);
 CachedText cached_text=nullptr;
@@ -200,17 +199,6 @@ void root_campaign(uintptr_t screen,uintptr_t declaration) {
         save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
                                       "main_logo_widget_fault",0,{},screen);
     }
-}
-void campaign_pump(uintptr_t screen) {
-    uintptr_t declaration=0;
-    if (!active() || !read(screen,0x100,declaration) || !declaration) {
-        original_campaign_pump(screen); return;
-    }
-    const auto count=*reinterpret_cast<const uint32_t*>(declaration+0x1b8);
-    __try {
-        *reinterpret_cast<uint32_t*>(declaration+0x1b8)=0;
-        original_campaign_pump(screen);
-    } __finally { *reinterpret_cast<uint32_t*>(declaration+0x1b8)=count; }
 }
 uintptr_t list_for(uintptr_t screen) {
     uintptr_t table=0,method=0;
@@ -555,6 +543,7 @@ void present_aggregate(uintptr_t root,const sc_campaign_reward& reward,const cha
     if (const auto background=swf_child(region,"complete")) original_sprite_visibility(background,completed,1);
     if (const auto heading=swf_child(region,"apCompleteHeading")) {
         original_sprite_visibility(heading,completed,1);
+        if (completed) special::align_reward_heading(region,heading,swf_child(region,"complete"));
         if (const auto normal=swf_child(region,"heading")) original_sprite_visibility(normal,!completed,1);
     }
     const auto text=swf_child(swf_child(region,"apReward"),"txtVal",true);
@@ -1518,7 +1507,19 @@ void present_campaign_actions(uintptr_t screen,bool entered) {
         read(list,0,table) && read(table,0x70,select) && select)
         reinterpret_cast<void(*)(uintptr_t,uintptr_t)>(select)(list,choose);
 }
+void pump_campaign(uintptr_t screen,void (*pump)(uintptr_t)) {
+    uintptr_t declaration=0;
+    uint32_t master_levels=0;
+    const bool hide=active() && read(screen,0x100,declaration) && declaration && read(declaration,0x1b8,master_levels);
+    __try {
+        if (hide) *reinterpret_cast<uint32_t*>(declaration+0x1b8)=0;
+        pump(screen);
+    } __finally {
+        if (hide) *reinterpret_cast<uint32_t*>(declaration+0x1b8)=master_levels;
+    }
+}
 #ifdef SC_NATIVE_TESTING
+Update test_pump=nullptr;
 bool test_hud_score_root() {
     std::array<unsigned char,0x180> score{},swf{},widget{},root{};
     const auto owner=reinterpret_cast<uintptr_t>(score.data());
@@ -1610,7 +1611,7 @@ void test_calls(const NativeCalls& c) {
     original_meter_allocate=c.meter_allocate;
     original_sprite_visibility=c.sprite_visibility;
     original_meter_update=c.meter_update;
-    original_campaign_pump=c.campaign_pump;
+    test_pump=c.campaign_pump;
     ready.store(true,std::memory_order_release);
 }
 void test_populate(uintptr_t screen,uintptr_t list) { populate(screen,list); }
@@ -1620,7 +1621,7 @@ void test_load(uintptr_t screen,int index) { load(screen,index); }
 void test_update(uintptr_t screen) { update(screen); }
 void test_root_navigation(uintptr_t screen,uint8_t reset) { root_navigation(screen,reset); }
 void test_root_campaign(uintptr_t screen,uintptr_t declaration) { root_campaign(screen,declaration); }
-void test_campaign_pump(uintptr_t screen) { campaign_pump(screen); }
+void test_campaign_pump(uintptr_t screen) { pump_campaign(screen,test_pump); }
 void test_meter_allocate(uintptr_t meter,uintptr_t encounters,uintptr_t decl) { meter_allocate_detour(meter,encounters,decl); }
 void test_sprite_visibility(uintptr_t sprite,uint32_t visible,uint32_t flag) {
     sprite_visibility_detour(sprite,visible,flag);
@@ -1805,7 +1806,6 @@ bool install(const engine::Binding& binding,HANDLE stop) {
         {0xf67a20,"b868400000e876439001482be0488b05a46f24034833c4488984243040000048",reinterpret_cast<void*>(reward_card),reinterpret_cast<void**>(&original_reward_card)},
         {0xf6c7f0,"48895c240848896c24104889742418574883ec50488bda488bf9e811b2ffff8b",reinterpret_cast<void*>(escalation_card),reinterpret_cast<void**>(&original_escalation_card)},
         {0xf6ba10,"48895c2420564883ec50488bd9498bf0488b89900200004885c90f843b010000",reinterpret_cast<void*>(escalation_perk),reinterpret_cast<void**>(&original_escalation_perk)},
-        {0x10a6fa0,"40555357488dac24e0bfffffb820410000e8ea4d7c01482be0488b05187a1003",reinterpret_cast<void*>(campaign_pump),reinterpret_cast<void**>(&original_campaign_pump)},
         {0x185d670,"48895c2408574883ec30488bd9488bfa488b49104885c97516394b207e56488b",nullptr,reinterpret_cast<void**>(&cached_text)},
         {0x185d1a0,"40534883ec20488b4110488bd94885c075143941207f064883c4205bc3e8ae1f",nullptr,reinterpret_cast<void**>(&cached_sprite)}};
     engine::LocalMemory optional_memory;

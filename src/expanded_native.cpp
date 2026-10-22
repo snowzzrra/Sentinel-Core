@@ -33,9 +33,11 @@ uint64_t elapsed_us(CostClock::time_point start) {
 struct ObserveCosts {
     uint64_t calls=0,total=0,maximum=0,slow=0,wait=0,wait_max=0,sync=0,sync_max=0,scan=0,scan_max=0,next=0;
 } observe_costs;
+std::atomic<uint64_t> motion_queries{0},motion_lookup_us{0},motion_controllers{0},motion_native_us{0};
 struct ObserveCost {
     CostClock::time_point start=CostClock::now();
     uint64_t wait=0,sync=0,scan=0;
+    uint64_t living=0;
     uintptr_t world=0;
     ~ObserveCost() {
         auto& value=observe_costs;
@@ -44,9 +46,16 @@ struct ObserveCost {
         value.slow+=elapsed>=16000; value.wait+=wait; value.wait_max=std::max(value.wait_max,wait);
         value.sync+=sync; value.sync_max=std::max(value.sync_max,sync);
         value.scan+=scan; value.scan_max=std::max(value.scan_max,scan);
+        static uint64_t peak=0;
+        peak=std::max(peak,living);
         const auto now=GetTickCount64();
         if (now<value.next) return;
         value.next=now+5000;
+        save::session().btrace.record(save::BStage::enemy_population,save::BStatus::succeeded,"enemy_population",0,
+            {{"living",living},{"peak",peak}},world);
+        save::session().btrace.record(save::BStage::enemy_motion_cost,save::BStatus::succeeded,"enemy_motion_cost_us",0,
+            {{"queries",motion_queries.load(std::memory_order_relaxed)},{"lookup_us",motion_lookup_us.load(std::memory_order_relaxed)},
+             {"controllers",motion_controllers.load(std::memory_order_relaxed)},{"native_us",motion_native_us.load(std::memory_order_relaxed)}},world);
         save::session().btrace.record(save::BStage::enemy_runtime,save::BStatus::succeeded,"enemy_runtime_cost_us",0,
             {{"calls",value.calls},{"total_us",value.total},{"max_us",value.maximum},{"over_16ms",value.slow},
              {"lock_us",value.wait},{"lock_max_us",value.wait_max},{"sync_us",value.sync},{"sync_max_us",value.sync_max},
@@ -1060,7 +1069,10 @@ uintptr_t recipe_factory(uintptr_t point, uintptr_t group) {
         if (!synchronize_point_credits(point, credits)) { recipe_fault.store(true); return 0; }
         const auto body = functional_body(creation, group);
         if (!body) { recipe_fault.store(true, std::memory_order_release); return 0; }
-        write_point_state(point, {body, 1, 0, 0, physical_spawn_override(creation->original.state)});
+        float destination[12];
+        const auto physical_state = recipe_landing_pose(*creation, destination) && creation->original.state != 9 ?
+            12u : physical_spawn_override(creation->original.state);
+        write_point_state(point, {body, 1, 0, 0, physical_state});
         creation->creating = creation->override_active = true;
         trace_recipe_spawn(*creation, body, point, 1);
         actor = original_point_factory(point, group);
@@ -1165,8 +1177,7 @@ uint64_t create_special_recipe(uintptr_t manager, std::string_view origin, std::
     return invoke_recipe_creation(&creation, manager, 0, 0, 0, false);
 }
 bool recipe_landing_pose(const RecipeCreation& creation, float* pose) {
-    if (!creation.active_point || creation.restoring || (creation.original.state != 6 &&
-        creation.original.state != 7 && creation.original.state != 9)) return false;
+    if (!creation.active_point || creation.restoring) return false;
     char point[512], marker[64];
     if (!read_definition_name(creation.active_point, point)) return false;
     sprintf_s(marker, "ap_v070_landing_%016llx", functional_token(point));
@@ -2841,8 +2852,12 @@ uint64_t health_detour(uintptr_t command) {
     catch (...) { return 0; }
 }
 float scale_movement(uintptr_t ai, float value) noexcept {
+    const auto started=CostClock::now();
     char name[512];
-    return read_recipe_definition(ai, name) || read_definition_name(ai, name) ? movement_speed(value, name) : value;
+    const auto scaled=read_recipe_definition(ai, name) || read_definition_name(ai, name) ? movement_speed(value, name) : value;
+    motion_queries.fetch_add(1,std::memory_order_relaxed);
+    motion_lookup_us.fetch_add(elapsed_us(started),std::memory_order_relaxed);
+    return scaled;
 }
 bool private_supply(std::string_view name, std::string_view suffix) noexcept {
     constexpr std::string_view prefix = "ap_v070_supply_";
@@ -3707,7 +3722,10 @@ float __fastcall controller_detour(uintptr_t controller, uintptr_t frame, uintpt
     active_ai = *reinterpret_cast<const uintptr_t*>(controller);
     active_speed = scale_movement(active_ai, 1.0f);
     // haste scales animation displacement; only the controller limits need the same factor.
+    const auto started=CostClock::now();
     const auto result = original_controller(controller, frame, output, distance);
+    motion_controllers.fetch_add(1,std::memory_order_relaxed);
+    motion_native_us.fetch_add(elapsed_us(started),std::memory_order_relaxed);
     active_ai = previous_ai;
     active_speed = previous_speed;
     return result;
@@ -4092,8 +4110,9 @@ void reconcile_recipe_memberships(const std::string& actor, const std::vector<Re
 }
 bool read_recipe_actors(uintptr_t world, std::map<uintptr_t, bool>& actors,
                         std::map<std::string, std::vector<RecipeMembership>>& memberships,
-                        std::set<uintptr_t>& workers, std::set<uintptr_t>& owners) {
+                        std::set<uintptr_t>& workers, std::set<uintptr_t>& owners, uint64_t* living=nullptr) {
     __try {
+        if (living) *living=0;
         const auto collection = *reinterpret_cast<const uintptr_t*>(world + 0x62088);
         const auto data = *reinterpret_cast<const uintptr_t*>(collection);
         const auto count = *reinterpret_cast<const int32_t*>(collection + 8);
@@ -4101,9 +4120,13 @@ bool read_recipe_actors(uintptr_t world, std::map<uintptr_t, bool>& actors,
         for (int32_t i = 0; i < count; ++i) {
             const auto actor = resolve_actor(data + static_cast<uintptr_t>(i) * 24);
             if (actor) current_recipe_actor(actor);
-            if (actor && (!component_summons.empty() || recipe_actors.find(actor) != recipe_actors.end() ||
-                recipe_actor_credits.find(actor) != recipe_actor_credits.end()))
-                actors[actor] = combat::confirmed_dead(world, actor);
+            const bool tracked=actor && (!component_summons.empty() || recipe_actors.find(actor) != recipe_actors.end() ||
+                recipe_actor_credits.find(actor) != recipe_actor_credits.end());
+            if (actor && (tracked || living)) {
+                const auto dead=combat::confirmed_dead(world, actor);
+                if (living && !dead) ++*living;
+                if (tracked) actors[actor]=dead;
+            }
         }
         // hidden actors keep their native identity outside the active AI list.
         for (const auto& [actor, credit] : recipe_actor_credits) {
@@ -4192,7 +4215,7 @@ void observe(uintptr_t world) {
         std::set<uintptr_t> workers, owners;
         const std::vector<RecipeMembership> none;
         const auto scan_start=CostClock::now();
-        const auto scanned=read_recipe_actors(world, actors, memberships, workers, owners);
+        const auto scanned=read_recipe_actors(world, actors, memberships, workers, owners,&cost.living);
         cost.scan=elapsed_us(scan_start);
         if (!scanned) { recipe_fault.store(true); return; }
         for (auto credit = recipe_actor_credits.begin(); credit != recipe_actor_credits.end();) {
@@ -5269,6 +5292,10 @@ bool test_functional_inputs() {
     original_point_factory=[](uintptr_t,uintptr_t)->uintptr_t { return spawned_address; };
     marker_present=true; creation.creating=false; write_point_state(point,{body,1,0,0,6});
     ok &= recipe_factory(point,0)==spawned_address && !std::memcmp(spawned.data()+0x74,landing,sizeof(landing));
+    std::memset(spawned.data()+0x74,0,sizeof(landing));
+    write_point_state(point,{body,1,0,0,17});
+    ok &= recipe_factory(point,0)==spawned_address && !std::memcmp(spawned.data()+0x74,landing,sizeof(landing)) &&
+        read_point_state(point).state==17;
     creation.creating=true;
     marker_present = true; landing_target = 0;
     ok &= !actor_factory_detour(address) && actor_calls == 3 && valid && recipe_fault.load() && !actor_factory_active;

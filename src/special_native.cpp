@@ -16,6 +16,7 @@
 #include <cmath>
 #include <mutex>
 #include <type_traits>
+#include <chrono>
 #ifdef SC_NATIVE_TESTING
 #include <map>
 #include <memory>
@@ -170,6 +171,42 @@ WeaponDispatch original_weapon_dispatch = nullptr;
 using CrucibleActivate = bool(*)(uintptr_t);
 CrucibleActivate original_crucible_activate = nullptr;
 InputDown original_input_pressed = nullptr;
+using ChainsawTick = void(*)(uintptr_t);
+ChainsawTick original_chainsaw_tick = nullptr;
+uint32_t route_scope_reason(uintptr_t p);
+bool stale_chainsaw_inhibit(uint8_t flags, uint32_t controls) {
+    return (flags & 0x40) && controls == 0;
+}
+void chainsaw_tick_detour(uintptr_t p) {
+    static std::atomic<uint64_t> chainsaw_calls{0},next{0},checked_epoch{0};
+    ++chainsaw_calls;
+    const auto now=GetTickCount64();
+    __try {
+        const auto epoch=native::observation_stamp();
+        const auto controls=p ? *reinterpret_cast<uint32_t*>(p+0x87fc) : UINT32_MAX;
+        if (controls) checked_epoch.store(0,std::memory_order_release);
+        else if (p && epoch && checked_epoch.load(std::memory_order_acquire)!=epoch &&
+                !route_scope_reason(p) && checked_epoch.exchange(epoch)!=epoch) {
+            // reconcile after loading or control release; later scripted chainsaw blocks stay intact.
+            if (stale_chainsaw_inhibit(*reinterpret_cast<uint8_t*>(p+0x7370),controls)) {
+                *reinterpret_cast<uint8_t*>(p+0x7370) &= ~uint8_t{0x40};
+                input_trace.record(save::BStage::chainsaw_state,save::BStatus::succeeded,
+                    "chainsaw_stale_inhibit_released",0,{{"player",p}});
+            }
+        }
+        auto due=next.load();
+        if (p && now>=due && next.compare_exchange_strong(due,now+1000)) {
+            input_trace.record(save::BStage::chainsaw_state,save::BStatus::entered,"chainsaw_native_entry",0,
+                {{"calls",chainsaw_calls.load()},{"player",p},{"pending_frame",*reinterpret_cast<uint32_t*>(p+0x7434)},
+                 {"flags_87fc",*reinterpret_cast<uint32_t*>(p+0x87fc)},
+                 {"flags_7370",*reinterpret_cast<uint8_t*>(p+0x7370)},
+                 {"flags_1606a",*reinterpret_cast<uint8_t*>(p+0x1606a)},
+                 {"flags_1606b",*reinterpret_cast<uint8_t*>(p+0x1606b)},
+                 {"flags_1606e",*reinterpret_cast<uint8_t*>(p+0x1606e)}});
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    original_chainsaw_tick(p);
+}
 using FastTravelCheckpointRender = void(*)(uintptr_t, int);
 FastTravelCheckpointRender original_fast_travel_checkpoint_render = nullptr;
 
@@ -371,6 +408,33 @@ void project_special_hud(uintptr_t element) {
                   {"primary_frame", primary_frame}, {"icon_frame", icon_frame},
                   {"parent_visible", parent_visible}, {"parent_frame", parent_frame}});
         }
+        const bool native_special_widgets = weapon_info_update_phase &&
+            observed_vtable == image_base + rva_weapon_info_vtable && *reinterpret_cast<uintptr_t*>(element + 0x1e8) &&
+            *reinterpret_cast<uintptr_t*>(element + 0x1f8);
+        if (native_special_widgets && (!valid || (!crucible && !hammer))) {
+            project_crucible_hud(element);
+            project_hammer_hud(element);
+        }
+        else if (native_special_widgets) {
+            auto& visible_c = *reinterpret_cast<uint8_t*>(element + 0x169);
+            auto& visible_h = *reinterpret_cast<uint8_t*>(element + 0x1b9);
+            const auto original_c = visible_c, original_h = visible_h;
+            const bool show_c = crucible && *reinterpret_cast<int32_t*>(element + 0x170) > 0;
+            const bool show_h = hammer && original_h;
+            __try {
+                visible_c = show_c;
+                visible_h = show_h;
+                project_crucible_hud(element);
+                project_hammer_hud(element);
+            } __finally {
+                visible_c = original_c;
+                visible_h = original_h;
+            }
+            installation_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
+                "special_hud_projection_submitted", 0,
+                {{"policy", owner.selected}, {"crucible_visible", show_c},
+                 {"hammer_visible", show_h}, {"pixels_observed", 0}});
+        }
         if (hud_valid) {
             weapon_info_element.store(element, std::memory_order_release);
             weapon_info_player.store(current_player, std::memory_order_release);
@@ -415,34 +479,6 @@ void project_special_hud(uintptr_t element) {
             weapon_info_player.store(0, std::memory_order_release);
             weapon_info_epoch.store(0, std::memory_order_release);
         }
-        if (!weapon_info_update_phase) return;
-        if (observed_vtable != image_base + rva_weapon_info_vtable) return;
-        const bool native_special_widgets = *reinterpret_cast<uintptr_t*>(element + 0x1e8) &&
-            *reinterpret_cast<uintptr_t*>(element + 0x1f8);
-        if (native_special_widgets && (!valid || (!crucible && !hammer))) {
-            project_crucible_hud(element);
-            project_hammer_hud(element);
-        }
-        else if (native_special_widgets) {
-            auto& visible_c = *reinterpret_cast<uint8_t*>(element + 0x169);
-            auto& visible_h = *reinterpret_cast<uint8_t*>(element + 0x1b9);
-            const auto original_c = visible_c, original_h = visible_h;
-            const bool show_c = crucible && *reinterpret_cast<int32_t*>(element + 0x170) > 0;
-            const bool show_h = hammer && original_h;
-            __try {
-                visible_c = show_c;
-                visible_h = show_h;
-                project_crucible_hud(element);
-                project_hammer_hud(element);
-            } __finally {
-                visible_c = original_c;
-                visible_h = original_h;
-            }
-            installation_trace.record(save::BStage::profile_output, save::BStatus::succeeded,
-                "special_hud_projection_submitted", 0,
-                {{"policy", owner.selected}, {"crucible_visible", show_c},
-                 {"hammer_visible", show_h}, {"pixels_observed", 0}});
-        }
         if (source_evaluated) {
             const auto final_graphics = hud::graphics_source(element);
             const auto final_icon = final_graphics.primary_root ? hud::child(final_graphics.primary_root, "icon") : 0;
@@ -472,11 +508,23 @@ void project_special_hud(uintptr_t element) {
 }
 
 void weapon_hud_update_detour(uintptr_t element, uintptr_t time) {
+    using Clock=std::chrono::steady_clock;
+    const auto start=Clock::now();
     original_weapon_hud_update(element, time);
+    const auto native_done=Clock::now();
     const bool previous = weapon_info_update_phase;
     weapon_info_update_phase = true;
     project_special_hud(element);
     weapon_info_update_phase = previous;
+    static std::atomic<uint64_t> ticks{0},native_us{0},ap_us{0},next{0};
+    ++ticks;
+    native_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(native_done-start).count());
+    ap_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-native_done).count());
+    const auto now=GetTickCount64();
+    auto due=next.load();
+    if (now>=due && next.compare_exchange_strong(due,now+5000))
+        save::session().btrace.record(save::BStage::weapon_hud_cost,save::BStatus::succeeded,"weapon_hud_cost_us",0,
+            {{"calls",ticks.load()},{"native_us",native_us.load()},{"ap_us",ap_us.load()}});
 }
 uintptr_t player(void*) {
     __try {
@@ -1169,6 +1217,11 @@ __declspec(noinline) void weapon_dispatch_detour(uintptr_t p, uintptr_t command)
 __declspec(noinline) bool input_pressed_detour(uintptr_t input, uint64_t mask) {
     const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
     const bool raw = original_input_pressed(input, mask);
+    if (mask == 0x8000000 && raw) {
+        static std::atomic<uint64_t> presses{0};
+        input_trace.record(save::BStage::chainsaw_input,save::BStatus::entered,"chainsaw_native_input_edge",0,
+            {{"edges",++presses},{"caller_rva",caller-image_base},{"input",input},{"raw",raw}});
+    }
     if (caller == image_base + 0x1465640 || mask == special_button) {
         if (mask == special_button && raw && !special_down.exchange(true)) begin_use_attempt();
         const auto p = route_player.load(std::memory_order_acquire);
@@ -1417,13 +1470,15 @@ void poll_input(uintptr_t p, bool safe_gameplay) {
         weapon_info_player.store(0, std::memory_order_release);
         weapon_info_epoch.store(0, std::memory_order_release);
     }
-    route_epoch.store(0, std::memory_order_release);
+    if (!safe_gameplay || !p) {
+        route_epoch.store(0, std::memory_order_release);
+        route_player.store(0, std::memory_order_release);
+    }
     AcquireSRWLockExclusive(&route_namespace_lock);
     if (!safe_gameplay || !p || published_policy.player != p ||
         published_policy.epoch != native::observation_stamp()) published_policy = {};
     ReleaseSRWLockExclusive(&route_namespace_lock);
     route_thread = GetCurrentThreadId();
-    route_player = 0;
     if (p && safe_gameplay) {
         const auto& id = save::session().namespace_id();
         AcquireSRWLockExclusive(&route_namespace_lock);
@@ -1522,6 +1577,15 @@ void present_combat_progress(uintptr_t root, uintptr_t anchor, bool visible) {
     if (visible && namespace_id.size() == 64) progress = combat::presentation().view(namespace_id.c_str());
     hud::project_progress(root, anchor, progress);
 }
+void align_reward_heading(uintptr_t parent, uintptr_t heading, uintptr_t background) {
+    hud::Rect text{}, frame{};
+    hud::Point origin{};
+    if (!hud::bounds(heading,parent,text) || !hud::bounds(background,parent,frame) ||
+        !hud::position(heading,origin)) return;
+    const float delta=hud::center(frame).y-hud::center(text).y;
+    if (std::isfinite(delta) && std::fabs(delta)>0.1f)
+        hud::place(heading,{origin.x,origin.y+delta});
+}
 UseHistory use_history() {
     AcquireSRWLockShared(&use_history_lock);
     auto snapshot = use_events;
@@ -1555,6 +1619,7 @@ void use_fixture(Calls value, const char* id) {
     calls = value;
     std::memcpy(fixture_namespace, id, 65);
     ready.store(true, std::memory_order_release);
+
 }
 #endif
 
@@ -1943,6 +2008,19 @@ void install(const engine::Binding& binding, HANDLE stop) {
             "special_hud_install", 0, {{"create_status", created}, {"enable_status", enabled},
                 {"label_create_status", label_created}, {"label_enable_status", label_enabled}});
     }
+    native::Target chainsaw{};
+    chainsaw.address=image_base+0x143ca30;
+    constexpr char chainsaw_bytes[]="4053565741544881ecc8000000488b05941fd7024833c4488984249000000048";
+    for (size_t i=0;i<chainsaw.bytes.size();++i)
+        chainsaw.bytes[i]=static_cast<uint8_t>(digit(chainsaw_bytes[i*2])*16+digit(chainsaw_bytes[i*2+1]));
+    const auto chainsaw_validation=native::validate_target(memory,binding.image,chainsaw,stop,GetTickCount64()+10000);
+    const auto chainsaw_created=!chainsaw_validation ? MH_CreateHook(reinterpret_cast<void*>(chainsaw.address),
+        reinterpret_cast<void*>(chainsaw_tick_detour),reinterpret_cast<void**>(&original_chainsaw_tick)) : MH_UNKNOWN;
+    const auto chainsaw_enabled=chainsaw_created==MH_OK ? MH_EnableHook(reinterpret_cast<void*>(chainsaw.address)) : MH_UNKNOWN;
+    if (chainsaw_created==MH_OK && chainsaw_enabled!=MH_OK) MH_RemoveHook(reinterpret_cast<void*>(chainsaw.address));
+    installation_trace.record(save::BStage::chainsaw_state,
+        chainsaw_enabled==MH_OK ? save::BStatus::succeeded : save::BStatus::refused,"chainsaw_diagnostic_install",0,
+        {{"validation",chainsaw_validation},{"created",chainsaw_created},{"enabled",chainsaw_enabled}});
     ready.store(true, std::memory_order_release);
     installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "ownership_ready", 0,
         {{"selection_route_ready", route_ready.load(std::memory_order_acquire)},

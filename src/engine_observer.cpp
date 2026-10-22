@@ -111,13 +111,11 @@ ReadResult LocalMemory::copy(uintptr_t address, void* out, size_t size) {
             return {SC_REASON_OUT_OF_RANGE, 0};
         cursor = std::min(end, start + region.RegionSize);
     }
-    SIZE_T count = 0;
-    SetLastError(ERROR_SUCCESS);
-    const BOOL ok = ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), out, size, &count);
-    const DWORD error = ok ? ERROR_SUCCESS : GetLastError();
-    if (!ok || count != size) {
+    __try {
+        std::memcpy(out, reinterpret_cast<const void*>(address), size);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
         std::memset(out, 0, size);
-        return {static_cast<uint32_t>(count != 0 || ok ? SC_REASON_PARTIAL_READ : SC_REASON_READ_FAILED), error};
+        return {SC_REASON_READ_FAILED, ERROR_NOACCESS};
     }
     return {};
 }

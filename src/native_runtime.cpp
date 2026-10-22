@@ -419,8 +419,17 @@ void execute_client_command(const sc_command_request& request, sc_command_result
 }
 struct FrameCost {
     std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last=start;
+    std::array<uint64_t,6> parts{};
+    void mark(size_t index) {
+        const auto now=std::chrono::steady_clock::now();
+        parts[index]=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now-last).count());
+        last=now;
+    }
     ~FrameCost() {
         static uint64_t calls=0,total=0,maximum=0,slow=0,next=0;
+        static std::array<uint64_t,6> sums{},maxima{};
+        for (size_t i=0;i<parts.size();++i) { sums[i]+=parts[i]; maxima[i]=std::max(maxima[i],parts[i]); }
         const auto us=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now()-start).count());
         ++calls; total+=us; maximum=std::max(maximum,us); slow+=us>=16000;
@@ -429,6 +438,11 @@ struct FrameCost {
         next=now+5000;
         save::session().btrace.record(save::BStage::native_frame_cost,save::BStatus::succeeded,"native_frame_cost_us",0,
             {{"calls",calls},{"total_us",total},{"max_us",maximum},{"over_16ms",slow}});
+        save::session().btrace.record(save::BStage::native_frame_parts,save::BStatus::succeeded,"native_frame_parts_us",0,
+            {{"calls",calls},{"context_us",sums[0]},{"player_us",sums[1]},{"travel_us",sums[2]},
+             {"automap_us",sums[3]},{"combat_us",sums[4]},{"arsenal_us",sums[5]},
+             {"context_max_us",maxima[0]},{"player_max_us",maxima[1]},{"travel_max_us",maxima[2]},
+             {"automap_max_us",maxima[3]},{"combat_max_us",maxima[4]},{"arsenal_max_us",maxima[5]}});
     }
 };
 void post_frame() {
@@ -515,15 +529,19 @@ void post_frame() {
     if (!why && owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); reject(SC_NATIVE_WRONG_THREAD, SC_STAGE_NATIVE_FAULT); }
     if (!why && !accepting.load(std::memory_order_acquire)) reject(SC_NATIVE_STOPPED, SC_STAGE_NATIVE_FAULT);
     // autonomous work uses the same fresh native admission as ipc, even with zero diagnostic slots. a diagnostic query is never its actuator
+    cost.mark(0);
     const auto player=!why ? tick_player_safely(binding.image.base + 0x69af70, expected_map_address, scope.lifecycle_generation) : 0;
     if (!player && owner_thread() == GetCurrentThreadId()) special::poll_input(0, false);
     // player natives may call back into a lifecycle hook before returning
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
+    cost.mark(1);
     if (!why) reconcile_fast_travel(expected_map_address,facts.current_map.bytes,scope.lifecycle_generation,player);
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
+    cost.mark(2);
     if (!why) reconcile_automap(expected_map_address, facts.current_map.bytes, scope.lifecycle_generation);
+    cost.mark(3);
     combat::Context combat_context{};
     if (!why && player && gameplay_admitted()) {
         combat_context.generation = scope.lifecycle_generation;
@@ -538,8 +556,10 @@ void post_frame() {
     }
     combat::observe(combat_context);
     if (combat_context.world) expanded::observe(combat_context.world);
+    cost.mark(4);
     if (!why && player) repair_crystal_first_contact(expected_map_address,facts.current_map.bytes,player);
     if (!why && player) arsenal::tick_masteries(scope.lifecycle_generation, player);
+    cost.mark(5);
     commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); });
     if (!slot) return;
     const bool process_scoped = slot->is_command && commands::process_scoped(slot->command_request);
