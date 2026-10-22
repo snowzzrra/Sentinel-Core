@@ -8,7 +8,8 @@ namespace sentinel::expanded {
 float spawn_lift(std::string_view name) noexcept {
     const auto tracking = spawn_tracking(name);
     constexpr uint64_t airborne = 0x40 | 0x2000 | 0x40000 | 0x80000 | 0x1000000;
-    return tracking && tracking->physical == 0x40000 && !(tracking->source & airborne) ? 1.25f : 0.0f;
+    constexpr uint64_t floating = 0x2000 | 0x40000 | 0x80000;
+    return tracking && (tracking->physical & floating) && !(tracking->source & airborne) ? 1.25f : 0.0f;
 }
 float movement_speed(float native_speed, std::string_view name) noexcept {
     constexpr std::string_view prefix = "ap_v070_ai_";
@@ -35,7 +36,7 @@ std::optional<SpawnLimits> spawn_limits(std::string_view name) noexcept {
         name.substr(marker + 37, speed.size()) != speed) return {};
     SpawnLimits result{};
     const auto kind = name[marker + 36];
-    const auto kinds = std::string_view("masn").find(kind);
+    const auto kinds = std::string_view("masnb").find(kind);
     if (kinds == std::string_view::npos) return {};
     result.kind = static_cast<unsigned>(kinds);
     for (std::size_t index = 0; index < result.maximum.size(); ++index) {
@@ -60,10 +61,11 @@ std::optional<SpawnTracking> spawn_tracking(std::string_view name) noexcept {
     }
     return result;
 }
-bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 3>& active) noexcept {
-    if (limits.kind >= active.size()) return true;
-    return active[limits.kind] < limits.maximum[limits.kind] &&
-        static_cast<std::uint64_t>(active[0]) + active[1] + active[2] < limits.maximum[3];
+bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 5>& active) noexcept {
+    if (limits.kind == 3 || limits.kind >= active.size()) return true;
+    const auto individual=limits.kind==4 ? 1 : limits.kind;
+    return active[limits.kind] < limits.maximum[individual] &&
+        static_cast<std::uint64_t>(active[0]) + active[1] + active[2] + active[4] < limits.maximum[3];
 }
 std::optional<SpawnRecipe> spawn_recipe(std::string_view name) noexcept {
     constexpr std::string_view prefix = "ap_v070_ai_r";

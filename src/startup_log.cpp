@@ -264,7 +264,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                     std::to_string(history_error)+",\"latest_error\":"+std::to_string(latest_error)+
                     ",\"history_rotations\":"+std::to_string(history_rotations)+
                     ",\"use_export_lost\":"+std::to_string(use_export_lost)+"}," + facts + "}\n";
-                if(line.size()>65536) throw std::length_error("diagnostic_snapshot_limit");
+                if(line.size()>131072) throw std::length_error("diagnostic_snapshot_limit");
                 auto history_line = line;
                 const auto use_at = history_line.find(use_json);
                 if (use_at != std::string::npos)

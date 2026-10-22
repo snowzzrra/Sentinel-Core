@@ -126,7 +126,7 @@ int main() {
         }
         check(fs::file_size(log)==capped_size && capped_size<=1024*1024,"history byte budget stops growth while later changes continue");
         auto content=read_latest();
-        check(!content.empty() && content.size()<=65536 && content.front()=='{' && content.substr(content.size()-2)=="}\n",
+        check(!content.empty() && content.size()<=131072 && content.front()=='{' && content.substr(content.size()-2)=="}\n",
             "complete bounded latest JSON envelope");
         check(content.find("\"checkpoint_index\":299")!=std::string::npos,"latest observes changes beyond history cap");
         check(content.find("\"build_id\":\""+std::string(core.core.build_id)+"\"")!=std::string::npos &&
@@ -154,7 +154,7 @@ int main() {
             "original precise cause survives later errors and all stage rollover");
         check(content.find("fixture_late_native_save_failed")!=std::string::npos && content.find("\"native_result\":-9")!=std::string::npos,
             "late failed stage retains exact native result after history limit");
-        check(content.size()<=65536 && fs::file_size(log)==capped_size,"independent snapshot and history remain bounded after failure");
+        check(content.size()<=131072 && fs::file_size(log)==capped_size,"independent snapshot and history remain bounded after failure");
         check(!fs::exists(latest.wstring()+L".pending"),"latest publication completed atomic replacement");
         // the process owns its open log handle until exit; keep fixture evidence
         std::cout << "workflow handoff and automatic logging fixtures passed\n";

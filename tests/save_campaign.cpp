@@ -336,6 +336,7 @@ int wmain(int argc,wchar_t** argv) {
         std::puts("PASS text capture inhibits AP input until close or destruction"); return 0;
     }
     if (defect==L"presentation_edges") {
+        menu_fixture::encounter_projection();
         CHECK(sentinel::campaign_menu::test_question_material());
         CHECK(sentinel::campaign_menu::test_physical_completion_edges());
         CHECK(sentinel::special::test_physical_completion_owner());

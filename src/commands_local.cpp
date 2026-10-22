@@ -80,6 +80,10 @@ void enemy_kill_wait_trace(const char* owner, const char* label, uint64_t mask, 
     if (print) print("AP_ENEMY_KILL_WAIT owner=%s label=%s mask=%llx target=%d seen=%u complete=%d\n",
         owner, label, static_cast<unsigned long long>(mask), target, seen, complete ? 1 : 0);
 }
+void enemy_quantity_wait_trace(char kind, const char* owner, uint64_t mask, double target, int32_t count, bool complete, bool fault) {
+    if (print) print("AP_ENEMY_WAIT kind=%c owner=%s mask=%llx target=%g count=%d complete=%d fault=%d\n",
+        kind, owner, static_cast<unsigned long long>(mask), target, count, complete ? 1 : 0, fault ? 1 : 0);
+}
 uint32_t prepare_local(const engine::Binding& binding, HANDLE stop) {
     image = binding.image; engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 5000;

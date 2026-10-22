@@ -41,5 +41,5 @@ struct SpawnLimits {
     unsigned kind;
 };
 std::optional<SpawnLimits> spawn_limits(std::string_view definition) noexcept;
-bool spawn_allowed(const SpawnLimits&, const std::array<std::uint32_t, 3>& active) noexcept;
+bool spawn_allowed(const SpawnLimits&, const std::array<std::uint32_t, 5>& active) noexcept;
 }

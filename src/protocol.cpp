@@ -368,10 +368,11 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
                 for (auto& c:entry.unlockable) c=static_cast<char>(r.number(1));
                 for (auto& c:entry.name) c=static_cast<char>(r.number(1));
                 for (auto& c:entry.text) c=static_cast<char>(r.number(1));
-                if (!entry.location_id || entry.checked>1 || entry.kind<1 || entry.kind>3 ||
+                if (!entry.location_id || entry.checked>1 || entry.kind<1 || entry.kind>4 ||
                     (entry.checked && !reward_fields.known) || entry.unlockable[79] ||
                     !entry.unlockable[0] ||
                     (entry.kind==SC_REWARD_AGGREGATE && std::strncmp(entry.unlockable,"mission_challenge/",18)) ||
+                    (entry.kind==SC_REWARD_ENCOUNTER && std::strncmp(entry.unlockable,"encounter/",10)) ||
                     !utf8(entry.name,sizeof(entry.name)) || !utf8(entry.text,sizeof(entry.text)) ||
                     ((entry.kind==SC_REWARD_MASTERY)!=bool(value.row.flags&SC_CAMPAIGN_HUB)))
                     return WireResult::malformed;

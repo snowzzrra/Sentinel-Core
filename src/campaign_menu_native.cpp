@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <algorithm>
 
 namespace sentinel::campaign_menu {
 namespace {
@@ -43,6 +44,10 @@ Update original_hud_challenge_update=nullptr,original_eol_challenge_update=nullp
 Update original_category_counts=nullptr;
 Update original_start_show=nullptr;
 Populate original_boss_update=nullptr;
+Update original_secret_rewards_show=nullptr,original_escalation_rewards_show=nullptr;
+Populate original_reward_card=nullptr,original_escalation_card=nullptr;
+using RewardPack=void(*)(uintptr_t,const char*,const void*);
+RewardPack original_escalation_perk=nullptr;
 Update original_hud_score_init=nullptr;
 Update original_hud_score_update=nullptr;
 uintptr_t hud_score_vtable=0;
@@ -397,6 +402,101 @@ uintptr_t question_material(uintptr_t sprite) {
     } __finally { *cache_class=legacy; }
     return material;
 }
+struct EncounterPopup {
+    uintptr_t screen=0,widget=0;
+    std::string map,namespace_id;
+    uint64_t since=0;
+};
+std::array<EncounterPopup,2> encounter_popups;
+void capture_encounter_popup(uintptr_t screen,bool escalation) {
+    auto& popup=encounter_popups[escalation ? 1 : 0];
+    popup={};
+    if (!active() || !save::session().accepts_requests()) return;
+    const auto campaign=save::session().campaign_run.snapshot();
+    if (campaign.map.compare(0,escalation ? 10 : 9,escalation ? "game/dlc2/" : "game/dlc/")!=0) return;
+    const auto& ns=save::session().namespace_id();
+    sc_campaign_reward reward{};
+    uintptr_t widget=0;
+    const auto now=GetTickCount64();
+    if (menu().encounter_reward(campaign.map,ns,now,reward) && read(screen,0x158,widget) && widget)
+        popup={screen,widget,campaign.map,ns,now};
+}
+bool popup_reward(uintptr_t owner,bool screen,sc_campaign_reward& reward) {
+    const auto campaign=save::session().campaign_run.snapshot();
+    const auto& ns=save::session().namespace_id();
+    if (!active() || !save::session().accepts_requests()) return false;
+    for (const auto& popup:encounter_popups)
+        if (owner==(screen ? popup.screen : popup.widget) && popup.since &&
+            GetTickCount64()-popup.since<15000 && campaign.map==popup.map && ns==popup.namespace_id)
+            return menu().encounter_reward(popup.map,ns,popup.since,reward);
+    return false;
+}
+const char* encounter_text(const sc_campaign_reward& reward) {
+    return reward.location_id ? reward.text : "AP REWARD PENDING";
+}
+void present_encounter_card(uintptr_t widget,const sc_campaign_reward& reward) {
+    uintptr_t root=0;
+    if (!read(widget,0x18,root) || !root) return;
+    const auto info=swf_child(root,"info");
+    const auto title=swf_child(swf_child(info,"rewardName"),"txtVal",true);
+    const auto category=swf_child(swf_child(info,"rewardType"),"txtVal",true);
+    if (!title || !category) return;
+    swf_set_text(title,encounter_text(reward));
+    swf_set_text(category,"ARCHIPELAGO");
+    for (const auto* name:{"item","details","lock","tier","tierColor","progressText"})
+        if (const auto child=swf_child(info,name)) original_sprite_visibility(child,0,1);
+    if (const auto pips=swf_child(root,"selectionPips")) original_sprite_visibility(pips,0,1);
+    const auto image=swf_child(info,"bigbox");
+    const auto material=question_material(image);
+    if (image) {
+        if (material) swf_set_material(image,material,0);
+        original_sprite_visibility(image,material!=0,1);
+    }
+    save::session().btrace.record(save::BStage::encounter_rewards,
+        reward.location_id ? save::BStatus::succeeded : save::BStatus::pending,
+        "encounter_reward_card",0,{{"location",reward.location_id},{"image",material!=0}},widget);
+}
+void secret_rewards_show(uintptr_t screen) {
+    capture_encounter_popup(screen,false);
+    original_secret_rewards_show(screen);
+}
+void escalation_rewards_show(uintptr_t screen) {
+    capture_encounter_popup(screen,true);
+    original_escalation_rewards_show(screen);
+}
+void reward_card(uintptr_t widget,uintptr_t declaration) {
+    original_reward_card(widget,declaration);
+    sc_campaign_reward reward{};
+    if (popup_reward(widget,false,reward)) present_encounter_card(widget,reward);
+}
+void escalation_card(uintptr_t widget,uintptr_t declaration) {
+    original_escalation_card(widget,declaration);
+    sc_campaign_reward reward{};
+    if (popup_reward(widget,false,reward)) present_encounter_card(widget,reward);
+}
+void escalation_perk(uintptr_t screen,const char* root_name,const void* pack) {
+    sc_campaign_reward reward{};
+    if (!pack || !popup_reward(screen,true,reward)) {
+        original_escalation_perk(screen,root_name,pack); return;
+    }
+    std::array<char,0x340> replacement{};
+    std::memcpy(replacement.data(),pack,replacement.size());
+    strcpy_s(replacement.data(),0xc0,"ARCHIPELAGO");
+    strcpy_s(replacement.data()+0xc0,0x200,encounter_text(reward));
+    original_escalation_perk(screen,root_name,replacement.data());
+    uintptr_t widget=0,root=0;
+    if (read(screen,0x290,widget) && read(widget,0x18,root)) {
+        const auto image=swf_child(swf_child(root,"icon"),"image");
+        const auto material=question_material(image);
+        if (image) {
+            if (material) swf_set_material(image,material,0);
+            original_sprite_visibility(image,material!=0,1);
+        }
+    }
+    save::session().btrace.record(save::BStage::encounter_rewards,
+        reward.location_id ? save::BStatus::succeeded : save::BStatus::pending,
+        "encounter_reward_perk",0,{{"location",reward.location_id}},screen);
+}
 void present_gate_status(uintptr_t root,uint32_t flags) {
     const auto region=swf_child(root,"apSlayerStatus");
     const bool known=(flags&SC_CAMPAIGN_SLAYER_GATE)!=0;
@@ -697,6 +797,8 @@ void eol_challenge_update(uintptr_t widget) {
 
 bool text_matches(uintptr_t field,const char* expected);
 bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
+    const auto campaign=save::session().campaign_run.snapshot();
+    const auto stage=campaign.map=="game/hub/hub" ? save::BStage::hud_found_hub : save::BStage::hud_found_fields;
     if (independent && meter_root) original_sprite_visibility(meter_root,0,1);
     for (const auto leaf:{"background","corruption","glow_burst","pointCount","header"})
         if (const auto sprite=swf_child(meter_root,leaf)) original_sprite_visibility(sprite,0,1);
@@ -705,27 +807,19 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     const auto title=swf_child(text_root,"txtVal",true);
     if (!title) {
         special::present_combat_progress(root,0,false);
-        save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::blocked,
+        save::session().btrace.record(stage,save::BStatus::blocked,
             "hud_found_text_missing",0,{{"root",root},{"label",label},{"text",text_root}},root);
         return false;
     }
-    const auto campaign=save::session().campaign_run.snapshot();
-    const auto projection=menu().projection();
     sc_campaign_summary summary{};
-    bool row_found=false;
-    const bool namespace_valid=projection.namespace_id==save::session().namespace_id();
-    if (namespace_valid)
-        for (uint32_t i=0;i<projection.count;++i)
-            if (campaign.map==projection.rows[i].map && (projection.rows[i].flags&SC_CAMPAIGN_REVEALED)) {
-                summary=projection.summaries[i]; row_found=true;
-            }
+    uint64_t revision=0;
+    const bool row_found=menu().summary(campaign.map,save::session().namespace_id(),summary,&revision);
     if (summary.known!=1) {
         original_sprite_visibility(label,0,1);
         special::present_combat_progress(root,label,false);
         if (meter_root) original_sprite_visibility(meter_root,0,1);
-        save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::pending,
-            "hud_found_summary_unknown",0,{{"revision",projection.revision},
-            {"namespace_valid",namespace_valid},{"row_found",row_found},{"known",summary.known}},root);
+        save::session().btrace.record(stage,save::BStatus::pending,
+            "hud_found_summary_unknown",0,{{"revision",revision},{"row_found",row_found},{"known",summary.known}},root);
         return true;
     }
     char value[64]; std::snprintf(value,sizeof(value),"ITEMS FOUND %u/%u",summary.found,summary.total);
@@ -744,12 +838,12 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     original_sprite_visibility(label,1,1);
     if (!independent) original_sprite_visibility(root,1,1);
     special::present_combat_progress(root,label,true);
-    save::session().btrace.record(save::BStage::hud_found_fields,
+    save::session().btrace.record(stage,
         question ? save::BStatus::succeeded : save::BStatus::pending,"hud_found_presentation",0,
         {{"named_color",*reinterpret_cast<const uint32_t*>(text_root+0x6c)},{"material",question!=0},
          {"found",summary.found},{"total",summary.total},{"playing",*reinterpret_cast<const uint8_t*>(label+0x50)},
          {"question_color",image?*reinterpret_cast<const uint32_t*>(image+0x6c):0},
-         {"revision",projection.revision},{"root",root},{"label",label},
+         {"revision",revision},{"root",root},{"label",label},
          {"root_visible",*reinterpret_cast<const uint8_t*>(root+0x51)},
          {"label_visible",*reinterpret_cast<const uint8_t*>(label+0x51)},
          {"text_matches",text_matches(title,value)}},root);
@@ -758,18 +852,24 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
 void present_score_found(uintptr_t score) {
     uintptr_t swf=0,root=0;
     uint8_t visible=0;
+    const bool hub=save::session().campaign_run.snapshot().map=="game/hub/hub";
+    const auto stage=hub ? save::BStage::hud_found_hub : save::BStage::hud_found_fields;
+    const bool fortress=hub && native::gameplay_admitted();
+    static uintptr_t fortress_root=0;
     if (!read(score,0x10,swf) || !read(swf,0x18,root) || !root) {
-        save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::blocked,
+        save::session().btrace.record(stage,save::BStatus::blocked,
             "hud_score_root_missing",0,{{"swf",swf},{"root",root}},score);
         return;
     }
-    if (!active() || !read(score,0xb8,visible) || !visible) {
+    if (!active() || !read(score,0xb8,visible) || (!visible && !fortress)) {
+        if (fortress_root==root && !visible) { original_sprite_visibility(root,0,1); fortress_root=0; }
         if (const auto label=swf_child(root,"apFoundLabel")) original_sprite_visibility(label,0,1);
         special::present_combat_progress(root,0,false);
-        save::session().btrace.record(save::BStage::hud_found_fields,save::BStatus::pending,
+        save::session().btrace.record(stage,save::BStatus::pending,
             "hud_score_visibility_gate",0,{{"active",active()},{"visible",visible},{"root",root}},score);
         return;
     }
+    if (fortress && !visible) { original_sprite_visibility(root,1,1); fortress_root=root; }
     present_found_root(root,swf_child(root,"demonic_corruption"),true);
 }
 void hud_score_init(uintptr_t score) {
@@ -783,16 +883,25 @@ void hud_score_init(uintptr_t score) {
 }
 void hud_score_update(uintptr_t score) {
     original_hud_score_update(score);
+    LARGE_INTEGER start{}; QueryPerformanceCounter(&start);
     __try {
         uintptr_t vtable=0;
         if (!read(score,0,vtable) || vtable!=hud_score_vtable) return;
-        save::session().btrace.record(save::BStage::hud_score_frame,save::BStatus::entered,
-            "hud_score_frame_entered",0,
-            {{"ticks",hud_score_frame_ticks.fetch_add(1,std::memory_order_relaxed)+1}},score);
+        hud_score_frame_ticks.fetch_add(1,std::memory_order_relaxed);
         present_score_found(score);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         save::session().btrace.record(save::BStage::hud_score_frame,save::BStatus::blocked,
             "hud_score_update_fault",0,{},score);
+    }
+    LARGE_INTEGER end{},frequency{}; QueryPerformanceCounter(&end); QueryPerformanceFrequency(&frequency);
+    static uint64_t total=0,maximum=0,next=0;
+    const auto elapsed=static_cast<uint64_t>((end.QuadPart-start.QuadPart)*1000000/frequency.QuadPart);
+    total+=elapsed; maximum=std::max(maximum,elapsed);
+    const auto now=GetTickCount64();
+    if (now>=next) {
+        next=now+5000;
+        save::session().btrace.record(save::BStage::hud_score_frame,save::BStatus::succeeded,"hud_score_cost_us",0,
+            {{"ticks",hud_score_frame_ticks.load(std::memory_order_relaxed)},{"total_us",total},{"max_us",maximum}},score);
     }
 }
 bool present_hud_found(uintptr_t meter) {
@@ -1640,7 +1749,12 @@ bool install(const engine::Binding& binding,HANDLE stop) {
         {0xf42930,"488bc4565741554883ec7048895810488bf14c896020e885a72800488bcee85d",reinterpret_cast<void*>(challenges_show),reinterpret_cast<void**>(&original_challenges_show)},
         {0xf40bf0,"40535556574881ece8010000488b05d5dd26034833c448898424d0010000488b",reinterpret_cast<void*>(challenges_action),reinterpret_cast<void**>(&original_challenges_action)},
         {0xf42de0,"405741564157b8b0400000e8b08f9201482be0488b05debb26034833c4488984",reinterpret_cast<void*>(mission_tab),reinterpret_cast<void**>(&original_mission_tab)},
-        {0xf58890,"40574883ec20488bf9e832482700488b07488bcfff50704885c00f84e1000000",reinterpret_cast<void*>(end_challenges_show),reinterpret_cast<void**>(&original_end_challenges_show)}};
+        {0xf58890,"40574883ec20488bf9e832482700488b07488bcfff50704885c00f84e1000000",reinterpret_cast<void*>(end_challenges_show),reinterpret_cast<void**>(&original_end_challenges_show)},
+        {0xf79720,"40555356488d6c24f04881ec10010000488b05a15223034833c4488945f0488b",reinterpret_cast<void*>(secret_rewards_show),reinterpret_cast<void**>(&original_secret_rewards_show)},
+        {0xf6b340,"405556488dac2488fcffff4881ec78040000488b057f3624034833c448898560",reinterpret_cast<void*>(escalation_rewards_show),reinterpret_cast<void**>(&original_escalation_rewards_show)},
+        {0xf67a20,"b868400000e876439001482be0488b05a46f24034833c4488984243040000048",reinterpret_cast<void*>(reward_card),reinterpret_cast<void**>(&original_reward_card)},
+        {0xf6c7f0,"48895c240848896c24104889742418574883ec50488bda488bf9e811b2ffff8b",reinterpret_cast<void*>(escalation_card),reinterpret_cast<void**>(&original_escalation_card)},
+        {0xf6ba10,"48895c2420564883ec50488bd9498bf0488b89900200004885c90f843b010000",reinterpret_cast<void*>(escalation_perk),reinterpret_cast<void**>(&original_escalation_perk)}};
     engine::LocalMemory optional_memory;
     for (const auto& page:pages) {
         native::Target target; target.address=binding.image.base+page.rva;

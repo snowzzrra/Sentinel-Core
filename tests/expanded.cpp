@@ -35,6 +35,11 @@ int main() {
     require(!spawn_allowed(*marauder, {1, 0, 0}), "native special actor consumes its species slot");
     require(!spawn_allowed(*marauder, {0, 2, 2}), "combined limit includes other species");
     require(spawn_allowed(*marauder, {0, 1, 2}), "actor death frees a combined slot");
+    const auto totem=spawn_limits("ap_v070_spawn_a_l00000001000000010000000100000002_kb__ap_v070_s00100");
+    require(totem && spawn_allowed(*totem,{0,0,0,0,0}), "buff totem has a free special slot");
+    require(!spawn_allowed(*totem,{0,0,0,0,1}), "buff totem respects its individual cap");
+    require(!spawn_allowed(*totem,{1,1,0,0,0}), "buff totem shares the combined special cap");
+    require(!spawn_allowed(*marauder,{0,1,2,0,1}), "buff totem counts against other special admissions");
     const auto banned = spawn_limits("ap_v070_spawn_a_l00000000000000020000000300000004_km__ap_v070_s00100");
     require(banned && !spawn_allowed(*banned, {0, 0, 0}), "zero species limit");
     const auto ordinary = spawn_limits("ap_v070_ai_a_l00000001000000020000000300000004_kn__ap_v070_s00100");
@@ -45,8 +50,11 @@ int main() {
         require(!spawn_limits(name), "unmarked or malformed limit marker");
     using sentinel::expanded::spawn_tracking;
     using sentinel::expanded::spawn_lift;
-    require(spawn_lift("ap_v070_ai_a_t00000000000000010000000000040000_l00000001000000010000000100000002_kn__ap_v070_s00100") > 0,
-        "ground replacement gives a cacodemon floor clearance");
+    for (const auto* physical : {"0000000000002000", "0000000000040000", "0000000000080000"}) {
+        const std::string body = "ap_v070_ai_a_t0000000000000001" + std::string(physical) +
+            "_l00000001000000010000000100000002_kn__ap_v070_s00100";
+        require(spawn_lift(body) > 0, "ground replacement gives floating demons floor clearance");
+    }
     require(spawn_lift("ap_v070_ai_a_t00000000000400000000000000040000_l00000001000000010000000100000002_kn__ap_v070_s00100") == 0,
         "native airborne points preserve their height");
     require(spawn_lift("ai/fodder/zombie") == 0, "unmarked actors preserve spawn height");

@@ -13,4 +13,5 @@ void console_tick(uint64_t generation);
 void manual_tick(uintptr_t player, uint64_t generation, uint64_t (*current_generation)());
 void enemy_spawn_trace(const char* state, const char* origin, const char* body, const char* point, uintptr_t actor);
 void enemy_kill_wait_trace(const char* owner, const char* label, uint64_t mask, int32_t target, uint32_t seen, bool complete);
+void enemy_quantity_wait_trace(char kind, const char* owner, uint64_t mask, double target, int32_t count, bool complete, bool fault);
 }
