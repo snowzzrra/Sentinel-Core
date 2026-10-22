@@ -64,7 +64,6 @@ save::BSnapshot input_diagnostics();
 save::BSnapshot route_diagnostics();
 save::BSnapshot hud_diagnostics();
 void present_combat_progress(uintptr_t root, uintptr_t anchor, bool visible);
-void align_reward_heading(uintptr_t parent, uintptr_t heading, uintptr_t background);
 struct UseHistory {
     uint64_t sequence = 0, overwritten = 0, lock_dropped = 0;
     uint64_t attempt = 0, attempt_started = 0, idle_queries = 0, coalesced = 0;

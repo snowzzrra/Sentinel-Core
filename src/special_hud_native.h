@@ -225,8 +225,6 @@ bool from_space(uintptr_t clip, uintptr_t parent, uintptr_t movie,
     return std::isfinite(out.x) && std::isfinite(out.y);
 }
 
-// Match the donor's complete visual transform when a nested sprite is cloned
-// under WeaponInfo. Position is written separately by swf.position.
 bool match_linear(uintptr_t clone, uintptr_t source, uintptr_t parent, uintptr_t movie,
                   float scale = 1.0f) {
     Point origin{}, x{}, y{};
@@ -656,10 +654,23 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                 toggle_target, arrow_offset)) switch_failure = "switch_arrow_place_failed";
             for (auto* saved : {&active_position, &inactive_position}) {
                 const auto root = saved == &active_position ? active_root : inactive_root;
-                Point original{};
+                Point original{}, vertical{}, reference{};
+                const bool crucible = root == context.crucible_root;
+                const auto vertical_leaf = child(root, crucible ? "background" : "icon");
+                Rect reference_bounds{};
+                // the crucible glyph animates within its plate when the regular weapon changes
                 if (!remember_native(*saved, root, movie, epoch) ||
                     !native_visual_center(*saved, child(root, "icon"), parent, original) ||
-                    !move_native(*saved, parent, {special_target.x-original.x, special_target.y-original.y})) {
+                    !(native_visual_center(*saved, vertical_leaf, parent, vertical) ||
+                      native_visual_center(*saved, child(root, "icon"), parent, vertical))) {
+                    if (saved == &active_position) switch_failure = "switch_move_active_failed";
+                    continue;
+                }
+                if (!bounds(child(flame_root, crucible ? "background" : "icon"), parent, reference_bounds))
+                    reference_bounds = flame_icon_bounds;
+                reference = center(reference_bounds);
+                const float target_y = reference.y - (special_target.x-reference.x)*render_row_slope;
+                if (!move_native(*saved, parent, {special_target.x-original.x, target_y-vertical.y})) {
                     if (saved == &active_position) switch_failure = "switch_move_active_failed";
                 }
             }

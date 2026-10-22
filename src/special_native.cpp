@@ -1577,15 +1577,6 @@ void present_combat_progress(uintptr_t root, uintptr_t anchor, bool visible) {
     if (visible && namespace_id.size() == 64) progress = combat::presentation().view(namespace_id.c_str());
     hud::project_progress(root, anchor, progress);
 }
-void align_reward_heading(uintptr_t parent, uintptr_t heading, uintptr_t background) {
-    hud::Rect text{}, frame{};
-    hud::Point origin{};
-    if (!hud::bounds(heading,parent,text) || !hud::bounds(background,parent,frame) ||
-        !hud::position(heading,origin)) return;
-    const float delta=hud::center(frame).y-hud::center(text).y;
-    if (std::isfinite(delta) && std::fabs(delta)>0.1f)
-        hud::place(heading,{origin.x,origin.y+delta});
-}
 UseHistory use_history() {
     AcquireSRWLockShared(&use_history_lock);
     auto snapshot = use_events;

@@ -995,8 +995,8 @@ bool test_hud_owner_path() {
             close_to(glyph_after.br.y - glyph_after.tl.y, glyph_before.br.y - glyph_before.tl.y) &&
             Fixture::get<uintptr_t>(foreign_glyph, 0x60) == 9;
         retail_cache_ok &= rendered_center(fixture.find(selected, "icon")).x < rendered_center(fixture.find(foreign_arrow, "arrow")).x &&
-            close_to(rendered_center(fixture.find(selected, "icon")).y,
-                     rendered_center(fixture.find(foreign.flame_root, "icon")).y) &&
+            close_to(rendered_center(fixture.find(selected, selected == foreign_crucible ? "background" : "icon")).y,
+                     rendered_center(fixture.find(foreign.flame_root, selected == foreign_crucible ? "background" : "icon")).y) &&
             rendered_center(fixture.find(foreign_arrow, "arrow")).x < rendered_center(fixture.find(foreign.flame_root, "icon")).x &&
             close_to(rendered_center(fixture.find(foreign_arrow, "arrow")).y,
                      rendered_center(foreign_native_arrow).y) &&
@@ -1030,7 +1030,9 @@ bool test_hud_owner_path() {
         const float flame_gap = flame_icon_rect.tl.x - arrow_icon_rect.br.x;
         const float refill_gap = rendered_refill_icon_rect.tl.x - native_arrow_icon_rect.br.x;
         retail_cache_ok &= special_gap > 0 && flame_gap > 0 && refill_gap > 0 &&
-            (selected == foreign_crucible ||
+            (selected == foreign_crucible ?
+             close_to(rendered_center(fixture.find(selected, "background")).y,
+                      rendered_center(fixture.find(foreign.flame_root, "background")).y) :
              close_to(hud::center(special_icon_rect).y, hud::center(flame_icon_rect).y)) &&
             close_to(hud::center(arrow_icon_rect).y, hud::center(native_arrow_icon_rect).y) &&
             close_to(hud::center(rendered_refill_icon_rect).y, refill_icon_baseline_y) &&

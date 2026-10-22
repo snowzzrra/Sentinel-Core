@@ -543,7 +543,6 @@ void present_aggregate(uintptr_t root,const sc_campaign_reward& reward,const cha
     if (const auto background=swf_child(region,"complete")) original_sprite_visibility(background,completed,1);
     if (const auto heading=swf_child(region,"apCompleteHeading")) {
         original_sprite_visibility(heading,completed,1);
-        if (completed) special::align_reward_heading(region,heading,swf_child(region,"complete"));
         if (const auto normal=swf_child(region,"heading")) original_sprite_visibility(normal,!completed,1);
     }
     const auto text=swf_child(swf_child(region,"apReward"),"txtVal",true);
