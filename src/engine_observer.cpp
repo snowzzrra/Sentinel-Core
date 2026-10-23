@@ -1,7 +1,6 @@
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 // Locator/layout facts adapted from DoomEternal-AP-Mod native/client/game_state_probe.cpp
 // at 760b7d98e22a6aa67db36dd0533c794e9dd14032 (MIT, same copyright).
-// New local checked reader; no external-process discovery or RPC policy is reused.
 #include "engine_observer.h"
 #include "pipe_io.h"
 #include <bcrypt.h>
@@ -249,10 +248,10 @@ Binding bind_host(Memory& memory, HANDLE stop) {
     wchar_t path[32768]{};
     char hash[65]{};
     const DWORD length = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
-    const auto deadline = GetTickCount64() + 2500;
+    const auto deadline = GetTickCount64() + 15000;
     const auto reason = length && length < std::size(path) ? disk_hash(path, hash, stop, deadline) : SC_REASON_READ_FAILED;
     // separate finite scan budget so unavailable disk evidence doesn't skip unknown-build validation
-    return bind(memory, std::move(image), hash, reason, stop, GetTickCount64() + 2000);
+    return bind(memory, std::move(image), hash, reason, stop, GetTickCount64() + 10000);
 }
 
 namespace {
