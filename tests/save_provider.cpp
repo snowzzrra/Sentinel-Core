@@ -26,6 +26,8 @@ struct Remote {
     unsigned reads = 0, queries = 0, writes = 0;
     bool short_read = false, mutate = false, bad_alloc = false, wrong_size = false, bad_count = false;
     bool fail_write = false, partial_write = false, add_foreign = false, discard_write = false, replace_selection = false;
+    bool override_name = false;
+    const char* first_name = nullptr;
 };
 Remote& get(uintptr_t self) { return *reinterpret_cast<Remote*>(self); }
 auto find(Remote& remote, const char* key) {
@@ -64,7 +66,8 @@ int32_t size(uintptr_t self, const char* key) {
 int32_t count(uintptr_t self) { return get(self).bad_count ? 100001 : static_cast<int32_t>(get(self).files.size()); }
 const char* name(uintptr_t self, int32_t index, int32_t* length) {
     auto& file = get(self).files.at(static_cast<size_t>(index));
-    *length = static_cast<int32_t>(file.second.size()); return file.first.c_str();
+    *length = static_cast<int32_t>(file.second.size());
+    return get(self).override_name && index == 0 ? get(self).first_name : file.first.c_str();
 }
 uintptr_t remote_pointer = 0;
 unsigned context_calls = 0;
@@ -76,7 +79,9 @@ struct Memory final : engine::Memory {
     engine::LocalMemory local;
     uintptr_t manager = 0;
     const char* campaign = "GAME-";
+    const char* excluded_name = nullptr;
     engine::ReadResult copy(uintptr_t address, void* out, size_t length) override {
+        if (excluded_name && address == reinterpret_cast<uintptr_t>(excluded_name)) return {SC_REASON_READ_FAILED, ERROR_NOACCESS};
         if (address == 0x1000 + 0x9b38 && length == sizeof(manager)) {
             std::memcpy(out, &manager, length); return {};
         }
@@ -105,6 +110,37 @@ void run_provider_contracts(const std::function<std::unique_ptr<Session>()>& mak
     table[15] = reinterpret_cast<uintptr_t>(size); table[18] = reinterpret_cast<uintptr_t>(count);
     table[19] = reinterpret_cast<uintptr_t>(name);
     const ProviderCalls calls{image, context};
+    SYSTEM_INFO system{}; GetSystemInfo(&system);
+    const auto page = system.dwPageSize;
+    auto boundary = static_cast<char*>(VirtualAlloc(nullptr, 2 * page, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    REQUIRE(boundary);
+    std::memset(boundary, 'a', page);
+    DWORD previous = 0;
+    REQUIRE(VirtualProtect(boundary + page, page, PAGE_NOACCESS, &previous));
+    for (unsigned test = 0; test < 8; ++test) {
+        std::string maximum(test == 4 ? 259 : 260, 'a');
+        if (test == 7) boundary[page - 1] = 0;
+        const char* names[]{"PROFILE/profile.bin", nullptr, "", boundary + page,
+                            maximum.c_str(), maximum.c_str(), boundary + page - 8, boundary + page - 8};
+        auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+        remote.files = {{"PROFILE/profile.bin", "unrelated vanilla"}};
+        remote.override_name = true; remote.first_name = names[test];
+        uintptr_t provider = image + 0x2e90658;
+        std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+        uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
+        Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
+        // Proton can return API strings outside the Windows memory regions used by the engine reader.
+        memory.excluded_name = remote.first_name;
+        const auto original = remote.files;
+        const bool accepted = test == 0 || test == 4 || test == 7;
+        REQUIRE(provider_initialized(*owner, memory, memory.manager, calls) == accepted);
+        REQUIRE(remote.files.front() == original.front() && remote.writes == (accepted ? 1u : 0u));
+        if (!accepted) {
+            REQUIRE(remote.files == original && !owner->routed());
+            REQUIRE(std::strcmp(owner->btrace.snapshot().first_failure.predicate, "remote_filename_unreadable") == 0);
+        }
+    }
+    REQUIRE(VirtualFree(boundary, 0, MEM_RELEASE));
     for (unsigned test = 0; test < 9; ++test) {
         auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
         uintptr_t provider = image + 0x2e90658;

@@ -55,6 +55,18 @@ bool name_at(engine::Memory& memory, const char* name, std::string& out) {
     }
     return false;
 }
+bool remote_name_at(const char* name, std::string& out) {
+    // Proton can return Unix buffers that VirtualQuery reports as uncommitted.
+    std::array<char, 260> text{};
+    for (size_t i = 0; name && i < text.size(); ++i) {
+        uintptr_t address = 0; SIZE_T copied = 0;
+        if (!engine::add(reinterpret_cast<uintptr_t>(name), i, 1, address) ||
+            !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), &text[i], 1, &copied) || copied != 1)
+            return false;
+        if (!text[i]) { out.assign(text.data(), i); return i != 0; }
+    }
+    return false;
+}
 bool slot_name(std::string_view value, std::string& canonical) {
     if (value.size() < 9 || !steam_name_equal(value.substr(0, 8), "AUTOSAVE")) return false;
     const auto number = value.substr(8);
@@ -98,7 +110,7 @@ bool inspect_remote(Session& owner, engine::Memory& memory, uintptr_t remote,
             if (GetTickCount64() > deadline)
                 return provider_refused(owner, "remote_scan_deadline", {{"file_count",static_cast<uint64_t>(files)},{"file_index",static_cast<uint64_t>(i)}});
             int32_t reported_size = 0; std::string key;
-            if (!name_at(memory, name(remote, i, &reported_size), key))
+            if (!remote_name_at(name(remote, i, &reported_size), key))
                 return provider_refused(owner, "remote_filename_unreadable", {{"file_index",static_cast<uint64_t>(i)}});
             if (!steam_name_equal(std::string_view(key).substr(0, prefix.size()), prefix)) continue;
             ++root_files;
