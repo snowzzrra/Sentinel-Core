@@ -85,6 +85,13 @@ int main() {
     CHECK(invalid_inventory.outcome == SC_INV_READ_FAILED &&
           invalid_inventory.frag_grenade_after == SC_INVENTORY_UNKNOWN_ITEM);
     inventory_facts.frag_grenade = 1;
+    inventory_facts.persistent_upgrades = 1u << SC_INV_BLOOD_PUNCH_SHIFT;
+    auto punch_observation = sentinel::inventory::initial(inventory_request);
+    sentinel::inventory::execute(inventory_request, punch_observation, inventory_calls);
+    CHECK(sentinel::inventory::blood_punch_observed());
+    sentinel::inventory::reset_session(inventory_request.namespace_id);
+    CHECK(!sentinel::inventory::blood_punch_observed());
+    inventory_facts.persistent_upgrades = 0;
     struct RuneFixture { sentinel::runes::SnapshotFacts facts{}; int bound = 0, reads = 0; bool active = true; } rune;
     sentinel::runes::calls = {
         &rune, nullptr,

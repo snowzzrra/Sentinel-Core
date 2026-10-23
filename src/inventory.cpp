@@ -1,6 +1,7 @@
 #include "inventory.h"
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 
 namespace sentinel::inventory {
 uint8_t capacity_stage(uint32_t owned, uint32_t active, int saved_count, int host_level) {
@@ -13,11 +14,13 @@ uint8_t capacity_stage(uint32_t owned, uint32_t active, int saved_count, int hos
 namespace {
 SRWLOCK state_lock = SRWLOCK_INIT;
 SnapshotFacts shared_state{0, 0, 0, 0, 0, 0, 0, 0};
+std::atomic<uint32_t> observed_upgrades{0};
 uint64_t total_operations = 0;
 char bound_namespace[65]{};
 
 void reset_state_locked(const char* id) {
     shared_state = {0, 0, 0, 0, 0, 0, 0, 0};
+    observed_upgrades.store(0, std::memory_order_release);
     total_operations = 0;
     if (id) std::memcpy(bound_namespace, id, sizeof(bound_namespace));
     else std::memset(bound_namespace, 0, sizeof(bound_namespace));
@@ -44,6 +47,10 @@ void update_capacity_locked(uint8_t health, uint8_t armor, uint8_t ammo) {
     if (ammo <= SC_INVENTORY_MAX_CAPACITY_TIER)
         shared_state.ammo_tier = std::max(shared_state.ammo_tier, ammo);
 }
+}
+
+bool blood_punch_observed() {
+    return (observed_upgrades.load(std::memory_order_acquire) & (1u << SC_INV_BLOOD_PUNCH_SHIFT)) != 0;
 }
 
 bool valid(const sc_inventory_request& r) {
@@ -138,6 +145,7 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
 
     AcquireSRWLockExclusive(&state_lock);
     check_namespace(r.namespace_id);
+    observed_upgrades.store(before.persistent_upgrades, std::memory_order_release);
 
     if (r.kind == SC_INV_OBSERVE) {
         out.weapons_after = before.weapons;

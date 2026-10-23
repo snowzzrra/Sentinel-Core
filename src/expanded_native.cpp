@@ -3,6 +3,7 @@
 #include "enemy_recipe_state.h"
 #include "enemy_checkpoint_native.h"
 #include "combat_native.h"
+#include "inventory.h"
 #include "native_target.h"
 #include "save_session.h"
 #include "save_collector.h"
@@ -147,6 +148,7 @@ struct NativeRecipe {
     uintptr_t tail = 0;
     std::vector<std::string> compatible_bodies;
     bool passthrough = false;
+    std::map<uintptr_t, uintptr_t> blood_punch_alternatives;
 };
 RecipeLibrary recipe_library;
 std::map<std::string, NativeRecipe> native_recipes;
@@ -576,6 +578,29 @@ bool load_native_recipes() {
                 recipe.compatible_bodies.push_back(std::move(name));
             }
         }
+        if (const auto alternate = find_entity(world, ("ap_v070_counter_r" + entry.origin).c_str())) {
+            const auto length = *reinterpret_cast<const int32_t*>(alternate + 0xc40);
+            const auto values = *reinterpret_cast<const uintptr_t*>(alternate + 0xc38);
+            if (length < 0 || static_cast<uint64_t>(length) != static_cast<uint64_t>(entry.physical_count) + partial ||
+                (length && !values)) return false;
+            for (int32_t index = 0; index < length; ++index) {
+                const auto replacement = values + static_cast<uintptr_t>(index) * 0x80;
+                std::string name, original;
+                if (!native_text(replacement, name, 511)) return false;
+                const auto body = spawn_recipe(name);
+                const auto tracking = spawn_tracking(name);
+                if (!body || !tracking || std::string(body->origin.data(), body->origin.size()) != entry.origin ||
+                    body->logical_units != entry.logical_count || body->physical_units != entry.physical_count ||
+                    body->body >= recipe.bodies.size() || tracking->source != entry.logical_mask || !spawn_limits(name)) return false;
+                const auto primary = body->credit_units == entry.logical_count ? recipe.bodies[body->body] :
+                    partial && body->credit_units == entry.final_credit_units ? recipe.tail : 0;
+                if (!primary || !native_text(primary, original, 511)) return false;
+                if (name != original) {
+                    if (!recipe.blood_punch_alternatives.emplace(primary, replacement).second) return false;
+                    recipe.compatible_bodies.push_back(std::move(name));
+                }
+            }
+        }
         recipes.emplace(entry.origin, std::move(recipe));
     }
     RecipeState loaded;
@@ -664,7 +689,8 @@ bool load_native_recipes() {
                 std::string(tracking->origin.data(), tracking->origin.size()) != progress.request.origin ||
                 std::none_of(recipe->second.bodies.begin(), recipe->second.bodies.end(), [&](uintptr_t body) {
                     std::string name; return native_text(body, name, 511) && name == child.body;
-                })) return invalid();
+                }) && std::find(recipe->second.compatible_bodies.begin(), recipe->second.compatible_bodies.end(),
+                                child.body) == recipe->second.compatible_bodies.end()) return invalid();
             (void)role;
         }
         for (const auto& [name, identity] : checkpoint.identities) {
@@ -827,6 +853,10 @@ bool open_native_request(uintptr_t manager, const NativeRecipe& recipe, std::str
         entry.physical_count, entry.maximum_emissions, entry.maximum_emissions, entry.final_credit_units, parent_actor, parent_request})) return false;
     key = std::move(candidate); return true;
 }
+uintptr_t blood_punch_body(const NativeRecipe& recipe, uintptr_t body, bool owned) {
+    const auto alternate = recipe.blood_punch_alternatives.find(body);
+    return !owned && alternate != recipe.blood_punch_alternatives.end() ? alternate->second : body;
+}
 bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::string_view origin, std::string_view label) {
     if (recipe_fault.load(std::memory_order_acquire)) return false;
     if (!load_native_recipes()) return false;
@@ -844,6 +874,12 @@ bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::str
     creation.emission = std::move(*emission); creation.recipe = &recipe;
     creation.body = recipe.tail && emission->ordinal + 1 == recipe.definition.maximum_emissions ? recipe.tail :
         recipe.bodies[(emission->ordinal % recipe.bodies.size() + worker_body_offset % recipe.bodies.size()) % recipe.bodies.size()];
+    const auto chosen = blood_punch_body(recipe, creation.body, inventory::blood_punch_observed());
+    if (chosen != creation.body) {
+        creation.body = chosen;
+        commands::enemy_spawn_trace("blood_punch_fallback", recipe.definition.origin.c_str(),
+            *reinterpret_cast<const char**>(chosen + 8), "prowler", 0);
+    }
     const auto name = *reinterpret_cast<const char**>(creation.body + 8);
     const auto limits = spawn_limits(name ? name : "");
     if (!limits) { recipe_state.release(creation.key); return false; }
@@ -2898,15 +2934,19 @@ unsigned special_kind(uintptr_t actor) {
     }
     // Native summon masks can identify Spirit templates or boss proxies.
     constexpr std::string_view kinds[]{"ai/superheavy/marauder", "ai/superheavy/archvile", "ai/ambient/spirit"};
-    for (auto definition = *reinterpret_cast<uintptr_t*>(actor + 0xa8); definition;
-         definition = *reinterpret_cast<uintptr_t*>(definition + 0x158)) {
+    auto definition = *reinterpret_cast<uintptr_t*>(actor + 0xa8);
+    for (unsigned depth = 0; definition && depth < 64; ++depth) {
         const auto value = *reinterpret_cast<const char**>(definition + 8);
-        if (!value) continue;
-        const std::string_view inherited(value);
-        if (inherited=="ai/ambient/buffpod") return 4;
-        if (inherited=="ai/fodder/zombie_t1_screecher") return 5;
-        if (inherited.substr(0, 8) == "ai/boss/") return 3;
-        for (unsigned kind = 0; kind < std::size(kinds); ++kind) if (inherited == kinds[kind]) return kind;
+        if (value) {
+            const std::string_view inherited(value);
+            if (inherited=="ai/ambient/buffpod") return 4;
+            if (inherited=="ai/fodder/zombie_t1_screecher") return 5;
+            if (inherited.substr(0, 8) == "ai/boss/") return 3;
+            for (unsigned kind = 0; kind < std::size(kinds); ++kind) if (inherited == kinds[kind]) return kind;
+        }
+        const auto parent = *reinterpret_cast<uintptr_t*>(definition + 0x158);
+        if (parent == definition) break;
+        definition = parent;
     }
     return 3;
 }
@@ -3392,7 +3432,8 @@ bool recipe_library_point(uintptr_t point) {
     const std::string_view value(name);
     if (recipe_creation && recipe_creation->source == point && recipe_creation->recipe->definition.family == 'd') return false;
     return value == "ap_v070_recipe_plan" || value.rfind("ap_v070_recipe_plan_", 0) == 0 ||
-        value.rfind("ap_v070_bodies_r", 0) == 0 || value.rfind("ap_v070_direct_r", 0) == 0 ||
+        value.rfind("ap_v070_bodies_r", 0) == 0 || value.rfind("ap_v070_compat_r", 0) == 0 ||
+        value.rfind("ap_v070_counter_r", 0) == 0 || value.rfind("ap_v070_direct_r", 0) == 0 ||
         value.rfind("ap_v070_functional_", 0) == 0 || value.rfind("ap_v070_independent_", 0) == 0 ||
         value.rfind("ap_v070_landing_", 0) == 0;
 }
@@ -5369,6 +5410,7 @@ bool test_point_inputs() {
     definition_name = [](uintptr_t) { return point_name; };
     original_point_candidate = [](uintptr_t, uintptr_t, uint64_t) -> uint64_t { ++candidates; return 7; };
     for (const char* name : {"ap_v070_recipe_plan", "ap_v070_bodies_r0123456789abcdef0123",
+            "ap_v070_compat_r0123456789abcdef0123", "ap_v070_counter_r0123456789abcdef0123",
             "ap_v070_functional_sources", "ap_v070_functional_0123456789abcdef",
             "ap_v070_independent_r0123456789abcdef0123"}) {
         point_name = name; ok &= !point_candidate_detour(1, point, 16);
@@ -5893,7 +5935,7 @@ bool recipe_fault_call(uintptr_t worker) {
 bool test_recipe_inputs() {
     struct Text { uintptr_t table; const char* data; int32_t length; uint32_t flags; };
     struct Collection { uintptr_t records; int32_t count, capacity; uint32_t flags; };
-    static uintptr_t root, library, alias, source_group, source_point, owner, destination, spirit_alias, spirit_library, spirit_point;
+    static uintptr_t root, library, alias, source_group, source_point, owner, destination, spirit_alias, spirit_library, spirit_point, counter_library;
     static std::array<uintptr_t, 2> actor_addresses;
     static uintptr_t original_definitions;
     static std::string metadata, origin, selected_name;
@@ -5950,7 +5992,7 @@ bool test_recipe_inputs() {
     calls = attempts = registrations = nested_calls = 0; fail = nested = fault = unique_bodies = false; valid = true;
     expected_logical = 16;
     expected_override = 12;
-    spirit_alias = spirit_library = spirit_point = 0;
+    spirit_alias = spirit_library = spirit_point = counter_library = 0;
     origin.assign(20, 'b');
     metadata = "EAP1|" + std::string(64, 'a') + "|game/test\n" + origin +
         "|m|original_group|arena|0000000000000010|00000002|00000003|00000005|00000001\n";
@@ -5983,6 +6025,7 @@ bool test_recipe_inputs() {
     find_entity = [](uintptr_t, const char* name) -> uintptr_t {
         if (!std::strcmp(name, "ap_v070_recipe_plan")) return root;
         if (std::string_view(name) == "ap_v070_bodies_r" + origin) return library;
+        if (counter_library && std::string_view(name) == "ap_v070_counter_r" + origin) return counter_library;
         if (spirit_library && std::string_view(name) == "ap_v070_bodies_r" + std::string(20, 'c')) return spirit_library;
         if (!std::strcmp(name, "original_group")) return source_group;
         if (!std::strcmp(name, "original_point")) return source_point;
@@ -6351,6 +6394,26 @@ bool test_recipe_inputs() {
         16, reinterpret_cast<uintptr_t>(label.c_str()), 1) == 99 && valid && calls == 1 && delay_count == 1 &&
         !registrations && helper_records == 1 && pending_recipes.empty() &&
         recipe_state.requests().begin()->second.empty_completed && !recipe_state.requests().rbegin()->second.request.parent_actor.size();
+    map_freed();
+    metadata = "EAP1|" + std::string(64, 'a') + "|game/test\n" + origin +
+        "|p|original_point|arena|0000000000000010|00000001|00000001|00000001|00000001\n";
+    *reinterpret_cast<Text*>(root + 0xbe0) = {0, metadata.data(), static_cast<int32_t>(metadata.size()), 0};
+    *reinterpret_cast<int32_t*>(library + 0xc40) = 1;
+    std::array<uint8_t, 0xe30> counter_storage{};
+    Text counter_body{0, nullptr, 0, 0};
+    auto counter_name = names[0];
+    counter_name.replace(counter_name.find("_t00000000000000100000000000000020"), 34,
+                         "_t00000000000000100000000000000040");
+    counter_body = {0, counter_name.c_str(), static_cast<int32_t>(counter_name.size()), 0};
+    counter_library = reinterpret_cast<uintptr_t>(counter_storage.data());
+    *reinterpret_cast<uintptr_t*>(counter_library + 0xc38) = reinterpret_cast<uintptr_t>(&counter_body);
+    *reinterpret_cast<int32_t*>(counter_library + 0xc40) = 1;
+    ok &= load_native_recipes() && native_recipes.at(origin).blood_punch_alternatives.size() == 1 &&
+        blood_punch_body(native_recipes.at(origin), reinterpret_cast<uintptr_t>(bodies.data()), false) ==
+            reinterpret_cast<uintptr_t>(&counter_body);
+    map_freed();
+    *reinterpret_cast<int32_t*>(counter_library + 0xc40) = 0;
+    ok &= !load_native_recipes();
     map_freed(); stopped.store(true);
     world_global = previous_world; definition_name = previous_name; find_entity = previous_find;
     original_point_factory = previous_factory; original_group = previous_group; original_spawn = previous_spawn;
@@ -6555,6 +6618,17 @@ bool test_limit_inputs() {
     static_assert(offsetof(Actor, definition) == 0xa8);
     Actor marauder{table, false, {}, &marauder_definition}, archvile{table, false, {}, &archvile_definition},
           spirit{table, false, {}, &spirit_definition}, boss{table, false, {}, &boss_type};
+    Definition default_type{0, "ai/default", {}, nullptr};
+    default_type.parent = &default_type;
+    Actor ordinary{table, false, {}, &default_type};
+    bool hierarchy_ok = special_kind(reinterpret_cast<uintptr_t>(&ordinary)) == 3;
+    NativeRecipe counter;
+    counter.blood_punch_alternatives.emplace(11, 22);
+    hierarchy_ok &= blood_punch_body(counter, 11, false) == 22 && blood_punch_body(counter, 11, true) == 11 &&
+                    blood_punch_body(counter, 33, false) == 33;
+    Definition first{0, "ai/fodder/first", {}, &default_type};
+    default_type.parent = &first;
+    hierarchy_ok &= special_kind(reinterpret_cast<uintptr_t>(&ordinary)) == 3;
     table[0x108 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(+[](uintptr_t actor) { return reinterpret_cast<Actor*>(actor)->dead; });
     uintptr_t references[4][3]{{reinterpret_cast<uintptr_t>(&marauder)}, {reinterpret_cast<uintptr_t>(&archvile)},
                              {reinterpret_cast<uintptr_t>(&spirit)}, {reinterpret_cast<uintptr_t>(&boss)}};
@@ -6595,7 +6669,7 @@ bool test_limit_inputs() {
     ok = ok && spawn_detour(7, 8, 9, 10, 11) == 1 && calls == 3 && abi;
     original_spawn = previous_spawn; resolve_actor = previous_resolve;
     definition_name = previous_name; world_global = previous_world; stopped.store(was_stopped);
-    return ok && test_supply_headroom();
+    return ok && hierarchy_ok && test_supply_headroom();
 }
 
 bool catches_immediate_fault(uintptr_t manager) {
