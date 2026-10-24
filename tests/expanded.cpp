@@ -48,6 +48,24 @@ int main() {
     require(banned && !spawn_allowed(*banned, {0, 0, 0}), "zero species limit");
     const auto ordinary = spawn_limits("ap_v070_ai_a_l00000001000000020000000300000004_kn__ap_v070_s00100");
     require(ordinary && spawn_allowed(*ordinary, {1, 2, 3}), "ordinary actors use native global admission");
+    const auto bounded = spawn_limits("ap_v070_ai_a_p00000008000000020000000500000001_l00000001000000010000000100000002_kh__ap_v070_s00100");
+    require(bounded && spawn_allowed(*bounded, {0,0,0,2,0,0,1,1}), "one superheavy leaves room for another");
+    require(!spawn_allowed(*bounded, {1,0,0,1,0,0,1,1}), "marauders and ordinary superheavies share the same cap");
+    require(!spawn_allowed(*bounded, {0,1,0,3,0,0,0,1}), "disruptive combinations wait for lower surrounding pressure");
+    require(spawn_allowed(*bounded, {0,1,0,1,0,0,0,1}), "reduced pressure permits an approved combination");
+    auto separate = *bounded; separate.mixed = 0;
+    require(!spawn_allowed(separate, {0,0,0,0,1,0,0,0}), "ordinary arenas separate superheavies and support enemies");
+    auto fodder = *bounded; fodder.kind = 7;
+    require(spawn_allowed(fodder, {0,0,0,8,0,0,0,0}), "ammunition fodder can enter a full arena");
+    require(!spawn_allowed(fodder, {0,0,0,6,0,0,0,2}), "ammunition exception does not create a fodder swarm");
+    auto normal = *bounded; normal.kind = 3;
+    require(!spawn_allowed(normal, {0,0,0,8,0,0,0,0}), "ordinary generated bodies respect the population cap");
+    const auto scoped_name = "ap_v070_ai_a_t00000000000000010000000000000002_a1234567812345678_p00000008000000020000000500000001_l00000001000000010000000100000002_kh__ap_v070_s00100";
+    const auto scoped = spawn_limits(scoped_name);
+    require(scoped && scoped->scope == 0x1234567812345678ull && sentinel::expanded::spawn_tracking(scoped_name),
+        "arena limits preserve native credit tracking");
+    require(!spawn_limits("ap_v070_ai_a_p00000000000000020000000500000000_l00000001000000010000000100000002_kh__ap_v070_s00100"),
+        "an empty population limit cannot replace valid limits");
     for (const auto* name : {"ai/fodder/imp", "ap_v070_spawn_a_l00000001000000020000000300000004_kx__ap_v070_s00100",
             "ap_v070_spawn_a_l80000000000000020000000300000004_km__ap_v070_s00100",
             "ap_v070_spawn_a_l0000000z000000020000000300000004_km__ap_v070_s00100"})

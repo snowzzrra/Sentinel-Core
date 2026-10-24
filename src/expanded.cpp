@@ -36,7 +36,7 @@ std::optional<SpawnLimits> spawn_limits(std::string_view name) noexcept {
         name.substr(marker + 37, speed.size()) != speed) return {};
     SpawnLimits result{};
     const auto kind = name[marker + 36];
-    const auto kinds = std::string_view("masnbc").find(kind);
+    const auto kinds = std::string_view("masnbchf").find(kind);
     if (kinds == std::string_view::npos) return {};
     result.kind = static_cast<unsigned>(kinds);
     for (std::size_t index = 0; index < result.maximum.size(); ++index) {
@@ -44,12 +44,30 @@ std::optional<SpawnLimits> spawn_limits(std::string_view name) noexcept {
         const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), result.maximum[index], 16);
         if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || result.maximum[index] > INT32_MAX) return {};
     }
+    if (marker >= 34 && name.substr(marker - 34, 2) == "_p") {
+        uint32_t* fields[]{&result.population, &result.superheavy, &result.pressure, &result.mixed};
+        for (size_t i = 0; i < std::size(fields); ++i) {
+            const auto digits = name.substr(marker - 32 + i * 8, 8);
+            const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), *fields[i], 16);
+            if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || *fields[i] > INT32_MAX) return {};
+        }
+        if (!result.population || !result.pressure || result.pressure > result.population || result.mixed > 1) return {};
+        if (marker >= 52 && name.substr(marker - 52, 2) == "_a") {
+            const auto digits = name.substr(marker - 50, 16);
+            const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), result.scope, 16);
+            if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || !result.scope) return {};
+        }
+    }
+    if (result.kind >= 6 && !result.population) return {};
     return result;
 }
 std::optional<SpawnTracking> spawn_tracking(std::string_view name) noexcept {
     if (!spawn_limits(name)) return {};
     const auto marker = name.rfind("_t");
-    if (marker == std::string_view::npos || name.size() - marker < 36 || name.substr(marker + 34, 2) != "_l") return {};
+    if (marker == std::string_view::npos || name.size() - marker < 36 ||
+        (name.substr(marker + 34, 2) != "_l" &&
+         (name.substr(marker + 34, 2) != "_p" || name.substr(marker + 68, 2) != "_l") &&
+         (name.substr(marker + 34, 2) != "_a" || name.substr(marker + 52, 2) != "_p" || name.substr(marker + 86, 2) != "_l"))) return {};
     SpawnTracking result{};
     std::uint64_t* fields[] = {&result.source, &result.physical};
     for (std::size_t index = 0; index < 2; ++index) {
@@ -61,11 +79,25 @@ std::optional<SpawnTracking> spawn_tracking(std::string_view name) noexcept {
     }
     return result;
 }
-bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 6>& active) noexcept {
+bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 8>& active) noexcept {
+    const auto superheavy = uint64_t{active[0]} + active[1] + active[6];
+    const auto special = uint64_t{active[0]} + active[1] + active[2] + active[4] + active[5];
+    const bool incoming_superheavy = limits.kind <= 1 || limits.kind == 6;
+    const bool incoming_special = limits.kind <= 2 || limits.kind == 4 || limits.kind == 5;
+    if (limits.population) {
+        if (!limits.mixed && ((incoming_superheavy && special) || (incoming_special && superheavy))) return false;
+        uint64_t population = 0;
+        for (const auto count : active) population += count;
+        const auto ceiling = (special || incoming_special || superheavy || incoming_superheavy) ?
+            limits.pressure : limits.population;
+        if (population >= ceiling && !(limits.kind == 7 && active[7] < 2)) return false;
+        if (incoming_superheavy && superheavy >= limits.superheavy) return false;
+    }
+    if (limits.kind >= 6) return true;
     if (limits.kind == 3 || limits.kind >= active.size()) return true;
     const auto individual=limits.kind>=4 ? 1 : limits.kind;
     return active[limits.kind] < limits.maximum[individual] &&
-        static_cast<std::uint64_t>(active[0]) + active[1] + active[2] + active[4] + active[5] < limits.maximum[3];
+        special < limits.maximum[3];
 }
 std::optional<SpawnRecipe> spawn_recipe(std::string_view name) noexcept {
     constexpr std::string_view prefix = "ap_v070_ai_r";

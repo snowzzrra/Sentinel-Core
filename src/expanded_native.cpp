@@ -347,7 +347,7 @@ struct HealthProgress {
 std::map<uintptr_t, HealthProgress> health_progress;
 std::recursive_mutex quantity_mutex;
 std::recursive_mutex admission_mutex;
-std::array<uint32_t, 6> reserved_special{};
+std::array<uint32_t, 8> reserved_special{};
 uint32_t reserved_actors = 0;
 struct ImmediateRequest {
     ImmediateRequest* previous;
@@ -857,6 +857,15 @@ uintptr_t blood_punch_body(const NativeRecipe& recipe, uintptr_t body, bool owne
     const auto alternate = recipe.blood_punch_alternatives.find(body);
     return !owned && alternate != recipe.blood_punch_alternatives.end() ? alternate->second : body;
 }
+void inherit_population(SpawnLimits& limits, uintptr_t parent) {
+    if (!limits.population || !parent) return;
+    char name[512];
+    if (!read_recipe_definition(parent, name) && !read_definition_name(parent, name)) return;
+    const auto owner = spawn_limits(name);
+    if (!owner || !owner->scope) return;
+    limits.population = owner->population; limits.superheavy = owner->superheavy;
+    limits.pressure = owner->pressure; limits.mixed = owner->mixed; limits.scope = owner->scope;
+}
 bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::string_view origin, std::string_view label) {
     if (recipe_fault.load(std::memory_order_acquire)) return false;
     if (!load_native_recipes()) return false;
@@ -884,6 +893,7 @@ bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::str
     const auto limits = spawn_limits(name ? name : "");
     if (!limits) { recipe_state.release(creation.key); return false; }
     creation.limits = *limits;
+    if (recipe.definition.family == 'u') inherit_population(creation.limits, manager);
     if (!generated_admission(creation.limits)) { recipe_state.release(creation.key); return false; }
     creation.source = recipe.definition.source.empty() ? 0 :
         find_entity(*reinterpret_cast<const uintptr_t*>(world_global), recipe.definition.source.c_str());
@@ -1705,8 +1715,9 @@ bool restore_checkpoint_actor(uintptr_t world, const std::string& role, RecipeNa
         std::string name; return native_text(entry, name, 511) && name == saved.body;
     });
     if (body == recipe.bodies.end()) return false;
-    const auto limits = spawn_limits(saved.body);
+    auto limits = spawn_limits(saved.body);
     if (!limits) return false;
+    if (!saved.parent.empty()) inherit_population(*limits, find_entity(world, saved.parent.c_str()));
     if (!generated_admission(*limits)) return true;
     RecipeCreation creation;
     creation.restoring = true; creation.recipe = &recipe; creation.key = key; creation.emission = {role, frozen.ordinal};
@@ -2943,6 +2954,10 @@ unsigned special_kind(uintptr_t actor) {
             if (inherited=="ai/fodder/zombie_t1_screecher") return 5;
             if (inherited.substr(0, 8) == "ai/boss/") return 3;
             for (unsigned kind = 0; kind < std::size(kinds); ++kind) if (inherited == kinds[kind]) return kind;
+            if (inherited.substr(0, 14) == "ai/superheavy/") return 6;
+            for (const auto fodder : {"ai/fodder/zombie_tier_1", "ai/fodder/zombie_tier_3", "ai/fodder/imp",
+                                     "ai/fodder/hell_soldier", "ai/fodder/soldier", "ai/fodder/gargoyle"})
+                if (inherited == fodder) return 7;
         }
         const auto parent = *reinterpret_cast<uintptr_t*>(definition + 0x158);
         if (parent == definition) break;
@@ -2950,18 +2965,54 @@ unsigned special_kind(uintptr_t actor) {
     }
     return 3;
 }
+bool population_member(uintptr_t world, uintptr_t actor, uint64_t scope, unsigned depth = 0) {
+    char name[512];
+    if (read_recipe_definition(actor, name) || read_definition_name(actor, name)) {
+        const auto frozen = spawn_limits(name);
+        if (frozen && frozen->scope) {
+            if (frozen->scope == scope) return true;
+            const auto role = recipe_actors.find(actor);
+            if (role == recipe_actors.end() || depth >= 8) return false;
+            const auto child = summon_children.find(role->second);
+            if (child == summon_children.end() || child->second.parent.empty()) return false;
+            const auto parent = find_entity(world, child->second.parent.c_str());
+            return parent && parent != actor && population_member(world, parent, scope, depth + 1);
+        }
+    }
+    const auto managers = *reinterpret_cast<const uintptr_t*>(world + 0x126658);
+    const auto count = *reinterpret_cast<const int32_t*>(world + 0x126660);
+    if (count < 0 || count > 100000) return false;
+    for (int32_t index = 0; index < count; ++index) {
+        const auto manager = *reinterpret_cast<const uintptr_t*>(managers + index * 0x20 + 8);
+        char owner[512];
+        if (!manager || !read_definition_name(manager, owner)) continue;
+        uint64_t hash = 14695981039346656037ull;
+        for (const unsigned char character : std::string_view(owner)) hash = (hash ^ character) * 1099511628211ull;
+        if (hash != scope) continue;
+        for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
+            const auto records = *reinterpret_cast<const uintptr_t*>(manager + offset);
+            const auto size = *reinterpret_cast<const int32_t*>(manager + offset + 8);
+            if (size < 0 || size > 1000000) return false;
+            for (int32_t entry = 0; entry < size; ++entry)
+                if (record_actor(records + static_cast<uintptr_t>(entry) * 0x68) == actor) return true;
+        }
+        return false;
+    }
+    return false;
+}
 bool special_admission(const SpawnLimits& limits) {
     __try {
         const auto world = *reinterpret_cast<uintptr_t*>(world_global);
         const auto collection = *reinterpret_cast<uintptr_t*>(world + 0x62088);
         const auto references = *reinterpret_cast<uintptr_t*>(collection);
         const auto count = *reinterpret_cast<int32_t*>(collection + 8);
-        std::array<uint32_t, 6> active{};
+        std::array<uint32_t, 8> active{};
         for (int32_t index = 0; index < count; ++index) {
             const auto actor = resolve_actor(references + index * 24);
             if (!actor || combat::confirmed_dead(world, actor)) continue;
+            if (limits.scope && !population_member(world, actor, limits.scope)) continue;
             const auto kind = special_kind(actor);
-            if (kind!=3 && kind < active.size()) ++active[kind];
+            if (kind < active.size()) ++active[kind];
         }
         for (size_t kind = 0; kind < active.size(); ++kind) {
             if (UINT32_MAX - active[kind] < reserved_special[kind]) return false;
@@ -3006,7 +3057,7 @@ bool generated_admission(const SpawnLimits& limits) {
              static_cast<int64_t>(count) + reserved_actors >= capacity)) return false;
         return supply_admission(world) &&
             (!reserved_actors || native_admission(world + 0xafd98, 1 - static_cast<int32_t>(reserved_actors))) &&
-            (limits.kind == 3 || special_admission(limits));
+            ((!limits.population && limits.kind == 3) || special_admission(limits));
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 bool active_actor(uintptr_t actor) {
@@ -3324,11 +3375,11 @@ void traversal_enter_detour(uintptr_t state, uintptr_t context, uintptr_t action
 }
 void reserve_admission(const SpawnLimits& limits) {
     ++reserved_actors;
-    if (limits.kind!=3 && limits.kind < reserved_special.size()) ++reserved_special[limits.kind];
+    if (limits.kind < reserved_special.size()) ++reserved_special[limits.kind];
 }
 void release_admission(const SpawnLimits& limits) {
     --reserved_actors;
-    if (limits.kind!=3 && limits.kind < reserved_special.size()) --reserved_special[limits.kind];
+    if (limits.kind < reserved_special.size()) --reserved_special[limits.kind];
 }
 void retry_immediate(uintptr_t manager) {
     rewind_timeline(manager + 0xe20, *reinterpret_cast<const int32_t*>(manager + 0xda0));
@@ -6754,7 +6805,7 @@ bool test_immediate_inputs() {
     ok = ok && multiple_detour(owner, 77, 16, 1, 22, 0x55) == 77 && created == 2 && rewinds == 3 && abi;
     fault = true;
     ok = ok && catches_immediate_fault(owner) && reserved_actors == 0 &&
-        reserved_special == std::array<uint32_t, 6>{} && immediate_request == nullptr;
+        reserved_special == std::array<uint32_t, 8>{} && immediate_request == nullptr;
     fault = false;
     collection.capacity = 1;
     reserved_actors = 1;
@@ -6768,7 +6819,7 @@ bool test_immediate_inputs() {
     original_register_spawn = previous_register; rewind_timeline = previous_rewind;
     definition_name = previous_name; world_global = previous_world; native_admission = previous_admission;
     stopped.store(previous_stopped);
-    return ok && immediate_request == nullptr && reserved_actors == 0 && reserved_special == std::array<uint32_t, 6>{};
+    return ok && immediate_request == nullptr && reserved_actors == 0 && reserved_special == std::array<uint32_t, 8>{};
 }
 
 bool test_spirit_inputs() {
@@ -6842,7 +6893,7 @@ bool test_spirit_inputs() {
     original_point_candidate = previous_candidate; original_point_index = previous_index;
     rewind_timeline = previous_rewind; definition_name = previous_name;
     world_global = previous_world; native_admission = previous_admission; stopped.store(previous_stopped);
-    return ok && reserved_actors == 0 && reserved_special == std::array<uint32_t, 6>{} && immediate_request == nullptr;
+    return ok && reserved_actors == 0 && reserved_special == std::array<uint32_t, 8>{} && immediate_request == nullptr;
 }
 
 bool test_tracking_inputs() {

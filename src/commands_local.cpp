@@ -1,6 +1,7 @@
 #include "commands_native.h"
 #include "commands.h"
 #include "native_target.h"
+#include "native_runtime.h"
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -71,6 +72,27 @@ const char* safe_effect(const ManualRequest& r, uintptr_t player, uint64_t expec
     __try { return effect(r, player, expected, current); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return "native fault; effect unknown, automatic retry disabled"; }
 }
+}
+bool execute_boon(const char* text, sc_command_result& result, uintptr_t player) {
+    const char* pickup = nullptr;
+    if (!std::strcmp(text, "ai_ScriptCmdEnt ap_rpc_v3_7770910 activate")) pickup = "ap_rpc_v3_7770910_pickup";
+    else if (!std::strcmp(text, "ai_ScriptCmdEnt ap_rpc_v3_7770911 activate")) pickup = "ap_rpc_v3_7770911_pickup";
+    else if (!std::strcmp(text, "ai_ScriptCmdEnt ap_rpc_v3_7770912 activate")) pickup = "ap_rpc_v3_7770912_pickup";
+    if (!pickup) return false;
+    if (!player) { result.outcome = SC_COMMAND_NO_PLAYER; return true; }
+    ManualRequest request{}; request.kind = 4; request.explicit_position = true;
+    strcpy_s(request.entity_def, pickup);
+    engine::LocalMemory memory;
+    if (memory.copy(player + 0x74, request.position, sizeof(request.position)).reason) {
+        result.outcome = SC_COMMAND_NO_PLAYER; return true;
+    }
+    request.position[2] += 1.0f;
+    // prop spawners ignore spawnAt, so use the qualified entity factory and world-position event.
+    const auto error = safe_effect(request, player, native::observation_stamp(), native::observation_stamp);
+    result.outcome = error ? SC_COMMAND_NATIVE_FAILED : SC_COMMAND_DISPATCHED;
+    if (print) print("AP_BOON_SPAWN pickup=%s outcome=%s x=%g y=%g z=%g detail=%s\n", pickup,
+        error ? "failed" : "created", request.position[0], request.position[1], request.position[2], error ? error : "ok");
+    return true;
 }
 void enemy_spawn_trace(const char* state, const char* origin, const char* body, const char* point, uintptr_t actor) {
     if (print) print("AP_ENEMY_SPAWN state=%s origin=%s body=%s point=%s actor=%llx\n",
