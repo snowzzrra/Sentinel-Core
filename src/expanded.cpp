@@ -36,7 +36,7 @@ std::optional<SpawnLimits> spawn_limits(std::string_view name) noexcept {
         name.substr(marker + 37, speed.size()) != speed) return {};
     SpawnLimits result{};
     const auto kind = name[marker + 36];
-    const auto kinds = std::string_view("masnbchf").find(kind);
+    const auto kinds = std::string_view("masnbchfo").find(kind);
     if (kinds == std::string_view::npos) return {};
     result.kind = static_cast<unsigned>(kinds);
     for (std::size_t index = 0; index < result.maximum.size(); ++index) {
@@ -51,7 +51,9 @@ std::optional<SpawnLimits> spawn_limits(std::string_view name) noexcept {
             const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), *fields[i], 16);
             if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || *fields[i] > INT32_MAX) return {};
         }
-        if (!result.population || !result.pressure || result.pressure > result.population || result.mixed > 1) return {};
+        result.heavy = result.mixed >> 8;
+        result.mixed &= 255;
+        if (!result.population || !result.pressure || result.pressure > result.population || result.mixed > 1 || result.heavy > 128) return {};
         if (marker >= 52 && name.substr(marker - 52, 2) == "_a") {
             const auto digits = name.substr(marker - 50, 16);
             const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), result.scope, 16);
@@ -79,7 +81,7 @@ std::optional<SpawnTracking> spawn_tracking(std::string_view name) noexcept {
     }
     return result;
 }
-bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 8>& active) noexcept {
+bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active) noexcept {
     const auto superheavy = uint64_t{active[0]} + active[1] + active[6];
     const auto special = uint64_t{active[0]} + active[1] + active[2] + active[4] + active[5];
     const bool incoming_superheavy = limits.kind <= 1 || limits.kind == 6;
@@ -92,6 +94,7 @@ bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 8>
             limits.pressure : limits.population;
         if (population >= ceiling && !(limits.kind == 7 && active[7] < 2)) return false;
         if (incoming_superheavy && superheavy >= limits.superheavy) return false;
+        if (limits.heavy && limits.kind == 3 && active[3] >= limits.heavy) return false;
     }
     if (limits.kind >= 6) return true;
     if (limits.kind == 3 || limits.kind >= active.size()) return true;

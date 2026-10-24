@@ -290,6 +290,7 @@ thread_local TraversalEntry* traversal_entry = nullptr;
 std::atomic<bool> recipe_fault{false};
 std::map<std::string, uint8_t> recipe_spawn_traces;
 std::map<std::tuple<uintptr_t, char, uint64_t, uint32_t>, uint8_t> quantity_wait_traces;
+std::map<uintptr_t, uint64_t> remaining_wait_started;
 using AllocateWorker = uintptr_t(*)(size_t, uint32_t);
 using ConstructStagger = uintptr_t(*)(uintptr_t, int32_t, uint64_t, uint64_t, uintptr_t, uint64_t, const char*);
 using AssignManager = void(*)(uintptr_t, uintptr_t);
@@ -349,7 +350,7 @@ struct HealthProgress {
 std::map<uintptr_t, HealthProgress> health_progress;
 std::recursive_mutex quantity_mutex;
 std::recursive_mutex admission_mutex;
-std::array<uint32_t, 8> reserved_special{};
+std::array<uint32_t, 9> reserved_special{};
 uint32_t reserved_actors = 0;
 struct ImmediateRequest {
     ImmediateRequest* previous;
@@ -866,7 +867,25 @@ void inherit_population(SpawnLimits& limits, uintptr_t parent) {
     const auto owner = spawn_limits(name);
     if (!owner || !owner->scope) return;
     limits.population = owner->population; limits.superheavy = owner->superheavy;
-    limits.pressure = owner->pressure; limits.mixed = owner->mixed; limits.scope = owner->scope;
+    limits.pressure = owner->pressure; limits.mixed = owner->mixed; limits.scope = owner->scope; limits.heavy = owner->heavy;
+}
+bool finite_wave_ready(std::string_view owner) {
+    for (const auto& [worker, key] : worker_recipes) {
+        (void)worker;
+        const auto found = recipe_state.requests().find(key);
+        if (found == recipe_state.requests().end()) continue;
+        const auto& progress = found->second;
+        if (progress.closed || progress.request.owner != owner ||
+            progress.emitted >= progress.request.maximum_emissions ||
+            recipe_state.parent_pending(progress.request.parent_actor)) continue;
+        const auto recipe = native_recipes.find(progress.request.origin);
+        if (recipe == native_recipes.end() || std::string_view("igaspb").find(recipe->second.definition.family) == std::string_view::npos ||
+            recipe->second.bodies.empty()) continue;
+        const auto body = recipe->second.bodies[progress.emitted % recipe->second.bodies.size()];
+        const auto limits = spawn_limits(*reinterpret_cast<const char**>(body + 8));
+        if (limits && generated_admission(*limits)) return true;
+    }
+    return false;
 }
 bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::string_view origin, std::string_view label) {
     if (recipe_fault.load(std::memory_order_acquire)) return false;
@@ -880,6 +899,7 @@ bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::str
         if (pending.empty() && !open_native_request(manager, recipe, label, pending)) return false;
         creation.key = pending;
     }
+    if (recipe.definition.family == 'm' && finite_wave_ready(recipe_state.requests().at(creation.key).request.owner)) return false;
     auto emission = recipe_state.reserve(creation.key);
     if (!emission) return false;
     creation.emission = std::move(*emission); creation.recipe = &recipe;
@@ -896,6 +916,11 @@ bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::str
     if (!limits) { recipe_state.release(creation.key); return false; }
     creation.limits = *limits;
     if (recipe.definition.family == 'u') inherit_population(creation.limits, manager);
+    // refills leave room for the finite waves that eventually stop them.
+    if (recipe.definition.family == 'm' && creation.limits.population > 1) {
+        creation.limits.population -= (std::min)(uint32_t{2}, creation.limits.population - 1);
+        creation.limits.pressure = (std::min)(creation.limits.pressure, creation.limits.population);
+    }
     if (!generated_admission(creation.limits)) { recipe_state.release(creation.key); return false; }
     creation.source = recipe.definition.source.empty() ? 0 :
         find_entity(*reinterpret_cast<const uintptr_t*>(world_global), recipe.definition.source.c_str());
@@ -1046,18 +1071,32 @@ bool record_point_credit(uintptr_t point, const RecipeCreation* creation) {
     if (total > UINT64_MAX - units) return false;
     total += units; credits.observed = count; return true;
 }
+bool recipe_landing_pose(const RecipeCreation&, float*);
 uint64_t invoke_point_available(uintptr_t point, uintptr_t group, uint8_t time, uint8_t player,
                                 uint8_t fov, uint8_t los, RecipeCreation* creation) {
     const auto state = read_point_state(point);
     const auto maximum = *reinterpret_cast<const int32_t*>(point + 0xb88);
+    const auto bounds = *reinterpret_cast<const int32_t*>(point + 0xb90);
+    float destination[12], original[12];
+    const auto active_point = creation ? creation->active_point : 0;
+    if (creation) creation->active_point = point;
+    const bool relocated = creation && recipe_landing_pose(*creation, destination);
+    if (creation) creation->active_point = active_point;
     uint64_t result = 0;
     __try {
         *reinterpret_cast<int32_t*>(point + 0xb88) = 0;
         if (creation) write_point_state(point, {creation->body, 1, 0, 0, 0});
+        if (relocated) {
+            std::memcpy(original, reinterpret_cast<const void*>(point + 0x74), sizeof(original));
+            independent_pose(point, destination);
+            *reinterpret_cast<int32_t*>(point + 0xb90) = 2;
+        }
         result = original_point_available(point, group, time, player, fov, los);
     } __finally {
+        if (relocated) independent_pose(point, original);
         if (creation) write_point_state(point, state);
         *reinterpret_cast<int32_t*>(point + 0xb88) = maximum;
+        *reinterpret_cast<int32_t*>(point + 0xb90) = bounds;
     }
     return result;
 }
@@ -1103,7 +1142,6 @@ void trace_recipe_spawn(const RecipeCreation& creation, uintptr_t body, uintptr_
         stage == 8 ? "factory" : stage == 16 ? "candidate_rejected" : stage == 32 ? "index_rejected" : "unavailable",
         creation.recipe->definition.origin.c_str(), definition.c_str(), point_name, creation.actor);
 }
-bool recipe_landing_pose(const RecipeCreation&, float*);
 uintptr_t recipe_factory(uintptr_t point, uintptr_t group) {
     const auto creation = recipe_creation;
     const auto state = read_point_state(point);
@@ -2102,7 +2140,7 @@ bool dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, 
             original_single(manager, output, type, alias, label);
     }
     const auto& birth_label = recipe_state.requests().at(key).request.label;
-    if (!recipe_state.requests().at(key).emitted || !queue_recipe_remainder(manager, alias, birth_label.c_str(), key)) {
+    if (!queue_recipe_remainder(manager, alias, birth_label.c_str(), key)) {
         retry_immediate(manager); return true;
     }
     pending_recipes.erase({manager, origin});
@@ -2308,6 +2346,12 @@ void invoke_death_actions(uintptr_t action, uintptr_t context, uintptr_t state, 
     __try { death_action_context = projection; original_death_actions(action, context, state, frame); }
     __finally { death_action_context = previous; admission_mutex.unlock(); }
 }
+void record_recipe_death(uintptr_t actor) {
+    const auto role = recipe_actors.find(actor);
+    if (role == recipe_actors.end()) return;
+    recipe_state.actor_changed(role->second, RecipeActorState::dead);
+    recipe_actors.erase(role);
+}
 void death_actions_detour(uintptr_t action, uintptr_t context, uintptr_t state, uintptr_t frame) {
     if (stopped.load(std::memory_order_acquire)) { original_death_actions(action, context, state, frame); return; }
     admission_mutex.lock();
@@ -2331,6 +2375,7 @@ void death_actions_detour(uintptr_t action, uintptr_t context, uintptr_t state, 
                 projection.request = "invalid"; projection.credit = {0, 1};
                 recipe_fault.store(true, std::memory_order_release);
             }
+            record_recipe_death(actor);
         }
     } catch (...) { recipe_fault.store(true, std::memory_order_release); }
     invoke_death_actions(action, context, state, frame, tracked ? &projection : nullptr);
@@ -2615,6 +2660,19 @@ bool remaining_encounter_heavy_safe(uintptr_t command) noexcept {
     __try { return remaining_encounter_heavy(command); }
     __except(EXCEPTION_EXECUTE_HANDLER) { return true; }
 }
+void trace_remaining_actors(uintptr_t command, const char* owner, int32_t count) noexcept {
+    __try {
+        const auto records = *reinterpret_cast<const uintptr_t*>(command + 0xa8);
+        for (int32_t i = 0; records && i < count && i < 32; ++i) {
+            const auto actor = record_actor(records + static_cast<uintptr_t>(i) * 0x68);
+            char name[512]{}, body[512]{}, position[768]{};
+            if (!actor || !read_instance_name(actor, name) || !read_definition_name(actor, body)) continue;
+            const auto xyz = reinterpret_cast<const float*>(actor + 0x74);
+            std::snprintf(position, sizeof(position), "%s@%g,%g,%g", name, xyz[0], xyz[1], xyz[2]);
+            commands::enemy_spawn_trace("waiting", owner, body, position, actor);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
 void trace_quantity_wait(uintptr_t command, char kind, uint64_t result) {
     const auto mask = *reinterpret_cast<const uint64_t*>(command + 0x88);
     const auto target_bits = *reinterpret_cast<const uint32_t*>(command + 0xc0);
@@ -2624,11 +2682,20 @@ void trace_quantity_wait(uintptr_t command, char kind, uint64_t result) {
     const auto key = std::make_tuple(command, kind, mask, target_bits);
     if (!quantity_wait_traces.count(key) && quantity_wait_traces.size() >= 4096) return;
     auto& traced = quantity_wait_traces[key];
-    if (traced & stage) return;
+    bool actors_due = false;
+    if (kind == 'r') {
+        if (result & 0xff) remaining_wait_started.erase(command);
+        else if (remaining_wait_started.size() < 4096) {
+            const auto started = remaining_wait_started.emplace(command, GetTickCount64()).first->second;
+            actors_due = !(traced & 16) && GetTickCount64() - started >= 15000;
+        }
+    }
+    if ((traced & stage) && !actors_due) return;
     traced |= stage;
     char owner[512]{};
     const auto manager = remaining_manager(command);
     if (manager) read_definition_name(manager, owner);
+    if (actors_due) { traced |= 16; trace_remaining_actors(command, owner, count); }
     const double target = kind == 'h' ? *reinterpret_cast<const float*>(command + 0xc0) :
         *reinterpret_cast<const int32_t*>(command + 0xc0);
     commands::enemy_quantity_wait_trace(kind, owner, mask, target, count, (result & 0xff) != 0, fault);
@@ -2678,7 +2745,22 @@ void kill_dead_detour(uintptr_t command, uintptr_t record) {
         const auto actor = record_actor(record);
         const auto weight = remaining_weight(actor);
         const auto before = *reinterpret_cast<const int32_t*>(command + 0xa8);
+        const auto cached = recipe_actor_credits.find(actor);
+        const bool counted = weight.recipe && cached != recipe_actor_credits.end() &&
+            recipe_state.requests().count(cached->second.request);
+        if (counted) record_recipe_death(actor);
+        bool selected = false;
+        if (weight.recipe) {
+            char name[512];
+            const auto tracking = read_recipe_definition(actor, name) ? spawn_tracking(name) : std::nullopt;
+            const auto filter = *reinterpret_cast<const uint64_t*>(command + 0x88);
+            const auto mask = filter & (uint64_t{1} << 44) ? encounter_ai_mask : filter;
+            selected = tracking && (tracking->source & mask) &&
+                (!*reinterpret_cast<const int32_t*>(command + 0x68) || !compare_text(record + 0x28, command + 0x58));
+        }
         original_kill_dead(command, record);
+        // recipe deaths use their logical source and survive expired native actor references.
+        if (weight.recipe) *reinterpret_cast<int32_t*>(command + 0xa8) = before + (!counted && selected);
         const auto after = *reinterpret_cast<const int32_t*>(command + 0xa8);
         if (after > before) {
             auto& progress = kill_progress[command];
@@ -2753,7 +2835,7 @@ uint64_t kill_result(uintptr_t command) {
     if (!progress.initialized) return 0;
     const auto target = *reinterpret_cast<const int32_t*>(command + 0xac);
     if (target <= 0) return 1;
-    auto deaths = recipe_state.deaths(progress.owner, progress.mask, progress.label, progress.baseline, true);
+    auto deaths = recipe_state.deaths(progress.owner, progress.mask, progress.label, progress.baseline);
     bool tracked = progress.tracked || recipe_scope(progress.owner, progress.mask, progress.label, false) ||
         std::any_of(deaths.begin(), deaths.end(), [](auto value) { return value.numerator != 0; });
     for (const auto& [credit, count] : progress.deaths) deaths.push_back({credit.first * count, credit.second});
@@ -2776,6 +2858,13 @@ uint64_t kill_result(uintptr_t command) {
         if (!synchronous_remainders(command, pending)) return 0;
         if (pending.empty()) return original_kill(command);
     }
+    uint32_t low = 0, high = static_cast<uint32_t>(target);
+    while (low < high) {
+        const auto middle = low + (high - low + 1) / 2;
+        if (credit_at_least(deaths, middle)) low = middle; else high = middle - 1;
+    }
+    progress.seen = low;
+    *reinterpret_cast<int32_t*>(command + 0xa8) = static_cast<int32_t>(low);
     if (credit_at_least(deaths, static_cast<uint32_t>(target))) return 1;
     if (native_future(manager, progress.mask, command + 0x58)) return 0;
     if (!count) return 1;
@@ -3015,7 +3104,7 @@ bool special_admission(const SpawnLimits& limits) {
         const auto collection = *reinterpret_cast<uintptr_t*>(world + 0x62088);
         const auto references = *reinterpret_cast<uintptr_t*>(collection);
         const auto count = *reinterpret_cast<int32_t*>(collection + 8);
-        std::array<uint32_t, 8> active{};
+        std::array<uint32_t, 9> active{};
         for (int32_t index = 0; index < count; ++index) {
             const auto actor = resolve_actor(references + index * 24);
             if (!actor || combat::confirmed_dead(world, actor)) continue;
@@ -4373,6 +4462,7 @@ void map_freed() {
     point_credits.clear();
     recipe_spawn_traces.clear();
     quantity_wait_traces.clear();
+    remaining_wait_started.clear();
     recipe_state = {}; next_recipe_request = 0; native_string_table = 0; recipe_fault.store(false);
 }
 #ifdef SC_NATIVE_TESTING
@@ -4724,6 +4814,8 @@ bool test_death_actions() {
     definition = "ap_v070_ai_r" + std::string(20, 'b') +
         "_00000000_q0000000200000006_t00000000000000100000000000000020_l00000001000000010000000100000003_kn__ap_v070_s00100";
     map_freed(); stopped.store(false); activate_event = 91;
+    recipe_state.reset("plan", "map");
+    bool state_ok = recipe_state.request("request", {"arena", "origin", "torch", 16, 2, 6, 6});
     triggers = other_events = nested_events = 0; valid = true; fault = false;
     definition_name = [](uintptr_t) { return definition.c_str(); };
     original_post_one = [](uintptr_t entity, uintptr_t event, int32_t delay, uintptr_t argument) -> uintptr_t {
@@ -4743,6 +4835,9 @@ bool test_death_actions() {
     unsigned deaths = 0;
     for (const auto index : {5, 1, 3, 0, 4, 2}) {
         const auto actor = reinterpret_cast<uintptr_t>(&entities[index]);
+        const auto emitted = recipe_state.reserve("request");
+        state_ok &= emitted && recipe_state.created("request", *emitted);
+        if (emitted) recipe_actors[actor] = emitted->actor;
         recipe_actor_credits[actor] = {static_cast<uint32_t>(actor), {2, 6}, "request"};
         *reinterpret_cast<uintptr_t*>(context.data() + 0x940) = actor;
         death_actions_detour(1, context_address, 2, 3);
@@ -4753,7 +4848,8 @@ bool test_death_actions() {
     recipe_actor_credits[actor] = {static_cast<uint32_t>(actor), {3, 1}, "reduction"};
     *reinterpret_cast<uintptr_t*>(context.data() + 0x940) = actor;
     death_actions_detour(1, context_address, 2, 3);
-    ok &= triggers == 5 && other_events == 7;
+    ok &= triggers == 5 && other_events == 7 && state_ok &&
+        credit_at_least(recipe_state.deaths("arena", 16, "torch"), 2);
     recipe_actor_credits[actor] = {static_cast<uint32_t>(actor), {1, 3}, "interrupted"};
     fault = true;
     ok &= death_actions_fault_call(context_address) && !death_action_context;
@@ -5493,6 +5589,43 @@ bool test_point_inputs() {
     ok &= point_candidate_detour(1, point, 16) == 7 && point_index_detour(1, point, 16) == -7;
     recipe_creation = nullptr;
     ok &= point_candidate_detour(1, point, 16) == 7 && point_index_detour(1, point, 16) == -7;
+    const auto previous_find = find_entity;
+    const auto previous_world = world_global;
+    static uintptr_t marker, landing;
+    std::array<uint8_t, 0xe30> marker_storage{}, landing_storage{};
+    marker = reinterpret_cast<uintptr_t>(marker_storage.data()); landing = reinterpret_cast<uintptr_t>(landing_storage.data());
+    const std::string landing_name = "landing";
+    *reinterpret_cast<save::NativeString*>(marker + 0xbe0) = recipe_text(landing_name);
+    const float destination[12]{10, 20, 30, 1, 0, 0, 0, 1, 0, 0, 0, 1};
+    std::memcpy(reinterpret_cast<void*>(landing + 0x74), destination, sizeof(destination));
+    uintptr_t table[0xe80 / sizeof(uintptr_t)]{};
+    table[0xe78 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(+[](uintptr_t actor) { return actor; });
+    table[0x50 / sizeof(uintptr_t)] = table[0x58 / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(+[](uintptr_t, uintptr_t, int32_t) {});
+    table[0xb8 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(+[](uintptr_t actor, uintptr_t matrix) {
+        std::memcpy(reinterpret_cast<void*>(actor + 0x80), reinterpret_cast<const void*>(matrix), 9 * sizeof(float));
+    });
+    *reinterpret_cast<uintptr_t*>(point) = reinterpret_cast<uintptr_t>(table);
+    const uintptr_t world = 0; world_global = reinterpret_cast<uintptr_t>(&world);
+    find_entity = [](uintptr_t, const char* name) -> uintptr_t {
+        return std::string_view(name).find("ap_v070_landing_") == 0 ? marker : !std::strcmp(name, "landing") ? landing : 0;
+    };
+    float initial[12]; std::memcpy(initial, reinterpret_cast<const void*>(point + 0x74), sizeof(initial));
+    write_point_state(point, original); point_credits.clear();
+    *reinterpret_cast<int32_t*>(point + 0xd90) = 0; *reinterpret_cast<int32_t*>(point + 0xb90) = 1;
+    original_point_available = [](uintptr_t source, uintptr_t, uint8_t, uint8_t, uint8_t, uint8_t) -> uint64_t {
+        valid &= std::memcmp(reinterpret_cast<const void*>(source + 0x74), reinterpret_cast<const void*>(landing + 0x74),
+            12 * sizeof(float)) == 0 && *reinterpret_cast<const int32_t*>(source + 0xb90) == 2;
+        if (fault) RaiseException(0xe0700003, 0, 0, nullptr);
+        return !blocked;
+    };
+    creation.creating = false; creation.active_point = 0; recipe_creation = &creation;
+    ok &= point_available_detour(point, 0x55, 1, 1, 1, 1) == 1;
+    blocked = true; ok &= !point_available_detour(point, 0x55, 1, 1, 1, 1);
+    fault = true; ok &= point_fault_call(point);
+    ok &= valid && !creation.active_point && *reinterpret_cast<const int32_t*>(point + 0xb90) == 1 &&
+        std::memcmp(initial, reinterpret_cast<const void*>(point + 0x74), sizeof(initial)) == 0;
+    find_entity = previous_find; world_global = previous_world; recipe_creation = nullptr;
     original_point_available = previous_available;
     definition_name = previous_name; original_point_candidate = previous_candidate;
     original_point_index = previous_index;
@@ -6063,7 +6196,7 @@ bool test_recipe_inputs() {
     for (size_t i = 0; i < names.size(); ++i) {
         char index[9]; sprintf_s(index, "%08x", static_cast<unsigned>(i == 3 ? 1 : i));
         names[i] = "ap_v070_ai_r" + origin + "_" + index + "_q0000000200000003" + (i == 3 ? "_w00000001" : "") +
-            "_t00000000000000100000000000000020_l00000001000000010000000100000003_kn__ap_v070_s00100";
+            "_t00000000000000100000000000000020_p00000005000000010000000300000100_l00000001000000010000000100000003_kn__ap_v070_s00100";
         *reinterpret_cast<Text*>(bodies.data() + i * 0x80) = {0, names[i].data(), static_cast<int32_t>(names[i].size()), 0};
     }
     *reinterpret_cast<uintptr_t*>(library + 0xc38) = reinterpret_cast<uintptr_t>(bodies.data());
@@ -6104,6 +6237,7 @@ bool test_recipe_inputs() {
             return 0x7777;
         }
         ++attempts;
+        if (recipe_creation->recipe->definition.family == 'm') valid &= recipe_creation->limits.population == 3;
         const auto expected_point = recipe_creation->recipe->definition.family == 's' && spirit_point ? spirit_point : source_point;
         valid = valid && point == expected_point && group == 0 && *reinterpret_cast<uint32_t*>(point + 0xd00) == expected_override &&
             !*reinterpret_cast<int32_t*>(point + 0xcd0) && *reinterpret_cast<int32_t*>(point + 0xc40) == 1 &&
@@ -6180,6 +6314,14 @@ bool test_recipe_inputs() {
         recipe_state.requests().size() == 1 &&
         !recipe_state.requests().begin()->second.emitted && !recipe_state.requests().begin()->second.reserved && !reserved_actors;
     const auto first = selected_name;
+    const std::string finite_origin(20, 'e');
+    auto finite_recipe = native_recipes.at(origin); finite_recipe.definition.family = 'i'; finite_recipe.definition.origin = finite_origin;
+    native_recipes.emplace(finite_origin, std::move(finite_recipe));
+    ok &= recipe_state.request("finite_priority", {"arena", finite_origin, "", 16, 2, 3, 3});
+    worker_recipes[1] = "finite_priority"; fail = false;
+    maintain_tick_detour(reinterpret_cast<uintptr_t>(worker.data()));
+    ok &= attempts == 1 && !calls;
+    recipe_state.cancel("finite_priority"); worker_recipes.erase(1); native_recipes.erase(finite_origin); fail = true;
     collection.count = collection.capacity;
     maintain_tick_detour(reinterpret_cast<uintptr_t>(worker.data()));
     ok = ok && attempts == 1 && !recipe_state.requests().begin()->second.emitted;
@@ -6277,7 +6419,7 @@ bool test_recipe_inputs() {
     };
     construct_stagger = [](uintptr_t memory, int32_t count, uint64_t minimum, uint64_t maximum,
                             uintptr_t target, uint64_t mask, const char* text) -> uintptr_t {
-        valid = valid && count == 1 && !minimum && !maximum && (target == alias || target == spirit_alias) &&
+        valid = valid && (count == 1 || count == 2) && !minimum && !maximum && (target == alias || target == spirit_alias) &&
             (mask == expected_logical || mask == uint64_t{1} << 40);
         queued_worker.fill(0);
         *reinterpret_cast<int32_t*>(memory + 0x90) = count;
@@ -6388,6 +6530,14 @@ bool test_recipe_inputs() {
         ok = ok && valid && calls == 2 && attempts == 3 && recipe_state.requests().begin()->second.emitted == 2 &&
             recipe_state.requests().begin()->second.closed && (family == 's' ? helper_records == 2 && !registrations : registrations == 2) &&
             !reserved_actors && !recipe_creation && !recipe_fault.load() && source_unchanged();
+        map_freed(); calls = attempts = registrations = retries = helper_records = 0;
+        collection.count = collection.capacity;
+        dispatch_recipe_immediate(owner, 88, expected_logical, alias, reinterpret_cast<uintptr_t>(label.c_str()), false, result);
+        ok &= !attempts && !retries && pending_recipes.empty() && worker_recipes.size() == 1 &&
+            !recipe_state.requests().begin()->second.emitted;
+        collection.count = 0;
+        for (int i = 0; i < 2; ++i) stagger_tick_detour(reinterpret_cast<uintptr_t>(queued_worker.data()));
+        ok &= valid && calls == 2 && recipe_state.requests().begin()->second.closed && source_unchanged();
     }
     map_freed(); expected_logical = 16;
     std::array<uint8_t, 0xe30> spirit_alias_storage{}, spirit_library_storage{}, spirit_point_storage = point_storage;
@@ -6817,7 +6967,7 @@ bool test_immediate_inputs() {
     ok = ok && multiple_detour(owner, 77, 16, 1, 22, 0x55) == 77 && created == 2 && rewinds == 3 && abi;
     fault = true;
     ok = ok && catches_immediate_fault(owner) && reserved_actors == 0 &&
-        reserved_special == std::array<uint32_t, 8>{} && immediate_request == nullptr;
+        reserved_special == std::array<uint32_t, 9>{} && immediate_request == nullptr;
     fault = false;
     collection.capacity = 1;
     reserved_actors = 1;
@@ -6831,7 +6981,7 @@ bool test_immediate_inputs() {
     original_register_spawn = previous_register; rewind_timeline = previous_rewind;
     definition_name = previous_name; world_global = previous_world; native_admission = previous_admission;
     stopped.store(previous_stopped);
-    return ok && immediate_request == nullptr && reserved_actors == 0 && reserved_special == std::array<uint32_t, 8>{};
+    return ok && immediate_request == nullptr && reserved_actors == 0 && reserved_special == std::array<uint32_t, 9>{};
 }
 
 bool test_spirit_inputs() {
@@ -6905,7 +7055,7 @@ bool test_spirit_inputs() {
     original_point_candidate = previous_candidate; original_point_index = previous_index;
     rewind_timeline = previous_rewind; definition_name = previous_name;
     world_global = previous_world; native_admission = previous_admission; stopped.store(previous_stopped);
-    return ok && reserved_actors == 0 && reserved_special == std::array<uint32_t, 8>{} && immediate_request == nullptr;
+    return ok && reserved_actors == 0 && reserved_special == std::array<uint32_t, 9>{} && immediate_request == nullptr;
 }
 
 bool test_tracking_inputs() {
@@ -7017,6 +7167,11 @@ bool test_quantity_inputs() {
     *reinterpret_cast<int32_t*>(command.data() + 0xc0) = 1;
     for (size_t i = 0; i < actors.size(); ++i) {
         auto& actor = actors[i]; actor.dead = actor.ignored = false; actor.bytes.fill(0);
+        actor.table[0x88 / 8] = reinterpret_cast<uintptr_t>(+[](uintptr_t address) -> uint32_t {
+            for (uint32_t index = 0; index < actors.size(); ++index)
+                if (address == reinterpret_cast<uintptr_t>(actors[index].bytes.data())) return index + 1;
+            return 0;
+        });
         actor.table[0x108 / 8] = reinterpret_cast<uintptr_t>(+[](uintptr_t address) {
             for (const auto& value : actors) if (address == reinterpret_cast<uintptr_t>(value.bytes.data())) return value.dead;
             return false;
@@ -7128,9 +7283,19 @@ bool test_quantity_inputs() {
     initialize_kill(kill, reinterpret_cast<uintptr_t>(manager.data()));
     ok = ok && kill_detour(kill) == 0;
     for (unsigned i : {5u, 1u, 3u}) {
-        kill_dead_detour(kill, reinterpret_cast<uintptr_t>(records.data() + i * 0x68)); actors[i].dead = true;
+        auto* record = records.data() + i * 0x68;
+        *reinterpret_cast<uint64_t*>(record) = 32;
+        kill_dead_detour(kill, reinterpret_cast<uintptr_t>(record)); actors[i].dead = true;
+        *reinterpret_cast<uint64_t*>(record) = 16;
         ok = ok && kill_detour(kill) == (i == 3 ? 1u : 0u);
     }
+    *reinterpret_cast<uint64_t*>(kill + 0x88) = 32;
+    const auto seen = *reinterpret_cast<int32_t*>(kill + 0xa8);
+    *reinterpret_cast<uint64_t*>(records.data()) = 32;
+    kill_dead_detour(kill, reinterpret_cast<uintptr_t>(records.data()));
+    ok = ok && *reinterpret_cast<int32_t*>(kill + 0xa8) == seen;
+    *reinterpret_cast<uint64_t*>(records.data()) = 16;
+    *reinterpret_cast<uint64_t*>(kill + 0x88) = 16;
     *reinterpret_cast<int32_t*>(kill + 0xac) = 2;
     ok = ok && kill_detour(kill) == 0;
     *reinterpret_cast<int32_t*>(manager.data() + 0xc88) = 0;
@@ -7139,11 +7304,40 @@ bool test_quantity_inputs() {
     ok = ok && kill_detour(kill) == 1;
     recipe_state.reset("plan", "map");
     kill_progress.erase(kill); *reinterpret_cast<int32_t*>(kill + 0xa8) = 0;
+    *reinterpret_cast<int32_t*>(kill + 0xac) = 5;
+    *reinterpret_cast<int32_t*>(manager.data() + 0xcc8) = 1;
+    initialize_kill(kill, reinterpret_cast<uintptr_t>(manager.data()));
+    ok &= recipe_state.request("torch", {"ai/fodder/imp", "origin", "", 16, 3, 3, 0});
+    for (unsigned i = 0; i < 5; ++i) {
+        const auto emitted = recipe_state.reserve("torch");
+        ok &= emitted && recipe_state.created("torch", *emitted) &&
+            recipe_state.actor_changed(emitted->actor, RecipeActorState::dead) &&
+            !recipe_state.actor_changed(emitted->actor, RecipeActorState::dead);
+        if (emitted && i % 2 == 0) {
+            const auto actor = reinterpret_cast<uintptr_t>(actors[0].bytes.data());
+            recipe_actors[actor] = emitted->actor;
+            recipe_actor_credits[actor] = {1, {1, 1}, "torch"};
+            *reinterpret_cast<uint64_t*>(records.data()) = 32;
+            kill_dead_detour(kill, reinterpret_cast<uintptr_t>(records.data()));
+            recipe_actors.erase(actor); recipe_actor_credits.erase(actor);
+            *reinterpret_cast<uint64_t*>(records.data()) = 16;
+        }
+        ok &= kill_detour(kill) == (i == 4 ? 1u : 0u) &&
+            *reinterpret_cast<int32_t*>(kill + 0xa8) == static_cast<int32_t>(i + 1);
+    }
+    kill_progress.erase(kill);
+    initialize_kill(kill, reinterpret_cast<uintptr_t>(manager.data()));
+    ok &= kill_detour(kill) == 1;
+    *reinterpret_cast<int32_t*>(kill + 0xac) = 2;
+    *reinterpret_cast<int32_t*>(kill + 0xa8) = 0;
+    recipe_state.reset("plan", "map");
+    kill_progress.erase(kill); *reinterpret_cast<int32_t*>(kill + 0xa8) = 0;
     initialize_kill(kill, reinterpret_cast<uintptr_t>(manager.data()));
     ok = ok && recipe_state.request("empty", {"ai/fodder/imp", "origin", "", 16, 2, 0, 0}) && recipe_state.complete_empty("empty");
     *reinterpret_cast<int32_t*>(manager.data() + 0xcc8) = 1;
     ok = ok && kill_detour(kill) == 1;
-    kill_progress.erase(kill); initialize_kill(kill, reinterpret_cast<uintptr_t>(manager.data()));
+    kill_progress.erase(kill); *reinterpret_cast<int32_t*>(kill + 0xa8) = 0;
+    initialize_kill(kill, reinterpret_cast<uintptr_t>(manager.data()));
     ok = ok && kill_detour(kill) == 0;
     recipe_state.reset("plan", "map");
     bool scope_ok = true;

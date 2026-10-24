@@ -60,6 +60,12 @@ int main() {
     require(!spawn_allowed(fodder, {0,0,0,6,0,0,0,2}), "ammunition exception does not create a fodder swarm");
     auto normal = *bounded; normal.kind = 3;
     require(!spawn_allowed(normal, {0,0,0,8,0,0,0,0}), "ordinary generated bodies respect the population cap");
+    const auto heavy = spawn_limits("ap_v070_ai_a_p00000006000000010000000300000200_l00000001000000010000000100000002_kn__ap_v070_s00100");
+    require(heavy && heavy->heavy == 2 && !heavy->mixed, "heavy ceiling decodes independently of mixed encounters");
+    require(spawn_allowed(*heavy, {0,0,0,1,0,0,0,2}), "one ordinary heavy leaves a free heavy slot");
+    require(!spawn_allowed(*heavy, {0,0,0,2,0,0,0,1}), "ordinary heavies cannot exceed their simultaneous ceiling");
+    auto ammunition = *heavy; ammunition.kind = 7;
+    require(spawn_allowed(ammunition, {0,0,0,2,0,0,0,1}), "heavy ceiling preserves ammunition access");
     const auto scoped_name = "ap_v070_ai_a_t00000000000000010000000000000002_a1234567812345678_p00000008000000020000000500000001_l00000001000000010000000100000002_kh__ap_v070_s00100";
     const auto scoped = spawn_limits(scoped_name);
     require(scoped && scoped->scope == 0x1234567812345678ull && sentinel::expanded::spawn_tracking(scoped_name),

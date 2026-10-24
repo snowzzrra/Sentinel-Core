@@ -39,9 +39,9 @@ bool parse_recipe_library(std::string_view, RecipeLibrary&);
 struct SpawnLimits {
     std::array<std::uint32_t, 4> maximum;
     unsigned kind;
-    std::uint32_t population = 0, superheavy = 0, pressure = 0, mixed = 0;
+    std::uint32_t population = 0, superheavy = 0, pressure = 0, mixed = 0, heavy = 0;
     std::uint64_t scope = 0;
 };
 std::optional<SpawnLimits> spawn_limits(std::string_view definition) noexcept;
-bool spawn_allowed(const SpawnLimits&, const std::array<std::uint32_t, 8>& active) noexcept;
+bool spawn_allowed(const SpawnLimits&, const std::array<std::uint32_t, 9>& active) noexcept;
 }
