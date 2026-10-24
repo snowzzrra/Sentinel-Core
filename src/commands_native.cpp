@@ -64,6 +64,7 @@ void execute_native(const sc_command_request& request, sc_command_result& result
     if (!available()) { result.outcome = SC_COMMAND_UNAVAILABLE; return; }
     if (!player && request.kind <= SC_COMMAND_CRUCIBLE_REFILL) { result.outcome = SC_COMMAND_NO_PLAYER; return; }
     if (execute_boon(request.text, result, player)) return;
+    if (execute_visual_cleanup(request.text, result)) return;
     engine::LocalMemory memory;
     uintptr_t system = 0, table = 0;
     if (memory.copy(image_base + command_global, &system, sizeof(system)).reason || !system ||

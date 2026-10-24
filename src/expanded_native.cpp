@@ -24,6 +24,7 @@
 #include <iterator>
 #include <cmath>
 #include <chrono>
+#include <intrin.h>
 
 namespace sentinel::expanded {
 namespace {
@@ -187,6 +188,7 @@ using DeathActions = void(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 using PostOne = uintptr_t(*)(uintptr_t, uintptr_t, int32_t, uintptr_t);
 DeathActions original_death_actions = nullptr;
 PostOne original_post_one = nullptr;
+std::array<uintptr_t, 3> death_target_returns{};
 uintptr_t activate_event = 0;
 struct DeathActionContext { std::string request; RecipeCredit credit; };
 thread_local const DeathActionContext* death_action_context = nullptr;
@@ -2265,7 +2267,7 @@ RemainingWeight remaining_weight(uintptr_t actor) {
     }
     return {{recipe.credit_units, recipe.physical_units}, true};
 }
-uintptr_t post_one_detour(uintptr_t target, uintptr_t event, int32_t delay, uintptr_t argument) {
+uintptr_t post_death_target(uintptr_t target, uintptr_t event, int32_t delay, uintptr_t argument) {
     if (!death_action_context || event != activate_event || stopped.load(std::memory_order_acquire)) {
         return original_post_one(target, event, delay, argument);
     }
@@ -2292,6 +2294,13 @@ uintptr_t post_one_detour(uintptr_t target, uintptr_t event, int32_t delay, uint
         return result;
     } catch (...) { recipe_fault.store(true, std::memory_order_release); }
     return 0;
+}
+uintptr_t post_one_detour(uintptr_t target, uintptr_t event, int32_t delay, uintptr_t argument) {
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    // only the actor's own death targets use logical credits; nested encounter events fire normally.
+    if (std::find(death_target_returns.begin(), death_target_returns.end(), caller) == death_target_returns.end())
+        return original_post_one(target, event, delay, argument);
+    return post_death_target(target, event, delay, argument);
 }
 void invoke_death_actions(uintptr_t action, uintptr_t context, uintptr_t state, uintptr_t frame,
                           const DeathActionContext* projection) {
@@ -3826,6 +3835,7 @@ float __fastcall controller_detour(uintptr_t controller, uintptr_t frame, uintpt
 bool install(const engine::Binding& binding, HANDLE stop_event) {
     if (!save::session().campaign_run.enabled()) return true;
     if (binding.metadata.profile != SC_PROFILE_STEAM_20260818) return false;
+    death_target_returns = {binding.image.base + 0xa1364a, binding.image.base + 0xa136f8, binding.image.base + 0xa137b4};
     const native::Target movement{binding.image.base + 0x7c7940,
         {0x48,0x8b,0x05,0x09,0xf6,0xe3,0x03,0x0f,0x57,0xc9,0xf3,0x0f,0x10,0x40,0x0c,0x0f,
          0x2f,0xc1,0x73,0x0f,0x48,0x8b,0x81,0x60,0x59,0x00,0x00,0xf3,0x0f,0x10,0x80,0xe8}};
@@ -4697,7 +4707,7 @@ bool death_actions_fault_call(uintptr_t context) {
 }
 bool test_death_actions() {
     static uintptr_t target;
-    static unsigned triggers, other_events;
+    static unsigned triggers, other_events, nested_events;
     static bool valid, fault;
     static std::string definition;
     const auto previous_actions = original_death_actions;
@@ -4714,17 +4724,19 @@ bool test_death_actions() {
     definition = "ap_v070_ai_r" + std::string(20, 'b') +
         "_00000000_q0000000200000006_t00000000000000100000000000000020_l00000001000000010000000100000003_kn__ap_v070_s00100";
     map_freed(); stopped.store(false); activate_event = 91;
-    triggers = other_events = 0; valid = true; fault = false;
+    triggers = other_events = nested_events = 0; valid = true; fault = false;
     definition_name = [](uintptr_t) { return definition.c_str(); };
     original_post_one = [](uintptr_t entity, uintptr_t event, int32_t delay, uintptr_t argument) -> uintptr_t {
-        valid &= entity == target && delay == 7 && argument == 55;
-        if (event == activate_event) ++triggers; else ++other_events;
+        valid &= entity == target && delay == 7 && (argument == 55 || argument == 56);
+        if (event == activate_event && argument == 56) ++nested_events;
+        else if (event == activate_event) ++triggers; else ++other_events;
         return 77;
     };
     original_death_actions = [](uintptr_t action, uintptr_t, uintptr_t state, uintptr_t frame) {
         valid &= action == 1 && state == 2 && frame == 3;
-        post_one_detour(target, activate_event, 7, 55);
-        post_one_detour(target, 92, 7, 55);
+        post_death_target(target, activate_event, 7, 55);
+        post_death_target(target, 92, 7, 55);
+        post_one_detour(target, activate_event, 7, 56);
         if (fault) RaiseException(0xe0700004, 0, 0, nullptr);
     };
     bool ok = true;
@@ -4735,7 +4747,7 @@ bool test_death_actions() {
         *reinterpret_cast<uintptr_t*>(context.data() + 0x940) = actor;
         death_actions_detour(1, context_address, 2, 3);
         ++deaths;
-        ok &= triggers == deaths / 3 && other_events == deaths && !death_action_context;
+        ok &= triggers == deaths / 3 && other_events == deaths && nested_events == deaths && !death_action_context;
     }
     const auto actor = reinterpret_cast<uintptr_t>(&entities[0]);
     recipe_actor_credits[actor] = {static_cast<uint32_t>(actor), {3, 1}, "reduction"};

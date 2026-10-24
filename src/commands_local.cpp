@@ -5,6 +5,9 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <string_view>
+#include <charconv>
+#include <cstdio>
 
 namespace sentinel::commands {
 namespace {
@@ -33,6 +36,16 @@ void callback(const NativeArgs* args) {
 bool executable(uintptr_t address) {
     return address >= image.base && address - image.base <= UINT32_MAX && image.contains(static_cast<uint32_t>(address - image.base), 1,
         IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE);
+}
+bool player_position(uintptr_t player, float (&position)[3]) {
+    engine::LocalMemory memory;
+    uintptr_t physics_table = 0;
+    // the player's Havok origin moves independently of its entity render transform.
+    if (memory.copy(player + 0x8a50, &physics_table, sizeof(physics_table)).reason ||
+        physics_table != image.base + 0x2a86e18 ||
+        memory.copy(player + 0x8b00, position, sizeof(position)).reason) return false;
+    for (const auto value : position) if (!std::isfinite(value)) return false;
+    return true;
 }
 const char* effect(const ManualRequest& r, uintptr_t player, uint64_t expected, uint64_t (*current)()) {
     if (r.kind <= 3) {
@@ -72,6 +85,38 @@ const char* safe_effect(const ManualRequest& r, uintptr_t player, uint64_t expec
     __try { return effect(r, player, expected, current); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return "native fault; effect unknown, automatic retry disabled"; }
 }
+uint32_t hide_visual(const char* name) noexcept {
+    __try {
+        const auto world = *reinterpret_cast<const uintptr_t*>(image.base + 0x45f7370);
+        if (!world) return SC_COMMAND_UNAVAILABLE;
+        using Find = uintptr_t (*)(uintptr_t, const char*);
+        const auto entity = reinterpret_cast<Find>(image.base + 0x6ca290)(world, name);
+        if (!entity) return 0;
+        const auto table = *reinterpret_cast<const uintptr_t*>(entity);
+        if (table < image.base || table - image.base > UINT32_MAX || !image.contains(
+                static_cast<uint32_t>(table - image.base), 0x728, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE))
+            return SC_COMMAND_NATIVE_FAILED;
+        const auto hide = *reinterpret_cast<const uintptr_t*>(table + 0x720);
+        if (!executable(hide)) return SC_COMMAND_NATIVE_FAILED;
+        reinterpret_cast<void (*)(uintptr_t)>(hide)(entity);
+        return SC_COMMAND_DISPATCHED;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return SC_COMMAND_NATIVE_FAILED; }
+}
+}
+bool execute_visual_cleanup(const char* text, sc_command_result& result) {
+    const std::string_view command(text), prefix = "ai_ScriptCmdEnt ap_hide_location_visual_", suffix = " activate";
+    if (command.substr(0, prefix.size()) != prefix || command.size() != prefix.size() + 7 + suffix.size() ||
+        command.substr(command.size() - suffix.size()) != suffix) return false;
+    const auto number = command.substr(prefix.size(), 7);
+    uint32_t location = 0;
+    const auto parsed = std::from_chars(number.data(), number.data() + number.size(), location);
+    if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size() || location < 7770000 || location >= 7780000) return false;
+    char name[64]; sprintf_s(name, "ap_location_visual_%u", location);
+    // streamed pickup layers can leave the helper's cached target unresolved.
+    const auto outcome = hide_visual(name);
+    if (!outcome) return false;
+    result.outcome = outcome;
+    return true;
 }
 bool execute_boon(const char* text, sc_command_result& result, uintptr_t player) {
     const char* pickup = nullptr;
@@ -82,8 +127,7 @@ bool execute_boon(const char* text, sc_command_result& result, uintptr_t player)
     if (!player) { result.outcome = SC_COMMAND_NO_PLAYER; return true; }
     ManualRequest request{}; request.kind = 4; request.explicit_position = true;
     strcpy_s(request.entity_def, pickup);
-    engine::LocalMemory memory;
-    if (memory.copy(player + 0x74, request.position, sizeof(request.position)).reason) {
+    if (!player_position(player, request.position)) {
         result.outcome = SC_COMMAND_NO_PLAYER; return true;
     }
     request.position[2] += 1.0f;
@@ -120,6 +164,7 @@ uint32_t prepare_local(const engine::Binding& binding, HANDLE stop) {
         {0x17a3380, {0x48,0x8d,0x05,0x69,0x01,0xf1,0x02,0xc3,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0x48,0x89,0x5c,0x24,0x18,0x48,0x89,0x6c,0x24,0x20,0x56,0x57,0x41,0x56,0x48,0x81}, 8},
         {0x17aa5d0, {0x40,0x55,0x56,0x57,0x41,0x57,0x48,0x8d,0xac,0x24,0x48,0xfe,0xff,0xff,0x48,0x81,0xec,0xb8,0x02,0x00,0x00,0x48,0x8b,0x05,0xec,0x43,0xa0,0x02,0x48,0x33,0xc4,0x48}, 0},
         {0x17deb40, {0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0x01,0x49,0x8b,0xe9,0x49,0x8b,0xd8,0x48,0x8b,0xfa}, 0},
+        {0x6ca290, {0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x48,0x89,0x7c,0x24,0x18,0x41,0x56,0x48,0x83,0xec,0x20,0x48,0x8b,0xf9,0x4c,0x8b,0xf2,0x48,0x8b,0x0d,0xee,0x70}, 0},
         {0x9907b0, {0x48,0x89,0x4c,0x24,0x08,0x56,0x48,0x81,0xec,0xe0,0x00,0x00,0x00,0x48,0x8b,0x05,0x9c,0x37,0xc8,0x03,0x48,0x8b,0xf1,0x83,0x78,0x08,0x00,0x0f,0x84,0x19,0x05,0x00}, 0},
     };
     for (const auto& e : entries) {
