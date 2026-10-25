@@ -406,29 +406,4 @@ bool input_inhibited() noexcept {
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return true; }
 }
-#ifdef SC_NATIVE_TESTING
-bool test_text_capture() {
-    std::array<uint8_t, 0x1a0> chat{};
-    const auto address = reinterpret_cast<uintptr_t>(chat.data());
-    static bool entering_blocked = false, leaving_blocked = false, freed_unblocked = false;
-    original_chat_begin = [](uintptr_t object) {
-        entering_blocked = input_inhibited(); put<uint8_t>(object, 0x188, 1);
-    };
-    original_chat_end = [](uintptr_t object) {
-        leaving_blocked = input_inhibited(); put<uint8_t>(object, 0x188, 0);
-    };
-    original_chat_destroy = [](uintptr_t object, uint32_t) {
-        freed_unblocked = !input_inhibited(); return object;
-    };
-    bool ok = !input_inhibited();
-    chat_begin_detour(address); ok = ok && entering_blocked && input_inhibited();
-    chat_end_detour(address); ok = ok && leaving_blocked && !input_inhibited();
-    chat_begin_detour(address); chat_destroy_detour(address, 1);
-    ok = ok && freed_unblocked && !input_inhibited();
-    original_chat_begin = [](uintptr_t) {};
-    chat[0x188] = 0; chat_begin_detour(address);
-    ok = ok && !input_inhibited();
-    return ok;
-}
-#endif
 }

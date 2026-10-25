@@ -26,7 +26,6 @@
 #endif
 
 namespace sentinel::special {
-void present_combat_milestone(uintptr_t, const char*, uint64_t);
 namespace {
 
 std::atomic<bool> ready{false};
@@ -460,8 +459,6 @@ void project_special_hud(uintptr_t element) {
             }
             bool clips_applied = false;
             hud::project(element, owner, graphics, keys, epoch, clips_applied);
-            const auto progress = combat::presentation().view(namespace_id);
-            if (progress.milestone) present_combat_milestone(current_player, namespace_id, progress.milestone);
             if (clips_applied) {
                 note_hud_update(element, epoch, true);
                 hud_trace.record(save::BStage::profile_capture, save::BStatus::succeeded,
@@ -1340,25 +1337,6 @@ bool test_physical_completion_owner() {
     return ok && stale && presented==1;
 }
 #endif
-void present_combat_milestone(uintptr_t player, const char* namespace_id, uint64_t milestone) {
-    static uint64_t presented_at = 0;
-    const auto now = GetTickCount64();
-    if (presented_at && now - presented_at < 5000) return;
-    const auto element = challenge_element.load(std::memory_order_acquire);
-    if (!element || challenge_player.load(std::memory_order_acquire) != player) return;
-    char text[64]{};
-    std::snprintf(text, sizeof(text), "KILLS %llu", milestone);
-    __try {
-        if (*reinterpret_cast<uintptr_t*>(element) != image_base + rva_mission_challenge_vtable) return;
-        auto append = reinterpret_cast<EarningsAppend>(image_base + rva_hud_earnings);
-#ifdef SC_NATIVE_TESTING
-        if (test_earnings_append) append = test_earnings_append;
-#endif
-        append(element, text, "", 5000, 0, 0);
-        combat::presentation().notice_presented(namespace_id, milestone);
-        presented_at = now;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-}
 void present_selection(uintptr_t p) {
     SnapshotFacts facts{};
 #ifdef SC_NATIVE_TESTING

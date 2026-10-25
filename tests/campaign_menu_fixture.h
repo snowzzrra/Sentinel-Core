@@ -14,8 +14,10 @@ void encounter_projection() {
         request.index=0; request.row={}; request.row.id=1;
         request.row.flags=SC_CAMPAIGN_HUB|SC_CAMPAIGN_REVEALED;
         strcpy_s(request.row.map,"game/hub/hub");
+        strcpy_s(request.row.title,"Fortress of Doom");
         CHECK(!model.request(campaign_row_operation,request,true,&summary).status);
         request.index=1; request.row={}; request.row.id=2; request.row.flags=SC_CAMPAIGN_REVEALED;
+        strcpy_s(request.row.title,"The World Spear");
         strcpy_s(request.row.map,"game/dlc2/e5m1_spear/e5m1_spear"); reward.checked=checked;
         CHECK(!model.request(campaign_row_operation,request,true,nullptr,&rewards).status);
         CHECK(!model.request(campaign_commit_operation,request,true).status);
@@ -31,6 +33,8 @@ void encounter_projection() {
     CHECK(!std::strcmp(observed.text,"Your Ballista"));
     Message wire{}; sc_campaign_request decoded{}; sc_campaign_rewards decoded_rewards{};
     request.execution.request_id=1; request.execution.nonce[0]=1; request.execution.deadline_ms=1000;
+    request.execution.expected.pid=1; request.execution.expected.process_created=1;
+    request.execution.expected.instance_id[0]=1;
     const auto size=encode_campaign_request(wire,campaign_row_operation,request,&summary,&rewards);
     CHECK(size && decode_request(wire,size,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&decoded,
         nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&decoded_rewards)==WireResult::ok);

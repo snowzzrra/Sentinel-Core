@@ -50,7 +50,28 @@ void update_capacity_locked(uint8_t health, uint8_t armor, uint8_t ammo) {
 }
 
 bool blood_punch_observed() {
-    return (observed_upgrades.load(std::memory_order_acquire) & (1u << SC_INV_BLOOD_PUNCH_SHIFT)) != 0;
+    const auto observed = observed_upgrades.load(std::memory_order_acquire);
+    return observed != SC_INVENTORY_UNKNOWN_MASK && (observed & (1u << SC_INV_BLOOD_PUNCH_SHIFT)) != 0;
+}
+
+bool microwave_counter(const SnapshotFacts& facts) {
+    return facts.weapons != SC_INVENTORY_UNKNOWN_MASK &&
+        (facts.weapons & SC_INV_WEAPON_PLASMA_RIFLE) &&
+        (facts.perks_known & facts.perks_owned & (1ull << 6));
+}
+
+bool stone_counter(const SnapshotFacts& facts, bool hammer) {
+    return hammer || (facts.weapons != SC_INVENTORY_UNKNOWN_MASK &&
+        ((facts.weapons & SC_INV_WEAPON_CHAINSAW) ||
+         ((facts.weapons & SC_INV_WEAPON_SHOTGUN) && (facts.perks_known & facts.perks_owned & (1ull << 1)))));
+}
+
+bool armored_counter(const SnapshotFacts& facts) {
+    if (facts.weapons == SC_INVENTORY_UNKNOWN_MASK) return false;
+    const auto perks = facts.perks_known & facts.perks_owned;
+    return (facts.weapons & SC_INV_WEAPON_BALLISTA) ||
+        ((facts.weapons & SC_INV_WEAPON_HEAVY_CANNON) && (perks & (1ull << 2))) ||
+        ((facts.weapons & SC_INV_WEAPON_SHOTGUN) && (perks & 1ull));
 }
 
 bool valid(const sc_inventory_request& r) {
@@ -95,6 +116,8 @@ sc_inventory_result initial(const sc_inventory_request& r) {
     out.dash_before = out.dash_after = SC_INVENTORY_UNKNOWN_ITEM;
     out.slayer_key_before = out.slayer_key_after = SC_INVENTORY_UNKNOWN_ITEM;
     out.frag_grenade_before = out.frag_grenade_after = SC_INVENTORY_UNKNOWN_ITEM;
+    out.flame_belch_before = out.flame_belch_after = SC_INVENTORY_UNKNOWN_ITEM;
+    out.blood_punch_before = out.blood_punch_after = SC_INVENTORY_UNKNOWN_ITEM;
     std::memcpy(out.namespace_id, r.namespace_id, sizeof(out.namespace_id));
     return out;
 }
@@ -118,7 +141,10 @@ bool valid_facts(const SnapshotFacts& f) {
         (f.ice_bomb <= 1 || f.ice_bomb == SC_INVENTORY_UNKNOWN_ITEM) &&
         (f.dash <= 1 || f.dash == SC_INVENTORY_UNKNOWN_ITEM) &&
         (f.slayer_key <= 1 || f.slayer_key == SC_INVENTORY_UNKNOWN_ITEM) &&
-        (f.frag_grenade <= 1 || f.frag_grenade == SC_INVENTORY_UNKNOWN_ITEM);
+        (f.frag_grenade <= 1 || f.frag_grenade == SC_INVENTORY_UNKNOWN_ITEM) &&
+        (f.flame_belch <= 1 || f.flame_belch == SC_INVENTORY_UNKNOWN_ITEM) &&
+        (f.blood_punch <= 1 || f.blood_punch == SC_INVENTORY_UNKNOWN_ITEM) &&
+        !(f.perks_owned & ~f.perks_known);
 }
 
 void execute(const sc_inventory_request& r, sc_inventory_result& out, const Calls& calls) {
@@ -137,6 +163,10 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
     out.dash_before = before.dash;
     out.slayer_key_before = before.slayer_key;
     out.frag_grenade_before = before.frag_grenade;
+    out.flame_belch_before = before.flame_belch;
+    out.blood_punch_before = before.blood_punch;
+    out.perks_known = before.perks_known;
+    out.perks_owned = before.perks_owned;
     out.special_before = before.special_weapons;
     out.upgrades_before = before.persistent_upgrades;
     out.health_tier_before = before.health_tier;
@@ -154,6 +184,8 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
         out.dash_after = before.dash;
         out.slayer_key_after = before.slayer_key;
         out.frag_grenade_after = before.frag_grenade;
+        out.flame_belch_after = before.flame_belch;
+        out.blood_punch_after = before.blood_punch;
         out.special_after = before.special_weapons;
         out.upgrades_after = before.persistent_upgrades;
         out.health_tier_after = before.health_tier;

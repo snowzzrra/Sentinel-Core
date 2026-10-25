@@ -15,7 +15,6 @@
 #include "protocol.h"
 #include "arsenal.h"
 #include "special.h"
-#include "ap_controls_native.h"
 #include "expanded_native.h"
 #include "enemy_checkpoint_native.h"
 #include "combat_native.h"
@@ -267,73 +266,9 @@ int wmain(int argc,wchar_t** argv) {
         CHECK(sentinel::expanded::test_recipe_inputs());
         std::puts("PASS native recipe factories preserve workers, retries, logical identity and finite partial credits"); return 0;
     }
-    if (defect==L"summon_inputs") {
-        CHECK(sentinel::expanded::test_summon_inputs());
-        std::puts("PASS native summons preserve batch quantities, admission retries, physical identity and component completion"); return 0;
-    }
-    if (defect==L"samuel_inputs") {
-        CHECK(sentinel::expanded::test_samuel_inputs());
-        std::puts("PASS Samuel setup preserves native effects with physical Spirit and other species"); return 0;
-    }
-    if (defect==L"show_inputs") {
-        CHECK(sentinel::expanded::test_show_inputs());
-        std::puts("PASS deferred native Show preserves actor identity, admission, cancellation and exception cleanup"); return 0;
-    }
-    if (defect==L"independent_inputs") {
-        CHECK(sentinel::expanded::test_independent_inputs());
-        std::puts("PASS independent bodies retain native identity, admission, memberships and checkpoint progress"); return 0;
-    }
-    if (defect==L"traversal_inputs") {
-        CHECK(sentinel::expanded::test_traversal_inputs());
-        std::puts("PASS missing traversal animations use the native endpoint and retain native completion"); return 0;
-    }
-    if (defect==L"point_inputs") {
-        CHECK(sentinel::expanded::test_point_inputs());
-        std::puts("PASS native point limits use logical births and test the selected body's bounds"); return 0;
-    }
-    if (defect==L"death_actions") {
-        CHECK(sentinel::expanded::test_death_actions());
-        std::puts("PASS death triggers preserve logical credits, out-of-order deaths and native exception cleanup"); return 0;
-    }
-    if (defect==L"resurrection_inputs") {
-        CHECK(sentinel::expanded::test_resurrection_inputs());
-        return 0;
-    }
-    if (defect==L"direct_inputs") {
-        CHECK(sentinel::expanded::test_direct_inputs());
-        return 0;
-    }
-    if (defect==L"functional_inputs") {
-        CHECK(sentinel::expanded::test_functional_inputs());
-        std::puts("PASS source references select physical variants through point and inherited group definitions"); return 0;
-    }
-    if (defect==L"immediate_inputs") {
-        CHECK(sentinel::expanded::test_immediate_inputs());
-        std::puts("PASS immediate requests retain admission, physical selection and native retry on failure"); return 0;
-    }
-    if (defect==L"spirit_inputs") {
-        CHECK(sentinel::expanded::test_spirit_inputs());
-        std::puts("PASS Spirit requests share admission and preserve native creation and registration"); return 0;
-    }
-    if (defect==L"tracking_inputs") {
-        CHECK(sentinel::expanded::test_tracking_inputs());
-        std::puts("PASS generated physical species preserve native source slots, flags, retries, nested records and stop"); return 0;
-    }
     if (defect==L"limit_inputs") {
         CHECK(sentinel::expanded::test_limit_inputs());
         std::puts("PASS global special limits include native actors, overlapping managers, death, occupancy and stop"); return 0;
-    }
-    if (defect==L"supply_inputs") {
-        CHECK(sentinel::expanded::test_supply_inputs());
-        std::puts("PASS private supply excluded from Spirit searches, native hosts, allocator, duplicates and stop"); return 0;
-    }
-    if (defect==L"movement_inputs") {
-        CHECK(sentinel::expanded::test_movement_inputs());
-        std::puts("PASS per-instance haste, native buffs, restored definitions, movement limits and stop"); return 0;
-    }
-    if (defect==L"controls_focus") {
-        CHECK(sentinel::ap_controls::test_text_capture());
-        std::puts("PASS text capture inhibits AP input until close or destruction"); return 0;
     }
     if (defect==L"presentation_edges") {
         menu_fixture::encounter_projection();

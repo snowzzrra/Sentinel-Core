@@ -440,7 +440,7 @@ bool popup_reward(uintptr_t owner,bool screen,sc_campaign_reward& reward) {
     return false;
 }
 const char* encounter_text(const sc_campaign_reward& reward) {
-    return reward.location_id ? reward.text : "AP REWARD PENDING";
+    return reward.location_id ? reward.text : "ARCHIPELAGO REWARD";
 }
 void present_encounter_card(uintptr_t widget,const sc_campaign_reward& reward) {
     if (!cached_text || !cached_sprite) return;

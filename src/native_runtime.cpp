@@ -346,11 +346,6 @@ int automap_status(const sc_automap_request& snapshot,const char* map,const char
     }
     return false;
 }
-bool automap_set_collected(uintptr_t system,uintptr_t key,uintptr_t object) {
-    if (*reinterpret_cast<int32_t*>(object+0x134)==3) return true;
-    automap_collect(system,key);
-    return *reinterpret_cast<int32_t*>(object+0x134)==3;
-}
 bool automap_set_uncollected(uintptr_t object) {
     const auto state=*reinterpret_cast<int32_t*>(object+0x134);
     if (state==1 || state==2) return true;
@@ -358,6 +353,12 @@ bool automap_set_uncollected(uintptr_t object) {
     automap_state(object,1);
     return *reinterpret_cast<int32_t*>(object+0x134)==1 &&
         *reinterpret_cast<uintptr_t*>(object+0x28)==*reinterpret_cast<uintptr_t*>(object+0x18);
+}
+bool automap_set_collected(uintptr_t system,uintptr_t key,uintptr_t object) {
+    if (*reinterpret_cast<int32_t*>(object+0x134)==3) return true;
+    if (!automap_set_uncollected(object)) return false;
+    automap_collect(system,key);
+    return *reinterpret_cast<int32_t*>(object+0x134)==3;
 }
 // Called only by the already-admitted native frame, never by an IPC reader.
 // Every pass rereads native keys/weak owners, including same-epoch reconstruction.
@@ -397,14 +398,14 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
             if (marker_status!=2 || *reinterpret_cast<int32_t*>(object+0x134)==3) {
                 ++automap_cursor; continue;
             }
-            if (!automap_set_collected(system,key,object)) { automap_fault.store(2); break; }
+            if (!automap_set_collected(system,key,object)) { ++automap_cursor; continue; }
             AutomapLists after{}; char after_name[64]{};
             if (!automap_lists(owner,after) || after.count!=list.count ||
                 after.keys!=list.keys || after.values!=list.values ||
                 !automap_name(after.keys+static_cast<uintptr_t>(automap_cursor)*0x30,after_name) ||
                 std::strcmp(name,after_name) ||
                 *reinterpret_cast<int32_t*>(after.values+static_cast<uintptr_t>(automap_cursor)*0x150+0x134)!=3) {
-                automap_fault.store(2); break;
+                automap_cursor=0; break;
             }
             ++collected; ++automap_cursor;
         }

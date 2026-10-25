@@ -1,5 +1,6 @@
 #include "inventory.h"
 #include "runes.h"
+#include "special.h"
 #include "native_target.h"
 #include "save_session.h"
 #include <atomic>
@@ -57,6 +58,29 @@ uint8_t read_capacity(uintptr_t p, uintptr_t inv, uintptr_t type, uintptr_t perk
     } __except(EXCEPTION_EXECUTE_HANDLER) { return SC_INVENTORY_UNKNOWN_TIER; }
 }
 
+uint8_t read_perk(uintptr_t p, uintptr_t type, const char* path) {
+    __try {
+        const auto decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
+            image_base + 0x17aa5d0)(type, path, 1);
+        if (!decl) return SC_INVENTORY_UNKNOWN_ITEM;
+        const auto name = *reinterpret_cast<const char**>(decl + 8);
+        if (!name || std::strcmp(name, path)) return SC_INVENTORY_UNKNOWN_ITEM;
+        const auto component = p + 0x3b40;
+        const auto count = *reinterpret_cast<const int*>(component + 0x58);
+        if (count < 0 || count > 4096 || (count && !*reinterpret_cast<uintptr_t*>(component + 0x50)))
+            return SC_INVENTORY_UNKNOWN_ITEM;
+        return reinterpret_cast<uint8_t(*)(uintptr_t, uintptr_t)>(image_base + 0xfe3830)(component, decl) ? 1 : 0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return SC_INVENTORY_UNKNOWN_ITEM; }
+}
+
+void observe_perk(SnapshotFacts& facts, uint32_t item, uint8_t owned) {
+    if (owned > 1) return;
+    const auto index = item >= 7770145 ? item - 7770145 + 61 : item - 7770058;
+    const auto bit = 1ull << index;
+    facts.perks_known |= bit;
+    if (owned) facts.perks_owned |= bit;
+}
+
 bool read(void*, uintptr_t p, SnapshotFacts& facts) {
     __try {
         facts = {};
@@ -85,6 +109,15 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
                 weapons |= 1u << i;
         }
         facts.weapons = weapons;
+        const char* flame = "weapon/player/equipment_flame_belch";
+        const auto flame_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
+            image_base + 0x17aa5d0)(type, flame, 1);
+        if (flame_decl) {
+            const auto path = *reinterpret_cast<const char**>(flame_decl + 8);
+            if (path && !std::strcmp(path, flame))
+                facts.flame_belch = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
+                    image_base + 0x1690660)(inv, flame_decl) ? 1 : 0;
+        }
         const char* dash = "ability_dash";
         const auto dash_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
             image_base + 0x17aa5d0)(type, dash, 1);
@@ -127,6 +160,53 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         }
         const auto perk_type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631f90)();
         if (!perk_type) return true;
+        // availability includes unequipped mods; active-perk state depends on selection
+        const struct { uint32_t item; const char* path; } permanent[] = {
+            {7770058, "perk/player/weapons/shotgun/pop_rocket"},
+            {7770059, "perk/player/weapons/shotgun/secondary_full_auto"},
+            {7770060, "perk/player/weapons/heavy_cannon/bolt_action"},
+            {7770061, "perk/player/weapons/heavy_cannon/burst_detonate"},
+            {7770062, "perk/player/weapons/plasma_rifle/secondary_aoe"},
+            {7770064, "perk/player/weapons/plasma_rifle/secondary_microwave"},
+            {7770071, "perk/player/weapons/rocket_launcher/detonate"},
+            {7770073, "perk/player/weapons/rocket_launcher/lock_on"},
+            {7770075, "perk/player/weapons/gauss_cannon/ballista"},
+            {7770077, "perk/player/weapons/gauss_cannon/destroyer"},
+            {7770079, "perk/player/weapons/chaingun/energy_shell"},
+            {7770081, "perk/player/weapons/chaingun/turret"},
+            {7770083, "perk/player/weapons/double_barrel/meat_hook"},
+            {7770097, "perk/player/suit/fundamentals/ledge_grab_speed"},
+            {7770098, "perk/player/suit/fundamentals/weapon_change_speed"},
+            {7770099, "perk/player/suit/dash/dash_regen_delay"},
+            {7770100, "perk/player/suit/dash/dash_gk_restore_dash"},
+            {7770101, "perk/player/suit/exploration/automap_shows_map_station"},
+            {7770102, "perk/player/suit/exploration/automap_shows_progression_items"},
+            {7770103, "perk/player/suit/exploration/automap_increased_fog_radius"},
+            {7770104, "perk/player/suit/exploration/dossier_shows_progression_items"},
+            {7770106, "perk/player/suit/self_preservation/reduce_hazard_damage"},
+            {7770107, "perk/player/suit/self_preservation/reduce_self_weapon_damage"},
+            {7770108, "perk/player/suit/extermination/barrels_respawn"},
+            {7770109, "perk/player/suit/extermination/barrels_drop_ammo"},
+            {7770110, "perk/player/suit/powerup/powerup_duration"},
+            {7770111, "perk/player/equipment/frag_reduce_cooldown"},
+            {7770112, "perk/player/equipment/frag_concussive_blast"},
+            {7770113, "perk/player/equipment/frag_cluster_bombs"},
+            {7770114, "perk/player/equipment/frag_max_capacity"},
+            {7770115, "perk/player/equipment/ice_reduce_cooldown"},
+            {7770116, "perk/player/equipment/ice_extend_duration"},
+            {7770117, "perk/player/equipment/ice_health_drops"},
+            {7770118, "perk/player/equipment/ice_melee_shatter"},
+        };
+        for (const auto& perk : permanent)
+            observe_perk(facts, perk.item, read_perk(p, perk_type, perk.path));
+        runes::SnapshotFacts rune_facts{};
+        if (runes::available() && runes::calls.read && runes::calls.read(runes::calls.context, p, rune_facts)) {
+            const uint32_t normal[] = {7770085, 7770086, 7770087, 7770089, 7770090, 7770091, 7770093, 7770094, 7770095};
+            for (unsigned i = 0; i < _countof(normal); ++i)
+                observe_perk(facts, normal[i], (rune_facts.owned_normal >> i) & 1);
+            for (unsigned i = 0; i < 3; ++i)
+                observe_perk(facts, 7770145 + i, (rune_facts.owned_support >> i) & 1);
+        }
         facts.health_tier = read_capacity(p, inv, type, perk_type, "health", 0);
         facts.armor_tier = read_capacity(p, inv, type, perk_type, "armor", 1);
         facts.ammo_tier = read_capacity(p, inv, type, perk_type, "ammo", 2);
@@ -144,6 +224,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
                 perks |= 1u << (SC_INV_BLOOD_PUNCH_SHIFT + i);
         }
         facts.persistent_upgrades = perks;
+        facts.blood_punch = (perks & (1u << SC_INV_BLOOD_PUNCH_SHIFT)) ? 1 : 0;
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -176,6 +257,31 @@ char fixture_namespace[65]{};
 }
 
 bool available() { return ready.load(std::memory_order_acquire); }
+
+bool microwave_observed() {
+    if (!available() || !save::session().routed()) return false;
+    const auto p = player(nullptr);
+    SnapshotFacts facts{};
+    return p && read(nullptr, p, facts) && microwave_counter(facts);
+}
+
+bool stone_counter_observed() {
+    if (!available() || !save::session().routed()) return false;
+    const auto p = player(nullptr);
+    if (!p) return false;
+    SnapshotFacts facts{};
+    if (read(nullptr, p, facts) && stone_counter(facts, false)) return true;
+    special::SnapshotFacts equipment{};
+    return special::calls.read && special::calls.read(special::calls.context, p, equipment) &&
+        (equipment.known & SC_SPECIAL_KNOWN_HAMMER) && equipment.native_hammer;
+}
+
+bool armored_counter_observed() {
+    if (!available() || !save::session().routed()) return false;
+    const auto p = player(nullptr);
+    SnapshotFacts facts{};
+    return p && read(nullptr, p, facts) && armored_counter(facts);
+}
 
 bool admitted(const char* id) {
 #ifdef SC_NATIVE_TESTING
@@ -237,6 +343,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {0x1631d90, "488d05a9d00603c3cccccccccccccccc488d05f9d10603c3cccccccccccccccc"},
         {0x4a1870, "8b4140c3cccccccccccccccccccccccc40534883ec20488bd9488b4a104883c1"},
         {0xfe37f0, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
+        {0xfe3830, "4c8bc24885d2742b4863515833c085d27e21488b49504c8bca8bd00f1f440000"},
         {0x1284720, "48895c24185556574154415541564157488dac2450c0ffffb8b0400000e85e76"},
         {0xfd8330, "4056574883ec58488b059a661d034833c44889442448488bf24889ac24880000"},
     };

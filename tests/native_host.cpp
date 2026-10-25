@@ -226,6 +226,13 @@ int wmain(int argc, wchar_t** argv) {
     *reinterpret_cast<uintptr_t*>(automap_test_object+0x18)=0x12345678;
     CHECK(native::test_automap_uncollected(automap_test_object,fixture_automap_uncollected));
     CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==1);
+    *reinterpret_cast<int32_t*>(automap_test_object+0x134)=0;
+    *reinterpret_cast<uintptr_t*>(automap_test_object+0x18)=0;
+    CHECK(!native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
+    CHECK(automap_collect_calls==2);
+    *reinterpret_cast<uintptr_t*>(automap_test_object+0x18)=0x12345678;
+    CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
+    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3 && automap_collect_calls==3);
     parked = CreateEventW(nullptr, TRUE, FALSE, nullptr); wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     gate_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr); gate_release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     changed = CreateEventW(nullptr, TRUE, FALSE, nullptr);

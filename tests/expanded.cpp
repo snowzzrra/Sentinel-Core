@@ -66,6 +66,54 @@ int main() {
     require(!spawn_allowed(*heavy, {0,0,0,2,0,0,0,1}), "ordinary heavies cannot exceed their simultaneous ceiling");
     auto ammunition = *heavy; ammunition.kind = 7;
     require(spawn_allowed(ammunition, {0,0,0,2,0,0,0,1}), "heavy ceiling preserves ammunition access");
+    const auto strict_zero = spawn_limits("ap_v070_ai_a_p00000003000000000000000300000002_l00000000000000000000000000000000_kn__ap_v070_s00100");
+    require(strict_zero && strict_zero->strict && !strict_zero->mixed &&
+            !spawn_allowed(*strict_zero, {}), "strict zero heavy slots reject heavy admission");
+    auto strict_fodder = *strict_zero; strict_fodder.kind = 7;
+    require(spawn_allowed(strict_fodder, {}) && !spawn_allowed(strict_fodder, {0,0,0,0,0,0,0,3}),
+            "strict fodder admission preserves the authored total ceiling");
+    auto strict_superheavy = *strict_zero; strict_superheavy.kind = 6;
+    require(!spawn_allowed(strict_superheavy, {}), "strict zero superheavy slots reject superheavy admission");
+    auto strict_special = *strict_zero; strict_special.kind = 0;
+    require(!spawn_allowed(strict_special, {}), "strict zero special slots reject special admission");
+    auto legacy_zero = *strict_zero; legacy_zero.strict = false;
+    require(spawn_allowed(legacy_zero, {}), "legacy zero heavy limits preserve unrestricted heavy admission");
+    const auto strict_mixed = spawn_limits("ap_v070_ai_a_p00000006000000020000000600000203_l00000002000000020000000200000003_kn__ap_v070_s00100");
+    require(strict_mixed && strict_mixed->strict && strict_mixed->mixed &&
+            spawn_allowed(*strict_mixed, {0,0,0,1}) && !spawn_allowed(*strict_mixed, {0,0,0,2}),
+            "strict mixed encounters enforce the prescribed heavy ceiling");
+    require(!spawn_limits("ap_v070_ai_a_p00000003000000000000000300000008_l00000000000000000000000000000000_kn__ap_v070_s00100"),
+            "unknown population flags are refused");
+    require(!spawn_limits("ap_v070_ai_a_p00000003000000000000000300000004_l00000000000000000000000000000000_kn__ap_v070_s00100"),
+            "counter allowances require strict limits");
+    std::string individual_caps;
+    for (unsigned value = 1; value <= 9; ++value) {
+        char cap[9]; std::snprintf(cap, sizeof(cap), "%08x", value); individual_caps += cap;
+    }
+    constexpr uint64_t masks[]{0x8000000ull, 0x40000000ull, 0x10000000000ull, 0x2000000000ull,
+        0x2ull, 0x1000000ull, 0x100ull, 0x20ull, 0x20000000ull};
+    for (unsigned index = 0; index < std::size(masks); ++index) {
+        char physical[17]; std::snprintf(physical, sizeof(physical), "%016llx", masks[index]);
+        const auto name = "ap_v070_ai_a_t0000000000000001" + std::string(physical) + "_v" + individual_caps +
+            "_a1234567812345678_p00000020000000080000002000000803_l00000008000000080000000800000020_kn__ap_v070_s00100";
+        const auto limits = spawn_limits(name);
+        require(limits && limits->physical == masks[index] && sentinel::expanded::spawn_tracking(name),
+                "strict species caps preserve physical tracking");
+        std::array<uint32_t, 9> active{}; active[index] = index;
+        require(sentinel::expanded::species_allowed(*limits, active), "a free individual special slot is admitted");
+        ++active[index];
+        require(!sentinel::expanded::species_allowed(*limits, active), "every special species has its own ceiling");
+        auto closed = *limits; closed.species_maximum[index] = 0; active = {};
+        require(!sentinel::expanded::species_allowed(closed, active), "zero closes each individual special category");
+        auto combined = *limits; combined.maximum[3] = 1; active[(index + 1) % active.size()] = 1;
+        require(!sentinel::expanded::species_allowed(combined, active), "all nine species consume combined special slots");
+        auto invalid_caps = name;
+        invalid_caps.replace(invalid_caps.find("_v", 8) + 2, 8, "80000000");
+        require(!spawn_limits(invalid_caps), "overflowing individual special caps are refused");
+        invalid_caps = name; invalid_caps.erase(invalid_caps.find("_v", 8) + 2, 8);
+        require(!spawn_limits(invalid_caps) && !sentinel::expanded::spawn_tracking(invalid_caps),
+                "truncated individual special caps are refused");
+    }
     const auto scoped_name = "ap_v070_ai_a_t00000000000000010000000000000002_a1234567812345678_p00000008000000020000000500000001_l00000001000000010000000100000002_kh__ap_v070_s00100";
     const auto scoped = spawn_limits(scoped_name);
     require(scoped && scoped->scope == 0x1234567812345678ull && sentinel::expanded::spawn_tracking(scoped_name),

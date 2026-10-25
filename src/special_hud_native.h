@@ -508,7 +508,6 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool switch_available = owner.owns_crucible && owner.owns_hammer &&
         route_ready.load(std::memory_order_acquire) && ((keys >> 8) & 0xff);
     const auto arrow_source = child(parent, "swapEquipment");
-    const auto equipment_arrow = child(arrow_source, "arrow");
     auto arrow_geometry = arrow_source;
     auto native_arrow = child(arrow_source, "arrow");
     auto native_backer = child(arrow_source, "backer");
@@ -533,7 +532,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     auto& inactive_position = owner.selected == SC_SPECIAL_WEAPON_HAMMER ? crucible_position : hammer_position;
     const auto inactive_root = owner.selected == SC_SPECIAL_WEAPON_HAMMER ? context.crucible_root : context.hammer_root;
     Rect arrow_bounds{}, backer_bounds{};
-    Rect source_icon_bounds{}, flame_icon_bounds{}, active_icon_bounds{};
+    Rect source_icon_bounds{}, flame_icon_bounds{}, active_icon_bounds{}, active_glyph_bounds{};
     Rect clone_plate_bounds{};
     const auto refill_geometry = !refill_frame_changed &&
         bounds(child(refill, "background"), parent, clone_plate_bounds) ? refill : source;
@@ -544,13 +543,15 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool native_backer_visual = bounds(native_backer, parent, backer_bounds);
     const bool source_icon_visual = bounds(source_icon, parent, source_icon_bounds);
     const auto flame_plate = child(flame_root, "background");
-    const bool flame_visual = bounds(flame_icon, parent, flame_icon_bounds) ||
-        bounds(flame_plate, parent, flame_icon_bounds) || bounds(flame_root, parent, flame_icon_bounds) ||
+    const bool flame_visual = bounds(child(source, "background"), parent, flame_icon_bounds,
+            flame_plate ? flame_plate : flame_root) || bounds(flame_plate, parent, flame_icon_bounds) ||
+        bounds(flame_icon, parent, flame_icon_bounds) || bounds(flame_root, parent, flame_icon_bounds) ||
         bounds(child(primary_root, "background"), parent, flame_icon_bounds,
                flame_plate ? flame_plate : flame_root) ||
         bounds(child(active_root, "background"), parent, flame_icon_bounds,
                flame_plate ? flame_plate : flame_root);
-    const bool active_icon_visual = bounds(active_icon, parent, active_icon_bounds);
+    const bool active_icon_visual = bounds(child(active_root, "background"), parent, active_icon_bounds) &&
+        bounds(active_icon, parent, active_glyph_bounds);
     const bool active_movie = active_root &&
         *reinterpret_cast<uintptr_t*>(active_root + 0x30) == movie;
     Point active_now{};
@@ -576,18 +577,14 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         std::fabs(render_yy) > 0.000001f ? render_yx / render_yy : 0.0f;
     Point authored_arrow_origin{};
     const bool arrow_origins = position(arrow_source, authored_arrow_origin);
-    Rect equipment_arrow_bounds{};
-    const bool equipment_arrow_visual = bounds(equipment_arrow, parent, equipment_arrow_bounds);
-    const Point arrow_baseline = equipment_arrow_visual ? center(equipment_arrow_bounds) :
-        Point{authored_arrow_origin.x + center(arrow_bounds).x - center(switch_bounds).x,
-              authored_arrow_origin.y + center(arrow_bounds).y - center(switch_bounds).y};
+    const Point arrow_baseline = center(flame_icon_bounds);
     const float switch_width = switch_bounds.br.x - switch_bounds.tl.x;
     const float toggle_x = flame_icon_bounds.tl.x - native_gap - switch_width * 0.5f +
         center(arrow_bounds).x - center(switch_bounds).x;
     const Point toggle_target{toggle_x,
         arrow_baseline.y - (toggle_x - arrow_baseline.x) * render_row_slope};
     const float special_x = flame_icon_bounds.tl.x - native_gap * 2 - switch_width -
-        (active_icon_bounds.br.x - active_icon_bounds.tl.x) * 0.5f;
+        (flame_icon_bounds.br.x - flame_icon_bounds.tl.x) * 0.5f;
     const Point flame_center = center(flame_icon_bounds);
     const Point special_target{special_x,
         flame_center.y - (special_x - flame_center.x) * render_row_slope};
@@ -658,23 +655,20 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
                 toggle_target, arrow_offset)) switch_failure = "switch_arrow_place_failed";
             for (auto* saved : {&active_position, &inactive_position}) {
                 const auto root = saved == &active_position ? active_root : inactive_root;
-                Point original{}, vertical{}, reference{};
-                const bool crucible = root == context.crucible_root;
-                const auto vertical_leaf = child(root, crucible ? "background" : "icon");
+                Point original{}, reference{};
+                const auto vertical_leaf = child(root, "background");
                 Rect reference_bounds{};
-                // the crucible glyph animates within its plate when the regular weapon changes
+                // native glyphs animate inside fixed equipment plates
                 if (!remember_native(*saved, root, movie, epoch) ||
-                    !native_visual_center(*saved, child(root, "icon"), parent, original) ||
-                    !(native_visual_center(*saved, vertical_leaf, parent, vertical) ||
-                      native_visual_center(*saved, child(root, "icon"), parent, vertical))) {
+                    !native_visual_center(*saved, vertical_leaf, parent, original)) {
                     if (saved == &active_position) switch_failure = "switch_move_active_failed";
                     continue;
                 }
-                if (!bounds(child(flame_root, crucible ? "background" : "icon"), parent, reference_bounds))
+                if (!bounds(child(flame_root, "background"), parent, reference_bounds))
                     reference_bounds = flame_icon_bounds;
                 reference = center(reference_bounds);
                 const float target_y = reference.y - (special_target.x-reference.x)*render_row_slope;
-                if (!move_native(*saved, parent, {special_target.x-original.x, target_y-vertical.y})) {
+                if (!move_native(*saved, parent, {special_target.x-original.x, target_y-original.y})) {
                     if (saved == &active_position) switch_failure = "switch_move_active_failed";
                 }
             }

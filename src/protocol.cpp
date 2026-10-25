@@ -1307,6 +1307,9 @@ template<class Codec> bool inventory_values(Codec& c, sc_inventory_result& v) {
     c.byte(v.dash_before); c.byte(v.dash_after);
     c.byte(v.slayer_key_before); c.byte(v.slayer_key_after);
     c.byte(v.frag_grenade_before); c.byte(v.frag_grenade_after);
+    c.byte(v.flame_belch_before); c.byte(v.flame_belch_after);
+    c.byte(v.blood_punch_before); c.byte(v.blood_punch_after);
+    c.u64(v.perks_known); c.u64(v.perks_owned);
     if (v.abi_version != SC_INVENTORY_ABI_VERSION || v.namespace_id[64] ||
         v.outcome > SC_INV_UNAVAILABLE || (v.flags & ~31u)) return false;
     const auto mask = [](uint32_t value, uint32_t allowed) {
@@ -1330,7 +1333,12 @@ template<class Codec> bool inventory_values(Codec& c, sc_inventory_result& v) {
         (v.slayer_key_before > 1 && v.slayer_key_before != SC_INVENTORY_UNKNOWN_ITEM) ||
         (v.slayer_key_after > 1 && v.slayer_key_after != SC_INVENTORY_UNKNOWN_ITEM) ||
         (v.frag_grenade_before > 1 && v.frag_grenade_before != SC_INVENTORY_UNKNOWN_ITEM) ||
-        (v.frag_grenade_after > 1 && v.frag_grenade_after != SC_INVENTORY_UNKNOWN_ITEM)) return false;
+        (v.frag_grenade_after > 1 && v.frag_grenade_after != SC_INVENTORY_UNKNOWN_ITEM) ||
+        (v.flame_belch_before > 1 && v.flame_belch_before != SC_INVENTORY_UNKNOWN_ITEM) ||
+        (v.flame_belch_after > 1 && v.flame_belch_after != SC_INVENTORY_UNKNOWN_ITEM) ||
+        (v.blood_punch_before > 1 && v.blood_punch_before != SC_INVENTORY_UNKNOWN_ITEM) ||
+        (v.blood_punch_after > 1 && v.blood_punch_after != SC_INVENTORY_UNKNOWN_ITEM) ||
+        (v.perks_owned & ~v.perks_known)) return false;
     return true;
 }
 }

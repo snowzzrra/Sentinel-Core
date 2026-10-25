@@ -52,24 +52,50 @@ std::optional<SpawnLimits> spawn_limits(std::string_view name) noexcept {
             if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || *fields[i] > INT32_MAX) return {};
         }
         result.heavy = result.mixed >> 8;
-        result.mixed &= 255;
-        if (!result.population || !result.pressure || result.pressure > result.population || result.mixed > 1 || result.heavy > 128) return {};
+        const auto flags = result.mixed & 255;
+        result.strict = (flags & 2) != 0;
+        result.spirit_counter = (flags & 4) != 0;
+        result.mixed = flags & 1;
+        if (!result.population || !result.pressure || result.pressure > result.population ||
+            (flags & ~7u) || (result.spirit_counter && !result.strict) || result.heavy > 128) return {};
         if (marker >= 52 && name.substr(marker - 52, 2) == "_a") {
             const auto digits = name.substr(marker - 50, 16);
             const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), result.scope, 16);
             if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || !result.scope) return {};
+            if (marker >= 126 && name.substr(marker - 126, 2) == "_v") {
+                if (!result.strict) return {};
+                for (size_t index = 0; index < result.species_maximum.size(); ++index) {
+                    const auto cap = name.substr(marker - 124 + index * 8, 8);
+                    const auto value = std::from_chars(cap.data(), cap.data() + cap.size(), result.species_maximum[index], 16);
+                    if (value.ec != std::errc{} || value.ptr != cap.data() + cap.size() || result.species_maximum[index] > INT32_MAX) return {};
+                }
+                const auto tracking = name.rfind("_t", marker - 126);
+                if (tracking == std::string_view::npos || tracking + 34 != marker - 126) return {};
+                const auto physical = name.substr(tracking + 18, 16);
+                const auto value = std::from_chars(physical.data(), physical.data() + physical.size(), result.physical, 16);
+                if (value.ec != std::errc{} || value.ptr != physical.data() + physical.size() ||
+                    !result.physical || (result.physical & (result.physical - 1)) || (result.physical & ~encounter_ai_mask)) return {};
+            }
         }
     }
+    const auto extension = name.find("_v", 8);
+    if (result.strict && extension < marker && !result.physical) return {};
     if (result.kind >= 6 && !result.population) return {};
     return result;
 }
 std::optional<SpawnTracking> spawn_tracking(std::string_view name) noexcept {
     if (!spawn_limits(name)) return {};
     const auto marker = name.rfind("_t");
-    if (marker == std::string_view::npos || name.size() - marker < 36 ||
-        (name.substr(marker + 34, 2) != "_l" &&
-         (name.substr(marker + 34, 2) != "_p" || name.substr(marker + 68, 2) != "_l") &&
-         (name.substr(marker + 34, 2) != "_a" || name.substr(marker + 52, 2) != "_p" || name.substr(marker + 86, 2) != "_l"))) return {};
+    if (marker == std::string_view::npos || name.size() - marker < 36) return {};
+    auto suffix = marker + 34;
+    if (name.substr(suffix, 2) == "_v") {
+        if (name.size() - suffix < 74) return {};
+        suffix += 74;
+    }
+    const auto remaining = name.substr(suffix);
+    if (remaining.substr(0, 2) != "_l" &&
+        (remaining.size() < 36 || remaining.substr(0, 2) != "_p" || remaining.substr(34, 2) != "_l") &&
+        (remaining.size() < 54 || remaining.substr(0, 2) != "_a" || remaining.substr(18, 2) != "_p" || remaining.substr(52, 2) != "_l")) return {};
     SpawnTracking result{};
     std::uint64_t* fields[] = {&result.source, &result.physical};
     for (std::size_t index = 0; index < 2; ++index) {
@@ -80,6 +106,20 @@ std::optional<SpawnTracking> spawn_tracking(std::string_view name) noexcept {
             value == 0 || (value & (value - 1)) != 0 || (value & ~encounter_ai_mask) != 0) return {};
     }
     return result;
+}
+unsigned special_species_index(std::uint64_t mask) noexcept {
+    constexpr std::uint64_t masks[]{0x8000000ull, 0x40000000ull, 0x10000000000ull,
+        0x2000000000ull, 0x2ull, 0x1000000ull, 0x100ull, 0x20ull, 0x20000000ull};
+    for (unsigned index = 0; index < std::size(masks); ++index) if (mask == masks[index]) return index;
+    return 9;
+}
+bool species_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active) noexcept {
+    if (!limits.strict || !limits.physical) return true;
+    const auto incoming = special_species_index(limits.physical);
+    if (incoming >= active.size()) return true;
+    uint64_t combined = 0;
+    for (const auto count : active) combined += count;
+    return active[incoming] < limits.species_maximum[incoming] && combined < limits.maximum[3];
 }
 bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active) noexcept {
     const auto superheavy = uint64_t{active[0]} + active[1] + active[6];
@@ -92,9 +132,9 @@ bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 9>
         for (const auto count : active) population += count;
         const auto ceiling = (special || incoming_special || superheavy || incoming_superheavy) ?
             limits.pressure : limits.population;
-        if (population >= ceiling && !(limits.kind == 7 && active[7] < 2)) return false;
+        if (population >= ceiling && !(!limits.strict && limits.kind == 7 && active[7] < 2)) return false;
         if (incoming_superheavy && superheavy >= limits.superheavy) return false;
-        if (limits.heavy && limits.kind == 3 && active[3] >= limits.heavy) return false;
+        if ((limits.heavy || limits.strict) && limits.kind == 3 && active[3] >= limits.heavy) return false;
     }
     if (limits.kind >= 6) return true;
     if (limits.kind == 3 || limits.kind >= active.size()) return true;

@@ -41,7 +41,13 @@ struct SpawnLimits {
     unsigned kind;
     std::uint32_t population = 0, superheavy = 0, pressure = 0, mixed = 0, heavy = 0;
     std::uint64_t scope = 0;
+    bool strict = false;
+    bool spirit_counter = false;
+    std::uint64_t physical = 0;
+    std::array<std::uint32_t, 9> species_maximum{};
 };
+unsigned special_species_index(std::uint64_t mask) noexcept;
 std::optional<SpawnLimits> spawn_limits(std::string_view definition) noexcept;
 bool spawn_allowed(const SpawnLimits&, const std::array<std::uint32_t, 9>& active) noexcept;
+bool species_allowed(const SpawnLimits&, const std::array<std::uint32_t, 9>& active) noexcept;
 }
