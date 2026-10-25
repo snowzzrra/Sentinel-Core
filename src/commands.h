@@ -13,6 +13,7 @@ bool parse_manual(int argc, const char* const* argv, ManualRequest&);
 bool compatible_product(std::string_view version);
 bool process_scoped(const sc_command_request& request);
 bool parse(std::string_view text, sc_command_request& request);
+uint32_t checked_visual_location(std::string_view text);
 bool valid(const sc_command_request& request);
 bool same(const sc_command_request& a, const sc_command_request& b);
 sc_command_result initial(const sc_command_request& request);

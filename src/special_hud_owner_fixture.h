@@ -642,17 +642,40 @@ bool test_hud_owner_path() {
     const auto flame_plate = fixture.find(first.flame_root, "background");
     fixture.set_bounds(flame_icon, 0, 0);
     fixture.set_bounds(flame_plate, 0, 0);
+    fixture.set_bounds(first.flame_root, 0, 0);
     fixture.set_bounds(arrow_backer, 0, 0);
     fixture.render(first.parent);
     update_on_hud(b);
     ok &= fixture.clips.at(arrow)->visible && fixture.clips.at(toggle_bind)->visible &&
         close_to(stage_center(refill).x, refill_before_equipment.x) &&
         close_to(stage_center(refill).y, refill_before_equipment.y);
+    const auto primary_plate = fixture.find(first.primary, "background");
+    for (const bool grenade_rendered : {true, false}) {
+      fixture.set_bounds(primary_plate, grenade_rendered ? 12.0f : 0.0f, grenade_rendered ? 12.0f : 0.0f);
+      for (const auto selected : {SC_SPECIAL_WEAPON_HAMMER, SC_SPECIAL_WEAPON_CRUCIBLE}) {
+        ok &= observe_selected(selected);
+        fixture.render(first.parent);
+        update_on_hud(b);
+        const auto selected_root = selected == SC_SPECIAL_WEAPON_HAMMER ? hammer_source : crucible_source;
+        hud::Rect reserved{}, special{}, toggle{};
+        const bool reserved_layout = hud::bounds(grenade_rendered ? primary_plate : fixture.find(selected_root, "background"),
+            first.parent, reserved, flame_plate) &&
+            hud::bounds(fixture.find(selected_root, "icon"), first.parent, special) &&
+            hud::bounds(arrow_leaf, first.parent, toggle) &&
+            special.br.x < toggle.tl.x && toggle.br.x < reserved.tl.x &&
+            close_to(hud::center(special).y, hud::center(reserved).y) &&
+            close_to(stage_center(arrow_leaf).y, stage_center(native_arrow).y);
+        if (!reserved_layout) std::fprintf(stderr, "HUD special weapon overlaps unowned Flame Belch column\n");
+        ok &= reserved_layout;
+      }
+    }
+    fixture.set_bounds(primary_plate, 12, 12);
     fixture.set_visible(first.flame_root, true);
     fixture.set_visible(first.primary, true);
     fixture.set_visible(first_swap, true);
     fixture.set_bounds(flame_icon, 12, 12);
     fixture.set_bounds(flame_plate, 12, 12);
+    fixture.set_bounds(first.flame_root, 16, 16);
     fixture.render(first.parent);
     update_on_hud(b);
     ok &= close_to(stage_center(refill).x, refill_before_equipment.x) &&

@@ -186,7 +186,7 @@ bool affine_to(uintptr_t clip, uintptr_t ancestor, uintptr_t movie, Point point,
     return clip == ancestor;
 }
 
-bool bounds(uintptr_t clip, uintptr_t parent, Rect& out) {
+bool bounds(uintptr_t clip, uintptr_t parent, Rect& out, uintptr_t placement = 0) {
     // convert the cached render rectangle directly into weaponinfo space
     Rect local{};
     if (!raw_bounds(clip, local)) return false;
@@ -195,11 +195,11 @@ bool bounds(uintptr_t clip, uintptr_t parent, Rect& out) {
                            {local.tl.x, local.br.y}, {local.br.x, local.br.y}};
     Point point{}, local_point{};
     if (!unrender(clip, corners[0], local_point) ||
-        !affine_to(clip, parent, movie, local_point, point)) return false;
+        !affine_to(placement ? placement : clip, parent, movie, local_point, point)) return false;
     out = {point, point};
     for (unsigned i = 1; i < 4; ++i) {
         if (!unrender(clip, corners[i], local_point) ||
-            !affine_to(clip, parent, movie, local_point, point)) return false;
+            !affine_to(placement ? placement : clip, parent, movie, local_point, point)) return false;
         out.tl.x = std::min(out.tl.x, point.x);
         out.tl.y = std::min(out.tl.y, point.y);
         out.br.x = std::max(out.br.x, point.x);
@@ -543,9 +543,13 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool native_arrow_visual = bounds(native_arrow, parent, arrow_bounds);
     const bool native_backer_visual = bounds(native_backer, parent, backer_bounds);
     const bool source_icon_visual = bounds(source_icon, parent, source_icon_bounds);
-    if (!bounds(flame_icon, parent, flame_icon_bounds))
-        if (!bounds(child(flame_root, "background"), parent, flame_icon_bounds))
-            bounds(flame_root, parent, flame_icon_bounds);
+    const auto flame_plate = child(flame_root, "background");
+    const bool flame_visual = bounds(flame_icon, parent, flame_icon_bounds) ||
+        bounds(flame_plate, parent, flame_icon_bounds) || bounds(flame_root, parent, flame_icon_bounds) ||
+        bounds(child(primary_root, "background"), parent, flame_icon_bounds,
+               flame_plate ? flame_plate : flame_root) ||
+        bounds(child(active_root, "background"), parent, flame_icon_bounds,
+               flame_plate ? flame_plate : flame_root);
     const bool active_icon_visual = bounds(active_icon, parent, active_icon_bounds);
     const bool active_movie = active_root &&
         *reinterpret_cast<uintptr_t*>(active_root + 0x30) == movie;
@@ -609,7 +613,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const Point refill_baseline{adjacent.x + refill_offset.x, adjacent.y + refill_offset.y};
     const Point refill_visual_target{refill_x, refill_baseline.y +
         (refill_x - refill_baseline.x) * render_row_slope};
-    const bool native_layout = native_arrow_visual &&
+    const bool native_layout = native_arrow_visual && flame_visual &&
         active_stage_forward && source_cached && source_icon_visual &&
         std::isfinite(special_x) && switch_width > 0;
     const bool refill_visual = refill_offsets && (visible_plate || source_icon_visual) &&

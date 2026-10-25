@@ -6,6 +6,17 @@
 #include <string>
 
 namespace sentinel::commands {
+uint32_t checked_visual_location(std::string_view text) {
+    constexpr std::string_view prefix = "ai_ScriptCmdEnt ap_hide_location_visual_", suffix = " activate";
+    if (text.size() >= 8 && text.substr(text.size() - 8) == " player1") text.remove_suffix(8);
+    if (text.substr(0, prefix.size()) != prefix || text.size() != prefix.size() + 7 + suffix.size() ||
+        text.substr(text.size() - suffix.size()) != suffix) return 0;
+    const auto number = text.substr(prefix.size(), 7);
+    uint32_t location = 0;
+    const auto parsed = std::from_chars(number.data(), number.data() + number.size(), location);
+    return parsed.ec == std::errc{} && parsed.ptr == number.data() + number.size() &&
+        location >= 7770000 && location < 7780000 ? location : 0;
+}
 bool process_scoped(const sc_command_request& request) {
     return request.kind == SC_COMMAND_CONDUMP &&
         std::string_view(request.text) == "condump AP_SUPPORT_FILE.txt";

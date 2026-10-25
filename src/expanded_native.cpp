@@ -150,6 +150,7 @@ struct NativeRecipe {
     std::vector<std::string> compatible_bodies;
     bool passthrough = false;
     std::map<uintptr_t, uintptr_t> blood_punch_alternatives;
+    uint32_t refill_limit = 0;
 };
 RecipeLibrary recipe_library;
 std::map<std::string, NativeRecipe> native_recipes;
@@ -566,6 +567,13 @@ bool load_native_recipes() {
         if (std::any_of(recipe.bodies.begin(), recipe.bodies.end(), [](auto value) { return !value; }) ||
             (partial && !recipe.tail)) return false;
         recipe.passthrough=find_entity(world,("ap_v070_passthrough_r"+entry.origin).c_str())!=0;
+        if (const auto refill = find_entity(world, ("ap_v070_refill_r" + entry.origin).c_str())) {
+            std::string value;
+            if (entry.family != 'm' || entry.maximum_emissions || !native_text(refill + 0xbe0, value, 10)) return false;
+            const auto parsed_limit = std::from_chars(value.data(), value.data() + value.size(), recipe.refill_limit);
+            if (parsed_limit.ec != std::errc{} || parsed_limit.ptr != value.data() + value.size() ||
+                !recipe.refill_limit || recipe.refill_limit > INT32_MAX) return false;
+        }
         if (const auto compatible=find_entity(world,("ap_v070_compat_r"+entry.origin).c_str())) {
             const auto length=*reinterpret_cast<const int32_t*>(compatible+0xc40);
             const auto values=*reinterpret_cast<const uintptr_t*>(compatible+0xc38);
@@ -887,6 +895,7 @@ bool finite_wave_ready(std::string_view owner) {
     }
     return false;
 }
+uint64_t functional_token(std::string_view value);
 bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::string_view origin, std::string_view label) {
     if (recipe_fault.load(std::memory_order_acquire)) return false;
     if (!load_native_recipes()) return false;
@@ -924,6 +933,13 @@ bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::str
     if (!generated_admission(creation.limits)) { recipe_state.release(creation.key); return false; }
     creation.source = recipe.definition.source.empty() ? 0 :
         find_entity(*reinterpret_cast<const uintptr_t*>(world_global), recipe.definition.source.c_str());
+    if (!creation.source && (recipe.definition.family == 'i' || recipe.definition.family == 'p')) {
+        // checkpoints can omit passive source entities; the compiler supplies a separate point.
+        char fallback[64];
+        sprintf_s(fallback, "ap_v070_source_%016llx", functional_token(recipe.definition.source));
+        const auto alias = find_entity(*reinterpret_cast<const uintptr_t*>(world_global), fallback);
+        if (alias && *reinterpret_cast<const int32_t*>(alias + 0xc40) > 0) creation.source = alias;
+    }
     reserve_admission(creation.limits); creation.reserved = true;
     creation.previous = recipe_creation; recipe_creation = &creation;
     return true;
@@ -1266,13 +1282,15 @@ bool recipe_landing_pose(const RecipeCreation& creation, float* pose) {
     if (!creation.active_point || creation.restoring) return false;
     char point[512], marker[64];
     if (!read_definition_name(creation.active_point, point)) return false;
-    sprintf_s(marker, "ap_v070_landing_%016llx", functional_token(point));
+    const auto name = std::string_view(point).rfind("ap_v070_source_", 0) == 0 ?
+        std::string_view(creation.recipe->definition.source) : std::string_view(point);
+    sprintf_s(marker, "ap_v070_landing_%016llx", functional_token(name));
     const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
     const auto helper = find_entity(world, marker);
     if (!helper) return false;
-    std::string name;
-    if (!native_text(helper + 0xbe0, name, 191)) { recipe_fault.store(true); return false; }
-    const auto target = find_entity(world, name.c_str());
+    std::string target_name;
+    if (!native_text(helper + 0xbe0, target_name, 191)) { recipe_fault.store(true); return false; }
+    const auto target = find_entity(world, target_name.c_str());
     if (!target) { recipe_fault.store(true); return false; }
     std::memcpy(pose, reinterpret_cast<const void*>(target + 0x74), 12 * sizeof(float));
     if (!std::all_of(pose, pose + 12, [](float value) { return std::isfinite(value); })) {
@@ -2015,7 +2033,8 @@ bool prepare_recipe_worker(uintptr_t worker, bool maintenance, bool& marked) {
         const auto quantity = static_cast<int32_t>(entry.physical_count);
         *reinterpret_cast<int32_t*>(worker + 0x90) = quantity;
         if (maintenance) {
-            *reinterpret_cast<int32_t*>(worker + 0x94) = static_cast<int32_t>(entry.maximum_emissions);
+            *reinterpret_cast<int32_t*>(worker + 0x94) = static_cast<int32_t>(
+                recipe->second.refill_limit ? recipe->second.refill_limit : entry.maximum_emissions);
             if (!quantity) *reinterpret_cast<uint8_t*>(worker + 0xcc) = 1;
         } else {
             *reinterpret_cast<int32_t*>(worker + 0xa8) = quantity;
@@ -2051,6 +2070,15 @@ void recipe_worker_tick(uintptr_t worker, bool maintenance) {
 }
 void maintain_tick_detour(uintptr_t worker) { recipe_worker_tick(worker, true); }
 void stagger_tick_detour(uintptr_t worker) { recipe_worker_tick(worker, false); }
+void prepare_queued_recipe(uintptr_t command) {
+    const auto previous = worker_recipe;
+    bool marked = false;
+    try {
+        if (const auto worker = cast_maintain ? cast_maintain(command) : 0) prepare_recipe_worker(worker, true, marked);
+        else if (const auto staggered = cast_stagger ? cast_stagger(command) : 0) prepare_recipe_worker(staggered, false, marked);
+    } catch (...) {}
+    worker_recipe = previous;
+}
 void queue_command_detour(uintptr_t manager, uintptr_t command) {
     admission_mutex.lock();
     __try {
@@ -2060,6 +2088,7 @@ void queue_command_detour(uintptr_t manager, uintptr_t command) {
             worker_recipes.erase(found);
         }
         original_queue_command(manager, command);
+        prepare_queued_recipe(command);
         if (kill_progress.find(command) != kill_progress.end()) initialize_kill(command, manager);
     } __finally { admission_mutex.unlock(); }
 }
@@ -2133,6 +2162,10 @@ bool dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, 
         recipe_state.complete_empty(key); pending_recipes.erase({manager, origin}); return true;
     }
     if (!recipe_state.requests().at(key).emitted) {
+        // a native refusal rewinds this event; queuing it too would repeat the wave.
+        if (!native_admission(*reinterpret_cast<const uintptr_t*>(world_global) + 0xafd98, 1)) {
+            retry_immediate(manager); return true;
+        }
         const auto family = found->second.definition.family;
         if (family == 'a' || family == 'b' || family == 's')
             create_special_recipe(manager, origin, recipe_state.requests().at(key).request.label);
@@ -6136,7 +6169,7 @@ bool test_recipe_inputs() {
     static uintptr_t original_definitions;
     static std::string metadata, origin, selected_name;
     static unsigned calls, attempts, registrations, nested_calls;
-    static bool fail, valid, nested, fault, unique_bodies;
+    static bool fail, valid, nested, fault, unique_bodies, missing_source;
     static uint64_t expected_logical, expected_physical;
     static uint32_t expected_override;
     auto world = std::make_unique<std::array<uint8_t, 0x126680>>();
@@ -6185,7 +6218,7 @@ bool test_recipe_inputs() {
     const auto previous_duration = native_duration;
     const auto previous_time = construct_time;
     world_global = reinterpret_cast<uintptr_t>(&world_address);
-    calls = attempts = registrations = nested_calls = 0; fail = nested = fault = unique_bodies = false; valid = true;
+    calls = attempts = registrations = nested_calls = 0; fail = nested = fault = unique_bodies = missing_source = false; valid = true;
     expected_logical = 16;
     expected_override = 12;
     spirit_alias = spirit_library = spirit_point = counter_library = 0;
@@ -6224,7 +6257,8 @@ bool test_recipe_inputs() {
         if (counter_library && std::string_view(name) == "ap_v070_counter_r" + origin) return counter_library;
         if (spirit_library && std::string_view(name) == "ap_v070_bodies_r" + std::string(20, 'c')) return spirit_library;
         if (!std::strcmp(name, "original_group")) return source_group;
-        if (!std::strcmp(name, "original_point")) return source_point;
+        if (!std::strcmp(name, "original_point")) return missing_source ? 0 : source_point;
+        if (missing_source && !std::strcmp(name, "ap_v070_source_a9f183750900d6cf")) return alias;
         if (!std::strcmp(name, "arch_template")) return source_group;
         if (!std::strcmp(name, "original_spirit_point")) return spirit_point;
         return 0;
@@ -6411,8 +6445,11 @@ bool test_recipe_inputs() {
         credit_at_most(recipe_state.deaths("destination", 16, "migrated"), 0) && recipe_state.capture(snapshot);
     static std::array<uint8_t, 0x110> queued_worker;
     static uintptr_t queued_commands[1];
-    static bool allocation_allowed;
+    static bool allocation_allowed, native_allowed;
     static unsigned retries, helper_records;
+    const auto previous_admission = native_admission;
+    native_allowed = true;
+    native_admission = [](uintptr_t, int32_t) { return native_allowed; };
     allocate_worker = [](size_t size, uint32_t tag) -> uintptr_t {
         valid = valid && size == 0x110 && tag == 0x54;
         return allocation_allowed ? reinterpret_cast<uintptr_t>(queued_worker.data()) : 0;
@@ -6439,6 +6476,7 @@ bool test_recipe_inputs() {
     };
     rewind_timeline = [](uintptr_t timeline, int32_t) { valid = valid && timeline == owner + 0xe20; ++retries; };
     original_single = [](uintptr_t manager_address, uintptr_t output, uint64_t type, uintptr_t point, uintptr_t text) -> uintptr_t {
+        if (!native_allowed) { retry_immediate(manager_address); return output; }
         alignas(8) uint8_t record[0x68]{};
         *reinterpret_cast<uint64_t*>(record) = type;
         const auto label = reinterpret_cast<const char*>(text);
@@ -6509,6 +6547,49 @@ bool test_recipe_inputs() {
             *reinterpret_cast<Text*>(bodies.data() + i * 0x80) = {0, names[i].data(), static_cast<int32_t>(names[i].size()), 0};
         }
         calls = attempts = registrations = retries = helper_records = 0; fail = false; allocation_allowed = false;
+        if (family == 'i' && !definition_count) {
+            native_allowed = false; allocation_allowed = true;
+            collection.count = 0;
+            uintptr_t refused_result = 0;
+            for (unsigned retry = 0; retry < 3; ++retry)
+                dispatch_recipe_immediate(owner, 88, expected_logical, alias, reinterpret_cast<uintptr_t>(label.c_str()), false, refused_result);
+            const bool deferred_once = recipe_state.requests().size() == 1 && pending_recipes.size() == 1 &&
+                worker_recipes.empty() && !attempts && retries == 3;
+            if (!deferred_once) std::fprintf(stderr, "refused spawn: requests=%zu pending=%zu workers=%zu attempts=%u retries=%u\n",
+                recipe_state.requests().size(), pending_recipes.size(), worker_recipes.size(), attempts, retries);
+            ok &= deferred_once;
+            native_allowed = true;
+            dispatch_recipe_immediate(owner, 88, expected_logical, alias, reinterpret_cast<uintptr_t>(label.c_str()), false, refused_result);
+            ok &= recipe_state.requests().size() == 1 && pending_recipes.empty() && worker_recipes.size() == 1 && calls == 1;
+            stagger_tick_detour(reinterpret_cast<uintptr_t>(queued_worker.data()));
+            ok &= calls == 2 && recipe_state.requests().size() == 1 && recipe_state.requests().begin()->second.emitted == 2;
+            map_freed(); native_allowed = true; allocation_allowed = false;
+            calls = attempts = registrations = retries = helper_records = 0;
+            const auto previous_cast = cast_stagger;
+            const auto previous_remaining = original_remaining;
+            cast_stagger = [](uintptr_t command) -> uintptr_t {
+                return command == reinterpret_cast<uintptr_t>(queued_worker.data()) ? command : 0;
+            };
+            original_remaining = [](uintptr_t) -> uint64_t { return 1; };
+            const auto queued = construct_stagger(reinterpret_cast<uintptr_t>(queued_worker.data()),
+                2, 0, 0, alias, expected_logical, label.c_str());
+            assign_manager(queued + 0x38, owner);
+            queue_command_detour(owner, queued);
+            alignas(8) std::array<uint8_t, 0xd0> wait{};
+            const auto waiting = reinterpret_cast<uintptr_t>(wait.data());
+            *reinterpret_cast<uintptr_t*>(waiting + 0x40) = owner;
+            *reinterpret_cast<Text*>(waiting + 0x58) = {0, "", 0, 0};
+            *reinterpret_cast<uint64_t*>(waiting + 0x88) = encounter_ai_mask;
+            const bool waits_before_first_tick = worker_recipes.size() == 1 &&
+                recipe_state.requests().size() == 1 && !calls && !remaining_result(waiting);
+            if (!waits_before_first_tick) std::fprintf(stderr, "queued wave completed before its first tick\n");
+            ok &= waits_before_first_tick;
+            for (unsigned tick = 0; tick < 2; ++tick) stagger_tick_detour(queued);
+            ok &= calls == 2 && recipe_state.requests().size() == 1 &&
+                recipe_state.requests().begin()->second.emitted == 2;
+            cast_stagger = previous_cast; original_remaining = previous_remaining;
+            map_freed(); calls = attempts = registrations = retries = helper_records = 0;
+        }
         collection.count = collection.capacity;
         uintptr_t result = 0;
         ok = ok && dispatch_recipe_immediate(owner, 88, expected_logical, alias, reinterpret_cast<uintptr_t>(label.c_str()), false, result) &&
@@ -6624,6 +6705,23 @@ bool test_recipe_inputs() {
     ok &= load_native_recipes() && native_recipes.at(origin).blood_punch_alternatives.size() == 1 &&
         blood_punch_body(native_recipes.at(origin), reinterpret_cast<uintptr_t>(bodies.data()), false) ==
             reinterpret_cast<uintptr_t>(&counter_body);
+    alias_storage = point_storage; missing_source = true;
+    RecipeCreation fallback;
+    ok &= begin_recipe_creation(fallback, owner, origin, label) && fallback.source == alias;
+    end_recipe_creation(fallback);
+    *reinterpret_cast<int32_t*>(alias + 0xc40) = 0;
+    RecipeCreation empty_alias;
+    ok &= begin_recipe_creation(empty_alias, owner, origin, label) && !empty_alias.source;
+    end_recipe_creation(empty_alias); missing_source = false;
+    auto& bounded = native_recipes.at(origin);
+    bounded.definition.family = 'm'; bounded.definition.maximum_emissions = bounded.definition.final_credit_units = 0;
+    bounded.refill_limit = 7;
+    bool marked = false;
+    const auto previous_worker = worker_recipe;
+    ok &= prepare_recipe_worker(reinterpret_cast<uintptr_t>(failed_worker.data()), true, marked) && marked &&
+        *reinterpret_cast<int32_t*>(failed_worker.data() + 0x94) == 7 &&
+        !recipe_state.requests().at(*worker_recipe).request.maximum_emissions;
+    worker_recipe = previous_worker;
     map_freed();
     *reinterpret_cast<int32_t*>(counter_library + 0xc40) = 0;
     ok &= !load_native_recipes();
@@ -6636,6 +6734,7 @@ bool test_recipe_inputs() {
     original_spirit_helper = previous_helper; allocate_worker = previous_allocate; construct_stagger = previous_construct;
     assign_manager = previous_assign; original_queue_command = previous_queue; original_stagger_tick = previous_stagger;
     rewind_timeline = previous_rewind;
+    native_admission = previous_admission;
     native_clock = previous_clock; native_step = previous_step; native_duration = previous_duration; construct_time = previous_time;
     return ok;
 }

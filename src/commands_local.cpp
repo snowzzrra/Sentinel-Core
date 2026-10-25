@@ -104,13 +104,8 @@ uint32_t hide_visual(const char* name) noexcept {
 }
 }
 bool execute_visual_cleanup(const char* text, sc_command_result& result) {
-    const std::string_view command(text), prefix = "ai_ScriptCmdEnt ap_hide_location_visual_", suffix = " activate";
-    if (command.substr(0, prefix.size()) != prefix || command.size() != prefix.size() + 7 + suffix.size() ||
-        command.substr(command.size() - suffix.size()) != suffix) return false;
-    const auto number = command.substr(prefix.size(), 7);
-    uint32_t location = 0;
-    const auto parsed = std::from_chars(number.data(), number.data() + number.size(), location);
-    if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size() || location < 7770000 || location >= 7780000) return false;
+    const auto location = checked_visual_location(text);
+    if (!location) return false;
     char name[64]; sprintf_s(name, "ap_location_visual_%u", location);
     // streamed pickup layers can leave the helper's cached target unresolved.
     const auto outcome = hide_visual(name);
