@@ -207,6 +207,7 @@ using SummonCreate = float(*)(uintptr_t, uintptr_t, uintptr_t, uint64_t, uintptr
 using SummonUpdate = void(*)(uintptr_t, uintptr_t);
 using NativeUnary = void(*)(uintptr_t);
 using ActorFactory = uintptr_t(*)(uintptr_t);
+using ManagedActorFactory = uintptr_t(*)(uintptr_t, uintptr_t);
 using DefinitionDatabase = uintptr_t(*)();
 using LookupDefinition = uintptr_t(*)(uintptr_t, const char*, int32_t);
 SummonCreate original_summon_create = nullptr;
@@ -216,6 +217,7 @@ NativeUnary original_darklord_summon = nullptr;
 NativeUnary original_summon_request_complete = nullptr;
 NativeUnary original_summon_cleanup = nullptr;
 ActorFactory original_actor_factory = nullptr;
+ManagedActorFactory original_managed_actor_factory = nullptr;
 using ResurrectFactory = uintptr_t(*)(uintptr_t, int32_t, const float*, const float*);
 ResurrectFactory original_resurrect_factory = nullptr;
 DefinitionDatabase definition_database = nullptr;
@@ -1420,6 +1422,29 @@ uint64_t darklord_summon_type(uintptr_t definition) {
     return 0;
 }
 struct DarklordDefinition { uintptr_t* slot; uintptr_t original, replacement; };
+thread_local const std::vector<DarklordDefinition>* darklord_replacements = nullptr;
+thread_local uintptr_t darklord_component = 0;
+uintptr_t physical_recipe_actor(uintptr_t definition, const float* pose, uint32_t state);
+
+uintptr_t managed_actor_factory_detour(uintptr_t world, uintptr_t info) {
+    if (!darklord_replacements || !darklord_component)
+        return original_managed_actor_factory(world, info);
+    const auto definition = *reinterpret_cast<const uintptr_t*>(info);
+    const auto selected = std::find_if(darklord_replacements->begin(), darklord_replacements->end(),
+        [&](const auto& value) { return value.replacement == definition; });
+    if (selected == darklord_replacements->end()) return original_managed_actor_factory(world, info);
+    const auto parent = *reinterpret_cast<const uintptr_t*>(darklord_component + 8);
+    if (parent) {
+        // the boss applies each final summon position before returning to the game loop.
+        float pose[12]; std::memcpy(pose, reinterpret_cast<const void*>(parent + 0x74), sizeof(pose));
+        if (std::all_of(pose, pose + 12, [](float value) { return std::isfinite(value); })) {
+            const auto actor = physical_recipe_actor(definition, pose, 12);
+            if (actor) return actor;
+        }
+    }
+    recipe_fault.store(true);
+    return original_managed_actor_factory(world, info);
+}
 bool darklord_definitions(uintptr_t component, std::vector<DarklordDefinition>& replacements) {
     if (!load_native_recipes()) return false;
     const auto declaration = *reinterpret_cast<const uintptr_t*>(component + 0x10);
@@ -1451,11 +1476,17 @@ bool darklord_definitions(uintptr_t component, std::vector<DarklordDefinition>& 
     return true;
 }
 void invoke_darklord_summons(uintptr_t component, const std::vector<DarklordDefinition>& replacements) {
+    const auto previous = darklord_replacements;
+    const auto previous_component = darklord_component;
     __try {
+        darklord_replacements = &replacements;
+        darklord_component = component;
         for (const auto& value : replacements) *value.slot = value.replacement;
         original_darklord_summon(component);
     } __finally {
         for (const auto& value : replacements) *value.slot = value.original;
+        darklord_replacements = previous;
+        darklord_component = previous_component;
     }
 }
 void darklord_summon_detour(uintptr_t component) {
@@ -1851,20 +1882,18 @@ bool capture_autonomous_summons(RecipeNativeCheckpoint& checkpoint) {
     }
     return true;
 }
-void invoke_checkpoint_actor(RecipeCreation* creation, const RecipeNativeCheckpoint::Child* saved) {
+uintptr_t physical_recipe_actor(uintptr_t definition, const float* pose, uint32_t state) {
     std::array<uint8_t, 0x138> info{};
     unsigned strings = 0;
+    uintptr_t actor = 0;
     __try {
-        const auto name = *reinterpret_cast<const char**>(creation->body + 8);
-        const auto definition = lookup_definition(definition_database(), name, 1);
-        if (!definition) { recipe_fault.store(true); return; }
         const auto address = reinterpret_cast<uintptr_t>(info.data());
         construct_native_string(address + 0x10); strings = 1;
         construct_native_string(address + 0x78); strings = 2;
         *reinterpret_cast<uintptr_t*>(info.data()) = definition;
         info[9] = 1;
-        std::memcpy(info.data() + 0x40, saved->pose.data(), sizeof(saved->pose));
-        *reinterpret_cast<uint32_t*>(info.data() + 0x70) = 12;
+        std::memcpy(info.data() + 0x40, pose, 12 * sizeof(float));
+        *reinterpret_cast<uint32_t*>(info.data() + 0x70) = state;
         *reinterpret_cast<uintptr_t*>(info.data() + 0x78) = animation_path_table;
         *reinterpret_cast<const char**>(info.data() + 0xa8) = "";
         *reinterpret_cast<const char**>(info.data() + 0xb0) = "";
@@ -1873,14 +1902,24 @@ void invoke_checkpoint_actor(RecipeCreation* creation, const RecipeNativeCheckpo
         for (const auto offset : {0xf8, 0x100, 0x108}) *reinterpret_cast<int32_t*>(info.data() + offset) = -1;
         *reinterpret_cast<uint32_t*>(info.data() + 0xfc) = 0x1fffffe;
         info[0x105] = 1;
+        actor = original_actor_factory(address);
+    } __finally {
+        if (strings > 1) destroy_native_text(reinterpret_cast<uintptr_t>(info.data()) + 0x78);
+        if (strings) destroy_native_text(reinterpret_cast<uintptr_t>(info.data()) + 0x10);
+    }
+    return actor;
+}
+void invoke_checkpoint_actor(RecipeCreation* creation, const RecipeNativeCheckpoint::Child* saved) {
+    __try {
+        const auto name = *reinterpret_cast<const char**>(creation->body + 8);
+        const auto definition = lookup_definition(definition_database(), name, 1);
+        if (!definition) { recipe_fault.store(true); return; }
         creation->creating = true;
-        creation->actor = original_actor_factory(address);
+        creation->actor = physical_recipe_actor(definition, saved->pose.data(), 12);
         if (creation->actor) initialize_physical_recipe(creation, creation->actor);
     } __finally {
-        __try {
-            if (strings > 1) destroy_native_text(reinterpret_cast<uintptr_t>(info.data()) + 0x78);
-            if (strings) destroy_native_text(reinterpret_cast<uintptr_t>(info.data()) + 0x10);
-        } __finally { creation->creating = false; end_recipe_creation(*creation); }
+        creation->creating = false;
+        end_recipe_creation(*creation);
     }
 }
 bool restore_checkpoint_actor(uintptr_t world, const std::string& role, RecipeNativeCheckpoint::Child& saved, uintptr_t& actor) {
@@ -4214,7 +4253,7 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
         0xba0bc0, 0xba19a0, 0xbbbc50, 0xba2080, 0xb92670, 0x682350, 0x6822f0, 0x17fae20,
         0x997d40, 0x998aa0, 0x999fc0, 0x996a10, 0x81dfd0, 0x17a3380, 0x17aa5d0, 0x3facb0, 0xba79b0, 0x3faff0, 0xbbc570, 0x996680, 0xd85490,
         0xa13210, 0x17dd730, 0x993090, 0x99dc60, 0x6fb2f0, 0x6fb5b0, 0x6f40b0, 0x17dd390, 0x17dce30,
-        0xa20f30, 0x8f9320, 0xb21ea0, 0x9960a0, 0x3fa8e0, 0x917950};
+        0xa20f30, 0x8f9320, 0xb21ea0, 0x9960a0, 0x3fa8e0, 0x917950, 0x6cd9e0};
     constexpr const char* recipe_prefixes[]{
         "4c8bdc554157498d6ba14881ecf8000000488b0520085f034833c44889450780",
         "4c8bdc554156498d6ba14881ece8000000488b0570ff5e034833c44889450780",
@@ -4266,7 +4305,8 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
         "40555356574154415541564157488dac2428ffffff4881ecd8010000488b0515",
         "4056415641574883ec404c63fa4c8bf185d27f380fb6411333f684c074062c03",
         "488d0591cb6602c7411414000080488901488d411848894108c7411000000000",
-        "4055488dac2480f0ffffb880100000e83c44f501482be0488b056a7089034833"};
+        "4055488dac2480f0ffffb880100000e83c44f501482be0488b056a7089034833",
+        "4883ec28e817030000488bc84883c428e9ab2c9d01cccccccccccccccccccccc"};
     native::Target recipe_targets[std::size(recipe_rvas)]{};
     engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 10000;
@@ -4372,7 +4412,8 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
                      reinterpret_cast<void*>(recipe_targets[39].address), reinterpret_cast<void*>(recipe_targets[40].address),
                      reinterpret_cast<void*>(recipe_targets[41].address), reinterpret_cast<void*>(recipe_targets[42].address),
                      reinterpret_cast<void*>(recipe_targets[45].address), reinterpret_cast<void*>(recipe_targets[46].address),
-                     reinterpret_cast<void*>(recipe_targets[47].address), reinterpret_cast<void*>(recipe_targets[50].address)};
+                     reinterpret_cast<void*>(recipe_targets[47].address), reinterpret_cast<void*>(recipe_targets[50].address),
+                     reinterpret_cast<void*>(recipe_targets[51].address)};
     void* detours[] = {reinterpret_cast<void*>(movement_detour), reinterpret_cast<void*>(haste_detour),
                        reinterpret_cast<void*>(controller_detour),
                        reinterpret_cast<void*>(occupied_hosts_detour), reinterpret_cast<void*>(spawn_detour),
@@ -4396,7 +4437,8 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
                        reinterpret_cast<void*>(samuel_setup_detour), reinterpret_cast<void*>(show_detour),
                        reinterpret_cast<void*>(show_now_detour), reinterpret_cast<void*>(hide_detour),
                        reinterpret_cast<void*>(traversal_enter_detour), reinterpret_cast<void*>(animation_valid_detour),
-                       reinterpret_cast<void*>(resurrect_detour), reinterpret_cast<void*>(darklord_summon_detour)};
+                       reinterpret_cast<void*>(resurrect_detour), reinterpret_cast<void*>(darklord_summon_detour),
+                       reinterpret_cast<void*>(managed_actor_factory_detour)};
     void** originals[] = {reinterpret_cast<void**>(&original_movement), reinterpret_cast<void**>(&original_haste),
                            reinterpret_cast<void**>(&original_controller),
                            reinterpret_cast<void**>(&original_hosts), reinterpret_cast<void**>(&original_spawn),
@@ -4420,7 +4462,8 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
                            reinterpret_cast<void**>(&original_samuel_setup), reinterpret_cast<void**>(&original_show),
                            reinterpret_cast<void**>(&original_show_now), reinterpret_cast<void**>(&original_hide),
                            reinterpret_cast<void**>(&original_traversal_enter), reinterpret_cast<void**>(&original_animation_valid),
-                           reinterpret_cast<void**>(&original_resurrect_factory), reinterpret_cast<void**>(&original_darklord_summon)};
+                           reinterpret_cast<void**>(&original_resurrect_factory), reinterpret_cast<void**>(&original_darklord_summon),
+                           reinterpret_cast<void**>(&original_managed_actor_factory)};
     size_t created = 0;
     for (; created < std::size(sites); ++created)
         if (MH_CreateHook(sites[created], detours[created], originals[created]) != MH_OK) break;
@@ -4710,6 +4753,40 @@ bool test_darklord_summon_scope() {
     ok &= darklord_fault_call(reinterpret_cast<uintptr_t>(slots.data()), replacements) &&
         observed && slots[0] == 11 && slots[1] == 22;
     fault = false; original_darklord_summon = previous;
+    ok &= !darklord_replacements && !darklord_component;
+    const auto previous_factory = original_actor_factory;
+    const auto previous_managed = original_managed_actor_factory;
+    const auto previous_construct = construct_native_string;
+    const auto previous_destroy = destroy_native_text;
+    static unsigned physical_calls = 0, managed_calls = 0;
+    static bool physical_fields = false;
+    physical_calls = managed_calls = 0;
+    original_actor_factory = [](uintptr_t info) -> uintptr_t {
+        ++physical_calls;
+        physical_fields = *reinterpret_cast<const uintptr_t*>(info) == 33 &&
+            *reinterpret_cast<const uint8_t*>(info + 9) == 1 &&
+            *reinterpret_cast<const float*>(info + 0x40) == 42.0f &&
+            *reinterpret_cast<const uint32_t*>(info + 0x70) == 12;
+        return 0x123;
+    };
+    original_managed_actor_factory = [](uintptr_t, uintptr_t) -> uintptr_t { ++managed_calls; return 0x456; };
+    construct_native_string = [](uintptr_t value) -> uintptr_t { return value; };
+    destroy_native_text = [](uintptr_t) {};
+    std::array<uint8_t, 0x74 + 12 * sizeof(float)> owner{};
+    *reinterpret_cast<float*>(owner.data() + 0x74) = 42.0f;
+    std::array<uintptr_t, 2> component{0, reinterpret_cast<uintptr_t>(owner.data())};
+    std::array<uintptr_t, 1> info{33};
+    darklord_component = reinterpret_cast<uintptr_t>(component.data());
+    darklord_replacements = &replacements;
+    ok &= managed_actor_factory_detour(1, reinterpret_cast<uintptr_t>(info.data())) == 0x123 &&
+        physical_fields && physical_calls == 1 && !managed_calls;
+    info[0] = 55;
+    ok &= managed_actor_factory_detour(1, reinterpret_cast<uintptr_t>(info.data())) == 0x456 &&
+        physical_calls == 1 && managed_calls == 1;
+    darklord_component = 0; darklord_replacements = nullptr; info[0] = 33;
+    ok &= managed_actor_factory_detour(1, reinterpret_cast<uintptr_t>(info.data())) == 0x456 && managed_calls == 2;
+    original_actor_factory = previous_factory; original_managed_actor_factory = previous_managed;
+    construct_native_string = previous_construct; destroy_native_text = previous_destroy;
     return ok;
 }
 bool test_recipe_transport() {
