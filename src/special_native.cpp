@@ -1042,6 +1042,26 @@ uint32_t select(void*, uintptr_t p, uint32_t selected) {
     return error;
 }
 
+uint32_t refill_crucible(uintptr_t p) {
+    if (!p) return ERROR_INVALID_PARAMETER;
+    __try {
+        const auto inv = inventory_of(p);
+        const auto crucible = find_decl(CRUCIBLE_PATH);
+        if (!inv || !crucible || !find_item(inv, crucible)) return ERROR_NOT_FOUND;
+        const auto meter = p + judgement_meter_offset;
+        const auto table = *reinterpret_cast<uintptr_t*>(meter);
+        if (table != image_base + rva_judgement_meter_vtable) return ERROR_NOT_SUPPORTED;
+        using MeterRead = float(*)(uintptr_t);
+        const auto capacity = reinterpret_cast<MeterRead>(
+            *reinterpret_cast<uintptr_t*>(table + 0x28))(meter);
+        if (!std::isfinite(capacity) || capacity <= 0) return ERROR_INVALID_DATA;
+        reinterpret_cast<void(*)(uintptr_t, float)>(image_base + rva_meter_set)(meter, capacity);
+        const auto amount = reinterpret_cast<MeterRead>(
+            *reinterpret_cast<uintptr_t*>(table + 0x20))(meter);
+        return amount == capacity ? ERROR_SUCCESS : ERROR_WRITE_FAULT;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode(); }
+}
+
 uint32_t refill(void*, uintptr_t p) {
     if (!p) return 1;
     uint32_t error = 0;
@@ -1090,17 +1110,7 @@ uint32_t refill(void*, uintptr_t p) {
         if (!attempted || confirmed != attempted) return 4;
         const auto crucible = find_decl(CRUCIBLE_PATH);
         if (crucible && find_item(inv, crucible)) {
-            const auto meter = p + judgement_meter_offset;
-            const auto table = *reinterpret_cast<uintptr_t*>(meter);
-            if (table != image_base + rva_judgement_meter_vtable) return ERROR_NOT_SUPPORTED;
-            using MeterRead = float(*)(uintptr_t);
-            const auto capacity = reinterpret_cast<MeterRead>(
-                *reinterpret_cast<uintptr_t*>(table + 0x28))(meter);
-            if (!std::isfinite(capacity) || capacity <= 0) return ERROR_INVALID_DATA;
-            reinterpret_cast<void(*)(uintptr_t, float)>(image_base + rva_meter_set)(meter, capacity);
-            const auto amount = reinterpret_cast<MeterRead>(
-                *reinterpret_cast<uintptr_t*>(table + 0x20))(meter);
-            if (amount != capacity) return ERROR_WRITE_FAULT;
+            return refill_crucible(p);
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
     return error;

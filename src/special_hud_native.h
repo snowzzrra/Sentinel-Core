@@ -582,7 +582,8 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const float toggle_x = flame_icon_bounds.tl.x - native_gap - switch_width * 0.5f +
         center(arrow_bounds).x - center(switch_bounds).x;
     const Point toggle_target{toggle_x,
-        arrow_baseline.y - (toggle_x - arrow_baseline.x) * render_row_slope};
+        arrow_baseline.y + center(arrow_bounds).y - center(switch_bounds).y -
+        (toggle_x - arrow_baseline.x) * render_row_slope};
     const float special_x = flame_icon_bounds.tl.x - native_gap * 2 - switch_width -
         (flame_icon_bounds.br.x - flame_icon_bounds.tl.x) * 0.5f;
     const Point flame_center = center(flame_icon_bounds);

@@ -212,6 +212,7 @@ using LookupDefinition = uintptr_t(*)(uintptr_t, const char*, int32_t);
 SummonCreate original_summon_create = nullptr;
 SummonUpdate original_summon_update = nullptr;
 NativeUnary original_summon_start = nullptr, original_summon_complete = nullptr, destroy_native_text = nullptr;
+NativeUnary original_darklord_summon = nullptr;
 NativeUnary original_summon_request_complete = nullptr;
 NativeUnary original_summon_cleanup = nullptr;
 ActorFactory original_actor_factory = nullptr;
@@ -1403,6 +1404,70 @@ void samuel_setup_detour(uintptr_t component, uintptr_t actor) {
             creation->actor == actor && !*reinterpret_cast<const uintptr_t*>(actor + 0x165d8);
         original_samuel_setup(component, actor);
     } __finally { samuel_without_parasite = previous; }
+}
+uint64_t darklord_summon_type(uintptr_t definition) {
+    for (unsigned depth = 0; definition && depth < 64; ++depth) {
+        const auto name = *reinterpret_cast<const char**>(definition + 8);
+        if (name) {
+            const std::string_view value(name);
+            if (value == "ai/heavy/hellknight") return 0x4000;
+            if (value == "ai/heavy/mancubus_fire") return 0x100000;
+            if (value == "ai/superheavy/baron") return 0x10000000;
+            if (value == "ai/superheavy/tyrant") return 0x80000000;
+        }
+        definition = *reinterpret_cast<const uintptr_t*>(definition + 0x158);
+    }
+    return 0;
+}
+struct DarklordDefinition { uintptr_t* slot; uintptr_t original, replacement; };
+bool darklord_definitions(uintptr_t component, std::vector<DarklordDefinition>& replacements) {
+    if (!load_native_recipes()) return false;
+    const auto declaration = *reinterpret_cast<const uintptr_t*>(component + 0x10);
+    if (!declaration) return false;
+    const auto count = *reinterpret_cast<const int32_t*>(declaration + 0x1e8);
+    const auto entries = *reinterpret_cast<const uintptr_t*>(declaration + 0x1e0);
+    if (count < 0 || count > 64 || (count && !entries)) return false;
+    for (int32_t i = 0; i < count; ++i) {
+        const auto slot = reinterpret_cast<uintptr_t*>(entries + i * 16 + 8);
+        const auto mask = darklord_summon_type(*slot);
+        if (!mask) continue;
+        const auto recipe = std::find_if(native_recipes.begin(), native_recipes.end(), [&](const auto& row) {
+            return row.second.definition.family == 'u' && row.second.definition.source == "ap_darklord_phantoms" &&
+                row.second.definition.logical_mask == mask;
+        });
+        if (recipe == native_recipes.end()) continue;
+        const auto& bodies = recipe->second.bodies;
+        if (bodies.empty()) return false;
+        const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
+        if (!world) return false;
+        auto& random = *reinterpret_cast<uint32_t*>(world + 0x9a038);
+        random = random * 0x19660d + 0x3c6ef35f;
+        const auto body = bodies[(random >> 10 & 0x7fff) % bodies.size()];
+        const auto name = *reinterpret_cast<const char**>(body + 8);
+        const auto definition = name ? lookup_definition(definition_database(), name, 1) : 0;
+        if (!definition) return false;
+        replacements.push_back({slot, *slot, definition});
+    }
+    return true;
+}
+void invoke_darklord_summons(uintptr_t component, const std::vector<DarklordDefinition>& replacements) {
+    __try {
+        for (const auto& value : replacements) *value.slot = value.replacement;
+        original_darklord_summon(component);
+    } __finally {
+        for (const auto& value : replacements) *value.slot = value.original;
+    }
+}
+void darklord_summon_detour(uintptr_t component) {
+    if (stopped.load(std::memory_order_acquire)) { original_darklord_summon(component); return; }
+    std::lock_guard<std::recursive_mutex> lock(admission_mutex);
+    uintptr_t root = 0;
+    if (recipe_checkpoint_root(root) && !root) { original_darklord_summon(component); return; }
+    std::vector<DarklordDefinition> replacements;
+    bool ready = false;
+    try { ready = darklord_definitions(component, replacements); } catch (...) {}
+    if (!ready) { recipe_fault.store(true); original_darklord_summon(component); return; }
+    invoke_darklord_summons(component, replacements);
 }
 const NativeRecipe* summon_recipe(uintptr_t component, uint64_t monster_type, uint64_t logical_type) {
     std::string source;
@@ -4149,7 +4214,7 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
         0xba0bc0, 0xba19a0, 0xbbbc50, 0xba2080, 0xb92670, 0x682350, 0x6822f0, 0x17fae20,
         0x997d40, 0x998aa0, 0x999fc0, 0x996a10, 0x81dfd0, 0x17a3380, 0x17aa5d0, 0x3facb0, 0xba79b0, 0x3faff0, 0xbbc570, 0x996680, 0xd85490,
         0xa13210, 0x17dd730, 0x993090, 0x99dc60, 0x6fb2f0, 0x6fb5b0, 0x6f40b0, 0x17dd390, 0x17dce30,
-        0xa20f30, 0x8f9320, 0xb21ea0, 0x9960a0, 0x3fa8e0};
+        0xa20f30, 0x8f9320, 0xb21ea0, 0x9960a0, 0x3fa8e0, 0x917950};
     constexpr const char* recipe_prefixes[]{
         "4c8bdc554157498d6ba14881ecf8000000488b0520085f034833c44889450780",
         "4c8bdc554156498d6ba14881ece8000000488b0570ff5e034833c44889450780",
@@ -4200,7 +4265,8 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
         "4056574881ec98000000488b05a7568b034833c448898424800000004c8b0148",
         "40555356574154415541564157488dac2428ffffff4881ecd8010000488b0515",
         "4056415641574883ec404c63fa4c8bf185d27f380fb6411333f684c074062c03",
-        "488d0591cb6602c7411414000080488901488d411848894108c7411000000000"};
+        "488d0591cb6602c7411414000080488901488d411848894108c7411000000000",
+        "4055488dac2480f0ffffb880100000e83c44f501482be0488b056a7089034833"};
     native::Target recipe_targets[std::size(recipe_rvas)]{};
     engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 10000;
@@ -4306,7 +4372,7 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
                      reinterpret_cast<void*>(recipe_targets[39].address), reinterpret_cast<void*>(recipe_targets[40].address),
                      reinterpret_cast<void*>(recipe_targets[41].address), reinterpret_cast<void*>(recipe_targets[42].address),
                      reinterpret_cast<void*>(recipe_targets[45].address), reinterpret_cast<void*>(recipe_targets[46].address),
-                     reinterpret_cast<void*>(recipe_targets[47].address)};
+                     reinterpret_cast<void*>(recipe_targets[47].address), reinterpret_cast<void*>(recipe_targets[50].address)};
     void* detours[] = {reinterpret_cast<void*>(movement_detour), reinterpret_cast<void*>(haste_detour),
                        reinterpret_cast<void*>(controller_detour),
                        reinterpret_cast<void*>(occupied_hosts_detour), reinterpret_cast<void*>(spawn_detour),
@@ -4330,7 +4396,7 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
                        reinterpret_cast<void*>(samuel_setup_detour), reinterpret_cast<void*>(show_detour),
                        reinterpret_cast<void*>(show_now_detour), reinterpret_cast<void*>(hide_detour),
                        reinterpret_cast<void*>(traversal_enter_detour), reinterpret_cast<void*>(animation_valid_detour),
-                       reinterpret_cast<void*>(resurrect_detour)};
+                       reinterpret_cast<void*>(resurrect_detour), reinterpret_cast<void*>(darklord_summon_detour)};
     void** originals[] = {reinterpret_cast<void**>(&original_movement), reinterpret_cast<void**>(&original_haste),
                            reinterpret_cast<void**>(&original_controller),
                            reinterpret_cast<void**>(&original_hosts), reinterpret_cast<void**>(&original_spawn),
@@ -4354,7 +4420,7 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
                            reinterpret_cast<void**>(&original_samuel_setup), reinterpret_cast<void**>(&original_show),
                            reinterpret_cast<void**>(&original_show_now), reinterpret_cast<void**>(&original_hide),
                            reinterpret_cast<void**>(&original_traversal_enter), reinterpret_cast<void**>(&original_animation_valid),
-                           reinterpret_cast<void**>(&original_resurrect_factory)};
+                           reinterpret_cast<void**>(&original_resurrect_factory), reinterpret_cast<void**>(&original_darklord_summon)};
     size_t created = 0;
     for (; created < std::size(sites); ++created)
         if (MH_CreateHook(sites[created], detours[created], originals[created]) != MH_OK) break;
@@ -4614,6 +4680,38 @@ void map_freed() {
 }
 #ifdef SC_NATIVE_TESTING
 #include <memory>
+bool darklord_fault_call(uintptr_t component, const std::vector<DarklordDefinition>& replacements) {
+    __try { invoke_darklord_summons(component, replacements); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode() == 0xe0700003; }
+    return false;
+}
+bool test_darklord_summon_scope() {
+    std::array<uintptr_t, 44> parent{}, child{}, boss{}, wolf{};
+    parent[1] = reinterpret_cast<uintptr_t>("ai/heavy/hellknight");
+    child[1] = reinterpret_cast<uintptr_t>("ai/boss/darklord/phantom_knight");
+    child[43] = reinterpret_cast<uintptr_t>(parent.data());
+    boss[1] = reinterpret_cast<uintptr_t>("ai/boss/darklord");
+    wolf[1] = reinterpret_cast<uintptr_t>("ai/friendly/wolf");
+    bool ok = darklord_summon_type(reinterpret_cast<uintptr_t>(child.data())) == 0x4000 &&
+        !darklord_summon_type(reinterpret_cast<uintptr_t>(boss.data())) &&
+        !darklord_summon_type(reinterpret_cast<uintptr_t>(wolf.data()));
+    std::array<uintptr_t, 2> slots{11, 22};
+    const std::vector<DarklordDefinition> replacements{{&slots[0], 11, 33}, {&slots[1], 22, 44}};
+    const auto previous = original_darklord_summon;
+    static bool observed = false, fault = false;
+    original_darklord_summon = [](uintptr_t component) {
+        const auto values = reinterpret_cast<const uintptr_t*>(component);
+        observed = values[0] == 33 && values[1] == 44;
+        if (fault) RaiseException(0xe0700003, 0, 0, nullptr);
+    };
+    invoke_darklord_summons(reinterpret_cast<uintptr_t>(slots.data()), replacements);
+    ok &= observed && slots[0] == 11 && slots[1] == 22;
+    observed = false; fault = true;
+    ok &= darklord_fault_call(reinterpret_cast<uintptr_t>(slots.data()), replacements) &&
+        observed && slots[0] == 11 && slots[1] == 22;
+    fault = false; original_darklord_summon = previous;
+    return ok;
+}
 bool test_recipe_transport() {
     static uintptr_t root, library;
     static std::vector<std::array<uint8_t, 0xbe0 + sizeof(save::NativeString)>> chunks;
@@ -4682,7 +4780,7 @@ bool test_recipe_transport() {
     map_freed(); session_recipe_plan.clear();
     world_global = previous_world; find_entity = previous_find; definition_name = previous_name;
     chunks.clear();
-    return ok;
+    return ok && test_darklord_summon_scope();
 }
 
 bool recipe_fault_call(uintptr_t worker) {

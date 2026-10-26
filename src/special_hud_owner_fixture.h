@@ -295,7 +295,7 @@ bool test_hud_owner_path() {
         const auto backer = fixture.add(swap, movie, "backer");
         const auto swap_cta = fixture.add(swap, movie, "cta");
         const auto swap_arrow = fixture.add(swap, movie, "arrow");
-        fixture.set_bounds(swap_arrow, 6, 12);
+        fixture.set_bounds(swap_arrow, 6, 12, 0, 4);
         fixture.set_visible(backer, true);
         fixture.set_visible(swap_cta, true);
         fixture.set_visible(swap_arrow, true);
@@ -360,7 +360,7 @@ bool test_hud_owner_path() {
     Fixture::put(swap_transform, 0x8, 1.1f);
     Fixture::put(swap_transform, 0xc, 0.12f);
     Fixture::put(swap_transform, 0x10, -0.07f);
-    fixture.set_bounds(fixture.find(first_swap, "arrow"), 6, 12);
+    fixture.set_bounds(fixture.find(first_swap, "arrow"), 6, 12, 0, 4);
     const auto first_donor_bounds = Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(first.quickuse.data()), 0x1f0);
     fixture.set_bounds(first_donor_bounds, 10, 4, 0, -22);
     const auto rebuilt_parent_transform = reinterpret_cast<uintptr_t>(fixture.clips.at(rebuilt.parent)->transform.data());
@@ -373,7 +373,7 @@ bool test_hud_owner_path() {
             Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.hammer.data()), 0x18)})
         fixture.set_bounds(root, 16, 16);
     const auto rebuilt_swap = fixture.find(rebuilt.parent, "swapEquipment");
-    fixture.set_bounds(fixture.find(rebuilt_swap, "arrow"), 6, 12);
+    fixture.set_bounds(fixture.find(rebuilt_swap, "arrow"), 6, 12, 0, 4);
     fixture.set_bounds(Fixture::get<uintptr_t>(reinterpret_cast<uintptr_t>(rebuilt.quickuse.data()), 0x1f0),
                        10, 4, 0, -22);
     hud::Point affine_offset{};
@@ -488,16 +488,17 @@ bool test_hud_owner_path() {
     const auto arrow_backer = fixture.find(arrow, "backer");
     const auto native_arrow = fixture.find(first_swap, "arrow");
     const auto packed = [&](Scene& scene) {
-        hud::Rect special{}, arrow{}, flame{};
+        hud::Rect special{}, arrow{}, flame{}, backer{};
         const auto special_root = fixture.find(scene.parent, "crucible_source");
         const auto ap = fixture.find(scene.parent, "apSpecialSwitch");
         if (!hud::bounds(fixture.find(special_root, "icon"), scene.parent, special) ||
             !hud::bounds(fixture.find(ap, "arrow"), scene.parent, arrow) ||
-            !hud::bounds(fixture.find(scene.flame_root, "icon"), scene.parent, flame)) return false;
+            !hud::bounds(fixture.find(scene.flame_root, "icon"), scene.parent, flame) ||
+            !hud::bounds(fixture.find(ap, "backer"), scene.parent, backer)) return false;
         const float width = special.br.x - special.tl.x;
         return special.br.x < arrow.tl.x && arrow.br.x < flame.tl.x &&
             arrow.tl.x - special.br.x < width && flame.tl.x - arrow.br.x < width &&
-            close_to(stage_center(fixture.find(ap, "arrow")).y,
+            close_to((std::min(arrow.tl.y, backer.tl.y) + std::max(arrow.br.y, backer.br.y)) * .5f,
                      stage_center(fixture.find(scene.flame_root, "background")).y);
     };
     const float special_x = stage_center(crucible_source).x;
