@@ -35,6 +35,8 @@ def build(bin_dir, output, commit, dirty):
     if len(identities) != 1:
         raise ValueError("Core binary version/build identity does not match canonical version")
     build_id = identities.pop().decode()
+    if build_id.encode() + b"\0" not in files["msimg32.dll"]:
+        raise ValueError("Bootstrap binary build identity differs from Core")
     files["prepare_vanilla_backup.py"] = (ROOT / "tools/prepare_vanilla_backup.py").read_bytes()
     for name, source in {
         "LICENSE.txt": ROOT / "LICENSE", "MinHook-LICENSE.txt": ROOT / "third_party/minhook/LICENSE.txt",

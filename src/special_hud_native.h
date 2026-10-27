@@ -564,6 +564,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     auto& source_position = layout_source == context.hammer_root ? hammer_position : crucible_position;
     const bool source_cached = remember_native(source_position, layout_source, movie, epoch);
     constexpr float native_gap = 1.0f;
+    constexpr float switch_gap = -40.0f;
     const Rect switch_bounds = native_backer_visual ?
         Rect{{std::min(arrow_bounds.tl.x, backer_bounds.tl.x),
               std::min(arrow_bounds.tl.y, backer_bounds.tl.y)},
@@ -579,12 +580,12 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool arrow_origins = position(arrow_source, authored_arrow_origin);
     const Point arrow_baseline = center(flame_icon_bounds);
     const float switch_width = switch_bounds.br.x - switch_bounds.tl.x;
-    const float toggle_x = flame_icon_bounds.tl.x - native_gap - switch_width * 0.5f +
+    const float toggle_x = flame_icon_bounds.tl.x - switch_gap - switch_width * 0.5f +
         center(arrow_bounds).x - center(switch_bounds).x;
     const Point toggle_target{toggle_x,
         arrow_baseline.y + center(arrow_bounds).y - center(switch_bounds).y -
         (toggle_x - arrow_baseline.x) * render_row_slope};
-    const float special_x = flame_icon_bounds.tl.x - native_gap * 2 - switch_width -
+    const float special_x = flame_icon_bounds.tl.x - switch_gap * 2 - switch_width -
         (flame_icon_bounds.br.x - flame_icon_bounds.tl.x) * 0.5f;
     const Point flame_center = center(flame_icon_bounds);
     const Point special_target{special_x,

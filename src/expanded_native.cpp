@@ -2886,6 +2886,64 @@ bool remaining_encounter_heavy_safe(uintptr_t command) noexcept {
     __try { return remaining_encounter_heavy(command); }
     __except(EXCEPTION_EXECUTE_HANDLER) { return true; }
 }
+bool optional_zombie_completion(uintptr_t command) {
+    const auto manager = *reinterpret_cast<const uintptr_t*>(command + 0x40);
+    char owner[512];
+    std::string label;
+    if (!manager || !world_global || !read_definition_name(manager, owner) ||
+        !native_text(command + 0x58, label, 1024) ||
+        *reinterpret_cast<const uint8_t*>(manager + 0xdaf) || *reinterpret_cast<const uint8_t*>(manager + 0xdb1)) return false;
+    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
+    if (!world) return false;
+    const auto selected = *reinterpret_cast<const uint64_t*>(command + 0x88);
+    const auto mask = selected & (uint64_t{1} << 44) ? encounter_ai_mask : selected;
+    const auto optional = [world](const char* name) {
+        constexpr uint64_t zombies = uint64_t{1} | (uint64_t{1} << 2);
+        const auto tracking = spawn_tracking(name);
+        const auto recipe = spawn_recipe(name);
+        return tracking && recipe && tracking->physical && !(tracking->physical & ~zombies) &&
+            find_entity(world, ("ap_v070_optional_zombies_r" + std::string(recipe->origin.data(), recipe->origin.size())).c_str());
+    };
+    bool found = false;
+    const auto count = *reinterpret_cast<const int32_t*>(manager + 0xc88);
+    const auto records = *reinterpret_cast<const uintptr_t*>(manager + 0xc80);
+    if (count < 0 || count > 100000 || (count && !records)) return false;
+    for (int32_t i = 0; i < count; ++i) {
+        const auto record = records + static_cast<uintptr_t>(i) * 0x68;
+        if (!(*reinterpret_cast<const uint64_t*>(record) & mask) ||
+            (!label.empty() && compare_text(record + 0x28, command + 0x58))) continue;
+        const auto actor = record_actor(record);
+        char name[512];
+        if (!actor || reinterpret_cast<bool(*)(uintptr_t)>(*reinterpret_cast<const uintptr_t*>(
+                *reinterpret_cast<const uintptr_t*>(actor) + 0x108))(actor)) continue;
+        if (!read_recipe_definition(actor, name)) return false;
+        if (!optional(name)) return false;
+        found = true;
+    }
+    std::vector<std::string> cancel;
+    for (const auto& [key, progress] : recipe_state.requests()) {
+        const auto& request = progress.request;
+        if (progress.closed || request.owner != owner || !(request.logical_mask & mask) ||
+            (!label.empty() && request.label != label) ||
+            (request.maximum_emissions && progress.emitted >= request.maximum_emissions)) continue;
+        const auto recipe = native_recipes.find(request.origin);
+        if (recipe == native_recipes.end() || recipe->second.bodies.empty() || progress.reserved) return false;
+        const auto remaining = request.maximum_emissions ? request.maximum_emissions - progress.emitted : recipe->second.bodies.size();
+        for (uint64_t i = 0; i < std::min<uint64_t>(remaining, recipe->second.bodies.size()); ++i) {
+            char name[512];
+            const auto body = recipe->second.bodies[(progress.emitted + i) % recipe->second.bodies.size()];
+            if (!body || !read_definition_name(body, name) || !optional(name)) return false;
+        }
+        cancel.push_back(key); found = true;
+    }
+    if (!found) return false;
+    for (const auto& key : cancel) recipe_state.cancel(key);
+    return true;
+}
+bool optional_zombie_completion_safe(uintptr_t command) noexcept {
+    __try { return optional_zombie_completion(command); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 void trace_remaining_actors(uintptr_t command, const char* owner, int32_t count) noexcept {
     __try {
         const auto records = *reinterpret_cast<const uintptr_t*>(command + 0xa8);
@@ -2936,6 +2994,7 @@ uint64_t remaining_result(uintptr_t command) {
     if (!tracked) return original_remaining(command);
     if (empty_request_pending(remaining_manager(command), *reinterpret_cast<const uint64_t*>(command + 0x88), command + 0x58)) return 0;
     if (threshold < 0) return 0;
+    if (threshold == 0 && !blocked && optional_zombie_completion_safe(command)) return 1;
     return credit_at_most(total, threshold) || (!blocked && credit_at_most(living, threshold));
 }
 uint64_t __fastcall remaining_detour(uintptr_t command) {
@@ -3093,6 +3152,7 @@ uint64_t kill_result(uintptr_t command) {
     *reinterpret_cast<int32_t*>(command + 0xa8) = static_cast<int32_t>(low);
     if (credit_at_least(deaths, static_cast<uint32_t>(target))) return 1;
     if (native_future(manager, progress.mask, command + 0x58)) return 0;
+    if (optional_zombie_completion_safe(command)) return 1;
     if (!count) return 1;
     auto potential = deaths; potential.insert(potential.end(), living.begin(), living.end());
     if (!credit_at_least(potential, static_cast<uint32_t>(target))) {
@@ -5915,6 +5975,76 @@ bool test_quantity_inputs() {
         *reinterpret_cast<uintptr_t*>(records.data() + i * 0x68 + 16) = reinterpret_cast<uintptr_t>(actor.bytes.data());
     }
     bool ok = remaining_detour(cmd) == 0;
+    {
+        const auto old_world = world_global;
+        const auto old_find = find_entity;
+        auto old_recipes = std::move(native_recipes);
+        auto old_state = std::move(recipe_state);
+        auto old_kills = std::move(kill_progress);
+        const auto first_name = actors[0].name, second_name = actors[1].name;
+        static uintptr_t fixture_world = 1;
+        static bool marker = true;
+        world_global = reinterpret_cast<uintptr_t>(&fixture_world);
+        find_entity = [](uintptr_t, const char* name) -> uintptr_t {
+            return marker && std::string_view(name).rfind("ap_v070_optional_zombies_r", 0) == 0 ? 1 : 0;
+        };
+        actors[0].name = "ap_v070_ai_r0123456789abcdef0123_00000000_q0000000100000001_t00000000000000100000000000000001_l00000001000000010000000100000002_kn__ap_v070_s00100";
+        actors[1].name = "ap_v070_ai_r0123456789abcdef0123_00000000_q0000000100000001_t00000000000000100000000000004000_l00000001000000010000000100000002_kn__ap_v070_s00100";
+        *reinterpret_cast<uintptr_t*>(manager.data() + 0xc80) = reinterpret_cast<uintptr_t>(records.data());
+        *reinterpret_cast<int32_t*>(manager.data() + 0xc88) = 2;
+        *reinterpret_cast<uint64_t*>(command.data() + 0x88) = 16;
+        *reinterpret_cast<int32_t*>(command.data() + 0xb0) = 2;
+        *reinterpret_cast<int32_t*>(command.data() + 0xc0) = 0;
+        for (size_t i = 0; i < 2; ++i) *reinterpret_cast<uint64_t*>(records.data() + i * 0x68) = 16;
+        remaining_weights.erase(cmd);
+        ok = ok && remaining_detour(cmd) == 0;
+        actors[1].dead = true;
+        ok = ok && remaining_detour(cmd) == 1 && !actors[0].dead;
+        const auto previous_handle = *reinterpret_cast<uint64_t*>(records.data() + 0x68 + 8);
+        *reinterpret_cast<uint64_t*>(records.data() + 0x68 + 8) = uint64_t{0x1fffffe} << 32 | 0x1fffffe;
+        *reinterpret_cast<uintptr_t*>(records.data() + 0x68 + 16) = 0;
+        ok = ok && optional_zombie_completion_safe(cmd);
+        *reinterpret_cast<uint64_t*>(records.data() + 0x68 + 8) = previous_handle;
+        *reinterpret_cast<uintptr_t*>(records.data() + 0x68 + 16) = reinterpret_cast<uintptr_t>(actors[1].bytes.data());
+        marker = false;
+        ok = ok && remaining_detour(cmd) == 0;
+        marker = true;
+        actors[0].name.replace(actors[0].name.find("_t") + 18, 16, "0000000000000004");
+        ok = ok && remaining_detour(cmd) == 1;
+        actors[0].name.replace(actors[0].name.find("_t") + 18, 16, "0000000000000002");
+        ok = ok && remaining_detour(cmd) == 0;
+        actors[0].name.replace(actors[0].name.find("_t") + 18, 16, "0000000000000008");
+        ok = ok && remaining_detour(cmd) == 0;
+        actors[0].name.replace(actors[0].name.find("_t") + 18, 16, "0000000000000001");
+        manager[0xdaf] = 1;
+        ok = ok && remaining_detour(cmd) == 0;
+        manager[0xdaf] = 0;
+        std::array<uint8_t, 0xb0> zombie_kill{};
+        const auto kill = reinterpret_cast<uintptr_t>(zombie_kill.data());
+        *reinterpret_cast<uintptr_t*>(kill + 0x40) = reinterpret_cast<uintptr_t>(manager.data());
+        *reinterpret_cast<uint64_t*>(kill + 0x88) = 16;
+        *reinterpret_cast<int32_t*>(kill + 0xac) = 1;
+        ok = ok && kill_result(kill) == 1 && *reinterpret_cast<int32_t*>(kill + 0xa8) == 0;
+        recipe_state.reset(std::string(64, 'a'), "fixture");
+        RecipeRequest pending{"ai/fodder/imp", "pending", "", 16, 1, 2, 2};
+        ok = ok && recipe_state.request("pending", pending);
+        native_recipes["pending"].bodies = {reinterpret_cast<uintptr_t>(actors[0].bytes.data()),
+                                            reinterpret_cast<uintptr_t>(actors[1].bytes.data())};
+        ok = ok && remaining_detour(cmd) == 0 && !recipe_state.requests().at("pending").closed;
+        actors[1].name = actors[0].name;
+        ok = ok && remaining_detour(cmd) == 1 && recipe_state.requests().at("pending").closed;
+        ok = ok && recipe_state.deaths("ai/fodder/imp", 16, "").empty();
+        native_recipes = std::move(old_recipes); recipe_state = std::move(old_state); kill_progress = std::move(old_kills);
+        world_global = old_world; find_entity = old_find;
+        actors[0].name = first_name; actors[1].name = second_name; actors[1].dead = false;
+        *reinterpret_cast<uintptr_t*>(manager.data() + 0xc80) = 0;
+        *reinterpret_cast<int32_t*>(manager.data() + 0xc88) = 0;
+        *reinterpret_cast<uint64_t*>(command.data() + 0x88) = 0;
+        *reinterpret_cast<int32_t*>(command.data() + 0xb0) = 6;
+        *reinterpret_cast<int32_t*>(command.data() + 0xc0) = 1;
+        for (size_t i = 0; i < 2; ++i) *reinterpret_cast<uint64_t*>(records.data() + i * 0x68) = 0;
+        remaining_weights.erase(cmd);
+    }
     actors[5].dead = actors[1].dead = actors[3].dead = true;
     ok = ok && remaining_detour(cmd) == 1;
     actors[3].ignored = true;

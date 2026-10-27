@@ -34,7 +34,7 @@ struct Binding {
 /* The signature is applicable to unknown PE identities, but it never authorizes
    the known profile's child offsets or global RVAs on those identities. */
 Binding bind(Memory& memory, Image image, const char* disk_hash,
-             uint32_t hash_reason, HANDLE stop, uint64_t deadline);
+             uint32_t hash_reason, HANDLE stop, uint64_t deadline, bool exact_layout = false);
 Binding bind_host(Memory& memory, HANDLE stop);
 sc_engine_snapshot sample(Memory& memory, const Binding& binding, uint64_t sequence);
 sc_engine_snapshot unavailable(uint32_t reason);
