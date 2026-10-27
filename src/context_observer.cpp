@@ -113,8 +113,6 @@ sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uin
     Evidence measured{};
     const auto start = clock.uptime(); measured.started_at_ms = start;
     measured.budget_ns = uint64_t(budget_ms) * 1000000;
-    int64_t begin = 0, end = 0;
-    const bool started = clock.frequency > 0 && clock.counter(begin);
     auto s = unavailable(SC_REASON_NOT_SAMPLED);
     s.sequence = sequence; s.profile = b.metadata.profile; s.locator_revision = b.metadata.locator_revision;
     s.root_locator_reason = b.metadata.root_locator_reason; s.disk_hash_reason = b.metadata.disk_hash_reason;
@@ -126,13 +124,15 @@ sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uin
     if (!reason) s.layout_revision = 1;
     if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) reason = SC_REASON_CANCELLED;
     if (!reason) {
+        int64_t begin = 0, end = 0;
+        const bool started = clock.frequency > 0 && clock.counter(begin);
         const auto first = frame(memory, b), second = frame(memory, b);
         auto state_error = first.state_result.reason ? first.state_result : second.state_result;
         auto map_error = first.map_result.reason ? first.map_result : second.map_result;
         if (!state_error.reason && !same_state(first, second)) state_error.reason = SC_REASON_TRANSITION;
         if (!map_error.reason && !same_map(first, second)) map_error.reason = SC_REASON_TRANSITION;
-        measured.state = state_error; measured.map = map_error;
         measured.timing_valid = started && clock.counter(end) && end >= begin;
+        measured.state = state_error; measured.map = map_error;
         if (!measured.timing_valid) {
             measured.timing_error = ERROR_INVALID_DATA;
             state_error = map_error = {SC_REASON_INTERNAL_ERROR, measured.timing_error};

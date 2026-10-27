@@ -511,7 +511,13 @@ void post_frame() {
             detail.pending_after_reason = after_read.reason;
             detail.pending_after_error = after_read.error;
             if (after_read.reason || pending_after) reject(after_read.reason ? SC_NATIVE_READ_FAILED : SC_NATIVE_TRANSITION, SC_STAGE_PENDING_AFTER);
-            else if (facts.sample_reason == SC_REASON_BUDGET) reject(SC_NATIVE_BUDGET, SC_STAGE_OBSERVATION_BUDGET);
+            else if (facts.sample_reason == SC_REASON_BUDGET) {
+                reject(SC_NATIVE_BUDGET, SC_STAGE_OBSERVATION_BUDGET);
+                save::session().btrace.record(save::BStage::native_observation, save::BStatus::refused, "native_budget", 0,
+                    {{"phase", result.phase}, {"stage", detail.stage}, {"elapsed_ns", detail.observation_elapsed_ns},
+                     {"budget_ns", detail.observation_budget_ns}, {"timing_valid", detail.timing_valid},
+                     {"state_reason", detail.state_reason}, {"map_reason", detail.map_reason}});
+            }
             else if (facts.current_map.validity != SC_OBSERVATION_OBSERVED ||
                      facts.fields[SC_CONTEXT_GAME_STATE].validity != SC_OBSERVATION_OBSERVED ||
                      facts.fields[SC_CONTEXT_GAME_STATE].value != SC_GAME_IN_GAME)
