@@ -1,6 +1,7 @@
 #include "native_test_adapter.h"
 #include "native_runtime.h"
 #include "inspection_server.h"
+#include "protocol.h"
 #include "pipe_io.h"
 #include "special.h"
 #include <intrin.h>
@@ -213,6 +214,26 @@ int wmain(int argc, wchar_t** argv) {
         automap.checked_locations[bit/64]&=~(uint64_t{1}<<(bit%64));
         CHECK(!native::test_automap_checked(automap,"game/sp/e2m2_base/e2m2_base",name));
     }
+    for (uint32_t id : {7770514u,7770518u}) {
+        char name[64]{}; std::snprintf(name,sizeof(name),"ap_automap_location_%u",id);
+        const auto bit=id-SC_AUTOMAP_LOCATION_BASE;
+        CHECK(!native::test_automap_checked(automap,"game/sp/e1m2_battle/e1m2_battle",name));
+        automap.checked_locations[bit/64]|=uint64_t{1}<<(bit%64);
+        CHECK(native::test_automap_checked(automap,"game/sp/e1m2_battle/e1m2_battle",name));
+        CHECK(!native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro",name));
+    }
+    automap.kind=SC_AUTOMAP_PUBLISH;
+    std::memset(automap.namespace_id,'a',64);
+    automap.execution.expected.pid=71; automap.execution.expected.process_created=101;
+    automap.execution.expected.instance_id[0]=1; automap.execution.expected.lifecycle_generation=2;
+    automap.execution.request_id=3; automap.execution.nonce[0]=17; automap.execution.deadline_ms=2000;
+    Message automap_wire{}; sc_automap_request decoded_automap{}; uint16_t automap_op=0;
+    const auto automap_size=encode_automap_request(automap_wire,automap);
+    CHECK(decode_request(automap_wire,automap_size,&automap_op,nullptr,nullptr,nullptr,nullptr,nullptr,
+        nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&decoded_automap)==WireResult::ok);
+    CHECK(automap_op==automap_operation);
+    CHECK(!std::memcmp(automap.checked_locations,decoded_automap.checked_locations,sizeof(automap.checked_locations)));
+    CHECK(decode_request(automap_wire,automap_size-8)==WireResult::malformed);
     std::array<uint8_t,0x150> automap_entry{}; automap_test_object=reinterpret_cast<uintptr_t>(automap_entry.data());
     *reinterpret_cast<int32_t*>(automap_test_object+0x134)=1;
     CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));

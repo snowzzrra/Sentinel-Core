@@ -7,6 +7,8 @@ void stop();
 void map_freed();
 void observe(uintptr_t world);
 #ifdef SC_NATIVE_TESTING
+bool test_stopped_hooks();
+bool test_hook_faults();
 bool test_limit_inputs();
 bool test_recipe_inputs();
 bool test_recipe_transport();

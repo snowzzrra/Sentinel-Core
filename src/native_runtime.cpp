@@ -280,7 +280,7 @@ void reconcile_fast_travel(uintptr_t map,const char* map_name,uint64_t generatio
 // HUD idPOIManager is a different subsystem and MUST NOT be used on AP props.
 SRWLOCK automap_lock = SRWLOCK_INIT;
 sc_automap_request automap_snapshot{};
-uint64_t automap_checked_floor[8]{};
+uint64_t automap_checked_floor[SC_AUTOMAP_LOCATION_BITS / 64]{};
 uint64_t automap_scanned=0, automap_collected=0, automap_passes=0;
 std::atomic<bool> automap_ready{false};
 std::atomic<uint32_t> automap_fault{0};
@@ -342,6 +342,7 @@ int automap_status(const sc_automap_request& snapshot,const char* map,const char
     for (const auto& marker:automap_markers) {
         if (marker.location!=id || std::strcmp(marker.map,map)) continue;
         const auto bit=id-SC_AUTOMAP_LOCATION_BASE;
+        if (bit>=SC_AUTOMAP_LOCATION_BITS) return false;
         return (snapshot.checked_locations[bit/64] & (uint64_t{1}<<(bit%64)))!=0 ? 2 : 1;
     }
     return false;
@@ -927,7 +928,7 @@ sc_automap_result automap_request(const sc_automap_request& request) {
         const bool duplicate=request.revision==automap_snapshot.revision && request.known==automap_snapshot.known &&
             !std::memcmp(request.checked_locations,automap_snapshot.checked_locations,sizeof(request.checked_locations));
         bool regression=false;
-        if (request.known) for (size_t i=0;i<8;++i)
+        if (request.known) for (size_t i=0;i<SC_AUTOMAP_LOCATION_BITS/64;++i)
             regression|=(automap_checked_floor[i]&~request.checked_locations[i])!=0;
         if (regression) out.outcome=SC_AUTOMAP_REGRESSION;
         else if (duplicate || request.revision>automap_snapshot.revision) {

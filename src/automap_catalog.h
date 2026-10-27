@@ -401,4 +401,8 @@ constexpr AutomapMarker automap_markers[] = {
     {7770515u, "game/dlc/e4m3_mcity/e4m3_mcity"},
     {7770516u, "game/dlc/e4m1_rig/e4m1_rig"},
     {7770517u, "game/sp/e1m3_cult/e1m3_cult"},
+    {7770518u, "game/sp/e1m2_battle/e1m2_battle"},
 };
+static_assert([] { for (const auto& marker : automap_markers)
+    if (marker.location < SC_AUTOMAP_LOCATION_BASE || marker.location - SC_AUTOMAP_LOCATION_BASE >= SC_AUTOMAP_LOCATION_BITS) return false;
+    return true; }(), "Automap catalog exceeds snapshot capacity");

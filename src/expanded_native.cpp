@@ -27,6 +27,11 @@
 #include <cmath>
 #include <chrono>
 #include <intrin.h>
+#ifdef SC_NATIVE_TESTING
+#include <tuple>
+#include <type_traits>
+#include <thread>
+#endif
 
 namespace sentinel::expanded {
 namespace {
@@ -1010,7 +1015,7 @@ bool settle_recipe_creation(RecipeCreation& creation) noexcept {
             request.final_credit_units : request.logical_units;
         recipe_actor_credits[creation.actor] = {identifier, {units, request.physical_units}, creation.key, native_name, creation.emission.ordinal};
         return true;
-    } catch (...) { return false; }
+    } catch (...) { recipe_fault.store(true, std::memory_order_release); return false; }
 }
 void end_recipe_creation(RecipeCreation& creation) noexcept {
     try {
@@ -1184,9 +1189,11 @@ uint64_t point_available_locked(uintptr_t point, uintptr_t group, uint8_t time, 
     } catch (...) { recipe_fault.store(true, std::memory_order_release); return 0; }
 }
 uint64_t point_available_detour(uintptr_t point, uintptr_t group, uint8_t time, uint8_t player, uint8_t fov, uint8_t los) {
-    admission_mutex.lock();
-    __try { return point_available_locked(point, group, time, player, fov, los); }
-    __finally { admission_mutex.unlock(); }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    return [&]() -> uint64_t {
+        __try { return point_available_locked(point, group, time, player, fov, los); }
+        __finally { admission.unlock(); }
+    }();
 }
 void trace_recipe_spawn(const RecipeCreation& creation, uintptr_t body, uintptr_t point, uint8_t stage) {
     if (!creation.recipe || creation.emission.actor.empty()) return;
@@ -1308,7 +1315,7 @@ uint64_t recipe_point_type(uintptr_t point) {
 }
 uint64_t create_tracked(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uint64_t);
 uint64_t invoke_recipe_creation(RecipeCreation* creation, uintptr_t manager, uintptr_t record,
-                                uintptr_t fourth, uintptr_t fifth, bool group) {
+                                uintptr_t fourth, uintptr_t fifth, bool group, std::unique_lock<std::recursive_mutex>& admission) {
     uint64_t result = 0;
     __try {
         suspend_recipe_points(creation);
@@ -1333,17 +1340,17 @@ uint64_t invoke_recipe_creation(RecipeCreation* creation, uintptr_t manager, uin
     } __finally {
         resume_recipe_points(creation);
         end_recipe_creation(*creation);
-        admission_mutex.unlock();
+        admission.unlock();
     }
     return result;
 }
 uint64_t create_special_recipe(uintptr_t manager, std::string_view origin, std::string_view label) {
     RecipeCreation creation;
-    admission_mutex.lock();
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
     bool ready = false;
-    try { ready = begin_recipe_creation(creation, manager, origin, label); } catch (...) {}
-    if (!ready) { admission_mutex.unlock(); return 0; }
-    return invoke_recipe_creation(&creation, manager, 0, 0, 0, false);
+    try { ready = begin_recipe_creation(creation, manager, origin, label); } catch (...) { recipe_fault.store(true, std::memory_order_release); }
+    if (!ready) { admission.unlock(); return 0; }
+    return invoke_recipe_creation(&creation, manager, 0, 0, 0, false, admission);
 }
 bool recipe_landing_pose(const RecipeCreation& creation, float* pose) {
     if (!creation.active_point || creation.restoring) return false;
@@ -1366,6 +1373,7 @@ bool recipe_landing_pose(const RecipeCreation& creation, float* pose) {
     return true;
 }
 uintptr_t actor_factory_detour(uintptr_t info) {
+    if (stopped.load(std::memory_order_acquire)) return original_actor_factory(info);
     const auto creation = recipe_creation;
     if (!creation || !creation->creating || actor_factory_active)
         return original_actor_factory(info);
@@ -1394,11 +1402,13 @@ uintptr_t actor_factory_detour(uintptr_t info) {
     return actor;
 }
 void role_text_detour(uintptr_t destination, const char* text) {
+    if (stopped.load(std::memory_order_acquire)) { assign_native_text(destination, text); return; }
     // the native Samuel helper addresses its Spirit filter through a nullable physical component.
     if (samuel_without_parasite && destination == 0x88) return;
     assign_native_text(destination, text);
 }
 void samuel_setup_detour(uintptr_t component, uintptr_t actor) {
+    if (stopped.load(std::memory_order_acquire)) { original_samuel_setup(component, actor); return; }
     const bool previous = samuel_without_parasite;
     const auto creation = recipe_creation;
     __try {
@@ -1486,10 +1496,11 @@ bool protected_summon_definition(uintptr_t entry) {
     return false;
 }
 float summon_create_detour(uintptr_t component, uintptr_t entry, uintptr_t positions, uint64_t mask, uintptr_t label) {
+    if (stopped.load(std::memory_order_acquire)) return original_summon_create(component, entry, positions, mask, label);
     if (!summon_collection) return original_summon_create(component, entry, positions, mask, label);
     if (protected_summon_definition(entry)) return original_summon_create(component, entry, positions, mask, label);
     bool accepted = false;
-    try { accepted = collect_summon(component, entry, positions, mask, label); } catch (...) {}
+    try { accepted = collect_summon(component, entry, positions, mask, label); } catch (...) { recipe_fault.store(true, std::memory_order_release); }
     destroy_native_text(label);
     if (!accepted) recipe_fault.store(true, std::memory_order_release);
     return 1.0f;
@@ -1540,6 +1551,7 @@ bool summon_memberships(uintptr_t parent, std::string_view source_owner, std::st
     return true;
 }
 void summon_request_complete_detour(uintptr_t target) {
+    if (stopped.load(std::memory_order_acquire)) { original_summon_request_complete(target); return; }
     if (!summon_collection) { original_summon_request_complete(target); return; }
     char name[512];
     if (!read_definition_name(target, name)) { recipe_fault.store(true, std::memory_order_release); return; }
@@ -1559,6 +1571,7 @@ void complete_summon_requests(ComponentSummons& pending) {
     }
 }
 void summon_cleanup_detour(uintptr_t component) {
+    if (stopped.load(std::memory_order_acquire)) { original_summon_cleanup(component); return; }
     std::lock_guard<std::recursive_mutex> lock(admission_mutex);
     const auto found = component_summons.find(component);
     if (found != component_summons.end()) {
@@ -2034,10 +2047,11 @@ void summon_start_detour(uintptr_t component) {
     invoke_summon_start(component, &collection);
     try {
         if (!recipe_fault.load(std::memory_order_acquire) && open_component_summons(collection) && drain_component_summons(component)) return;
-    } catch (...) {}
+    } catch (...) { recipe_fault.store(true, std::memory_order_release); }
     recipe_fault.store(true, std::memory_order_release);
 }
 void summon_complete_detour(uintptr_t component) {
+    if (stopped.load(std::memory_order_acquire)) { original_summon_complete(component); return; }
     std::lock_guard<std::recursive_mutex> lock(admission_mutex);
     original_summon_complete(component);
     const auto found = component_summons.find(component);
@@ -2057,7 +2071,7 @@ void summon_update_detour(uintptr_t component, uintptr_t frame) {
     original_summon_update(component, frame);
     if (stopped.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(admission_mutex);
-    try { if (drain_component_summons(component)) return; } catch (...) {}
+    try { if (drain_component_summons(component)) return; } catch (...) { recipe_fault.store(true, std::memory_order_release); }
     recipe_fault.store(true, std::memory_order_release);
 }
 uint64_t invoke_suspended_recipe(RecipeCreation* scope, uintptr_t manager, uintptr_t record,
@@ -2080,14 +2094,14 @@ uint64_t without_recipe_override(uintptr_t manager, uintptr_t record, uintptr_t 
 uint64_t create_from_recipe(uintptr_t manager, uintptr_t record, uintptr_t fourth,
                             uintptr_t fifth, bool group, std::string_view origin) {
     RecipeCreation creation;
-    admission_mutex.lock();
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
     bool ready = false;
     try {
         std::string label;
         ready = native_text(record + 0x28, label, 1024) && begin_recipe_creation(creation, manager, origin, label);
-    } catch (...) {}
-    if (!ready) { admission_mutex.unlock(); return 0; }
-    return invoke_recipe_creation(&creation, manager, record, fourth, fifth, group);
+    } catch (...) { recipe_fault.store(true, std::memory_order_release); }
+    if (!ready) { admission.unlock(); return 0; }
+    return invoke_recipe_creation(&creation, manager, record, fourth, fifth, group, admission);
 }
 bool try_recipe_creation(uintptr_t manager, uintptr_t record, uintptr_t alias, uintptr_t fourth,
                           uintptr_t fifth, bool group, uint64_t& result) {
@@ -2148,7 +2162,7 @@ bool prepare_recipe_worker(uintptr_t worker, bool maintenance, bool& marked) {
     worker_recipe = &found->second;
     return true;
 }
-void invoke_recipe_worker(uintptr_t worker, bool maintenance, const std::string* previous, bool marked) {
+void invoke_recipe_worker(uintptr_t worker, bool maintenance, const std::string* previous, bool marked, std::unique_lock<std::recursive_mutex>& admission) {
     __try {
         (maintenance ? original_maintain_tick : original_stagger_tick)(worker);
     } __finally {
@@ -2157,17 +2171,18 @@ void invoke_recipe_worker(uintptr_t worker, bool maintenance, const std::string*
             if (found != worker_recipes.end()) recipe_state.cancel(found->second);
         }
         worker_recipe = previous;
-        admission_mutex.unlock();
+        admission.unlock();
     }
 }
 void recipe_worker_tick(uintptr_t worker, bool maintenance) {
-    admission_mutex.lock();
+    if (stopped.load(std::memory_order_acquire)) { (maintenance ? original_maintain_tick : original_stagger_tick)(worker); return; }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
     const auto previous = worker_recipe;
     worker_recipe = nullptr;
     bool marked = false, ready = false;
-    try { ready = prepare_recipe_worker(worker, maintenance, marked); } catch (...) {}
-    if (!ready) { worker_recipe = previous; admission_mutex.unlock(); return; }
-    invoke_recipe_worker(worker, maintenance, previous, marked);
+    try { ready = prepare_recipe_worker(worker, maintenance, marked); } catch (...) { recipe_fault.store(true, std::memory_order_release); }
+    if (!ready) { worker_recipe = previous; admission.unlock(); return; }
+    invoke_recipe_worker(worker, maintenance, previous, marked, admission);
 }
 void maintain_tick_detour(uintptr_t worker) { recipe_worker_tick(worker, true); }
 void stagger_tick_detour(uintptr_t worker) { recipe_worker_tick(worker, false); }
@@ -2177,21 +2192,24 @@ void prepare_queued_recipe(uintptr_t command) {
     try {
         if (const auto worker = cast_maintain ? cast_maintain(command) : 0) prepare_recipe_worker(worker, true, marked);
         else if (const auto staggered = cast_stagger ? cast_stagger(command) : 0) prepare_recipe_worker(staggered, false, marked);
-    } catch (...) {}
+    } catch (...) { recipe_fault.store(true, std::memory_order_release); }
     worker_recipe = previous;
 }
 void queue_command_detour(uintptr_t manager, uintptr_t command) {
-    admission_mutex.lock();
-    __try {
-        const auto found = worker_recipes.find(command);
-        if (found != worker_recipes.end()) {
-            recipe_state.cancel(found->second);
-            worker_recipes.erase(found);
-        }
-        original_queue_command(manager, command);
-        prepare_queued_recipe(command);
-        if (kill_progress.find(command) != kill_progress.end()) initialize_kill(command, manager);
-    } __finally { admission_mutex.unlock(); }
+    if (stopped.load(std::memory_order_acquire)) { original_queue_command(manager, command); return; }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    [&]() -> void {
+        __try {
+            const auto found = worker_recipes.find(command);
+            if (found != worker_recipes.end()) {
+                recipe_state.cancel(found->second);
+                worker_recipes.erase(found);
+            }
+            original_queue_command(manager, command);
+            prepare_queued_recipe(command);
+            if (kill_progress.find(command) != kill_progress.end()) initialize_kill(command, manager);
+        } __finally { admission.unlock(); }
+    }();
 }
 bool queue_recipe_remainder(uintptr_t manager, uintptr_t alias, const char* label, const std::string& key) {
     const auto found = recipe_state.requests().find(key);
@@ -2286,19 +2304,19 @@ bool dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, 
     return true;
 }
 bool invoke_recipe_dispatch(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
-                             uintptr_t label, bool group, const std::string* origin, uintptr_t* result) {
+                             uintptr_t label, bool group, const std::string* origin, uintptr_t* result, std::unique_lock<std::recursive_mutex>& admission) {
     bool handled = false;
     const auto previous_worker = worker_recipe;
     __try { worker_recipe = nullptr; handled = dispatch_recipe_locked(manager, output, type, alias, label, group, *origin, *result); }
-    __finally { worker_recipe = previous_worker; admission_mutex.unlock(); }
+    __finally { worker_recipe = previous_worker; admission.unlock(); }
     return handled;
 }
 bool dispatch_recipe_immediate(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
                                uintptr_t label, bool group, uintptr_t& result) {
     std::string origin;
     if (stopped.load(std::memory_order_acquire) || !recipe_origin(alias, origin)) return false;
-    admission_mutex.lock();
-    return invoke_recipe_dispatch(manager, output, type, alias, label, group, &origin, &result);
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    return invoke_recipe_dispatch(manager, output, type, alias, label, group, &origin, &result, admission);
 }
 uintptr_t possessed_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t host, uintptr_t label,
                                    uintptr_t spirit, const std::string& host_origin, const std::string& spirit_origin) {
@@ -2335,24 +2353,25 @@ uintptr_t possessed_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t 
     return output;
 }
 uintptr_t invoke_possessed_recipe(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t host, uintptr_t label,
-                                   uintptr_t spirit, const std::string* host_origin, const std::string* spirit_origin) {
+                                   uintptr_t spirit, const std::string* host_origin, const std::string* spirit_origin, std::unique_lock<std::recursive_mutex>& admission) {
     uintptr_t result = output;
     const auto previous_worker = worker_recipe;
     __try {
         worker_recipe = nullptr;
         result = possessed_recipe_locked(manager, output, type, host, label, spirit, *host_origin, *spirit_origin);
-    } __finally { worker_recipe = previous_worker; admission_mutex.unlock(); }
+    } __finally { worker_recipe = previous_worker; admission.unlock(); }
     return result;
 }
 uintptr_t possessed_detour(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t host, uintptr_t label,
                             uintptr_t spirit, uint64_t hosts, uintptr_t filter, uint8_t flag) {
+    if (stopped.load(std::memory_order_acquire)) return original_possessed(manager, output, type, host, label, spirit, hosts, filter, flag);
     std::string host_origin, spirit_origin;
     const auto marked_host = recipe_origin(host, host_origin), marked_spirit = recipe_origin(spirit, spirit_origin);
     if (stopped.load(std::memory_order_acquire) || (!marked_host && !marked_spirit))
         return original_possessed(manager, output, type, host, label, spirit, hosts, filter, flag);
     if (!marked_host || !marked_spirit) { recipe_fault.store(true); retry_immediate(manager); return output; }
-    admission_mutex.lock();
-    return invoke_possessed_recipe(manager, output, type, host, label, spirit, &host_origin, &spirit_origin);
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    return invoke_possessed_recipe(manager, output, type, host, label, spirit, &host_origin, &spirit_origin, admission);
 }
 uintptr_t record_actor(uintptr_t record) {
     const auto identifier = *reinterpret_cast<const uint32_t*>(record + 8);
@@ -2393,9 +2412,11 @@ uintptr_t resurrect_locked(uintptr_t component, int32_t index, const float* posi
 }
 uintptr_t resurrect_detour(uintptr_t component, int32_t index, const float* position, const float* axis) {
     if (stopped.load()) return original_resurrect_factory(component, index, position, axis);
-    admission_mutex.lock();
-    __try { return resurrect_locked(component, index, position, axis); }
-    __finally { admission_mutex.unlock(); }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    return [&]() -> uintptr_t {
+        __try { return resurrect_locked(component, index, position, axis); }
+        __finally { admission.unlock(); }
+    }();
 }
 bool completed_independent_actor(uintptr_t actor, const SpawnRecipe& frozen, std::string* request = nullptr) {
     const auto origin = std::string(frozen.origin.data(), frozen.origin.size());
@@ -2473,6 +2494,7 @@ uintptr_t post_death_target(uintptr_t target, uintptr_t event, int32_t delay, ui
     return 0;
 }
 uintptr_t post_one_detour(uintptr_t target, uintptr_t event, int32_t delay, uintptr_t argument) {
+    if (stopped.load(std::memory_order_acquire)) return original_post_one(target, event, delay, argument);
     const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
     // only the actor's own death targets use logical credits; nested encounter events fire normally.
     if (std::find(death_target_returns.begin(), death_target_returns.end(), caller) == death_target_returns.end())
@@ -2480,10 +2502,10 @@ uintptr_t post_one_detour(uintptr_t target, uintptr_t event, int32_t delay, uint
     return post_death_target(target, event, delay, argument);
 }
 void invoke_death_actions(uintptr_t action, uintptr_t context, uintptr_t state, uintptr_t frame,
-                          const DeathActionContext* projection) {
+                          const DeathActionContext* projection, std::unique_lock<std::recursive_mutex>& admission) {
     const auto previous = death_action_context;
     __try { death_action_context = projection; original_death_actions(action, context, state, frame); }
-    __finally { death_action_context = previous; admission_mutex.unlock(); }
+    __finally { death_action_context = previous; admission.unlock(); }
 }
 void record_recipe_death(uintptr_t actor) {
     const auto role = recipe_actors.find(actor);
@@ -2493,7 +2515,7 @@ void record_recipe_death(uintptr_t actor) {
 }
 void death_actions_detour(uintptr_t action, uintptr_t context, uintptr_t state, uintptr_t frame) {
     if (stopped.load(std::memory_order_acquire)) { original_death_actions(action, context, state, frame); return; }
-    admission_mutex.lock();
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
     DeathActionContext projection;
     bool tracked = false;
     try {
@@ -2517,7 +2539,7 @@ void death_actions_detour(uintptr_t action, uintptr_t context, uintptr_t state, 
             record_recipe_death(actor);
         }
     } catch (...) { recipe_fault.store(true, std::memory_order_release); }
-    invoke_death_actions(action, context, state, frame, tracked ? &projection : nullptr);
+    invoke_death_actions(action, context, state, frame, tracked ? &projection : nullptr, admission);
 }
 bool cache_remaining(uintptr_t command, uintptr_t record) {
     __try {
@@ -2533,37 +2555,43 @@ bool cache_remaining(uintptr_t command, uintptr_t record) {
 }
 bool try_cache_remaining(uintptr_t command, uintptr_t record) {
     try { return cache_remaining(command, record); }
-    catch (...) { return false; }
+    catch (...) { recipe_fault.store(true, std::memory_order_release); return false; }
 }
 void __fastcall remaining_added_detour(uintptr_t command, uintptr_t record) {
-    admission_mutex.lock();
-    quantity_mutex.lock();
-    __try {
-        if (!*reinterpret_cast<const int32_t*>(command + 0xb0)) remaining_weights.erase(command);
-        try_cache_remaining(command, record);
-        original_remaining_added(command, record);
-    } __finally { quantity_mutex.unlock(); admission_mutex.unlock(); }
+    if (stopped.load(std::memory_order_acquire)) { original_remaining_added(command, record); return; }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    std::unique_lock<std::recursive_mutex> quantity(quantity_mutex);
+    [&]() -> void {
+        __try {
+            if (!*reinterpret_cast<const int32_t*>(command + 0xb0)) remaining_weights.erase(command);
+            try_cache_remaining(command, record);
+            original_remaining_added(command, record);
+        } __finally { quantity.unlock(); admission.unlock(); }
+    }();
 }
 void __fastcall remaining_dead_detour(uintptr_t command, uintptr_t record) {
-    admission_mutex.lock();
-    quantity_mutex.lock();
-    __try {
-        const auto identifier = *reinterpret_cast<const uint32_t*>(record + 12);
-        const auto before = *reinterpret_cast<const int32_t*>(command + 0xb0);
-        original_remaining_dead(command, record);
-        const auto after = *reinterpret_cast<const int32_t*>(command + 0xb0);
-        const auto found = remaining_weights.find(command);
-        if (found != remaining_weights.end() && after < before) {
-            auto& rows = found->second;
-            if (before >= 0 && rows.size() >= static_cast<size_t>(before)) {
-                rows.resize(before);
-                rows.erase(std::remove_if(rows.begin(), rows.end(), [identifier](const auto& item) {
-                    return item.identifier == identifier;
-                }), rows.end());
+    if (stopped.load(std::memory_order_acquire)) { original_remaining_dead(command, record); return; }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    std::unique_lock<std::recursive_mutex> quantity(quantity_mutex);
+    [&]() -> void {
+        __try {
+            const auto identifier = *reinterpret_cast<const uint32_t*>(record + 12);
+            const auto before = *reinterpret_cast<const int32_t*>(command + 0xb0);
+            original_remaining_dead(command, record);
+            const auto after = *reinterpret_cast<const int32_t*>(command + 0xb0);
+            const auto found = remaining_weights.find(command);
+            if (found != remaining_weights.end() && after < before) {
+                auto& rows = found->second;
+                if (before >= 0 && rows.size() >= static_cast<size_t>(before)) {
+                    rows.resize(before);
+                    rows.erase(std::remove_if(rows.begin(), rows.end(), [identifier](const auto& item) {
+                        return item.identifier == identifier;
+                    }), rows.end());
+                }
+                if (after < 0 || rows.size() != static_cast<size_t>(after)) rows.clear();
             }
-            if (after < 0 || rows.size() != static_cast<size_t>(after)) rows.clear();
-        }
-    } __finally { quantity_mutex.unlock(); admission_mutex.unlock(); }
+        } __finally { quantity.unlock(); admission.unlock(); }
+    }();
 }
 uintptr_t remaining_manager(uintptr_t command) {
     const auto identifier = *reinterpret_cast<const uint32_t*>(command + 0x38);
@@ -2911,11 +2939,12 @@ uint64_t remaining_result(uintptr_t command) {
     return credit_at_most(total, threshold) || (!blocked && credit_at_most(living, threshold));
 }
 uint64_t __fastcall remaining_detour(uintptr_t command) {
+    if (stopped.load(std::memory_order_acquire)) return original_remaining(command);
     WaitCost cost;
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> lock(quantity_mutex);
     try { const auto result = remaining_result(command); trace_quantity_wait(command, 'r', result); return result; }
-    catch (...) { return 0; }
+    catch (...) { recipe_fault.store(true, std::memory_order_release); return 0; }
 }
 void initialize_kill(uintptr_t command, uintptr_t manager) {
     std::lock_guard<std::recursive_mutex> lock(quantity_mutex);
@@ -2931,42 +2960,46 @@ void initialize_kill(uintptr_t command, uintptr_t manager) {
     progress.initialized = true;
 }
 uintptr_t kill_construct_detour(uintptr_t command, int32_t threshold, uintptr_t label, uint64_t mask, uint64_t clock) {
+    if (stopped.load(std::memory_order_acquire)) return original_kill_construct(command, threshold, label, mask, clock);
     const auto result = original_kill_construct(command, threshold, label, mask, clock);
     std::lock_guard<std::recursive_mutex> lock(quantity_mutex);
     kill_progress.erase(command); kill_progress.emplace(command, KillProgress{});
     return result;
 }
 void kill_dead_detour(uintptr_t command, uintptr_t record) {
-    admission_mutex.lock();
-    quantity_mutex.lock();
-    __try {
-        const auto actor = record_actor(record);
-        const auto weight = remaining_weight(actor);
-        const auto before = *reinterpret_cast<const int32_t*>(command + 0xa8);
-        const auto cached = recipe_actor_credits.find(actor);
-        const bool counted = weight.recipe && cached != recipe_actor_credits.end() &&
-            recipe_state.requests().count(cached->second.request);
-        if (counted) record_recipe_death(actor);
-        bool selected = false;
-        if (weight.recipe) {
-            char name[512];
-            const auto tracking = read_recipe_definition(actor, name) ? spawn_tracking(name) : std::nullopt;
-            const auto filter = *reinterpret_cast<const uint64_t*>(command + 0x88);
-            const auto mask = filter & (uint64_t{1} << 44) ? encounter_ai_mask : filter;
-            selected = tracking && (tracking->source & mask) &&
-                (!*reinterpret_cast<const int32_t*>(command + 0x68) || !compare_text(record + 0x28, command + 0x58));
-        }
-        original_kill_dead(command, record);
-        // recipe deaths use their logical source and survive expired native actor references.
-        if (weight.recipe) *reinterpret_cast<int32_t*>(command + 0xa8) = before + (!counted && selected);
-        const auto after = *reinterpret_cast<const int32_t*>(command + 0xa8);
-        if (after > before) {
-            auto& progress = kill_progress[command];
-            if (!progress.initialized && before > 0) progress.deaths[{1, 1}] = before;
-            ++progress.deaths[{static_cast<uint32_t>(weight.credit.numerator), weight.credit.denominator}];
-            progress.seen = static_cast<uint32_t>(after); progress.tracked |= weight.recipe;
-        }
-    } __finally { quantity_mutex.unlock(); admission_mutex.unlock(); }
+    if (stopped.load(std::memory_order_acquire)) { original_kill_dead(command, record); return; }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    std::unique_lock<std::recursive_mutex> quantity(quantity_mutex);
+    [&]() -> void {
+        __try {
+            const auto actor = record_actor(record);
+            const auto weight = remaining_weight(actor);
+            const auto before = *reinterpret_cast<const int32_t*>(command + 0xa8);
+            const auto cached = recipe_actor_credits.find(actor);
+            const bool counted = weight.recipe && cached != recipe_actor_credits.end() &&
+                recipe_state.requests().count(cached->second.request);
+            if (counted) record_recipe_death(actor);
+            bool selected = false;
+            if (weight.recipe) {
+                char name[512];
+                const auto tracking = read_recipe_definition(actor, name) ? spawn_tracking(name) : std::nullopt;
+                const auto filter = *reinterpret_cast<const uint64_t*>(command + 0x88);
+                const auto mask = filter & (uint64_t{1} << 44) ? encounter_ai_mask : filter;
+                selected = tracking && (tracking->source & mask) &&
+                    (!*reinterpret_cast<const int32_t*>(command + 0x68) || !compare_text(record + 0x28, command + 0x58));
+            }
+            original_kill_dead(command, record);
+            // recipe deaths use their logical source and survive expired native actor references.
+            if (weight.recipe) *reinterpret_cast<int32_t*>(command + 0xa8) = before + (!counted && selected);
+            const auto after = *reinterpret_cast<const int32_t*>(command + 0xa8);
+            if (after > before) {
+                auto& progress = kill_progress[command];
+                if (!progress.initialized && before > 0) progress.deaths[{1, 1}] = before;
+                ++progress.deaths[{static_cast<uint32_t>(weight.credit.numerator), weight.credit.denominator}];
+                progress.seen = static_cast<uint32_t>(after); progress.tracked |= weight.recipe;
+            }
+        } __finally { quantity.unlock(); admission.unlock(); }
+    }();
 }
 bool recipe_scope(std::string_view owner, uint64_t mask, std::string_view label, bool empty_only) {
     if (mask & (uint64_t{1} << 44)) mask = encounter_ai_mask;
@@ -3075,6 +3108,7 @@ uint64_t kill_result(uintptr_t command) {
     return 0;
 }
 uint64_t kill_detour(uintptr_t command) {
+    if (stopped.load(std::memory_order_acquire)) return original_kill(command);
     WaitCost cost;
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> quantity(quantity_mutex);
@@ -3088,7 +3122,7 @@ uint64_t kill_detour(uintptr_t command) {
                 *reinterpret_cast<const int32_t*>(command + 0xac), progress.seen, stage == 2);
         }
         return result;
-    } catch (...) { return 0; }
+    } catch (...) { recipe_fault.store(true, std::memory_order_release); return 0; }
 }
 RemainingWeight health_weight(uintptr_t command, uintptr_t record) {
     const auto id = *reinterpret_cast<const uint32_t*>(record + 12);
@@ -3104,37 +3138,43 @@ float actor_health(uintptr_t actor, uintptr_t slot) {
         *reinterpret_cast<const uintptr_t*>(actor) + slot))(actor);
 }
 void health_added_detour(uintptr_t command, uintptr_t record) {
-    admission_mutex.lock();
-    quantity_mutex.lock();
-    __try {
-        const auto before = *reinterpret_cast<const int32_t*>(command + 0xb0);
-        if (!before && !*reinterpret_cast<const float*>(command + 0xc8)) health_progress.erase(command);
-        const auto actor = record_actor(record);
-        const auto identifier = *reinterpret_cast<const uint32_t*>(record + 12);
-        const auto weight = health_weight(command, record);
-        const auto initial = actor ? actor_health(actor, 0x6f0) : 0;
-        const auto current = actor ? actor_health(actor, 0x6e8) : 0;
-        original_health_added(command, record);
-        if (*reinterpret_cast<const int32_t*>(command + 0xb0) > before) {
-            auto& progress = health_progress[command];
-            progress.actors[identifier] = {weight, initial, current}; progress.tracked |= weight.recipe;
-        }
-    } __finally { quantity_mutex.unlock(); admission_mutex.unlock(); }
+    if (stopped.load(std::memory_order_acquire)) { original_health_added(command, record); return; }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    std::unique_lock<std::recursive_mutex> quantity(quantity_mutex);
+    [&]() -> void {
+        __try {
+            const auto before = *reinterpret_cast<const int32_t*>(command + 0xb0);
+            if (!before && !*reinterpret_cast<const float*>(command + 0xc8)) health_progress.erase(command);
+            const auto actor = record_actor(record);
+            const auto identifier = *reinterpret_cast<const uint32_t*>(record + 12);
+            const auto weight = health_weight(command, record);
+            const auto initial = actor ? actor_health(actor, 0x6f0) : 0;
+            const auto current = actor ? actor_health(actor, 0x6e8) : 0;
+            original_health_added(command, record);
+            if (*reinterpret_cast<const int32_t*>(command + 0xb0) > before) {
+                auto& progress = health_progress[command];
+                progress.actors[identifier] = {weight, initial, current}; progress.tracked |= weight.recipe;
+            }
+        } __finally { quantity.unlock(); admission.unlock(); }
+    }();
 }
 void health_damage_detour(uintptr_t command, uintptr_t record, float damage) {
-    admission_mutex.lock();
-    quantity_mutex.lock();
-    __try {
-        const auto actor = record_actor(record);
-        const auto identifier = *reinterpret_cast<const uint32_t*>(record + 12);
-        const auto current = actor ? actor_health(actor, 0x6e8) : 0;
-        original_health_damage(command, record, damage);
-        auto& progress = health_progress[command];
-        const auto found = progress.actors.find(identifier);
-        if (found != progress.actors.end()) {
-            found->second.current = actor ? current : found->second.current - damage;
-        }
-    } __finally { quantity_mutex.unlock(); admission_mutex.unlock(); }
+    if (stopped.load(std::memory_order_acquire)) { original_health_damage(command, record, damage); return; }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    std::unique_lock<std::recursive_mutex> quantity(quantity_mutex);
+    [&]() -> void {
+        __try {
+            const auto actor = record_actor(record);
+            const auto identifier = *reinterpret_cast<const uint32_t*>(record + 12);
+            const auto current = actor ? actor_health(actor, 0x6e8) : 0;
+            original_health_damage(command, record, damage);
+            auto& progress = health_progress[command];
+            const auto found = progress.actors.find(identifier);
+            if (found != progress.actors.end()) {
+                found->second.current = actor ? current : found->second.current - damage;
+            }
+        } __finally { quantity.unlock(); admission.unlock(); }
+    }();
 }
 uint64_t health_result(uintptr_t command) {
     if (!*reinterpret_cast<const int32_t*>(command + 0xb0) && !*reinterpret_cast<const float*>(command + 0xc8))
@@ -3189,11 +3229,12 @@ uint64_t health_result(uintptr_t command) {
     return result && *result;
 }
 uint64_t health_detour(uintptr_t command) {
+    if (stopped.load(std::memory_order_acquire)) return original_health(command);
     WaitCost cost;
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> lock(quantity_mutex);
     try { const auto result = health_result(command); trace_quantity_wait(command, 'h', result); return result; }
-    catch (...) { return 0; }
+    catch (...) { recipe_fault.store(true, std::memory_order_release); return 0; }
 }
 float scale_movement(uintptr_t ai, float value) noexcept {
     const auto started=CostClock::now();
@@ -3584,21 +3625,24 @@ void invoke_show(uintptr_t actor, NativeUnary original, IndependentShow* indepen
     const auto previous_actor = active_show_actor;
     bool reserved = false;
     SpawnLimits limits{};
-    admission_mutex.lock();
-    __try {
-        if (prepare_show(actor, limits, reserved) &&
-                (stopped.load() || active_show_actor == actor || prepare_independent_show(actor, *independent))) {
-            active_show_actor = actor;
-            original(actor);
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    [&]() -> void {
+        __try {
+            if (prepare_show(actor, limits, reserved) &&
+                    (stopped.load() || active_show_actor == actor || prepare_independent_show(actor, *independent))) {
+                active_show_actor = actor;
+                original(actor);
+            }
+        } __finally {
+            finish_independent_show(actor, *independent);
+            active_show_actor = previous_actor;
+            if (reserved) release_admission(limits);
+            admission.unlock();
         }
-    } __finally {
-        finish_independent_show(actor, *independent);
-        active_show_actor = previous_actor;
-        if (reserved) release_admission(limits);
-        admission_mutex.unlock();
-    }
+    }();
 }
 void show_admitted(uintptr_t actor, NativeUnary original) {
+    if (stopped.load(std::memory_order_acquire)) { original(actor); return; }
     IndependentShow independent;
     invoke_show(actor, original, &independent);
 }
@@ -3630,14 +3674,17 @@ void try_hide_independent_bodies(uintptr_t actor) noexcept {
     try { hide_independent_bodies(actor); } catch (...) { recipe_fault.store(true); }
 }
 void hide_detour(uintptr_t actor) {
-    admission_mutex.lock();
-    __try {
-        if (active_show_actor != actor) {
-            cancel_deferred_show(actor);
-            try_hide_independent_bodies(actor);
-        }
-        original_hide(actor);
-    } __finally { admission_mutex.unlock(); }
+    if (stopped.load(std::memory_order_acquire)) { original_hide(actor); return; }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    [&]() -> void {
+        __try {
+            if (active_show_actor != actor) {
+                cancel_deferred_show(actor);
+                try_hide_independent_bodies(actor);
+            }
+            original_hide(actor);
+        } __finally { admission.unlock(); }
+    }();
 }
 bool prepare_traversal(uintptr_t context, TraversalEntry& entry) noexcept {
     __try {
@@ -3661,6 +3708,7 @@ bool prepare_traversal(uintptr_t context, TraversalEntry& entry) noexcept {
     } __except(EXCEPTION_EXECUTE_HANDLER) { recipe_fault.store(true); return false; }
 }
 bool animation_valid_detour(uintptr_t state, const char* message) {
+    if (stopped.load(std::memory_order_acquire)) return original_animation_valid(state, message);
     const auto valid = original_animation_valid(state, message);
     constexpr char missing[] = "AI waiting at traversal it has no anim for";
     if (!valid && traversal_entry && !traversal_entry->missing && message &&
@@ -3676,19 +3724,19 @@ bool animation_valid_detour(uintptr_t state, const char* message) {
     }
     return valid;
 }
-void invoke_traversal(uintptr_t state, uintptr_t context, uintptr_t actions, uintptr_t frame, TraversalEntry* entry) {
+void invoke_traversal(uintptr_t state, uintptr_t context, uintptr_t actions, uintptr_t frame, TraversalEntry* entry, std::unique_lock<std::recursive_mutex>& admission) {
     entry->previous = traversal_entry;
     __try {
         traversal_entry = entry;
         original_traversal_enter(state, context, actions, frame);
-    } __finally { traversal_entry = entry->previous; admission_mutex.unlock(); }
+    } __finally { traversal_entry = entry->previous; admission.unlock(); }
 }
 void traversal_enter_detour(uintptr_t state, uintptr_t context, uintptr_t actions, uintptr_t frame) {
     if (stopped.load()) { original_traversal_enter(state, context, actions, frame); return; }
     TraversalEntry entry;
-    admission_mutex.lock();
-    if (prepare_traversal(context, entry)) { invoke_traversal(state, context, actions, frame, &entry); return; }
-    admission_mutex.unlock();
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    if (prepare_traversal(context, entry)) { invoke_traversal(state, context, actions, frame, &entry, admission); return; }
+    admission.unlock();
     if (!entry.actor) original_traversal_enter(state, context, actions, frame);
 }
 void reserve_admission(const SpawnLimits& limits) {
@@ -3707,12 +3755,12 @@ void retry_immediate(uintptr_t manager) {
     rewind_timeline(manager + 0xe20, *reinterpret_cast<const int32_t*>(manager + 0xda0));
     *reinterpret_cast<uint8_t*>(manager + 0xdac) = 1;
 }
-bool begin_immediate(ImmediateRequest* request, uintptr_t manager, uintptr_t origin) {
+bool begin_immediate(ImmediateRequest* request, uintptr_t manager, uintptr_t origin, std::unique_lock<std::recursive_mutex>& admission) {
     char name[512];
     if (stopped.load(std::memory_order_acquire) || !read_definition_name(origin, name)) return false;
     const auto limits = spawn_limits(name);
     if (!limits) return false;
-    admission_mutex.lock();
+    admission.lock();
     request->previous = immediate_request;
     request->manager = manager;
     request->origin = origin;
@@ -3723,37 +3771,45 @@ bool begin_immediate(ImmediateRequest* request, uintptr_t manager, uintptr_t ori
     immediate_request = request;
     return true;
 }
-void end_immediate(ImmediateRequest* request) {
+void end_immediate(ImmediateRequest* request, std::unique_lock<std::recursive_mutex>& admission) {
     if (request->reserved) release_admission(request->limits);
     immediate_request = request->previous;
-    admission_mutex.unlock();
+    admission.unlock();
 }
 uintptr_t __fastcall single_detour(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t point, uintptr_t label) {
-    uintptr_t recipe_result;
-    if (dispatch_recipe_immediate(manager, output, type, point, label, false, recipe_result)) return recipe_result;
-    ImmediateRequest request{};
-    if (!begin_immediate(&request, manager, point)) return original_single(manager, output, type, point, label);
-    uintptr_t result = output;
-    __try {
-        if (request.reserved) result = original_single(manager, output, type, point, label);
-        if (!request.succeeded) retry_immediate(manager);
-    } __finally { end_immediate(&request); }
-    return result;
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex, std::defer_lock);
+    return [&]() -> uintptr_t {
+        if (stopped.load(std::memory_order_acquire)) return original_single(manager, output, type, point, label);
+        uintptr_t recipe_result;
+        if (dispatch_recipe_immediate(manager, output, type, point, label, false, recipe_result)) return recipe_result;
+        ImmediateRequest request{};
+        if (!begin_immediate(&request, manager, point, admission)) return original_single(manager, output, type, point, label);
+        uintptr_t result = output;
+        __try {
+            if (request.reserved) result = original_single(manager, output, type, point, label);
+            if (!request.succeeded) retry_immediate(manager);
+        } __finally { end_immediate(&request, admission); }
+        return result;
+    }();
 }
 uintptr_t __fastcall multiple_detour(uintptr_t manager, uintptr_t output, uint64_t type, int32_t count,
                                     uintptr_t group, uintptr_t label) {
-    uintptr_t recipe_result;
-    if (count == 1 && dispatch_recipe_immediate(manager, output, type, group, label, true, recipe_result)) return recipe_result;
-    ImmediateRequest request{};
-    // larger requests belong to the native worker, whose remaining count survives refusal.
-    if (count != 1 || !begin_immediate(&request, manager, group))
-        return original_multiple(manager, output, type, count, group, label);
-    uintptr_t result = output;
-    __try {
-        if (request.reserved) result = original_multiple(manager, output, type, count, group, label);
-        if (!request.succeeded) retry_immediate(manager);
-    } __finally { end_immediate(&request); }
-    return result;
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex, std::defer_lock);
+    return [&]() -> uintptr_t {
+        if (stopped.load(std::memory_order_acquire)) return original_multiple(manager, output, type, count, group, label);
+        uintptr_t recipe_result;
+        if (count == 1 && dispatch_recipe_immediate(manager, output, type, group, label, true, recipe_result)) return recipe_result;
+        ImmediateRequest request{};
+        // larger requests belong to the native worker, whose remaining count survives refusal.
+        if (count != 1 || !begin_immediate(&request, manager, group, admission))
+            return original_multiple(manager, output, type, count, group, label);
+        uintptr_t result = output;
+        __try {
+            if (request.reserved) result = original_multiple(manager, output, type, count, group, label);
+            if (!request.succeeded) retry_immediate(manager);
+        } __finally { end_immediate(&request, admission); }
+        return result;
+    }();
 }
 bool owns_immediate_admission(uintptr_t manager, const SpawnLimits& limits, const SpawnTracking* tracking) {
     return immediate_request && immediate_request->reserved && immediate_request->manager == manager &&
@@ -3763,29 +3819,35 @@ bool owns_immediate_admission(uintptr_t manager, const SpawnLimits& limits, cons
 }
 uintptr_t __fastcall spirit_detour(uintptr_t manager, uintptr_t output, uintptr_t point, uint64_t allowed_hosts,
                                   uintptr_t label, uint8_t flag) {
-    uintptr_t recipe_result;
-    if (dispatch_recipe_immediate(manager, output, 0, point, label, false, recipe_result)) return recipe_result;
-    char name[512];
-    if (!read_definition_name(point, name) || !spawn_tracking(name))
-        return original_spirit(manager, output, point, allowed_hosts, label, flag);
-    ImmediateRequest request{};
-    if (!begin_immediate(&request, manager, point))
-        return original_spirit(manager, output, point, allowed_hosts, label, flag);
-    request.direct_factory = true;
-    uintptr_t result = output;
-    __try {
-        if (request.reserved) result = original_spirit(manager, output, point, allowed_hosts, label, flag);
-        if (!request.succeeded) retry_immediate(manager);
-    } __finally { end_immediate(&request); }
-    return result;
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex, std::defer_lock);
+    return [&]() -> uintptr_t {
+        if (stopped.load(std::memory_order_acquire)) return original_spirit(manager, output, point, allowed_hosts, label, flag);
+        uintptr_t recipe_result;
+        if (dispatch_recipe_immediate(manager, output, 0, point, label, false, recipe_result)) return recipe_result;
+        char name[512];
+        if (!read_definition_name(point, name) || !spawn_tracking(name))
+            return original_spirit(manager, output, point, allowed_hosts, label, flag);
+        ImmediateRequest request{};
+        if (!begin_immediate(&request, manager, point, admission))
+            return original_spirit(manager, output, point, allowed_hosts, label, flag);
+        request.direct_factory = true;
+        uintptr_t result = output;
+        __try {
+            if (request.reserved) result = original_spirit(manager, output, point, allowed_hosts, label, flag);
+            if (!request.succeeded) retry_immediate(manager);
+        } __finally { end_immediate(&request, admission); }
+        return result;
+    }();
 }
 uintptr_t archvile_detour(uintptr_t manager, uintptr_t output, uintptr_t point, uintptr_t arch_template,
                            uintptr_t label, const char* group) {
+    if (stopped.load(std::memory_order_acquire)) return original_archvile(manager, output, point, arch_template, label, group);
     uintptr_t result;
     if (dispatch_recipe_immediate(manager, output, 0, point, label, false, result)) return result;
     return original_archvile(manager, output, point, arch_template, label, group);
 }
 uintptr_t buff_detour(uintptr_t manager, uintptr_t output, uintptr_t point, uintptr_t label, const char* group) {
+    if (stopped.load(std::memory_order_acquire)) return original_buff(manager, output, point, label, group);
     uintptr_t result;
     if (dispatch_recipe_immediate(manager, output, 0, point, label, false, result)) return result;
     return original_buff(manager, output, point, label, group);
@@ -3811,24 +3873,30 @@ bool recipe_library_point(uintptr_t point) {
         value.rfind("ap_v070_landing_", 0) == 0;
 }
 uint64_t __fastcall point_candidate_detour(uintptr_t manager, uintptr_t point, uint64_t type) {
-    admission_mutex.lock();
-    __try {
-        if (recipe_library_point(point) || !recipe_arena_point(point)) return 0;
-        const auto result = tracked_point_type(manager, point, type) ? 1 : original_point_candidate(manager, point, type);
-        if (!result && recipe_creation && recipe_creation->source == point)
-            trace_recipe_spawn(*recipe_creation, recipe_creation->body, point, 16);
-        return result;
-    } __finally { admission_mutex.unlock(); }
+    if (stopped.load(std::memory_order_acquire)) return original_point_candidate(manager, point, type);
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    return [&]() -> uint64_t {
+        __try {
+            if (recipe_library_point(point) || !recipe_arena_point(point)) return 0;
+            const auto result = tracked_point_type(manager, point, type) ? 1 : original_point_candidate(manager, point, type);
+            if (!result && recipe_creation && recipe_creation->source == point)
+                trace_recipe_spawn(*recipe_creation, recipe_creation->body, point, 16);
+            return result;
+        } __finally { admission.unlock(); }
+    }();
 }
 int32_t __fastcall point_index_detour(uintptr_t manager, uintptr_t point, uint64_t type) {
-    admission_mutex.lock();
-    __try {
-        if (recipe_library_point(point) || !recipe_arena_point(point)) return -1;
-        const auto result = tracked_point_type(manager, point, type) ? 0 : original_point_index(manager, point, type);
-        if (result < 0 && recipe_creation && recipe_creation->source == point)
-            trace_recipe_spawn(*recipe_creation, recipe_creation->body, point, 32);
-        return result;
-    } __finally { admission_mutex.unlock(); }
+    if (stopped.load(std::memory_order_acquire)) return original_point_index(manager, point, type);
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    return [&]() -> int32_t {
+        __try {
+            if (recipe_library_point(point) || !recipe_arena_point(point)) return -1;
+            const auto result = tracked_point_type(manager, point, type) ? 0 : original_point_index(manager, point, type);
+            if (result < 0 && recipe_creation && recipe_creation->source == point)
+                trace_recipe_spawn(*recipe_creation, recipe_creation->body, point, 32);
+            return result;
+        } __finally { admission.unlock(); }
+    }();
 }
 uintptr_t invoke_direct_creation(RecipeCreation* creation, uintptr_t point) {
     __try {
@@ -3926,9 +3994,12 @@ uintptr_t point_factory_locked(uintptr_t point, uintptr_t group) {
     return result;
 }
 uintptr_t __fastcall point_factory_detour(uintptr_t point, uintptr_t group) {
-    admission_mutex.lock();
-    __try { return point_factory_locked(point, group); }
-    __finally { admission_mutex.unlock(); }
+    if (stopped.load(std::memory_order_acquire)) return original_point_factory(point, group);
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    return [&]() -> uintptr_t {
+        __try { return point_factory_locked(point, group); }
+        __finally { admission.unlock(); }
+    }();
 }
 uint64_t create_tracked(uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth,
                         uint64_t physical) {
@@ -3956,25 +4027,28 @@ uint64_t create_tracked(uintptr_t manager, uintptr_t record, uintptr_t point, ui
 }
 uint64_t spawn_marked(uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth,
                       const SpawnLimits* limits, const SpawnTracking* tracking) {
-    admission_mutex.lock();
-    uint64_t result = 0;
-    bool reserved = false;
-    __try {
-        const auto owned = owns_immediate_admission(manager, *limits, tracking);
-        const auto immediate = immediate_request && immediate_request->manager == manager;
-        if ((immediate && owned) || (!immediate && generated_admission(*limits))) {
-            if (!owned) { reserve_admission(*limits); reserved = true; }
-            result = tracking ? create_tracked(manager, record, point, fourth, fifth, tracking->physical) :
-                original_spawn(manager, record, point, fourth, fifth);
-            if (owned && result) immediate_request->succeeded = true;
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    return [&]() -> uint64_t {
+        uint64_t result = 0;
+        bool reserved = false;
+        __try {
+            const auto owned = owns_immediate_admission(manager, *limits, tracking);
+            const auto immediate = immediate_request && immediate_request->manager == manager;
+            if ((immediate && owned) || (!immediate && generated_admission(*limits))) {
+                if (!owned) { reserve_admission(*limits); reserved = true; }
+                result = tracking ? create_tracked(manager, record, point, fourth, fifth, tracking->physical) :
+                    original_spawn(manager, record, point, fourth, fifth);
+                if (owned && result) immediate_request->succeeded = true;
+            }
+        } __finally {
+            if (reserved) release_admission(*limits);
+            admission.unlock();
         }
-    } __finally {
-        if (reserved) release_admission(*limits);
-        admission_mutex.unlock();
-    }
-    return result;
+        return result;
+    }();
 }
 uint64_t __fastcall spawn_detour(uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth) {
+    if (stopped.load(std::memory_order_acquire)) return original_spawn(manager, record, point, fourth, fifth);
     if (recipe_creation && !recipe_creation->creating) {
         const auto physical = recipe_point_type(point);
         return physical ? create_tracked(manager, record, point, fourth, fifth, physical) :
@@ -4117,9 +4191,12 @@ void register_spawn_locked(uintptr_t manager, uint64_t* record) {
     if (!register_independent_extras(manager, *independent, copy, label)) independent_memberships_pending = true;
 }
 void __fastcall register_spawn_detour(uintptr_t manager, uint64_t* record) {
-    admission_mutex.lock();
-    __try { register_spawn_locked(manager, record); }
-    __finally { admission_mutex.unlock(); }
+    if (stopped.load(std::memory_order_acquire)) { original_register_spawn(manager, record); return; }
+    std::unique_lock<std::recursive_mutex> admission(admission_mutex);
+    [&]() -> void {
+        __try { register_spawn_locked(manager, record); }
+        __finally { admission.unlock(); }
+    }();
 }
 float __fastcall movement_detour(uintptr_t ai) {
     const auto value = original_movement(ai);
@@ -4696,6 +4773,7 @@ void map_freed() {
 }
 #ifdef SC_NATIVE_TESTING
 #include <memory>
+#include "../tests/expanded_stop.inc"
 bool darklord_fault_call(uintptr_t component) {
     __try { darklord_summon_detour(component); }
     __except(EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode() == 0xe0700003; }
@@ -6084,14 +6162,14 @@ bool test_quantity_inputs() {
     actors[4].dead = true; *reinterpret_cast<int32_t*>(command.data() + 0xc0) = 2;
     ok = ok && remaining_detour(cmd) == 0;
     actors[1].dead = true; ok = ok && remaining_detour(cmd) == 1;
-    stopped.store(true); ok = ok && remaining_detour(cmd) == 1; stopped.store(false);
+    stopped.store(true); ok = ok && remaining_detour(cmd) == 42; stopped.store(false);
     *reinterpret_cast<int32_t*>(command.data() + 0xb0) = 2;
     actors[0].name = actors[1].name = "ai/fodder/imp";
     for (unsigned i = 0; i < 2; ++i) {
         *reinterpret_cast<uint32_t*>(records.data() + i * 0x68 + 8) = i + 101;
         *reinterpret_cast<uint32_t*>(records.data() + i * 0x68 + 12) = i + 101;
     }
-    ok = ok && remaining_detour(cmd) == 42 && native_calls == 1;
+    ok = ok && remaining_detour(cmd) == 42 && native_calls == 2;
     const auto previous_kill = original_kill;
     const auto previous_kill_dead = original_kill_dead;
     const auto previous_maintain_cast = cast_maintain, previous_stagger_cast = cast_stagger;

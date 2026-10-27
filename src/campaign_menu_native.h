@@ -3,6 +3,9 @@
 #include "native_target.h"
 #include "sentinel_campaign_menu.h"
 #include <string>
+#ifdef SC_NATIVE_TESTING
+#include <MinHook.h>
+#endif
 
 namespace sentinel::campaign_menu {
 // check the bindings before the domain hooks patch shared functions
@@ -26,6 +29,7 @@ struct MeterDiagnostics {
 };
 MeterDiagnostics meter_diagnostics();
 #ifdef SC_NATIVE_TESTING
+bool test_install_hooks(const std::array<native::Target,46>&,decltype(&MH_EnableHook));
 bool test_hud_score_root();
 bool test_physical_completion_edges();
 bool test_question_material();

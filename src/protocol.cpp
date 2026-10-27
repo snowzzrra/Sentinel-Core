@@ -129,7 +129,7 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
         return WireResult::ok;
     }
     if (op == automap_operation) {
-        if (length != 217) return WireResult::malformed;
+        if (length != 153 + SC_AUTOMAP_LOCATION_BITS / 8) return WireResult::malformed;
         if (r.number(8) != automap_capability) return WireResult::capability_unavailable;
         Message identity = in;
         Writer fixed{identity, 6}; fixed.number(diagnostic_submit_operation, 2); fixed.number(72, 4);
@@ -1943,7 +1943,7 @@ template<class Codec> bool automap_values(Codec& c,sc_automap_result& v) {
 }
 size_t encode_automap_request(Message& out,const sc_automap_request& request) {
     const auto end=encode_native_request(out,diagnostic_submit_operation,request.execution);
-    Writer h{out}; header(h,wire_version,automap_operation,217,WireResult::ok); h.number(automap_capability,8);
+    Writer h{out}; header(h,wire_version,automap_operation,153+SC_AUTOMAP_LOCATION_BITS/8,WireResult::ok); h.number(automap_capability,8);
     Writer w{out,end}; for (auto ch:request.namespace_id) w.number(static_cast<uint8_t>(ch),1);
     w.number(request.kind,4); w.number(request.known,4); w.number(request.revision,8);
     for (auto bits:request.checked_locations) w.number(bits,8);

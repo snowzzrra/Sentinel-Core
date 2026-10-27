@@ -1728,9 +1728,9 @@ bool validate_native_targets(save::Installation& record,engine::Memory& source_m
     }
     return true;
 }
-bool install(const engine::Binding& binding,HANDLE stop) {
-    if (!save::session().campaign_run.enabled()) return true;
-    const auto targets=native_targets(binding.image.base);
+static bool install_hooks(const engine::Binding& binding,HANDLE stop,
+                          const std::array<native::Target,46>& targets,
+                          decltype(&MH_EnableHook) enable_hook=MH_EnableHook) {
     meter_visibility_return=binding.image.base+0x1116e07;
     hud_score_vtable=binding.image.base+0x2d01de8;
     void* detours[]={reinterpret_cast<void*>(populate),reinterpret_cast<void*>(focus),reinterpret_cast<void*>(load),
@@ -1747,8 +1747,23 @@ bool install(const engine::Binding& binding,HANDLE stop) {
         reinterpret_cast<void*>(trigger_gate),reinterpret_cast<void*>(hud_score_update)};
     constexpr unsigned hooked[]={0,1,2,3,4,11,12,9,15,16,17,27,28,29,30,31,32,34,35,38,39,41,42,45};
     void* originals[24]{};
-    for (unsigned i=0;i<24;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
-        return MH_CreateHook(reinterpret_cast<void*>(targets[hooked[i]].address),detours[i],&originals[i]); })!=MH_OK) return false;
+    std::array<void*,35> created{};
+    size_t created_count=0;
+    const auto rollback=[&] {
+        ready.store(false,std::memory_order_release);
+        while (created_count) {
+            const auto site=created[--created_count];
+            const auto rva=static_cast<uint32_t>(reinterpret_cast<uintptr_t>(site)-binding.image.base);
+            MH_DisableHook(site);
+            save::session().installation.hook(SC_INSTALL_REMOVE,6,SC_INSTALL_UNKNOWN,rva,[&] { return MH_RemoveHook(site); });
+        }
+        return false;
+    };
+    for (unsigned i=0;i<24;++i) {
+        if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
+            return MH_CreateHook(reinterpret_cast<void*>(targets[hooked[i]].address),detours[i],&originals[i]); })!=MH_OK) return rollback();
+        created[created_count++]=reinterpret_cast<void*>(targets[hooked[i]].address);
+    }
     original_populate=reinterpret_cast<Populate>(originals[0]); original_focus=reinterpret_cast<Update>(originals[1]);
     original_load=reinterpret_cast<Load>(originals[2]); original_available=reinterpret_cast<Available>(originals[3]);
     original_update=reinterpret_cast<Update>(originals[4]);
@@ -1793,7 +1808,7 @@ bool install(const engine::Binding& binding,HANDLE stop) {
     original_hud_score_update=reinterpret_cast<Update>(originals[23]);
     end_items_category_vtable=binding.image.base+0x2d10d78;
     for (unsigned i=0;i<24;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
-        return MH_EnableHook(reinterpret_cast<void*>(targets[hooked[i]].address)); })!=MH_OK) return false;
+        return enable_hook(reinterpret_cast<void*>(targets[hooked[i]].address)); })!=MH_OK) return rollback();
     struct OptionalPageHook { uint32_t rva; const char* bytes; void* hook; void** original; };
     const OptionalPageHook pages[]={
         {0xf42930,"488bc4565741554883ec7048895810488bf14c896020e885a72800488bcee85d",reinterpret_cast<void*>(challenges_show),reinterpret_cast<void**>(&original_challenges_show)},
@@ -1814,14 +1829,31 @@ bool install(const engine::Binding& binding,HANDLE stop) {
             unsigned value=0; sscanf_s(page.bytes+n*2,"%2x",&value); target.bytes[n]=static_cast<uint8_t>(value);
         }
         auto reason=native::validate_target(optional_memory,binding.image,target,stop,GetTickCount64()+3000);
-        if (!reason && page.hook) {
-            reason=MH_CreateHook(reinterpret_cast<void*>(target.address),page.hook,page.original);
-            if (!reason) reason=MH_EnableHook(reinterpret_cast<void*>(target.address));
+        const bool installing=!reason && page.hook;
+        if (installing) {
+            reason=save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,SC_INSTALL_UNKNOWN,page.rva,[&] {
+                return MH_CreateHook(reinterpret_cast<void*>(target.address),page.hook,page.original); });
+            if (!reason) {
+                created[created_count++]=reinterpret_cast<void*>(target.address);
+                reason=save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,SC_INSTALL_UNKNOWN,page.rva,[&] {
+                    return enable_hook(reinterpret_cast<void*>(target.address)); });
+            }
         } else if (!reason) *page.original=reinterpret_cast<void*>(target.address);
         save::session().btrace.record(save::BStage::dossier_challenges,
             reason ? save::BStatus::refused : save::BStatus::succeeded,"campaign_page_binding",0,
             {{"rva",page.rva},{"reason",reason}});
+        if (installing && reason) return rollback();
     }
     ready.store(true,std::memory_order_release); return true;
 }
+bool install(const engine::Binding& binding,HANDLE stop) {
+    if (!save::session().campaign_run.enabled()) return true;
+    return install_hooks(binding,stop,native_targets(binding.image.base));
+}
+#ifdef SC_NATIVE_TESTING
+bool test_install_hooks(const std::array<native::Target,46>& targets,decltype(&MH_EnableHook) enable_hook) {
+    engine::Binding binding{};
+    return install_hooks(binding,nullptr,targets,enable_hook);
+}
+#endif
 }

@@ -11,7 +11,10 @@ def project(registry):
     return ('// Generated from checked_location_visuals.json; exact canonical map ownership.\n'
             'struct AutomapMarker { uint32_t location; const char* map; };\n'
             'constexpr AutomapMarker automap_markers[] = {\n' +
-            ''.join(f'    {{{code}u, "{runtime_map}"}},\n' for code, runtime_map in rows) + '};\n')
+            ''.join(f'    {{{code}u, "{runtime_map}"}},\n' for code, runtime_map in rows) + '};\n'
+            'static_assert([] { for (const auto& marker : automap_markers)\n'
+            '    if (marker.location < SC_AUTOMAP_LOCATION_BASE || marker.location - SC_AUTOMAP_LOCATION_BASE >= SC_AUTOMAP_LOCATION_BITS) return false;\n'
+            '    return true; }(), "Automap catalog exceeds snapshot capacity");\n')
 
 
 if __name__ == '__main__':

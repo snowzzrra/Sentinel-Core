@@ -239,6 +239,7 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
 #include "campaign_travel_fixture.h"
 }
 #include "startup_route_fixture.h"
+void test_campaign_hook_cleanup();
 int wmain(int argc,wchar_t** argv) {
     CHECK(argc==4 || argc==5);
     std::filesystem::create_directories(argv[2]);
@@ -249,6 +250,15 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
+    if (defect==L"expanded_stop") {
+        CHECK(sentinel::expanded::test_stopped_hooks());
+        CHECK(sentinel::expanded::test_hook_faults());
+        std::puts("PASS stopped gameplay hooks forward native calls without Sentinel mutation"); return 0;
+    }
+    if (defect==L"hook_cleanup") {
+        test_campaign_hook_cleanup();
+        std::puts("PASS campaign hook creation and enable failures unwind each owned hook"); return 0;
+    }
     if (defect==L"combat_contention") {
         CHECK(sentinel::combat::test_observation_contention());
         std::puts("PASS combat observations survive concurrent readers and duplicate death notifications"); return 0;
