@@ -27,13 +27,13 @@ void run_backup_request_contracts();
 int main() {
     for (int stage = 0; stage <= 4; ++stage) {
         const auto mask = (1u << stage) - 1;
-        CHECK(inventory::capacity_stage(mask, mask, stage, stage) == stage);
-        CHECK(inventory::capacity_stage(mask, mask, stage, stage + 1) == 255);
+        CHECK(inventory::capacity_stage(mask, mask, stage) == stage);
+        CHECK(inventory::capacity_stage(mask, mask, stage + 1) == 255);
     }
-    CHECK(inventory::capacity_stage(5, 5, 2, 2) == 255);
-    CHECK(inventory::capacity_stage(3, 1, 2, 2) == 255);
-    CHECK(inventory::capacity_stage(0, 0, -1, 0) == 255);
-    CHECK(inventory::capacity_stage(31, 31, 5, 5) == 255);
+    CHECK(inventory::capacity_stage(5, 5, 2) == 255);
+    CHECK(inventory::capacity_stage(3, 1, 2) == 255);
+    CHECK(inventory::capacity_stage(0, 0, -1) == 255);
+    CHECK(inventory::capacity_stage(31, 31, 5) == 255);
     sentinel::inventory::SnapshotFacts inventory_facts{};
     sentinel::inventory::Calls inventory_calls{
         &inventory_facts,

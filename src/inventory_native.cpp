@@ -25,10 +25,12 @@ uintptr_t player(void*) {
 uint8_t read_capacity(uintptr_t p, uintptr_t inv, uintptr_t type, uintptr_t perk_type,
                       const char* family, unsigned index) {
     __try {
-        const auto suit = p + 0x192f0;
-        const auto list = *reinterpret_cast<const uintptr_t**>(suit + 8);
-        const auto count = *reinterpret_cast<const int*>(suit + 0x10);
-        if (count < 0 || count > 4096 || (count && !list)) return SC_INVENTORY_UNKNOWN_TIER;
+        const auto perks = p + 0x3b40;
+        for (const unsigned offset : {0x50u, 0x68u}) {
+            const auto count = *reinterpret_cast<const int*>(perks + offset + 8);
+            if (count < 0 || count > 4096 || (count && !*reinterpret_cast<const uintptr_t*>(perks + offset)))
+                return SC_INVENTORY_UNKNOWN_TIER;
+        }
         const char* host_path = "abilities/environmentsuit";
         const auto host_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
             image_base + 0x17aa5d0)(type, host_path, 1);
@@ -38,7 +40,7 @@ uint8_t read_capacity(uintptr_t p, uintptr_t inv, uintptr_t type, uintptr_t perk
         const auto host = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
             image_base + 0x1690660)(inv, host_decl);
         if (!host) return SC_INVENTORY_UNKNOWN_TIER;
-        uint32_t owned = 0, active = 0;
+        uint32_t available = 0, active = 0;
         for (unsigned stage = 0; stage < 4; ++stage) {
             char path[80]{};
             std::snprintf(path, sizeof(path), "perk/player/argent/%s_capacity_%u", family, stage);
@@ -47,14 +49,13 @@ uint8_t read_capacity(uintptr_t p, uintptr_t inv, uintptr_t type, uintptr_t perk
             if (!decl) return SC_INVENTORY_UNKNOWN_TIER;
             const auto name = *reinterpret_cast<const char**>(decl + 8);
             if (!name || std::strcmp(name, path)) return SC_INVENTORY_UNKNOWN_TIER;
-            for (int i = 0; i < count; ++i)
-                if (list[i] == decl) { owned |= 1u << stage; break; }
-            if (reinterpret_cast<uint8_t(*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0)(p + 0x3b40, decl))
+            if (reinterpret_cast<uint8_t(*)(uintptr_t, uintptr_t)>(image_base + 0xfe3830)(perks, decl))
+                available |= 1u << stage;
+            if (reinterpret_cast<uint8_t(*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0)(perks, decl))
                 active |= 1u << stage;
         }
-        return capacity_stage(owned, active,
-            *reinterpret_cast<const int*>(suit + 0x2b8 + 4 * index),
-            *reinterpret_cast<const int*>(host + 0x318 + 4 * index));
+        // givePlayerPerk updates the perk component and suit host without acquiring a Crystal UI node.
+        return capacity_stage(available, active, *reinterpret_cast<const int*>(host + 0x318 + 4 * index));
     } __except(EXCEPTION_EXECUTE_HANDLER) { return SC_INVENTORY_UNKNOWN_TIER; }
 }
 

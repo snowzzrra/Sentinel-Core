@@ -1424,7 +1424,7 @@ uint64_t darklord_summon_type(uintptr_t definition) {
 struct DarklordDefinition { uintptr_t* slot; uintptr_t original, replacement; };
 thread_local const std::vector<DarklordDefinition>* darklord_replacements = nullptr;
 thread_local uintptr_t darklord_component = 0;
-uintptr_t physical_recipe_actor(uintptr_t definition, const float* pose, uint32_t state);
+uintptr_t physical_recipe_actor(uintptr_t definition, const float* pose, uint32_t state, bool activate = false);
 
 uintptr_t managed_actor_factory_detour(uintptr_t world, uintptr_t info) {
     if (!darklord_replacements || !darklord_component)
@@ -1438,7 +1438,7 @@ uintptr_t managed_actor_factory_detour(uintptr_t world, uintptr_t info) {
         // the boss applies each final summon position before returning to the game loop.
         float pose[12]; std::memcpy(pose, reinterpret_cast<const void*>(parent + 0x74), sizeof(pose));
         if (std::all_of(pose, pose + 12, [](float value) { return std::isfinite(value); })) {
-            const auto actor = physical_recipe_actor(definition, pose, 12);
+            const auto actor = physical_recipe_actor(definition, pose, 12, true);
             if (actor) return actor;
         }
     }
@@ -1882,7 +1882,7 @@ bool capture_autonomous_summons(RecipeNativeCheckpoint& checkpoint) {
     }
     return true;
 }
-uintptr_t physical_recipe_actor(uintptr_t definition, const float* pose, uint32_t state) {
+uintptr_t physical_recipe_actor(uintptr_t definition, const float* pose, uint32_t state, bool activate) {
     std::array<uint8_t, 0x138> info{};
     unsigned strings = 0;
     uintptr_t actor = 0;
@@ -1901,6 +1901,8 @@ uintptr_t physical_recipe_actor(uintptr_t definition, const float* pose, uint32_
             *reinterpret_cast<uint64_t*>(info.data() + offset) = uint64_t{0x1fffffe} << 32 | 0x1fffffe;
         for (const auto offset : {0xf8, 0x100, 0x108}) *reinterpret_cast<int32_t*>(info.data() + offset) = -1;
         *reinterpret_cast<uint32_t*>(info.data() + 0xfc) = 0x1fffffe;
+        // Dark Lord summons need the activation flag used by native SpawnAI.
+        info[0x104] = activate ? 1 : 0;
         info[0x105] = 1;
         actor = original_actor_factory(address);
     } __finally {
@@ -4826,7 +4828,8 @@ bool test_darklord_summon_scope() {
         physical_fields = *reinterpret_cast<const uintptr_t*>(info) == 33 &&
             *reinterpret_cast<const uint8_t*>(info + 9) == 1 &&
             *reinterpret_cast<const float*>(info + 0x40) == 42.0f &&
-            *reinterpret_cast<const uint32_t*>(info + 0x70) == 12;
+            *reinterpret_cast<const uint32_t*>(info + 0x70) == 12 &&
+            *reinterpret_cast<const uint8_t*>(info + 0x104) == 1;
         return 0x123;
     };
     original_managed_actor_factory = [](uintptr_t, uintptr_t) -> uintptr_t { ++managed_calls; return 0x456; };

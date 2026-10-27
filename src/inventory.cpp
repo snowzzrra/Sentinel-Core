@@ -4,11 +4,11 @@
 #include <atomic>
 
 namespace sentinel::inventory {
-uint8_t capacity_stage(uint32_t owned, uint32_t active, int saved_count, int host_level) {
-    if (saved_count < 0 || saved_count > SC_INVENTORY_MAX_CAPACITY_TIER ||
-        host_level != saved_count || owned != ((1u << saved_count) - 1) || active != owned)
+uint8_t capacity_stage(uint32_t available, uint32_t active, int host_level) {
+    if (host_level < 0 || host_level > SC_INVENTORY_MAX_CAPACITY_TIER ||
+        available != ((1u << host_level) - 1) || active != available)
         return SC_INVENTORY_UNKNOWN_TIER;
-    return static_cast<uint8_t>(saved_count);
+    return static_cast<uint8_t>(host_level);
 }
 
 namespace {

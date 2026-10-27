@@ -7,7 +7,7 @@ namespace sentinel::inventory {
 bool valid(const sc_inventory_request&);
 bool same(const sc_inventory_request&, const sc_inventory_request&);
 sc_inventory_result initial(const sc_inventory_request&);
-uint8_t capacity_stage(uint32_t owned, uint32_t active, int saved_count, int host_level);
+uint8_t capacity_stage(uint32_t available, uint32_t active, int host_level);
 
 struct SnapshotFacts {
     uint32_t weapons = SC_INVENTORY_UNKNOWN_MASK;
