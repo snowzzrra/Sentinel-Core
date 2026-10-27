@@ -59,10 +59,12 @@ void execute(const sc_special_request&, sc_special_result&, const Calls&);
 void install(const engine::Binding&, HANDLE stop);
 bool available();
 bool selection_route_available();
+uint32_t refill_crucible(uintptr_t player);
 save::BSnapshot installation_diagnostics();
 save::BSnapshot input_diagnostics();
 save::BSnapshot route_diagnostics();
 save::BSnapshot hud_diagnostics();
+void present_combat_progress(uintptr_t root, uintptr_t anchor, bool visible);
 struct UseHistory {
     uint64_t sequence = 0, overwritten = 0, lock_dropped = 0;
     uint64_t attempt = 0, attempt_started = 0, idle_queries = 0, coalesced = 0;

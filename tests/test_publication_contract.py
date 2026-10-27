@@ -18,6 +18,8 @@ COMMIT = "a" * 40
 
 def fixture(root, stable=False, dirty=False):
     files = {"sentinel_core.dll": b"core", "msimg32.dll": b"bootstrap", "sentinel_probe.exe": b"probe", "notices/LICENSE.txt": b"license"}
+    for name in ("sentinel_core.dll", "msimg32.dll"):
+        files[name] += b"b" * 64 + b"\0"
     for name, data in files.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)

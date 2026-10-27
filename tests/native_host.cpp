@@ -226,6 +226,13 @@ int wmain(int argc, wchar_t** argv) {
     *reinterpret_cast<uintptr_t*>(automap_test_object+0x18)=0x12345678;
     CHECK(native::test_automap_uncollected(automap_test_object,fixture_automap_uncollected));
     CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==1);
+    *reinterpret_cast<int32_t*>(automap_test_object+0x134)=0;
+    *reinterpret_cast<uintptr_t*>(automap_test_object+0x18)=0;
+    CHECK(!native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
+    CHECK(automap_collect_calls==2);
+    *reinterpret_cast<uintptr_t*>(automap_test_object+0x18)=0x12345678;
+    CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
+    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3 && automap_collect_calls==3);
     parked = CreateEventW(nullptr, TRUE, FALSE, nullptr); wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     gate_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr); gate_release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     changed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -253,6 +260,19 @@ int wmain(int argc, wchar_t** argv) {
         }
     });
     until([] { return caller.load() && originals.load(); }); park();
+    std::array<uint8_t,0xc80> saved_trigger{};
+    saved_trigger[0xb9e]=1;
+    const auto arm=+[](uintptr_t target,uintptr_t player) {
+        CHECK(player==42);
+        CHECK(*reinterpret_cast<uint8_t*>(target+0xb9e)==1);
+        *reinterpret_cast<uint8_t*>(target+0xb9e)=0;
+    };
+    const auto trigger=reinterpret_cast<uintptr_t>(saved_trigger.data());
+    CHECK(native::test_arm_first_contact(trigger,reinterpret_cast<uintptr_t>(arm),42));
+    CHECK(!native::test_arm_first_contact(trigger,reinterpret_cast<uintptr_t>(arm),42));
+    saved_trigger[0xb9e]=2;
+    CHECK(!native::test_arm_first_contact(trigger,reinterpret_cast<uintptr_t>(arm),42));
+    CHECK(!native::test_arm_first_contact(0,reinterpret_cast<uintptr_t>(arm),42));
     native::TestAdapter adapter{};
     adapter.root = reinterpret_cast<uintptr_t>(&root_object); adapter.common = reinterpret_cast<uintptr_t>(&common_object);
     adapter.caller = caller.load();

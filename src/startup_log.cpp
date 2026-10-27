@@ -7,6 +7,7 @@
 #include "runes.h"
 #include "weapon_points.h"
 #include "deathlink.h"
+#include "combat_native.h"
 #include <filesystem>
 #include <windows.h>
 #include <string>
@@ -47,6 +48,9 @@ std::string parser_trace(const save::ParserObservation& p) {
         ",\"directory_hex\":\""+private_hex(p.directory)+"\",\"prefix_hex\":\""+private_hex(p.prefix)+"\"}}";
 }
 SRWLOCK guard = SRWLOCK_INIT;
+SRWLOCK darklord_guard = SRWLOCK_INIT;
+std::wstring darklord_path;
+std::string darklord_identity;
 HANDLE file = INVALID_HANDLE_VALUE;
 bool opened = false;
 unsigned count = 0;
@@ -175,11 +179,36 @@ void open(const Snapshot& core) {
     if (!CreateDirectoryW(directory.c_str(),nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return;
     const auto path = directory + L"\\" + std::to_wstring(core.pid) + L"-" + std::to_wstring(core.process_created) + L".jsonl";
     history_path = path;
+    auto telemetry_path = path.substr(0, path.size() - 6) + L".darklord.log";
+    auto telemetry_identity = " build_id=" + std::string(core.core.build_id[0] ? core.core.build_id : "unknown") +
+        " process_created=" + std::to_string(core.process_created);
+    AcquireSRWLockExclusive(&darklord_guard);
+    darklord_path.swap(telemetry_path); darklord_identity.swap(telemetry_identity);
+    ReleaseSRWLockExclusive(&darklord_guard);
     latest_path=path.substr(0,path.size()-6)+L".latest.json";
     temporary_path=latest_path+L".pending";
     file = CreateFileW(path.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(file==INVALID_HANDLE_VALUE) history_error=GetLastError();
 }
+}
+uint32_t darklord(const char* line) noexcept {
+    AcquireSRWLockExclusive(&darklord_guard);
+    DWORD error = ERROR_PATH_NOT_FOUND;
+    try {
+        if (!darklord_path.empty()) {
+            const std::string record = std::string(line) + darklord_identity + '\n';
+            const auto output = CreateFileW(darklord_path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (output != INVALID_HANDLE_VALUE) {
+                DWORD written = 0;
+                error = !WriteFile(output, record.data(), static_cast<DWORD>(record.size()), &written, nullptr) ?
+                    GetLastError() : written == record.size() ? ERROR_SUCCESS : ERROR_WRITE_FAULT;
+                CloseHandle(output);
+            } else error = GetLastError();
+        }
+    } catch (...) { error = ERROR_NOT_ENOUGH_MEMORY; }
+    ReleaseSRWLockExclusive(&darklord_guard);
+    return error;
 }
 void record(const Snapshot& core, uint32_t engine_reason) noexcept {
     AcquireSRWLockExclusive(&guard);
@@ -249,6 +278,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"special_input\":"+b_trace(special::input_diagnostics())+
                 ",\"special_route\":"+b_trace(special::route_diagnostics())+
                 ",\"special_hud\":"+b_trace(special::hud_diagnostics())+
+                ",\"combat\":"+b_trace(combat::diagnostics())+
                 ",\"special_use_history\":"+use_json+
                 ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
             if (facts != last) {
@@ -262,7 +292,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                     std::to_string(history_error)+",\"latest_error\":"+std::to_string(latest_error)+
                     ",\"history_rotations\":"+std::to_string(history_rotations)+
                     ",\"use_export_lost\":"+std::to_string(use_export_lost)+"}," + facts + "}\n";
-                if(line.size()>65536) throw std::length_error("diagnostic_snapshot_limit");
+                if(line.size()>131072) throw std::length_error("diagnostic_snapshot_limit");
                 auto history_line = line;
                 const auto use_at = history_line.find(use_json);
                 if (use_at != std::string::npos)

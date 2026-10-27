@@ -83,8 +83,9 @@ private:
 };
 
 // <=2048 bytes; ordered LF-terminated UTF-8 fields, no BOM/unknown/duplicate fields:
-// sentinel-test-session-v1\nseed_hex=<lowercase UTF-8 hex>\nteam=<canonical decimal>\n
+// sentinel-test-session-v3\nseed_hex=<lowercase UTF-8 hex>\nteam=<canonical decimal>\n
 // slot=<positive canonical decimal>\ngeneration_fingerprint=<64 lowercase hex>\n
+// slot_data_revision=0.7.0\nsession_mod_contract_revision=2\n
 // provenance=synthetic-fixture\nroot=<existing absolute local Windows directory>\n
 Result parse_descriptor(std::string_view text, Descriptor& descriptor);
 // shares the probe's limited, pinned, local-file reader with prelaunch admission

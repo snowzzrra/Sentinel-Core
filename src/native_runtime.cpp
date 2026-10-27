@@ -1,4 +1,8 @@
 #include "native_runtime.h"
+#include "combat_native.h"
+#include "expanded_native.h"
+#include "combat_presentation.h"
+#include "ap_controls_native.h"
 #include "inventory.h"
 #include "arsenal.h"
 #include "runes.h"
@@ -18,6 +22,7 @@
 #include <intrin.h>
 #include <cstring>
 #include <cstdio>
+#include <chrono>
 #ifdef SC_NATIVE_TESTING
 #include "native_test_adapter.h"
 #endif
@@ -142,6 +147,7 @@ bool begin_event(uintptr_t root, bool change, uintptr_t descriptor, save::Campai
     }
     if (transition) transition->generation_before=lifetime.generation;
     lifetime.begin(change, known, (flag & 2) != 0, GetTickCount64(), GetCurrentThreadId());
+    combat::transition(lifetime.generation);
     if (event_depth == 1) loading_checkpoint = change && known && (flag & 2) != 0;
     if (transition) {
         transition->event_id=lifetime.sequence; transition->generation_after=lifetime.generation;
@@ -210,7 +216,8 @@ void install_fast_travel(const engine::Binding& b) {
     engine::LocalMemory memory;
     const struct { uint32_t rva; const char* hex; } sites[] = {
         {0x6ca290,"48895c2408488974241048897c241841564883ec20488bf94c8bf2488b0dee70"},
-        {0xd5d660,"48895c2418574883ec70488b05671345034833c44889442458488bf9488bda48"}
+        {0xd5d660,"48895c2418574883ec70488b05671345034833c44889442458488bf9488bda48"},
+        {0xda2360,"405356574881ecb0000000488b0566c640034833c448898424a8000000488b05"}
     };
     for (const auto& s:sites) {
         std::array<uint8_t,32> actual{},expected{};
@@ -222,6 +229,24 @@ void install_fast_travel(const engine::Binding& b) {
     fast_travel_find=reinterpret_cast<FastTravelFind>(b.image.base+0x6ca290);
     fast_travel_activate=reinterpret_cast<FastTravelActivate>(b.image.base+0xd5d660);
     fast_travel_ready.store(true,std::memory_order_release);
+}
+bool arm_first_contact(uintptr_t target,uintptr_t activate,uintptr_t player) {
+    if (!target || !activate || !player || *reinterpret_cast<const uint8_t*>(target+0xb9e)!=1) return false;
+    reinterpret_cast<FastTravelActivate>(activate)(target,player);
+    return *reinterpret_cast<const uint8_t*>(target+0xb9e)==0;
+}
+void repair_crystal_first_contact(uintptr_t map,const char* map_name,uintptr_t player) {
+    if (!player || !fast_travel_ready.load(std::memory_order_acquire) ||
+        !save::session().campaign_run.enabled() || std::strcmp(map_name,"game/hub/hub")) return;
+    __try {
+        const auto target=fast_travel_find(map,"ap_independent_progress_argent_cell_1_1072112848");
+        if (!target || *reinterpret_cast<const uint8_t*>(target+0xb9e)!=1) return;
+        const auto vtable=*reinterpret_cast<const uintptr_t*>(target);
+        const auto activate=*reinterpret_cast<const uintptr_t*>(vtable+0x2e8);
+        if (activate!=binding.image.base+0xda2360) return;
+        // the first activation arms saved triggers without delivering their check.
+        arm_first_contact(target,activate,player);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 void reconcile_fast_travel(uintptr_t map,const char* map_name,uint64_t generation,uintptr_t player) {
     const auto& namespace_id=save::session().namespace_id();
@@ -321,11 +346,6 @@ int automap_status(const sc_automap_request& snapshot,const char* map,const char
     }
     return false;
 }
-bool automap_set_collected(uintptr_t system,uintptr_t key,uintptr_t object) {
-    if (*reinterpret_cast<int32_t*>(object+0x134)==3) return true;
-    automap_collect(system,key);
-    return *reinterpret_cast<int32_t*>(object+0x134)==3;
-}
 bool automap_set_uncollected(uintptr_t object) {
     const auto state=*reinterpret_cast<int32_t*>(object+0x134);
     if (state==1 || state==2) return true;
@@ -333,6 +353,12 @@ bool automap_set_uncollected(uintptr_t object) {
     automap_state(object,1);
     return *reinterpret_cast<int32_t*>(object+0x134)==1 &&
         *reinterpret_cast<uintptr_t*>(object+0x28)==*reinterpret_cast<uintptr_t*>(object+0x18);
+}
+bool automap_set_collected(uintptr_t system,uintptr_t key,uintptr_t object) {
+    if (*reinterpret_cast<int32_t*>(object+0x134)==3) return true;
+    if (!automap_set_uncollected(object)) return false;
+    automap_collect(system,key);
+    return *reinterpret_cast<int32_t*>(object+0x134)==3;
 }
 // Called only by the already-admitted native frame, never by an IPC reader.
 // Every pass rereads native keys/weak owners, including same-epoch reconstruction.
@@ -366,20 +392,20 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
             }
             const auto marker_status=automap_status(snapshot,map_name,name);
             if (marker_status==1) {
-                if (!automap_set_uncollected(object)) { automap_fault.store(3); break; }
+                automap_set_uncollected(object);
                 ++automap_cursor; continue;
             }
             if (marker_status!=2 || *reinterpret_cast<int32_t*>(object+0x134)==3) {
                 ++automap_cursor; continue;
             }
-            if (!automap_set_collected(system,key,object)) { automap_fault.store(2); break; }
+            if (!automap_set_collected(system,key,object)) { ++automap_cursor; continue; }
             AutomapLists after{}; char after_name[64]{};
             if (!automap_lists(owner,after) || after.count!=list.count ||
                 after.keys!=list.keys || after.values!=list.values ||
                 !automap_name(after.keys+static_cast<uintptr_t>(automap_cursor)*0x30,after_name) ||
                 std::strcmp(name,after_name) ||
                 *reinterpret_cast<int32_t*>(after.values+static_cast<uintptr_t>(automap_cursor)*0x150+0x134)!=3) {
-                automap_fault.store(2); break;
+                automap_cursor=0; break;
             }
             ++collected; ++automap_cursor;
         }
@@ -389,9 +415,41 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
     ReleaseSRWLockExclusive(&automap_lock);
 }
 
+void execute_client_command(const sc_command_request& request, sc_command_result& result, uintptr_t player) {
+    commands::execute_native(request, result, player);
+}
+struct FrameCost {
+    std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last=start;
+    std::array<uint64_t,6> parts{};
+    void mark(size_t index) {
+        const auto now=std::chrono::steady_clock::now();
+        parts[index]=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now-last).count());
+        last=now;
+    }
+    ~FrameCost() {
+        static uint64_t calls=0,total=0,maximum=0,slow=0,next=0;
+        static std::array<uint64_t,6> sums{},maxima{};
+        for (size_t i=0;i<parts.size();++i) { sums[i]+=parts[i]; maxima[i]=std::max(maxima[i],parts[i]); }
+        const auto us=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now()-start).count());
+        ++calls; total+=us; maximum=std::max(maximum,us); slow+=us>=16000;
+        const auto now=GetTickCount64();
+        if (now<next) return;
+        next=now+5000;
+        save::session().btrace.record(save::BStage::native_frame_cost,save::BStatus::succeeded,"native_frame_cost_us",0,
+            {{"calls",calls},{"total_us",total},{"max_us",maximum},{"over_16ms",slow}});
+        save::session().btrace.record(save::BStage::native_frame_parts,save::BStatus::succeeded,"native_frame_parts_us",0,
+            {{"calls",calls},{"context_us",sums[0]},{"player_us",sums[1]},{"travel_us",sums[2]},
+             {"automap_us",sums[3]},{"combat_us",sums[4]},{"arsenal_us",sums[5]},
+             {"context_max_us",maxima[0]},{"player_max_us",maxima[1]},{"travel_max_us",maxima[2]},
+             {"automap_max_us",maxima[3]},{"combat_max_us",maxima[4]},{"arsenal_max_us",maxima[5]}});
+    }
+};
 void post_frame() {
     if (!accepting.load(std::memory_order_acquire) || fault.load(std::memory_order_acquire)) return;
     if (owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); return; }
+    FrameCost cost;
     commands::console_tick(epoch.load(std::memory_order_acquire));
     deathlink::expire_pending(GetTickCount64());
     // Missing this diagnostic opportunity is harmless; unlike a lifecycle event,
@@ -453,7 +511,13 @@ void post_frame() {
             detail.pending_after_reason = after_read.reason;
             detail.pending_after_error = after_read.error;
             if (after_read.reason || pending_after) reject(after_read.reason ? SC_NATIVE_READ_FAILED : SC_NATIVE_TRANSITION, SC_STAGE_PENDING_AFTER);
-            else if (facts.sample_reason == SC_REASON_BUDGET) reject(SC_NATIVE_BUDGET, SC_STAGE_OBSERVATION_BUDGET);
+            else if (facts.sample_reason == SC_REASON_BUDGET) {
+                reject(SC_NATIVE_BUDGET, SC_STAGE_OBSERVATION_BUDGET);
+                save::session().btrace.record(save::BStage::native_observation, save::BStatus::refused, "native_budget", 0,
+                    {{"phase", result.phase}, {"stage", detail.stage}, {"elapsed_ns", detail.observation_elapsed_ns},
+                     {"budget_ns", detail.observation_budget_ns}, {"timing_valid", detail.timing_valid},
+                     {"state_reason", detail.state_reason}, {"map_reason", detail.map_reason}});
+            }
             else if (facts.current_map.validity != SC_OBSERVATION_OBSERVED ||
                      facts.fields[SC_CONTEXT_GAME_STATE].validity != SC_OBSERVATION_OBSERVED ||
                      facts.fields[SC_CONTEXT_GAME_STATE].value != SC_GAME_IN_GAME)
@@ -472,16 +536,37 @@ void post_frame() {
     if (!why && owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); reject(SC_NATIVE_WRONG_THREAD, SC_STAGE_NATIVE_FAULT); }
     if (!why && !accepting.load(std::memory_order_acquire)) reject(SC_NATIVE_STOPPED, SC_STAGE_NATIVE_FAULT);
     // autonomous work uses the same fresh native admission as ipc, even with zero diagnostic slots. a diagnostic query is never its actuator
+    cost.mark(0);
     const auto player=!why ? tick_player_safely(binding.image.base + 0x69af70, expected_map_address, scope.lifecycle_generation) : 0;
     if (!player && owner_thread() == GetCurrentThreadId()) special::poll_input(0, false);
     // player natives may call back into a lifecycle hook before returning
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
+    cost.mark(1);
     if (!why) reconcile_fast_travel(expected_map_address,facts.current_map.bytes,scope.lifecycle_generation,player);
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
+    cost.mark(2);
     if (!why) reconcile_automap(expected_map_address, facts.current_map.bytes, scope.lifecycle_generation);
+    cost.mark(3);
+    combat::Context combat_context{};
+    if (!why && player && gameplay_admitted()) {
+        combat_context.generation = scope.lifecycle_generation;
+        combat_context.stamp = before;
+        combat_context.sampled_at_ms = GetTickCount64();
+        combat_context.world = expected_map_address;
+        combat_context.player = player;
+        combat_context.owner_thread = GetCurrentThreadId();
+        combat_context.map = facts.current_map;
+        const auto& namespace_id = save::session().namespace_id();
+        if (namespace_id.size() == 64) std::memcpy(combat_context.namespace_id, namespace_id.c_str(), 65);
+    }
+    combat::observe(combat_context);
+    if (combat_context.world) expanded::observe(combat_context.world);
+    cost.mark(4);
+    if (!why && player) repair_crystal_first_contact(expected_map_address,facts.current_map.bytes,player);
     if (!why && player) arsenal::tick_masteries(scope.lifecycle_generation, player);
+    cost.mark(5);
     commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); });
     if (!slot) return;
     const bool process_scoped = slot->is_command && commands::process_scoped(slot->command_request);
@@ -524,7 +609,7 @@ void post_frame() {
         if (slot->is_inventory)
             inventory::execute_native(slot->inventory_request, slot->inventory_result);
         if (slot->is_command)
-            commands::execute_native(slot->command_request, slot->command_result, player);
+            execute_client_command(slot->command_request, slot->command_result, player);
         if (slot->is_arsenal)
             arsenal::execute_native(slot->arsenal_request, slot->arsenal_result);
         if (slot->is_runes)
@@ -585,11 +670,15 @@ void free_detour(uintptr_t root, uintptr_t slot) {
     if (primary && !readable && accepting.load()) invalidate(SC_NATIVE_READ_FAILED);
     const bool observe = primary && readable && map && begin_event(root, false, 0);
     __try { original_free(root, slot); }
-    __finally { if (observe) end_event(false, true, AbnormalTermination() != FALSE); }
+    __finally {
+        if (primary && readable && map) expanded::map_freed();
+        if (observe) end_event(false, true, AbnormalTermination() != FALSE);
+    }
 }
 }
 
 void prepare(const Snapshot& identity) {
+    combat::prepare(identity);
     save::configure_prelaunch();
     AcquireSRWLockExclusive(&lock);
     status = {}; status.size = sizeof(status); status.abi_version = SC_NATIVE_ABI_VERSION;
@@ -718,8 +807,16 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
             why=SC_NATIVE_EXCEPTION;
         }
-        // special checks the shared hud earnings entry before wup owns its detour
+        if (!why && !stopping.load(std::memory_order_acquire) && !ap_controls::install(binding, stop_event)) {
+            save::session().campaign_run.refuse("native_ap_controls_installation_failed");
+            why = SC_NATIVE_EXCEPTION;
+        }
+        // hud validation needs the shared string entry before enemizer hooks it.
         if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
+        if (!why && !stopping.load(std::memory_order_acquire) && !expanded::install(binding, stop_event)) {
+            save::session().campaign_run.refuse("native_expanded_installation_failed");
+            why = SC_NATIVE_EXCEPTION;
+        }
         // The WUP owner validates and patches the 13ce4c0 entry first; the
         // challenge scope then qualifies the untouched seam/continuation windows
         // and coexists with that detour on the same function.
@@ -729,6 +826,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         if (!why && !stopping.load(std::memory_order_acquire)) arsenal::install(binding, stop_event);
         if (!why && !stopping.load(std::memory_order_acquire)) runes::install(binding, stop_event);
     if (!why && !stopping.load(std::memory_order_acquire)) deathlink::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire)) combat::install(binding, stop_event);
     if (!why && !stopping.load(std::memory_order_acquire)) install_automap(binding);
     if (!why && !stopping.load(std::memory_order_acquire)) install_fast_travel(binding);
         if (!why && !stopping.load(std::memory_order_acquire) && !campaign_menu::install(binding,stop_event)) {
@@ -741,10 +839,11 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
         status.availability = why ? SC_NATIVE_DISABLED : SC_NATIVE_ENABLED;
         accepting.store(!why && !stopping.load(std::memory_order_acquire), std::memory_order_release);
         ReleaseSRWLockExclusive(&lock);
+        save::complete_native_installation(accepting.load(std::memory_order_acquire), stop_event);
     }
     ReleaseSRWLockExclusive(&startup);
 }
-bool gameplay_admitted() { return gameplay_admitted_locked_scope(); }
+bool gameplay_admitted() { return !ap_controls::input_inhibited() && gameplay_admitted_locked_scope(); }
 bool checkpoint_loading() {
     return loading_checkpoint && event_depth == 1 &&
         event_thread.load(std::memory_order_acquire) == GetCurrentThreadId() &&
@@ -852,6 +951,15 @@ sc_campaign_result campaign_request(uint16_t operation,const sc_campaign_request
         save::session().namespace_id()==request.namespace_id;
     const auto out=campaign_menu::menu().request(operation,request,admitted,summary,rewards);
     ReleaseSRWLockShared(&lock); return out;
+}
+sc_combat_presentation_result combat_presentation_request(const sc_combat_presentation_request& request) {
+    AcquireSRWLockShared(&lock);
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    const bool admitted = same_scope(scope, request.execution.expected) &&
+        save::session().state() == save::SessionState::admitted && save::session().accepts_requests() &&
+        save::session().namespace_id() == request.namespace_id;
+    const auto result = combat::presentation().submit(request, scope, admitted);
+    ReleaseSRWLockShared(&lock); return result;
 }
 sc_weapon_points_result submit_weapon_points(const sc_weapon_points_request& request) {
     AcquireSRWLockExclusive(&lock);
@@ -996,6 +1104,9 @@ sc_save_backup_snapshot backup_result(const sc_save_backup_request& request, boo
     ReleaseSRWLockExclusive(&lock); return out;
 }
 bool stop() {
+    expanded::stop();
+    ap_controls::stop();
+    combat::stop();
     commands::disable();
     save::session().stop_requests();
     stopping.store(true, std::memory_order_release);
@@ -1027,6 +1138,9 @@ void test_events(const engine::Binding& source, uint64_t (*change)(uintptr_t,uin
     lifetime.end(true,true,SC_GAME_MAIN_MENU,GetTickCount64(),GetCurrentThreadId());
     status={}; status.game_state=SC_GAME_MAIN_MENU; event_depth=0; event_thread=0;
     original_change=change; fault=0; gaps=0; accepting=true;
+}
+bool test_arm_first_contact(uintptr_t target,uintptr_t activate,uintptr_t player) {
+    return arm_first_contact(target,activate,player);
 }
 void test_cold_events(const engine::Binding& source, uint64_t (*change)(uintptr_t,uintptr_t,uintptr_t)) {
     binding=source; fixture={}; fixture.owner=[]() -> uint32_t { return GetCurrentThreadId(); }; fixture_active=true;

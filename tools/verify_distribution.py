@@ -15,6 +15,8 @@ def verify(directory):
         data = (directory / name).read_bytes()
         if len(data) != record["size"] or hashlib.sha256(data).hexdigest() != record["sha256"]:
             raise ValueError(f"Artifact bytes disagree: {name}")
+        if name in {"sentinel_core.dll", "msimg32.dll"} and manifest["build_id"].encode() + b"\0" not in data:
+            raise ValueError(f"Runtime binary build identity differs: {name}")
     with zipfile.ZipFile(directory / "sentinel-runtime.zip") as archive:
         expected = set(records) - {"sentinel-runtime.zip"}
         if len(archive.namelist()) != len(expected) or set(archive.namelist()) != expected:

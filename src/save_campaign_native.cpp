@@ -9,6 +9,7 @@
 #include "save_write.h"
 #include "native_runtime.h"
 #include "native_target.h"
+#include "enemy_checkpoint_native.h"
 #include "MinHook.h"
 #include <cstring>
 #include <intrin.h>
@@ -208,7 +209,7 @@ void campaign_pump(uintptr_t screen) {
         *reinterpret_cast<uint32_t*>(screen+0x10c)=2;
         session().btrace.record(BStage::creation,BStatus::succeeded,"single_campaign_actions_requested",0,{{"slot",0}},screen);
     }
-    original_pump(screen);
+    campaign_menu::pump_campaign(screen,original_pump);
     campaign_menu::present_campaign_actions(screen,before!=2 || next==1);
 }
 void invoke_bootstrap_devmenu(uintptr_t arguments,uintptr_t previous) {
@@ -369,6 +370,17 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
     auto result=original_parse(data,files,prepared,request);
     if (!result && mission_checkpoint && !restore_mission_spawn(prepared,request)) {
         session().campaign_run.refuse("native_mission_checkpoint_missing",BStage::parser); result=0x10;
+    }
+    if (!result && !metadata_only && expanded::recipe_checkpoint_enabled()) {
+        const auto checkpoint=session().campaign_run.snapshot();
+        if (checkpoint.resumed && (checkpoint.native_subtype==1 || mission_checkpoint)) {
+            uintptr_t map=0,table=0,serializer=0;
+            if (!read(root,0x50,map) || !read(map,0,table) || table!=image+0x2ab30c8 ||
+                !read(map,0xae5e0,serializer) ||
+                !expanded::read_recipe_checkpoint(serializer,checkpoint.map,checkpoint.native_subtype)) {
+                session().campaign_run.refuse("native_enemy_checkpoint_invalid",BStage::parser); result=0x10;
+            }
+        }
     }
     session().campaign_run.parser_leave(static_cast<uint32_t>(result),metadata_only); return result;
 }

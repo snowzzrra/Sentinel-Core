@@ -111,13 +111,11 @@ ReadResult LocalMemory::copy(uintptr_t address, void* out, size_t size) {
             return {SC_REASON_OUT_OF_RANGE, 0};
         cursor = std::min(end, start + region.RegionSize);
     }
-    SIZE_T count = 0;
-    SetLastError(ERROR_SUCCESS);
-    const BOOL ok = ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), out, size, &count);
-    const DWORD error = ok ? ERROR_SUCCESS : GetLastError();
-    if (!ok || count != size) {
+    __try {
+        std::memcpy(out, reinterpret_cast<const void*>(address), size);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
         std::memset(out, 0, size);
-        return {static_cast<uint32_t>(count != 0 || ok ? SC_REASON_PARTIAL_READ : SC_REASON_READ_FAILED), error};
+        return {SC_REASON_READ_FAILED, ERROR_NOACCESS};
     }
     return {};
 }
@@ -180,16 +178,23 @@ sc_engine_snapshot freshness(sc_engine_snapshot s, uint64_t now) {
     }
     return s;
 }
-Binding bind(Memory& memory, Image image, const char* hash, uint32_t hash_reason, HANDLE stop, uint64_t deadline) {
+Binding bind(Memory& memory, Image image, const char* hash, uint32_t hash_reason, HANDLE stop, uint64_t deadline, bool exact_layout) {
     Binding b{}; b.image = std::move(image);
     auto& s = b.metadata; s = unavailable(SC_REASON_NOT_SAMPLED);
     s.pe_reason = SC_REASON_NONE; s.machine = b.image.machine; s.timestamp = b.image.timestamp;
     s.image_size = b.image.size; s.entry_rva = b.image.entry;
     s.disk_hash_reason = hash_reason; s.locator_revision = 1;
     if (hash_reason == SC_REASON_NONE) strcpy_s(s.disk_sha256, hash);
-    if (hash_reason == SC_REASON_NONE && std::strcmp(hash, known_hash) == 0 &&
-        b.image.machine == IMAGE_FILE_MACHINE_AMD64 && b.image.size == 0x7431000 &&
-        b.image.timestamp == 0x6a7b9b8c && b.image.entry == 0x286caa8)
+    const bool layout = b.image.machine == IMAGE_FILE_MACHINE_AMD64 && b.image.size == 0x7431000 &&
+        b.image.timestamp == 0x6a7b9b8c && b.image.entry == 0x286caa8;
+    if (layout && exact_layout) {
+        constexpr uint8_t expected[] = {0x48,0x8d,0x0d,0x79,0xb3,0x1b,0x04,0xe8,0xa4,0x5f,0x23,0,0x84,0xc0,0x48,0x8d,0x0d,3,0xca,0x63,2,0x49,0x8b,0xd4};
+        std::array<uint8_t, sizeof(expected)> actual{};
+        if (!interrupted(stop, deadline) && b.image.contains(0x42f370, actual.size(), readable | executable, writable) &&
+            !memory.copy(b.image.base + 0x42f370, actual.data(), actual.size()).reason &&
+            std::equal(actual.begin(), actual.end(), std::begin(expected)))
+            s.profile = SC_PROFILE_STEAM_20260818;
+    } else if (layout && hash_reason == SC_REASON_NONE && std::strcmp(hash, known_hash) == 0)
         s.profile = SC_PROFILE_STEAM_20260818;
     constexpr uint32_t rvas[] = {0x5477298, 0x6b92f18, 0x5412948};
     for (size_t i = 0; i < b.globals.size(); ++i) {
@@ -198,6 +203,18 @@ Binding bind(Memory& memory, Image image, const char* hash, uint32_t hash_reason
         if (b.global_reasons[i] == SC_REASON_NONE) b.globals[i] = b.image.base + rvas[i];
     }
     s.root_locator_reason = SC_REASON_SIGNATURE_MISSING;
+    if (exact_layout) {
+        s.locator_revision = 2;
+        if (s.profile == SC_PROFILE_STEAM_20260818 &&
+            b.image.contains(0x45ea6f0, 8, readable | writable, executable) &&
+            std::all_of(b.global_reasons.begin(), b.global_reasons.end(), [](auto reason) { return reason == SC_REASON_NONE; })) {
+            s.root_signature_rva = 0x42f370;
+            s.root_target_rva = 0x45ea6f0;
+            s.root_locator_reason = SC_REASON_NONE;
+            b.root = b.image.base + s.root_target_rva;
+        }
+        return b;
+    }
     size_t matches = 0, scanned = 0;
     std::array<uint8_t, chunk_size> buffer{};
     for (const auto& section : b.image.sections) {
@@ -245,6 +262,8 @@ Binding bind_host(Memory& memory, HANDLE stop) {
     Image image;
     const auto pe = read_image(memory, base, image);
     if (pe.reason) { b.metadata = unavailable(pe.reason); return b; }
+    auto direct = bind(memory, image, "", SC_REASON_NOT_SAMPLED, stop, GetTickCount64() + 1000, true);
+    if (direct.metadata.profile == SC_PROFILE_STEAM_20260818 && direct.root) return direct;
     wchar_t path[32768]{};
     char hash[65]{};
     const DWORD length = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));

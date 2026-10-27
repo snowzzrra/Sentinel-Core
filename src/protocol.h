@@ -14,7 +14,12 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation = 
                           sc_runes_request* runes = nullptr, sc_special_request* special = nullptr,
                           sc_deathlink_request* deathlink = nullptr, sc_automap_request* automap = nullptr,
                           sc_campaign_summary* summary = nullptr, sc_campaign_rewards* rewards = nullptr,
-                          sc_command_request* command = nullptr);
+                          sc_command_request* command = nullptr,
+                          sc_combat_presentation_request* combat_presentation = nullptr,
+                          sc_combat_query* combat = nullptr);
+size_t encode_combat_presentation_request(Message&, const sc_combat_presentation_request&);
+size_t encode_combat_presentation_response(Message&, WireResult, const Snapshot&, const sc_combat_presentation_result&);
+bool decode_combat_presentation_response(const Message&, size_t, WireResult&, Snapshot&, sc_combat_presentation_result&);
 size_t encode_command_request(Message&, uint16_t, const sc_command_request&);
 size_t encode_command_response(Message&, WireResult, uint16_t, const Snapshot&, const sc_command_result&);
 bool decode_command_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, sc_command_result&);
@@ -44,6 +49,9 @@ size_t encode_backup_request(Message&, uint16_t operation, const sc_save_backup_
 size_t encode_backup_response(Message&, WireResult, uint16_t operation, const Snapshot&, const sc_save_backup_snapshot&);
 bool decode_backup_response(const Message&, size_t, WireResult&, uint16_t operation, Snapshot&, sc_save_backup_snapshot&);
 size_t encode_save_write_request(Message&, uint64_t operation_id);
+size_t encode_combat_request(Message&, uint32_t pid, const sc_combat_query&);
+size_t encode_combat_response(Message&, WireResult, const Snapshot&, const sc_combat_snapshot&);
+bool decode_combat_response(const Message&, size_t, WireResult&, Snapshot&, sc_combat_snapshot&);
 size_t encode_native_request(Message& out, uint16_t operation,
                               const sc_diagnostic_request& request, uint64_t after_event = 0);
 size_t encode_native_response(Message& out, WireResult result, uint16_t operation,

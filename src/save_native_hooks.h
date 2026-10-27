@@ -16,6 +16,7 @@ bool validate_native_helpers(Installation&, engine::Memory&, const engine::Image
 // Called by the existing hook owner after MinHook initialization/module pinning.
 // Save detours never take that owner's installer lock or use its accepting flag.
 void install_native_hooks(const engine::Binding&, HANDLE stop);
+void complete_native_installation(bool native_ready, HANDLE stop);
 // called only after the native runtime has claimed and admitted a save request
 SubmissionResult submit_native_backup(const std::shared_ptr<BackupJob>&, std::string_view directory);
 }

@@ -28,6 +28,7 @@ SaveReference* save_factory_detour(uintptr_t manager, SaveReference* out, uint32
 using RootInit = void (*)(uintptr_t);
 RootInit original_root = nullptr;
 StartupGate startup_gate;
+bool startup_gate_deferred = false;
 uintptr_t startup_image=0, startup_expected_root=0, startup_expected_caller=0;
 CollectorCalls calls{};
 DeleteCalls delete_calls{};
@@ -531,6 +532,23 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         }
     }
     if (cancelled()) { session().reject(SessionFault::installation); return; }
+    startup_gate_deferred = true;
+    gate_completion.disarm();
+}
+void complete_native_installation(bool native_ready, HANDLE stop) {
+    if (!startup_gate_deferred) return;
+    startup_gate_deferred = false;
+    StartupGate::Completion gate_completion(startup_gate, &session().btrace);
+    if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) {
+        gate_completion.cancel();
+        session().reject(SessionFault::installation);
+        return;
+    }
+    if (!native_ready || session().state() != SessionState::prepared) {
+        session().reject(SessionFault::installation);
+        return;
+    }
+    auto& record = session().installation;
     record.finish(record.begin(SC_INSTALL_READY));
     gate_completion.ready();
 }

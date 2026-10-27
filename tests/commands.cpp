@@ -10,10 +10,17 @@ using namespace sentinel;
 namespace sentinel::runes { Calls calls{}; }
 namespace sentinel::special { Calls calls{}; }
 int main() {
+    assert(commands::checked_visual_location("ai_ScriptCmdEnt ap_hide_location_visual_7770302 activate player1") == 7770302);
+    assert(commands::checked_visual_location("ai_ScriptCmdEnt ap_hide_location_visual_7770302 activate") == 7770302);
+    for (const char* text : {"ai_ScriptCmdEnt ap_hide_location_visual_7780000 activate player1",
+            "ai_ScriptCmdEnt ap_hide_location_visual_7770302 activate player2",
+            "ai_ScriptCmdEnt ap_hide_location_visual_7770302 activate player1 extra",
+            "ai_ScriptCmdEnt ap_hide_location_visual_7770302 remove player1"})
+        assert(commands::checked_visual_location(text) == 0);
     assert(commands::compatible_product(SC_PRODUCT_VERSION));
-    for (const char* version : {"1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.0-rc-1", "1.0.1-rc-1", "1.0.2-rc-10", "1.0.3-rc-1"})
+    for (const char* version : {"1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.0-rc-1", "1.0.1-rc-1", "1.0.2-rc-10", "1.0.3-rc-1", "1.1.0"})
         assert(commands::compatible_product(version));
-    for (const char* version : {"", "1.1.0-rc-1", "1.0.2-rc-01", "1.0.2-rc-0",
+    for (const char* version : {"", "1.1.0-rc-1", "1.1.1", "1.2.0", "2.0.0", "1.0.2-rc-01", "1.0.2-rc-0",
             "1.0.2-rc-", "1.0.2-rc-1extra", "1.0.2+build", "1.0.02"})
         assert(!commands::compatible_product(version));
     commands::ManualRequest manual{};

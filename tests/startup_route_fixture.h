@@ -46,15 +46,21 @@ inline void exercise_gate() {
         while (!gate.waiting() && GetTickCount64()<deadline) Sleep(1);
         CHECK(gate.waiting()==1 && forwarded==0 && admitted==0);
         try {
-            StartupGate::Completion completion(gate,&trace);
-            routes.store(1,std::memory_order_release); // partial installation
-            CHECK(forwarded==0 && WaitForSingleObject(done,0)==WAIT_TIMEOUT);
+            {
+                StartupGate::Completion completion(gate,&trace);
+                routes.store(1,std::memory_order_release); // partial installation
+                CHECK(forwarded==0 && WaitForSingleObject(done,0)==WAIT_TIMEOUT);
+                if (mode==0) completion.disarm();
+                else if (mode==2) completion.cancel();
+                else if (mode==3) throw std::runtime_error("fixture_install_exception");
+            }
             if (mode==0) {
+                CHECK(forwarded==0 && WaitForSingleObject(done,0)==WAIT_TIMEOUT);
+                StartupGate::Completion final_completion(gate,&trace);
                 routes.store(steam_20260818_routes,std::memory_order_release);
-                completion.ready();
+                final_completion.ready();
                 CHECK(forwarded==0); // ready() commits only on scope completion
-            } else if (mode==2) completion.cancel();
-            else if (mode==3) throw std::runtime_error("fixture_install_exception");
+            }
         } catch (const std::runtime_error&) { CHECK(mode==3); }
         CHECK(WaitForSingleObject(done,2000)==WAIT_OBJECT_0); native.join(); CloseHandle(done);
         CHECK(forwarded==1 && admitted==(mode==0?1u:0u));

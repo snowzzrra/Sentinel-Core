@@ -4,7 +4,7 @@
 
 /* Ordinary inventory observations and AP intent. UNKNOWN values are not ownership
    or capacity facts. Map-local AP entitlement is separate from the physical key. */
-#define SC_INVENTORY_ABI_VERSION 7u
+#define SC_INVENTORY_ABI_VERSION 8u
 #define SC_INVENTORY_MAX_CAPACITY_TIER 4u
 #define SC_INVENTORY_UNKNOWN_MASK UINT32_MAX
 #define SC_INVENTORY_UNKNOWN_TIER UINT8_MAX
@@ -124,6 +124,10 @@ typedef struct sc_inventory_result {
     /* Generic physical key count > 0; 255 means the native read is inconclusive. */
     uint8_t slayer_key_before, slayer_key_after;
     uint8_t frag_grenade_before, frag_grenade_after;
+    uint8_t flame_belch_before, flame_belch_after;
+    uint8_t blood_punch_before, blood_punch_after;
+    /* bits 0..60 are item IDs 7770058..7770118; bits 61..63 are 7770145..7770147 */
+    uint64_t perks_known, perks_owned;
 } sc_inventory_result;
 
 #endif

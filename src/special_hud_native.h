@@ -186,7 +186,7 @@ bool affine_to(uintptr_t clip, uintptr_t ancestor, uintptr_t movie, Point point,
     return clip == ancestor;
 }
 
-bool bounds(uintptr_t clip, uintptr_t parent, Rect& out) {
+bool bounds(uintptr_t clip, uintptr_t parent, Rect& out, uintptr_t placement = 0) {
     // convert the cached render rectangle directly into weaponinfo space
     Rect local{};
     if (!raw_bounds(clip, local)) return false;
@@ -195,11 +195,11 @@ bool bounds(uintptr_t clip, uintptr_t parent, Rect& out) {
                            {local.tl.x, local.br.y}, {local.br.x, local.br.y}};
     Point point{}, local_point{};
     if (!unrender(clip, corners[0], local_point) ||
-        !affine_to(clip, parent, movie, local_point, point)) return false;
+        !affine_to(placement ? placement : clip, parent, movie, local_point, point)) return false;
     out = {point, point};
     for (unsigned i = 1; i < 4; ++i) {
         if (!unrender(clip, corners[i], local_point) ||
-            !affine_to(clip, parent, movie, local_point, point)) return false;
+            !affine_to(placement ? placement : clip, parent, movie, local_point, point)) return false;
         out.tl.x = std::min(out.tl.x, point.x);
         out.tl.y = std::min(out.tl.y, point.y);
         out.br.x = std::max(out.br.x, point.x);
@@ -225,8 +225,6 @@ bool from_space(uintptr_t clip, uintptr_t parent, uintptr_t movie,
     return std::isfinite(out.x) && std::isfinite(out.y);
 }
 
-// Match the donor's complete visual transform when a nested sprite is cloned
-// under WeaponInfo. Position is written separately by swf.position.
 bool match_linear(uintptr_t clone, uintptr_t source, uintptr_t parent, uintptr_t movie,
                   float scale = 1.0f) {
     Point origin{}, x{}, y{};
@@ -534,8 +532,7 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     auto& inactive_position = owner.selected == SC_SPECIAL_WEAPON_HAMMER ? crucible_position : hammer_position;
     const auto inactive_root = owner.selected == SC_SPECIAL_WEAPON_HAMMER ? context.crucible_root : context.hammer_root;
     Rect arrow_bounds{}, backer_bounds{};
-    Rect source_icon_bounds{}, flame_icon_bounds{}, active_icon_bounds{};
-    Rect active_plate_bounds{};
+    Rect source_icon_bounds{}, flame_icon_bounds{}, active_icon_bounds{}, active_glyph_bounds{};
     Rect clone_plate_bounds{};
     const auto refill_geometry = !refill_frame_changed &&
         bounds(child(refill, "background"), parent, clone_plate_bounds) ? refill : source;
@@ -545,8 +542,16 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const bool native_arrow_visual = bounds(native_arrow, parent, arrow_bounds);
     const bool native_backer_visual = bounds(native_backer, parent, backer_bounds);
     const bool source_icon_visual = bounds(source_icon, parent, source_icon_bounds);
-    bounds(flame_icon, parent, flame_icon_bounds);
-    const bool active_icon_visual = bounds(active_icon, parent, active_icon_bounds);
+    const auto flame_plate = child(flame_root, "background");
+    const bool flame_visual = bounds(child(source, "background"), parent, flame_icon_bounds,
+            flame_plate ? flame_plate : flame_root) || bounds(flame_plate, parent, flame_icon_bounds) ||
+        bounds(flame_icon, parent, flame_icon_bounds) || bounds(flame_root, parent, flame_icon_bounds) ||
+        bounds(child(primary_root, "background"), parent, flame_icon_bounds,
+               flame_plate ? flame_plate : flame_root) ||
+        bounds(child(active_root, "background"), parent, flame_icon_bounds,
+               flame_plate ? flame_plate : flame_root);
+    const bool active_icon_visual = bounds(child(active_root, "background"), parent, active_icon_bounds) &&
+        bounds(active_icon, parent, active_glyph_bounds);
     const bool active_movie = active_root &&
         *reinterpret_cast<uintptr_t*>(active_root + 0x30) == movie;
     Point active_now{};
@@ -556,15 +561,10 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     Point original_special{};
     const bool active_stage_forward = active_cached && active_icon_visual &&
         native_visual_center(active_position, active_icon, parent, original_special);
-    const auto active_plate = owner.selected == SC_SPECIAL_WEAPON_CRUCIBLE ?
-        child(active_root, "background") : uintptr_t{0};
-    Point original_plate{};
-    const bool crucible_plate_visual =
-        bounds(active_plate, parent, active_plate_bounds) && active_cached &&
-        native_visual_center(active_position, active_plate, parent, original_plate);
     auto& source_position = layout_source == context.hammer_root ? hammer_position : crucible_position;
     const bool source_cached = remember_native(source_position, layout_source, movie, epoch);
     constexpr float native_gap = 1.0f;
+    constexpr float switch_gap = -40.0f;
     const Rect switch_bounds = native_backer_visual ?
         Rect{{std::min(arrow_bounds.tl.x, backer_bounds.tl.x),
               std::min(arrow_bounds.tl.y, backer_bounds.tl.y)},
@@ -576,26 +576,20 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const float render_yx = render_matrix[3];
     const float render_row_slope = std::isfinite(render_yy) && std::isfinite(render_yx) &&
         std::fabs(render_yy) > 0.000001f ? render_yx / render_yy : 0.0f;
-    const float flame_left = adjacent.x - (source_icon_bounds.br.x - source_icon_bounds.tl.x) * 0.5f;
-    const float arrow_right = flame_left - native_gap;
-    const float arrow_left = arrow_right - (switch_bounds.br.x - switch_bounds.tl.x);
-    const auto native_arrow_center = center(arrow_bounds);
-    Point authored_arrow_origin{}, projected_arrow_origin{};
-    const bool arrow_origins = position(arrow_source, authored_arrow_origin) &&
-        position(arrow_geometry, projected_arrow_origin);
-    const Point authored_arrow_center{
-        authored_arrow_origin.x + native_arrow_center.x - projected_arrow_origin.x,
-        authored_arrow_origin.y + native_arrow_center.y - projected_arrow_origin.y};
-    const float toggle_x = arrow_right - (switch_bounds.br.x - native_arrow_center.x);
-    const Point toggle_target{toggle_x, authored_arrow_center.y +
-        (authored_arrow_center.x - toggle_x) * render_row_slope};
-    const float active_icon_width = active_icon_bounds.br.x - active_icon_bounds.tl.x;
-    const float special_x = arrow_left - native_gap - active_icon_width * 0.5f;
+    Point authored_arrow_origin{};
+    const bool arrow_origins = position(arrow_source, authored_arrow_origin);
+    const Point arrow_baseline = center(flame_icon_bounds);
+    const float switch_width = switch_bounds.br.x - switch_bounds.tl.x;
+    const float toggle_x = flame_icon_bounds.tl.x - switch_gap - switch_width * 0.5f +
+        center(arrow_bounds).x - center(switch_bounds).x;
+    const Point toggle_target{toggle_x,
+        arrow_baseline.y + center(arrow_bounds).y - center(switch_bounds).y -
+        (toggle_x - arrow_baseline.x) * render_row_slope};
+    const float special_x = flame_icon_bounds.tl.x - switch_gap * 2 - switch_width -
+        (flame_icon_bounds.br.x - flame_icon_bounds.tl.x) * 0.5f;
+    const Point flame_center = center(flame_icon_bounds);
     const Point special_target{special_x,
-        crucible_plate_visual ? original_special.y + adjacent.y -
-            original_plate.y + (adjacent.x -
-            (special_x + original_plate.x - original_special.x)) * render_row_slope :
-            icon_baseline_y};
+        flame_center.y - (special_x - flame_center.x) * render_row_slope};
     const auto refill_plate = child(refill_geometry, "background");
     Rect refill_plate_bounds{};
     Point refill_plate_offset{};
@@ -618,9 +612,9 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
     const Point refill_baseline{adjacent.x + refill_offset.x, adjacent.y + refill_offset.y};
     const Point refill_visual_target{refill_x, refill_baseline.y +
         (refill_x - refill_baseline.x) * render_row_slope};
-    const bool native_layout = native_arrow_visual &&
+    const bool native_layout = native_arrow_visual && flame_visual &&
         active_stage_forward && source_cached && source_icon_visual &&
-        std::isfinite(native_gap) && native_gap > 0;
+        std::isfinite(special_x) && switch_width > 0;
     const bool refill_visual = refill_offsets && (visible_plate || source_icon_visual) &&
         std::isfinite(native_gap) && native_gap > 0;
     const bool arrow_visual = native_layout &&
@@ -646,11 +640,6 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         else if (!arrow_visual) switch_failure = "switch_arrow_stage_forward_failed";
         else if (!arrow_origins) switch_failure = "switch_authored_origin_missing";
     }
-    if (!switch_failure && switch_available) {
-        if (!(special_target.x + active_icon_width * 0.5f < arrow_left &&
-              arrow_right < flame_left))
-            switch_failure = "switch_layout_overlap";
-    }
     bool arrow_ready = false;
     if (switch_available && !switch_failure) {
         if (!special_arrow) special_arrow = clone(arrow_source, parent, "apSpecialSwitch", created);
@@ -662,41 +651,28 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
             if (const auto cta = child(child(special_arrow, "icon"), "cta")) show(cta, false);
             if (const auto leaf = child(special_arrow, "arrow")) show(leaf, true);
             else switch_failure = "switch_arrow_leaf_missing";
-            if (!switch_failure &&
-                !place_visual(special_arrow, arrow_geometry, parent, movie, toggle_target, arrow_offset))
+            if (!switch_failure && !match_linear(special_arrow, arrow_source, parent, movie))
                 switch_failure = "switch_arrow_place_failed";
-            const Point shift{special_target.x - original_special.x,
-                              special_target.y - original_special.y};
-            if (!switch_failure && !move_native(active_position, parent, shift))
-                switch_failure = "switch_move_active_failed";
-            if (!switch_failure) {
-                Rect inactive_bounds{};
-                Point inactive_center{};
-                const auto inactive_icon = child(inactive_root, "icon");
-                if (bounds(inactive_icon, parent, inactive_bounds) &&
-                    remember_native(inactive_position, inactive_root, movie, epoch) &&
-                    native_visual_center(inactive_position, inactive_icon, parent, inactive_center)) {
-                    Rect inactive_plate_bounds{};
-                    Point inactive_plate_center{};
-                    const auto inactive_plate = inactive_root == context.crucible_root ?
-                        child(inactive_root, "background") : uintptr_t{0};
-                    const bool inactive_crucible_plate =
-                        bounds(inactive_plate, parent, inactive_plate_bounds) &&
-                        native_visual_center(inactive_position, inactive_plate, parent,
-                                             inactive_plate_center);
-                    const float inactive_x = arrow_left - native_gap -
-                        (inactive_bounds.br.x - inactive_bounds.tl.x) * 0.5f;
-                    const Point inactive_target{inactive_x,
-                        inactive_crucible_plate ? inactive_center.y +
-                            adjacent.y - inactive_plate_center.y +
-                            (adjacent.x - (inactive_x +
-                            inactive_plate_center.x - inactive_center.x)) * render_row_slope :
-                            icon_baseline_y};
-                    if (!move_native(inactive_position, parent,
-                            {inactive_target.x - inactive_center.x,
-                             inactive_target.y - inactive_center.y}))
-                        restore_native(inactive_position, inactive_root, movie, epoch);
-                } else restore_native(inactive_position, inactive_root, movie, epoch);
+            if (!switch_failure && !place_visual(special_arrow, arrow_source, parent, movie,
+                toggle_target, arrow_offset)) switch_failure = "switch_arrow_place_failed";
+            for (auto* saved : {&active_position, &inactive_position}) {
+                const auto root = saved == &active_position ? active_root : inactive_root;
+                Point original{}, reference{};
+                const auto vertical_leaf = child(root, "background");
+                Rect reference_bounds{};
+                // native glyphs animate inside fixed equipment plates
+                if (!remember_native(*saved, root, movie, epoch) ||
+                    !native_visual_center(*saved, vertical_leaf, parent, original)) {
+                    if (saved == &active_position) switch_failure = "switch_move_active_failed";
+                    continue;
+                }
+                if (!bounds(child(flame_root, "background"), parent, reference_bounds))
+                    reference_bounds = flame_icon_bounds;
+                reference = center(reference_bounds);
+                const float target_y = reference.y - (special_target.x-reference.x)*render_row_slope;
+                if (!move_native(*saved, parent, {special_target.x-original.x, target_y-original.y})) {
+                    if (saved == &active_position) switch_failure = "switch_move_active_failed";
+                }
             }
             if (!switch_failure) { show(special_arrow, true); arrow_ready = true; }
         }
@@ -707,16 +683,9 @@ bool project(uintptr_t element, const HudOwnerSnapshot& owner, const GraphicsSou
         if (special_arrow && !(switch_available && arrow_geometry == special_arrow &&
             !native_arrow_visual)) show(special_arrow, false);
     }
-    const float special_half_width = active_icon_width * 0.5f;
-    const float special_half_height = (active_icon_bounds.br.y - active_icon_bounds.tl.y) * 0.5f;
-    const Rect native_special_bounds{{special_target.x - special_half_width,
-                                      special_target.y - special_half_height},
-                                     {special_target.x + special_half_width,
-                                      special_target.y + special_half_height}};
-    const Rect ap_arrow_bounds{{toggle_target.x + switch_bounds.tl.x - native_arrow_center.x,
-                                toggle_target.y + switch_bounds.tl.y - native_arrow_center.y},
-                               {toggle_target.x + switch_bounds.br.x - native_arrow_center.x,
-                                toggle_target.y + switch_bounds.br.y - native_arrow_center.y}};
+    Rect native_special_bounds{},ap_arrow_bounds{};
+    bounds(active_icon,parent,native_special_bounds);
+    bounds(native_arrow,parent,ap_arrow_bounds);
     const float refill_half_width = (refill_plate_bounds.br.x - refill_plate_bounds.tl.x) * 0.5f;
     const float refill_half_height = (refill_plate_bounds.br.y - refill_plate_bounds.tl.y) * 0.5f;
     const Rect intended_refill_bounds{{refill_visual_target.x - refill_half_width,

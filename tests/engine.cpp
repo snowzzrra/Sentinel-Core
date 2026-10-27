@@ -165,7 +165,23 @@ void protocol() {
     size = encode_request(data, engine_capability, 99, engine_operation);
     CHECK(decode_request(data, size) == WireResult::incompatible_protocol);
 }
+void supported_layout_without_disk_scan() {
+    Fixture f;
+    const auto direct = [&] { return bind(f.memory, f.image, "", SC_REASON_NOT_SAMPLED, nullptr, GetTickCount64() + 2000, true); };
+    auto b = direct();
+    CHECK(b.metadata.profile == SC_PROFILE_STEAM_20260818 && b.root == root);
+    CHECK(b.metadata.disk_hash_reason == SC_REASON_NOT_SAMPLED && b.metadata.locator_revision == 2);
+    CHECK(f.memory.copies == 1);
+    f.memory.blocks[base + 0x42f300][0x77] ^= 1;
+    CHECK(direct().metadata.profile == SC_PROFILE_NONE);
+    f.memory.blocks[base + 0x42f300][0x77] ^= 1;
+    ++f.image.timestamp;
+    CHECK(direct().metadata.profile == SC_PROFILE_NONE);
+    --f.image.timestamp;
+    f.image.sections.back().flags = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE;
+    CHECK(!direct().root);
+}
 int main() {
-    values_and_failures(); locators_and_identity(); checked_adapter_and_pe(); protocol();
+    values_and_failures(); locators_and_identity(); checked_adapter_and_pe(); protocol(); supported_layout_without_disk_scan();
     std::puts("PASS bounded reader, profile/locator gates, null/read failures, transition/no stale, wire contract; SYNTHETIC ONLY");
 }

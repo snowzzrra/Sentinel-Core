@@ -6,6 +6,7 @@
 
 namespace sentinel::native {
 sc_automap_result automap_request(const sc_automap_request&);
+sc_combat_presentation_result combat_presentation_request(const sc_combat_presentation_request&);
 void prepare(const Snapshot& identity);
 void start(const engine::Binding& binding, const Snapshot& identity, HANDLE stop);
 uint64_t observation_stamp();

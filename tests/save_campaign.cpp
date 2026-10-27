@@ -15,6 +15,9 @@
 #include "protocol.h"
 #include "arsenal.h"
 #include "special.h"
+#include "expanded_native.h"
+#include "enemy_checkpoint_native.h"
+#include "combat_native.h"
 #include <windows.h>
 #include <array>
 #include <cstdio>
@@ -246,7 +249,29 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
+    if (defect==L"combat_contention") {
+        CHECK(sentinel::combat::test_observation_contention());
+        std::puts("PASS combat observations survive concurrent readers and duplicate death notifications"); return 0;
+    }
+    if (defect==L"recipe_checkpoint") {
+        CHECK(sentinel::expanded::test_recipe_checkpoint());
+        std::puts("PASS recipe state uses the native checkpoint archive and rejects corrupt capture or restore"); return 0;
+    }
+    if (defect==L"quantity_inputs") {
+        CHECK(sentinel::expanded::test_quantity_inputs());
+        std::puts("PASS weighted native remaining populations preserve partial thresholds and pause conditions"); return 0;
+    }
+    if (defect==L"recipe_inputs") {
+        CHECK(sentinel::expanded::test_recipe_transport());
+        CHECK(sentinel::expanded::test_recipe_inputs());
+        std::puts("PASS native recipe factories preserve workers, retries, logical identity and finite partial credits"); return 0;
+    }
+    if (defect==L"limit_inputs") {
+        CHECK(sentinel::expanded::test_limit_inputs());
+        std::puts("PASS global special limits include native actors, overlapping managers, death, occupancy and stop"); return 0;
+    }
     if (defect==L"presentation_edges") {
+        menu_fixture::encounter_projection();
         CHECK(sentinel::campaign_menu::test_question_material());
         CHECK(sentinel::campaign_menu::test_physical_completion_edges());
         CHECK(sentinel::special::test_physical_completion_owner());

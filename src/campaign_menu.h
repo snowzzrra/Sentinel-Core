@@ -5,6 +5,7 @@
 #include <vector>
 #include <set>
 #include <string>
+#include <map>
 
 namespace sentinel::campaign_menu {
 struct Projection {
@@ -22,6 +23,8 @@ public:
     sc_campaign_result request(uint16_t operation,const sc_campaign_request&,bool admitted,
                                const sc_campaign_summary* = nullptr, const sc_campaign_rewards* = nullptr);
     Projection projection();
+    bool summary(const std::string& map,const std::string& namespace_id,sc_campaign_summary& out,uint64_t* revision=nullptr);
+    bool encounter_reward(const std::string& map,const std::string& namespace_id,uint64_t since,sc_campaign_reward& out);
     void rendered(uint64_t revision);
     void selected(uint32_t id);
     uint32_t focus_id();
@@ -35,6 +38,7 @@ private:
     uint32_t selected_=0,loaded_=0;
     std::string namespace_id_;
     std::set<uint32_t> hint_intents_;
+    std::map<std::string,std::pair<uint64_t,sc_campaign_reward>> encounter_edges_;
 };
 Menu& menu();
 }

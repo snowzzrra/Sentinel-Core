@@ -27,13 +27,13 @@ void run_backup_request_contracts();
 int main() {
     for (int stage = 0; stage <= 4; ++stage) {
         const auto mask = (1u << stage) - 1;
-        CHECK(inventory::capacity_stage(mask, mask, stage, stage) == stage);
-        CHECK(inventory::capacity_stage(mask, mask, stage, stage + 1) == 255);
+        CHECK(inventory::capacity_stage(mask, mask, stage) == stage);
+        CHECK(inventory::capacity_stage(mask, mask, stage + 1) == 255);
     }
-    CHECK(inventory::capacity_stage(5, 5, 2, 2) == 255);
-    CHECK(inventory::capacity_stage(3, 1, 2, 2) == 255);
-    CHECK(inventory::capacity_stage(0, 0, -1, 0) == 255);
-    CHECK(inventory::capacity_stage(31, 31, 5, 5) == 255);
+    CHECK(inventory::capacity_stage(5, 5, 2) == 255);
+    CHECK(inventory::capacity_stage(3, 1, 2) == 255);
+    CHECK(inventory::capacity_stage(0, 0, -1) == 255);
+    CHECK(inventory::capacity_stage(31, 31, 5) == 255);
     sentinel::inventory::SnapshotFacts inventory_facts{};
     sentinel::inventory::Calls inventory_calls{
         &inventory_facts,
@@ -85,6 +85,56 @@ int main() {
     CHECK(invalid_inventory.outcome == SC_INV_READ_FAILED &&
           invalid_inventory.frag_grenade_after == SC_INVENTORY_UNKNOWN_ITEM);
     inventory_facts.frag_grenade = 1;
+    const auto microwave = 1ull << 6;
+    inventory_facts.weapons = SC_INV_WEAPON_PLASMA_RIFLE;
+    CHECK(!sentinel::inventory::microwave_counter(inventory_facts));
+    inventory_facts.perks_known = microwave;
+    CHECK(!sentinel::inventory::microwave_counter(inventory_facts));
+    inventory_facts.perks_owned = microwave;
+    CHECK(sentinel::inventory::microwave_counter(inventory_facts));
+    inventory_facts.weapons = SC_INVENTORY_UNKNOWN_MASK;
+    CHECK(!sentinel::inventory::microwave_counter(inventory_facts));
+    inventory_facts.weapons = 0;
+    CHECK(!sentinel::inventory::microwave_counter(inventory_facts));
+    inventory_facts.flame_belch = 1;
+    sentinel::inventory::SnapshotFacts stone_facts{};
+    CHECK(!sentinel::inventory::stone_counter(stone_facts, false));
+    CHECK(sentinel::inventory::stone_counter(stone_facts, true));
+    stone_facts.weapons = SC_INV_WEAPON_CHAINSAW;
+    CHECK(sentinel::inventory::stone_counter(stone_facts, false));
+    stone_facts.weapons = SC_INV_WEAPON_SHOTGUN;
+    stone_facts.perks_known = 1ull << 1;
+    CHECK(!sentinel::inventory::stone_counter(stone_facts, false));
+    stone_facts.perks_owned = 1ull << 1;
+    CHECK(sentinel::inventory::stone_counter(stone_facts, false));
+    stone_facts.weapons = 0;
+    CHECK(!sentinel::inventory::stone_counter(stone_facts, false));
+    sentinel::inventory::SnapshotFacts armored_facts{};
+    CHECK(!sentinel::inventory::armored_counter(armored_facts));
+    armored_facts.weapons = SC_INV_WEAPON_BALLISTA;
+    CHECK(sentinel::inventory::armored_counter(armored_facts));
+    armored_facts.weapons = SC_INV_WEAPON_HEAVY_CANNON;
+    CHECK(!sentinel::inventory::armored_counter(armored_facts));
+    armored_facts.perks_known = armored_facts.perks_owned = 1ull << 2;
+    CHECK(sentinel::inventory::armored_counter(armored_facts));
+    armored_facts.weapons = SC_INV_WEAPON_SHOTGUN;
+    CHECK(!sentinel::inventory::armored_counter(armored_facts));
+    armored_facts.perks_known = armored_facts.perks_owned = 1ull;
+    CHECK(sentinel::inventory::armored_counter(armored_facts));
+    armored_facts.perks_owned = 0;
+    CHECK(!sentinel::inventory::armored_counter(armored_facts));
+    inventory_facts.blood_punch = 0;
+    inventory_facts.persistent_upgrades = 1u << SC_INV_BLOOD_PUNCH_SHIFT;
+    auto punch_observation = sentinel::inventory::initial(inventory_request);
+    sentinel::inventory::execute(inventory_request, punch_observation, inventory_calls);
+    CHECK(sentinel::inventory::blood_punch_observed());
+    sentinel::inventory::reset_session(inventory_request.namespace_id);
+    CHECK(!sentinel::inventory::blood_punch_observed());
+    inventory_facts.persistent_upgrades = SC_INVENTORY_UNKNOWN_MASK;
+    punch_observation = sentinel::inventory::initial(inventory_request);
+    sentinel::inventory::execute(inventory_request, punch_observation, inventory_calls);
+    CHECK(!sentinel::inventory::blood_punch_observed());
+    inventory_facts.persistent_upgrades = 0;
     struct RuneFixture { sentinel::runes::SnapshotFacts facts{}; int bound = 0, reads = 0; bool active = true; } rune;
     sentinel::runes::calls = {
         &rune, nullptr,
@@ -247,6 +297,8 @@ int main() {
     CHECK(decoded_inventory.dash_after == 1 && decoded_inventory.slayer_key_before == 1 &&
           decoded_inventory.slayer_key_after == 1 && decoded_inventory.equipment_after == SC_INVENTORY_UNKNOWN_MASK &&
           decoded_inventory.frag_grenade_after == 1 && decoded_inventory.ice_bomb_after == 0);
+    CHECK(decoded_inventory.flame_belch_after == 1 && decoded_inventory.blood_punch_after == 0 &&
+          decoded_inventory.perks_known == microwave && decoded_inventory.perks_owned == microwave);
     CHECK(!decode_inventory_response(wire, size - 1, code, inventory_result_operation, s, decoded_inventory));
     inventory_reply.dash_after = 2;
     CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
@@ -255,6 +307,9 @@ int main() {
     CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
     inventory_reply.slayer_key_after = 1;
     inventory_reply.frag_grenade_after = 2;
+    CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
+    inventory_reply.frag_grenade_after = 1;
+    inventory_reply.perks_owned = microwave << 1;
     CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
     detail = {}; detail.revision = 1; detail.stage = SC_STAGE_OBSERVATION_BUDGET;
     detail.observation_attempted = detail.timing_valid = 1;

@@ -82,7 +82,7 @@ class ProtectionTests(unittest.TestCase):
         (self.steam / "remotecache.vdf").write_bytes(b"fixture local cache metadata")
         (self.local / "settings.cfg").write_bytes(b"fixture settings")
         (self.local / "empty-directory").mkdir()
-        self.args = argparse.Namespace(action="prepare", steam_account="12345",
+        self.args = argparse.Namespace(action="prepare", steam_account="12345", slot_data_revision="0.7.0", mod_contract_revision=2,
             steam_app_root=str(self.steam), local_provider_root=str(self.local),
             backup_directory=str(self.backup), ap_root=str(self.root / "ap"),
             uninstall_root=[str(self.root / "game-install"), str(self.root / "mod-install")])
@@ -96,6 +96,36 @@ class ProtectionTests(unittest.TestCase):
     def snapshot(self):
         return {str(p): (p.read_bytes(), p.stat().st_mtime_ns)
                 for root in (self.steam, self.local) for p in root.rglob("*") if p.is_file()}
+
+    def test_unsupported_contract_refuses_before_diagnostic_or_backup_io(self):
+        paths = ["prepare", "--steam-account", "12345", "--steam-app-root", str(self.steam),
+                 "--local-provider-root", str(self.local), "--backup-directory", str(self.backup),
+                 "--ap-root", str(self.root / "ap"), "--uninstall-root", str(self.root / "game-install"),
+                 "--diagnostic-file", str(self.root / "diagnostic.json")]
+        for revision in ([], ["--slot-data-revision", "0.6.0", "--mod-contract-revision", "2"],
+                         ["--slot-data-revision", "0.7.0", "--mod-contract-revision", "1"]):
+            with self.subTest(revision=revision), mock.patch.object(protection, "protect") as protect, \
+                    mock.patch.object(protection, "explicit_path") as path, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as refusal:
+                    protection.main(paths + revision)
+                self.assertEqual(refusal.exception.code, 2)
+                protect.assert_not_called()
+                path.assert_not_called()
+        self.assertFalse(self.backup.exists())
+        self.assertFalse((self.root / "diagnostic.json").exists())
+
+    def test_imported_helper_refuses_unsupported_contract_before_protection(self):
+        for revisions in ({}, {"slot_data_revision": "0.6.0", "mod_contract_revision": 2},
+                          {"slot_data_revision": "0.7.0", "mod_contract_revision": 1},
+                          {"slot_data_revision": "0.7.0", "mod_contract_revision": "2"}):
+            arguments = vars(self.args).copy()
+            arguments.pop("slot_data_revision")
+            arguments.pop("mod_contract_revision")
+            with self.subTest(revisions=revisions), mock.patch.object(protection, "_protect") as protect:
+                with self.assertRaisesRegex(protection.Refused, "slot-data 0.7.0 and mod contract 2 required"):
+                    protection.protect(argparse.Namespace(**arguments, **revisions))
+                protect.assert_not_called()
+        self.assertFalse(self.backup.exists())
 
     def test_complete_readback_preserves_sources_and_reuses_first(self):
         original = self.snapshot()

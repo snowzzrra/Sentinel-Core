@@ -7,6 +7,7 @@
 #include "save_observer.h"
 #include "save_session.h"
 #include "native_runtime.h"
+#include "combat_native.h"
 #include <sddl.h>
 #include <vector>
 
@@ -18,6 +19,7 @@ DWORD observe(void*) {
     engine::LocalMemory memory;
     engine::Binding binding;
     uint64_t sequence = 0;
+    uint64_t diagnostic_at = 0;
     try {
         if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return 0;
         binding = engine::bind_host(memory, stop);
@@ -30,7 +32,10 @@ DWORD observe(void*) {
             native::publish_context(observed, before);
             publish_context(observed);
             publish_save(save::sample(memory, binding, sequence, stop));
-            startup_log::record(current_snapshot(), binding.metadata.sample_reason);
+            if (GetTickCount64() >= diagnostic_at) {
+                startup_log::record(current_snapshot(), binding.metadata.sample_reason);
+                diagnostic_at = GetTickCount64() + 1000;
+            }
         } while (WaitForSingleObject(stop, 100) == WAIT_TIMEOUT);
     } catch (...) {
         binding.metadata = engine::unavailable(SC_REASON_INTERNAL_ERROR);
@@ -82,9 +87,14 @@ DWORD serve(void*) {
             sc_deathlink_request deathlink{};
             sc_automap_request automap{};
             sc_command_request command{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink, &automap, &summary, &rewards, &command);
+            sc_combat_presentation_request combat_presentation{};
+            sc_combat_query combat_query{};
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink, &automap, &summary, &rewards, &command, &combat_presentation, &combat_query);
+            sc_combat_presentation_result presentation_result{};
+            if (result == WireResult::ok && operation == combat_presentation_operation)
+                presentation_result = native::combat_presentation_request(combat_presentation);
             sc_command_result command_result{};
-            if (result == WireResult::ok && operation >= command_submit_operation) {
+            if (result == WireResult::ok && operation >= command_submit_operation && operation <= command_release_operation) {
                 command_result = operation == command_submit_operation ? native::submit_command(command) :
                     native::command_result(command, operation == command_cancel_operation, operation == command_release_operation);
             }
@@ -142,7 +152,9 @@ DWORD serve(void*) {
                         operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
             const DWORD size = static_cast<DWORD>(
-                operation >= command_submit_operation ? encode_command_response(data, result, operation, current_snapshot(), command_result) :
+                operation == combat_presentation_operation ? encode_combat_presentation_response(data, result, current_snapshot(), presentation_result) :
+                operation == combat_operation ? encode_combat_response(data, result, current_snapshot(), combat::inspect(combat_query)) :
+                operation >= command_submit_operation && operation <= command_release_operation ? encode_command_response(data, result, operation, current_snapshot(), command_result) :
                 operation == automap_operation ? encode_automap_response(data, result, current_snapshot(), automap_result) :
                 operation >= deathlink_submit_operation ?
                     encode_deathlink_response(data, result, operation, current_snapshot(), deathlink_result) :

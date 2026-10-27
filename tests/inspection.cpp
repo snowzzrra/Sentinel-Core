@@ -157,6 +157,51 @@ void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int
     CHECK(!output.empty() && GetTickCount64() - start < 4000);
     server.join();
 }
+void combat_presentation_identity(const Snapshot& snapshot) {
+    sc_combat_presentation_request request{};
+    request.execution.expected.pid = GetCurrentProcessId();
+    CHECK(process_time(GetCurrentProcess(), request.execution.expected.process_created));
+    std::memcpy(request.execution.expected.instance_id, snapshot.instance.data(), 16);
+    request.execution.expected.lifecycle_generation = 7;
+    request.execution.request_id = 123;
+    std::memset(request.execution.nonce, 0x45, 16);
+    request.execution.deadline_ms = 1000;
+    std::memset(request.namespace_id, 'a', 64);
+    request.total = 7; request.target = 50; request.visible = 1;
+    for (bool forged_nonce : {false, true}) {
+        Handle pipe(fake_pipe(GetCurrentProcessId())); CHECK(pipe);
+        std::thread server([&] {
+            Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr)); CHECK(event);
+            OVERLAPPED ov{}; ov.hEvent = event.value;
+            const auto connected = ConnectNamedPipe(pipe.value, &ov);
+            const auto error = connected ? ERROR_SUCCESS : GetLastError();
+            DWORD count = 0;
+            CHECK(error == ERROR_PIPE_CONNECTED || finish_io(pipe.value, ov, connected, error, nullptr, 2000, count) == ERROR_SUCCESS);
+            Message data{};
+            CHECK(transfer(pipe.value, false, data.data(), static_cast<DWORD>(data.size()), count, nullptr, 2000) == ERROR_SUCCESS);
+            uint16_t operation = 0; sc_combat_presentation_request received{};
+            CHECK(decode_request(data, count, &operation, nullptr, nullptr, nullptr, nullptr, nullptr,
+                nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &received) == WireResult::ok);
+            CHECK(operation == combat_presentation_operation && received.execution.request_id == request.execution.request_id);
+            auto source = snapshot; source.pid = request.execution.expected.pid;
+            source.process_created = request.execution.expected.process_created;
+            sc_combat_presentation_result response{};
+            response.abi_version = SC_COMBAT_PRESENTATION_ABI_VERSION;
+            response.scope = request.execution.expected; response.request_id = request.execution.request_id;
+            std::memcpy(response.nonce, request.execution.nonce, 16);
+            if (forged_nonce) ++response.nonce[0];
+            response.total = request.total; response.target = request.target; response.visible = 1;
+            const auto size = static_cast<DWORD>(encode_combat_presentation_response(data, WireResult::ok, source, response));
+            CHECK(size && transfer(pipe.value, true, data.data(), size, count, nullptr, 2000) == ERROR_SUCCESS);
+            transfer(pipe.value, false, data.data(), 1, count, nullptr, 2000);
+            DisconnectNamedPipe(pipe.value);
+        });
+        const auto result = query_combat_presentation(GetCurrentProcessId(), 2000, request);
+        CHECK(result.result == (forged_nonce ? ProbeResult::invalid_response : ProbeResult::ok));
+        if (!forged_nonce) CHECK(result.combat_presentation.total == 7 && result.combat_presentation.target == 50);
+        server.join();
+    }
+}
 void write_codec() {
     static_assert(sizeof(sc_save_write_snapshot) == 160 && sizeof(sc_save_snapshot) == 368 && sizeof(sc_save_admission_snapshot) == 160);
     Snapshot original{}, decoded{}; original.core.abi_version = SC_ABI_VERSION;
@@ -276,9 +321,9 @@ void prelaunch_contract(const std::wstring& dll, const std::wstring& probe_path)
     lease.reset();
     {
         std::ofstream out(fixture_file, std::ios::binary);
-        out << "sentinel-test-session-v1\nseed_hex=61646d697373696f6e2d66697874757265\nteam=0\nslot=1\n"
+        out << "sentinel-test-session-v3\nseed_hex=61646d697373696f6e2d66697874757265\nteam=0\nslot=1\n"
             "generation_fingerprint=" << std::string(64, 'a') <<
-            "\nprovenance=synthetic-fixture\nroot=" << root.u8string() << '\n';
+            "\nslot_data_revision=0.7.0\nsession_mod_contract_revision=2\nprovenance=synthetic-fixture\nroot=" << root.u8string() << '\n';
         out.close(); CHECK(out.good());
     }
     CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", fixture_file.c_str()));
@@ -444,6 +489,14 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(context.result == ProbeResult::ok && context.snapshot.instance == initial.snapshot.instance);
     CHECK(context.context.current_map.reason == SC_REASON_PROFILE_UNRECOGNIZED);
     CHECK(context.context.fields[SC_CONTEXT_LOAD_SERIAL].reason == SC_CONTEXT_UNSUPPORTED);
+    sc_combat_query combat_query{}; std::memset(combat_query.namespace_id, 'a', 64);
+    combat_query.map_count = 1; strcpy_s(combat_query.maps[0], "game/sp/hellonearth/hellonearth");
+    const auto combat = query_combat(first.child.pid, 2000, combat_query);
+    CHECK(combat.result == ProbeResult::ok && combat.snapshot.instance == initial.snapshot.instance);
+    CHECK(combat.combat.abi_version == SC_COMBAT_ABI_VERSION && combat.combat.scope.pid == first.child.pid);
+    CHECK(combat.combat.scope.process_created == initial.snapshot.process_created);
+    CHECK(std::memcmp(combat.combat.scope.instance_id, initial.snapshot.instance.data(), 16) == 0);
+    CHECK(combat.combat.qualified_kills == 0 && !std::strcmp(combat.combat.namespace_id, combat_query.namespace_id));
     const auto context_json = probe(probe_path, args + L" --context --json", 0);
     CHECK(context_json.find("\"operation\":\"context\"") != std::string::npos);
     CHECK(context_json.find("\"core_version\":\"" SC_PRODUCT_VERSION "\"") != std::string::npos);
@@ -586,7 +639,8 @@ int wmain(int argc, wchar_t** argv) {
         probe(probe_path, L"--pid " + std::to_wstring(GetCurrentProcessId()) + L" --json", 4);
     }
     for (int i = 0; i < 5; ++i) fake_response(probe_path, initial.snapshot, i);
-    fake_response(probe_path, initial.snapshot, 4, true); // old server's op-1 rejection envelope
+    fake_response(probe_path, initial.snapshot, 4, true);
+    combat_presentation_identity(initial.snapshot);
     CHECK(GetModuleHandleW(L"sentinel_core.dll") == nullptr); // test client never hosts core
     std::puts("PASS separate hosts/CLI, OS PID+creation, identity, ACL, reconnect, malformed/capability/version, timeouts, shutdown; HARNESS ONLY");
     return 0;

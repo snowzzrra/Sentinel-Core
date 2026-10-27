@@ -2,6 +2,7 @@
 #include "sentinel_inspection.h"
 #include <cstring>
 #include <algorithm>
+#include <windows.h>
 
 namespace sentinel::campaign_menu {
 Menu& menu() { static Menu value; return value; }
@@ -15,7 +16,7 @@ sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r
     const auto refuse=[&](uint32_t reason) { out.status=SC_CAMPAIGN_REFUSED; out.reason=reason; };
     if (admitted && namespace_id_!=r.namespace_id) {
         namespace_id_=r.namespace_id; staged_={}; committed_={}; received_={};
-        rendered_=0; selected_=0; loaded_=0; hint_intents_.clear();
+        rendered_=0; selected_=0; loaded_=0; hint_intents_.clear(); encounter_edges_.clear();
     }
     if (r.reward_presentation) out.abi_version=2;
     const sc_campaign_summary presentation=summary ? *summary : sc_campaign_summary{};
@@ -60,7 +61,18 @@ sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r
                     for (uint32_t j=0;j<i;++j) if (row.id==staged_.rows[j].id) refuse(SC_CAMPAIGN_ROWS);
                 }
                 if (!out.status && hubs!=1) refuse(SC_CAMPAIGN_ROWS);
-                if (!out.status) { staged_.focus_id=r.row.id; committed_=staged_; }
+                if (!out.status) {
+                    for (uint32_t i=0;i<staged_.count;++i)
+                        for (const auto& reward:staged_.rewards[i]) {
+                            if (reward.kind!=SC_REWARD_ENCOUNTER || !reward.checked) continue;
+                            for (uint32_t j=0;j<committed_.count;++j)
+                                if (!std::strcmp(staged_.rows[i].map,committed_.rows[j].map))
+                                    for (const auto& previous:committed_.rewards[j])
+                                        if (previous.location_id==reward.location_id && previous.kind==reward.kind && !previous.checked)
+                                            encounter_edges_[staged_.rows[i].map]={GetTickCount64(),reward};
+                        }
+                    staged_.focus_id=r.row.id; committed_=staged_;
+                }
             }
         }
     }
@@ -76,6 +88,27 @@ sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r
     return out;
 }
 Projection Menu::projection() { std::lock_guard<std::mutex> guard(mutex_); return committed_; }
+bool Menu::summary(const std::string& map,const std::string& namespace_id,sc_campaign_summary& out,uint64_t* revision) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (revision) *revision=committed_.revision;
+    if (committed_.namespace_id!=namespace_id) return false;
+    for (uint32_t i=0;i<committed_.count;++i)
+        if (map==committed_.rows[i].map && (committed_.rows[i].flags&SC_CAMPAIGN_REVEALED)) {
+            out=committed_.summaries[i]; return true;
+        }
+    return false;
+}
+bool Menu::encounter_reward(const std::string& map,const std::string& namespace_id,uint64_t since,sc_campaign_reward& out) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    const auto found=encounter_edges_.find(map);
+    if (committed_.namespace_id!=namespace_id) return false;
+    if (found!=encounter_edges_.end() && found->second.first+2000>=since) { out=found->second.second; return true; }
+    for (uint32_t i=0;i<committed_.count;++i)
+        if (map==committed_.rows[i].map)
+            for (const auto& entry:committed_.rewards[i])
+                if (entry.kind==SC_REWARD_ENCOUNTER) { out={}; return true; }
+    return false;
+}
 void Menu::hint_intent(const char* namespace_id,uint32_t location_id) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (namespace_id_!=namespace_id || !location_id) return;

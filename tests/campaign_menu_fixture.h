@@ -1,6 +1,52 @@
 // Bound native callees; wire decoding, namespace/scope admission, atomic commit,
 // privacy, refresh, and native LoadMission ownership use production adapters.
 namespace menu_fixture {
+void encounter_projection() {
+    campaign_menu::Menu model;
+    sc_campaign_request request{}; request.count=2; request.revision=1; request.reward_presentation=1;
+    std::memset(request.namespace_id,'a',64);
+    sc_campaign_summary summary{}; summary.known=1; summary.found=2; summary.total=20;
+    sc_campaign_rewards rewards{}; rewards.known=1; rewards.count=1;
+    auto& reward=rewards.entries[0]; reward.location_id=7770462; reward.kind=SC_REWARD_ENCOUNTER;
+    strcpy_s(reward.unlockable,"encounter/7770462"); strcpy_s(reward.name,"Escalation Encounter Wave 1");
+    strcpy_s(reward.text,"Your Ballista");
+    const auto commit=[&](bool checked) {
+        request.index=0; request.row={}; request.row.id=1;
+        request.row.flags=SC_CAMPAIGN_HUB|SC_CAMPAIGN_REVEALED;
+        strcpy_s(request.row.map,"game/hub/hub");
+        strcpy_s(request.row.title,"Fortress of Doom");
+        CHECK(!model.request(campaign_row_operation,request,true,&summary).status);
+        request.index=1; request.row={}; request.row.id=2; request.row.flags=SC_CAMPAIGN_REVEALED;
+        strcpy_s(request.row.title,"The World Spear");
+        strcpy_s(request.row.map,"game/dlc2/e5m1_spear/e5m1_spear"); reward.checked=checked;
+        CHECK(!model.request(campaign_row_operation,request,true,nullptr,&rewards).status);
+        CHECK(!model.request(campaign_commit_operation,request,true).status);
+    };
+    commit(true);
+    sc_campaign_reward observed{};
+    const std::string ns(64,'a'),map="game/dlc2/e5m1_spear/e5m1_spear";
+    CHECK(model.encounter_reward(map,ns,GetTickCount64(),observed) && !observed.location_id);
+    ++request.revision; commit(false);
+    const auto since=GetTickCount64();
+    ++request.revision; commit(true);
+    CHECK(model.encounter_reward(map,ns,since,observed) && observed.location_id==reward.location_id);
+    CHECK(!std::strcmp(observed.text,"Your Ballista"));
+    Message wire{}; sc_campaign_request decoded{}; sc_campaign_rewards decoded_rewards{};
+    request.execution.request_id=1; request.execution.nonce[0]=1; request.execution.deadline_ms=1000;
+    request.execution.expected.pid=1; request.execution.expected.process_created=1;
+    request.execution.expected.instance_id[0]=1;
+    const auto size=encode_campaign_request(wire,campaign_row_operation,request,&summary,&rewards);
+    CHECK(size && decode_request(wire,size,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&decoded,
+        nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&decoded_rewards)==WireResult::ok);
+    CHECK(decoded_rewards.count==1 && decoded_rewards.entries[0].kind==SC_REWARD_ENCOUNTER);
+    CHECK(model.encounter_reward(map,ns,since+3000,observed) && !observed.location_id);
+    CHECK(!model.encounter_reward(map,std::string(64,'b'),since,observed));
+    sc_campaign_summary hub{};
+    CHECK(model.summary("game/hub/hub",ns,hub) && hub.found==2 && hub.total==20);
+    CHECK(!model.summary("game/hub/hub",std::string(64,'b'),hub));
+    std::memset(request.namespace_id,'b',64); request.revision=1; commit(true);
+    CHECK(model.encounter_reward(map,std::string(64,'b'),since,observed) && !observed.location_id);
+}
 uintptr_t screen=0,list=0,details=0,campaign=0;
 uintptr_t source_list=0;
 uintptr_t combat_meter=0;
@@ -158,6 +204,9 @@ void exercise() {
         CHECK(at<uint32_t>(owner,0x1c8)==0); ++root_campaigns;
     };
     calls.campaign_definitions=[]()->uintptr_t { return root_definitions; };
+    calls.campaign_pump=[](uintptr_t owner) {
+        CHECK(at<uint32_t>(at<uintptr_t>(owner,0x100),0x1b8)==0);
+    };
     calls.sprite_changed=[](uintptr_t) { ++root_moves; };
     test_calls(calls);
     std::array<unsigned char,0x200> root_bytes{},definitions_bytes{};
@@ -168,6 +217,10 @@ void exercise() {
     const auto root_screen=reinterpret_cast<uintptr_t>(root_bytes.data());
     root_definitions=reinterpret_cast<uintptr_t>(definitions_bytes.data());
     at<uintptr_t>(root_definitions,0x148)=campaign;
+    at<uintptr_t>(root_screen,0x100)=root_definitions;
+    at<uint32_t>(root_definitions,0x1b8)=7;
+    sentinel::campaign_menu::test_campaign_pump(root_screen);
+    CHECK(at<uint32_t>(root_definitions,0x1b8)==7);
     constexpr size_t offsets[]{0x140,0x148,0x150,0x158,0x160,0x168,0x178,0x180,0x188};
     const auto render_address=reinterpret_cast<uintptr_t>(renderer.data());
     const auto transform_address=reinterpret_cast<uintptr_t>(transforms.data());

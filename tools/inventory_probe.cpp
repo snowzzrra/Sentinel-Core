@@ -34,6 +34,9 @@ int inventory_command(int argc, wchar_t** argv) {
          "\"dash_before\":%u,\"dash_after\":%u,"
          "\"slayer_key_before\":%u,\"slayer_key_after\":%u,"
          "\"frag_grenade_before\":%u,\"frag_grenade_after\":%u,"
+         "\"flame_belch_before\":%u,\"flame_belch_after\":%u,"
+         "\"blood_punch_before\":%u,\"blood_punch_after\":%u,"
+         "\"perks_known\":\"%llu\",\"perks_owned\":\"%llu\","
         "\"special_before\":%u,\"special_after\":%u,"
         "\"upgrades_before\":%u,\"upgrades_after\":%u,"
         "\"health_tier_before\":%u,\"health_tier_after\":%u,"
@@ -48,6 +51,9 @@ int inventory_command(int argc, wchar_t** argv) {
          static_cast<uint32_t>(inv.dash_before), static_cast<uint32_t>(inv.dash_after),
          static_cast<uint32_t>(inv.slayer_key_before), static_cast<uint32_t>(inv.slayer_key_after),
          static_cast<uint32_t>(inv.frag_grenade_before), static_cast<uint32_t>(inv.frag_grenade_after),
+         static_cast<uint32_t>(inv.flame_belch_before), static_cast<uint32_t>(inv.flame_belch_after),
+         static_cast<uint32_t>(inv.blood_punch_before), static_cast<uint32_t>(inv.blood_punch_after),
+         inv.perks_known, inv.perks_owned,
         inv.special_before, inv.special_after,
         inv.upgrades_before, inv.upgrades_after,
         static_cast<uint32_t>(inv.health_tier_before), static_cast<uint32_t>(inv.health_tier_after),

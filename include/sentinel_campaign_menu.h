@@ -32,7 +32,7 @@ typedef struct sc_campaign_summary {
 } sc_campaign_summary;
 
 // room rewards use the same menu revision
-enum { SC_REWARD_MISSION=1, SC_REWARD_AGGREGATE=2, SC_REWARD_MASTERY=3 };
+enum { SC_REWARD_MISSION=1, SC_REWARD_AGGREGATE=2, SC_REWARD_MASTERY=3, SC_REWARD_ENCOUNTER=4 };
 typedef struct sc_campaign_reward {
     uint32_t location_id, kind, checked;
     char unlockable[80], name[128], text[512];

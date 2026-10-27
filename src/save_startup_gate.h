@@ -66,6 +66,7 @@ public:
         Completion(const Completion&)=delete;
         Completion& operator=(const Completion&)=delete;
         ~Completion() {
+            if (!active_) return;
             { std::lock_guard<std::mutex> guard(gate_.observation_mutex_); gate_.complete_ms_=GetTickCount64(); }
             if (trace_) gate_.record(*trace_,result_==State::ready?BStatus::succeeded:BStatus::refused,
                 result_==State::ready?"startup_gate_installation_ready":result_==State::cancelled?
@@ -74,8 +75,9 @@ public:
         }
         void ready() { result_=State::ready; }
         void cancel() { result_=State::cancelled; }
+        void disarm() { active_=false; }
     private:
-        StartupGate& gate_; BTrace* trace_; State result_=State::failed;
+        StartupGate& gate_; BTrace* trace_; State result_=State::failed; bool active_=true;
     };
 private:
     HANDLE event_=nullptr;
