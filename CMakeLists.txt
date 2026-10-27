@@ -47,7 +47,7 @@ set(identity_inputs CMakeLists.txt version.json include/sentinel_version.h.in re
   include/sentinel_context.h src/context_observer.h src/context_observer.cpp
   include/sentinel_native.h src/native_model.h src/native_model.cpp
   include/sentinel_combat.h src/combat.h src/combat.cpp src/combat_native.h src/combat_native.cpp src/combat_presentation.h src/combat_progress_hud.h
-  src/expanded.h src/expanded.cpp src/expanded_native.h src/expanded_native.cpp src/enemy_recipe_state.h src/enemy_recipe_state.cpp
+  src/expanded.h src/expanded.cpp src/expanded_native.h src/expanded_native.cpp src/darklord_telemetry.h src/enemy_recipe_state.h src/enemy_recipe_state.cpp
   src/enemy_checkpoint_native.h src/enemy_checkpoint_native.cpp
   include/sentinel_weapon_points.h src/weapon_points.h src/weapon_points.cpp src/weapon_points_native.cpp
   tools/weapon_points_probe.cpp
@@ -139,7 +139,7 @@ set_tests_properties(native_expanded_movement PROPERTIES TIMEOUT 10)
 add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp src/save_campaign.cpp)
 target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
 target_sources(sentinel_save_session PRIVATE src/save_recovery.cpp)
-add_executable(sentinel_campaign_tests tests/save_campaign.cpp tests/save_profile.cpp src/native_runtime.cpp src/combat_native.cpp src/ap_controls_native.cpp src/native_target.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp src/campaign_menu_native.cpp)
+add_executable(sentinel_campaign_tests tests/save_campaign.cpp tests/save_profile.cpp src/native_runtime.cpp src/combat_native.cpp src/ap_controls_native.cpp src/native_target.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp src/campaign_menu_native.cpp src/startup_log.cpp)
 target_include_directories(sentinel_campaign_tests PRIVATE tests)
 target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)
 target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_native_model sentinel_minhook sentinel_save_session sentinel_protocol)
@@ -188,7 +188,7 @@ enable_testing()
 add_executable(sentinel_command_tests tests/commands.cpp)
 target_link_libraries(sentinel_command_tests PRIVATE sentinel_native_model)
 add_test(NAME command_dispatch_contract COMMAND sentinel_command_tests)
-add_executable(sentinel_installation_tests tests/installation.cpp)
+add_executable(sentinel_installation_tests tests/installation.cpp src/startup_log.cpp)
 target_link_libraries(sentinel_installation_tests PRIVATE sentinel_protocol sentinel_native)
 add_test(NAME retained_installation_contract COMMAND sentinel_installation_tests)
 add_executable(sentinel_save_session_tests tests/save_session.cpp tests/save_profile.cpp tests/save_provider.cpp tests/save_sdk_write.cpp tests/save_readback.cpp tests/save_submission.cpp)

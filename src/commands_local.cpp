@@ -2,6 +2,7 @@
 #include "commands.h"
 #include "native_target.h"
 #include "native_runtime.h"
+#include "startup_log.h"
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -136,6 +137,15 @@ bool execute_boon(const char* text, sc_command_result& result, uintptr_t player)
 void enemy_spawn_trace(const char* state, const char* origin, const char* body, const char* point, uintptr_t actor) {
     if (print) print("AP_ENEMY_SPAWN state=%s origin=%s body=%s point=%s actor=%llx\n",
         state, origin, body, point, static_cast<unsigned long long>(actor));
+}
+void darklord_trace(const char* line, bool console_allowed) noexcept {
+    const auto error = startup_log::darklord(line);
+    __try {
+        if (console_allowed && print) {
+            if (error) print("%s log_io_error=%u\n", line, error);
+            else print("%s\n", line);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 void enemy_kill_wait_trace(const char* owner, const char* label, uint64_t mask, int32_t target, uint32_t seen, bool complete) {
     if (print) print("AP_ENEMY_KILL_WAIT owner=%s label=%s mask=%llx target=%d seen=%u complete=%d\n",

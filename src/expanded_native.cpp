@@ -8,11 +8,13 @@
 #include "save_session.h"
 #include "save_collector.h"
 #include "commands_native.h"
+#include "startup_log.h"
 #include <MinHook.h>
 #include <atomic>
 #include <cstring>
 #include <cstddef>
 #include <cstdio>
+#include <cstdarg>
 #include <memory>
 #include <mutex>
 #include <map>
@@ -1405,69 +1407,19 @@ void samuel_setup_detour(uintptr_t component, uintptr_t actor) {
         original_samuel_setup(component, actor);
     } __finally { samuel_without_parasite = previous; }
 }
-uint64_t darklord_summon_type(uintptr_t definition) {
-    for (unsigned depth = 0; definition && depth < 64; ++depth) {
-        const auto name = *reinterpret_cast<const char**>(definition + 8);
-        if (name) {
-            const std::string_view value(name);
-            if (value == "ai/heavy/hellknight") return 0x4000;
-            if (value == "ai/heavy/mancubus_fire") return 0x100000;
-            if (value == "ai/superheavy/baron") return 0x10000000;
-            if (value == "ai/superheavy/tyrant") return 0x80000000;
-        }
-        definition = *reinterpret_cast<const uintptr_t*>(definition + 0x158);
-    }
-    return 0;
-}
-struct DarklordDefinition { uintptr_t* slot; uintptr_t original, replacement; };
-bool darklord_definitions(uintptr_t component, std::vector<DarklordDefinition>& replacements) {
-    if (!load_native_recipes()) return false;
-    const auto declaration = *reinterpret_cast<const uintptr_t*>(component + 0x10);
-    if (!declaration) return false;
-    const auto count = *reinterpret_cast<const int32_t*>(declaration + 0x1e8);
-    const auto entries = *reinterpret_cast<const uintptr_t*>(declaration + 0x1e0);
-    if (count < 0 || count > 64 || (count && !entries)) return false;
-    for (int32_t i = 0; i < count; ++i) {
-        const auto slot = reinterpret_cast<uintptr_t*>(entries + i * 16 + 8);
-        const auto mask = darklord_summon_type(*slot);
-        if (!mask) continue;
-        const auto recipe = std::find_if(native_recipes.begin(), native_recipes.end(), [&](const auto& row) {
-            return row.second.definition.family == 'u' && row.second.definition.source == "ap_darklord_phantoms" &&
-                row.second.definition.logical_mask == mask;
-        });
-        if (recipe == native_recipes.end()) continue;
-        const auto& bodies = recipe->second.bodies;
-        if (bodies.empty()) return false;
-        const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
-        if (!world) return false;
-        auto& random = *reinterpret_cast<uint32_t*>(world + 0x9a038);
-        random = random * 0x19660d + 0x3c6ef35f;
-        const auto body = bodies[(random >> 10 & 0x7fff) % bodies.size()];
-        const auto name = *reinterpret_cast<const char**>(body + 8);
-        const auto definition = name ? lookup_definition(definition_database(), name, 1) : 0;
-        if (!definition) return false;
-        replacements.push_back({slot, *slot, definition});
-    }
-    return true;
-}
-void invoke_darklord_summons(uintptr_t component, const std::vector<DarklordDefinition>& replacements) {
-    __try {
-        for (const auto& value : replacements) *value.slot = value.replacement;
-        original_darklord_summon(component);
-    } __finally {
-        for (const auto& value : replacements) *value.slot = value.original;
-    }
-}
+#include "darklord_telemetry.h"
 void darklord_summon_detour(uintptr_t component) {
     if (stopped.load(std::memory_order_acquire)) { original_darklord_summon(component); return; }
     std::lock_guard<std::recursive_mutex> lock(admission_mutex);
-    uintptr_t root = 0;
-    if (recipe_checkpoint_root(root) && !root) { original_darklord_summon(component); return; }
-    std::vector<DarklordDefinition> replacements;
-    bool ready = false;
-    try { ready = darklord_definitions(component, replacements); } catch (...) {}
-    if (!ready) { recipe_fault.store(true); original_darklord_summon(component); return; }
-    invoke_darklord_summons(component, replacements);
+    auto telemetry = darklord_begin(component);
+    darklord_slots(telemetry.get(), component);
+    // MSVC requires SEH cleanup in a scope without C++ destructors.
+    [component, call = telemetry.get()] {
+        darklord_call_start(call);
+        __try { original_darklord_summon(component); }
+        __finally { darklord_end(call, AbnormalTermination() != FALSE, call ? elapsed_us(call->call_start) : 0); }
+    }();
+    darklord_watch(std::move(telemetry));
 }
 const NativeRecipe* summon_recipe(uintptr_t component, uint64_t monster_type, uint64_t logical_type) {
     std::string source;
@@ -4407,6 +4359,7 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
     grow_summon_records = reinterpret_cast<GrowSummonRecords>(recipe_targets[48].address);
     construct_native_string = reinterpret_cast<ConstructNativeString>(recipe_targets[49].address);
     animation_path_table = binding.image.base + 0x2a9a1f8;
+    darklord_image = binding.image.base;
 
     world_global = binding.image.base + 0x45f7370;
     void* sites[] = {reinterpret_cast<void*>(movement.address), reinterpret_cast<void*>(haste.address),
@@ -4633,6 +4586,8 @@ void observe(uintptr_t world) {
     ObserveCost cost; cost.world=world;
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     cost.wait=elapsed_us(cost.start);
+    ++darklord_frame;
+    darklord_sample(world, GetTickCount64());
     if (restored_independent && !load_native_recipes()) return;
     try {
         if (!restore_autonomous_summons(world)) { recipe_fault.store(true); return; }
@@ -4720,6 +4675,7 @@ void observe(uintptr_t world) {
 void map_freed() {
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> lock(quantity_mutex);
+    darklord_clear();
     remaining_weights.clear();
     kill_progress.clear();
     health_progress.clear();
@@ -4740,36 +4696,147 @@ void map_freed() {
 }
 #ifdef SC_NATIVE_TESTING
 #include <memory>
-bool darklord_fault_call(uintptr_t component, const std::vector<DarklordDefinition>& replacements) {
-    __try { invoke_darklord_summons(component, replacements); }
+bool darklord_fault_call(uintptr_t component) {
+    __try { darklord_summon_detour(component); }
     __except(EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode() == 0xe0700003; }
     return false;
 }
 bool test_darklord_summon_scope() {
-    std::array<uintptr_t, 44> parent{}, child{}, boss{}, wolf{};
-    parent[1] = reinterpret_cast<uintptr_t>("ai/heavy/hellknight");
-    child[1] = reinterpret_cast<uintptr_t>("ai/boss/darklord/phantom_knight");
-    child[43] = reinterpret_cast<uintptr_t>(parent.data());
-    boss[1] = reinterpret_cast<uintptr_t>("ai/boss/darklord");
-    wolf[1] = reinterpret_cast<uintptr_t>("ai/friendly/wolf");
-    bool ok = darklord_summon_type(reinterpret_cast<uintptr_t>(child.data())) == 0x4000 &&
-        !darklord_summon_type(reinterpret_cast<uintptr_t>(boss.data())) &&
-        !darklord_summon_type(reinterpret_cast<uintptr_t>(wolf.data()));
-    std::array<uintptr_t, 2> slots{11, 22};
-    const std::vector<DarklordDefinition> replacements{{&slots[0], 11, 33}, {&slots[1], 22, 44}};
+    std::array<uintptr_t, 4> slots{0, 11, 0, 22};
+    std::array<uint8_t, 0x1f0> declaration{};
+    std::array<uintptr_t, 3> component{0, 0, reinterpret_cast<uintptr_t>(declaration.data())};
+    *reinterpret_cast<uintptr_t*>(declaration.data() + 0x1e0) = reinterpret_cast<uintptr_t>(slots.data());
+    *reinterpret_cast<int32_t*>(declaration.data() + 0x1e8) = 2;
     const auto previous = original_darklord_summon;
+    const auto previous_stopped = stopped.load();
+    const auto previous_fault = recipe_fault.exchange(false);
     static bool observed = false, fault = false;
-    original_darklord_summon = [](uintptr_t component) {
-        const auto values = reinterpret_cast<const uintptr_t*>(component);
-        observed = values[0] == 33 && values[1] == 44;
+    static unsigned calls = 0;
+    calls = 0;
+    original_darklord_summon = [](uintptr_t pointer) {
+        const auto decl = *reinterpret_cast<const uintptr_t*>(pointer + 0x10);
+        const auto values = *reinterpret_cast<const uintptr_t**>(decl + 0x1e0);
+        observed = values[1] == 11 && values[3] == 22;
+        ++calls;
         if (fault) RaiseException(0xe0700003, 0, 0, nullptr);
     };
-    invoke_darklord_summons(reinterpret_cast<uintptr_t>(slots.data()), replacements);
-    ok &= observed && slots[0] == 11 && slots[1] == 22;
-    observed = false; fault = true;
-    ok &= darklord_fault_call(reinterpret_cast<uintptr_t>(slots.data()), replacements) &&
-        observed && slots[0] == 11 && slots[1] == 22;
+    stopped.store(false);
+    darklord_summon_detour(reinterpret_cast<uintptr_t>(component.data()));
+    bool ok = observed && calls == 1 && !recipe_fault.load() && slots == std::array<uintptr_t, 4>{0, 11, 0, 22};
+    stopped.store(true); observed = false; fault = true;
+    ok &= darklord_fault_call(reinterpret_cast<uintptr_t>(component.data())) &&
+        observed && calls == 2 && slots == std::array<uintptr_t, 4>{0, 11, 0, 22};
+    stopped.store(true); fault = false; observed = false;
+    darklord_summon_detour(reinterpret_cast<uintptr_t>(component.data()));
+    ok &= observed && calls == 3 && slots == std::array<uintptr_t, 4>{0, 11, 0, 22};
+    stopped.store(previous_stopped);
+    recipe_fault.store(previous_fault);
     fault = false; original_darklord_summon = previous;
+    return ok;
+}
+bool test_darklord_telemetry() {
+    static std::vector<std::string> lines;
+    static std::array<uintptr_t, 2> actors{};
+    static std::array<uint32_t, 3> handles{9, 111, 222};
+    std::vector<uint8_t> world(0x9a100), component(0x400);
+    std::array<std::vector<uint8_t>, 2> actor_bytes{std::vector<uint8_t>(0x16830), std::vector<uint8_t>(0x16830)};
+    std::array<std::vector<uint8_t>, 2> animator_bytes{std::vector<uint8_t>(0xa300), std::vector<uint8_t>(0xa300)};
+    std::array<uintptr_t, 44> knight{}, pain{};
+    knight[1] = reinterpret_cast<uintptr_t>("ai/heavy/hellknight");
+    pain[1] = reinterpret_cast<uintptr_t>("ai/boss/darklord/summoned/painelemental");
+    std::array<uintptr_t, 4> slots{0, reinterpret_cast<uintptr_t>(knight.data()), 0, reinterpret_cast<uintptr_t>(pain.data())};
+    std::vector<uint8_t> declaration(0x1f0);
+    *reinterpret_cast<uintptr_t*>(declaration.data() + 0x1e0) = reinterpret_cast<uintptr_t>(slots.data());
+    *reinterpret_cast<int32_t*>(declaration.data() + 0x1e8) = 2;
+    std::array<uintptr_t, 0x100 / 8> world_table{}, actor_table{}, animator_table{};
+    world_table[0x88 / 8] = reinterpret_cast<uintptr_t>(+[](uintptr_t, uint32_t* handle) -> uintptr_t {
+        return *handle == 111 ? actors[0] : *handle == 222 ? actors[1] : uintptr_t{1};
+    });
+    actor_table[0x60 / 8] = reinterpret_cast<uintptr_t>(+[](uintptr_t) { return "fixture_actor"; });
+    const auto previous_image = darklord_image, previous_world = world_global;
+    const auto previous_sink = darklord_sink;
+    const auto previous_clock = native_clock;
+    const auto previous_original = original_darklord_summon;
+    auto previous_calls = std::move(darklord_calls);
+    darklord_calls.clear(); lines.clear();
+    darklord_sink = +[](const char* line, bool) { lines.emplace_back(line); };
+    darklord_image = world_table[0x88 / 8] - 0x6998e0;
+    animator_table[0x98 / 8] = darklord_image + 0x4947b0;
+    uintptr_t world_address = reinterpret_cast<uintptr_t>(world.data());
+    world_global = reinterpret_cast<uintptr_t>(&world_address);
+    *reinterpret_cast<uintptr_t*>(world.data()) = reinterpret_cast<uintptr_t>(world_table.data());
+    *reinterpret_cast<uintptr_t*>(world.data() + 0x9a068) = reinterpret_cast<uintptr_t>("game/dlc2/e5m4_boss/e5m4_boss");
+    *reinterpret_cast<uint32_t*>(world.data() + 0x9a038) = 0x1234;
+    const auto address = reinterpret_cast<uintptr_t>(component.data());
+    *reinterpret_cast<uintptr_t*>(address + 8) = 77;
+    *reinterpret_cast<uintptr_t*>(address + 0x10) = reinterpret_cast<uintptr_t>(declaration.data());
+    *reinterpret_cast<uintptr_t*>(address + 0x3d8) = reinterpret_cast<uintptr_t>(handles.data());
+    *reinterpret_cast<int32_t*>(address + 0x3e0) = 1;
+    for (size_t i = 0; i < actors.size(); ++i) {
+        actors[i] = reinterpret_cast<uintptr_t>(actor_bytes[i].data());
+        const auto actor = actors[i], animator = reinterpret_cast<uintptr_t>(animator_bytes[i].data());
+        *reinterpret_cast<uintptr_t*>(actor) = reinterpret_cast<uintptr_t>(actor_table.data());
+        *reinterpret_cast<int32_t*>(actor + 0x10) = static_cast<int32_t>(i + 7);
+        *reinterpret_cast<uintptr_t*>(actor + 0xa8) = reinterpret_cast<uintptr_t>(i ? pain.data() : knight.data());
+        *reinterpret_cast<uintptr_t*>(actor + 0x5960) = animator;
+        *reinterpret_cast<float*>(actor + 0x65a4) = 100;
+        *reinterpret_cast<uintptr_t*>(animator + 0x9890) = reinterpret_cast<uintptr_t>(animator_table.data());
+        *reinterpret_cast<uint8_t*>(animator + 0x9890 + 0x370) = 1;
+        *reinterpret_cast<uint16_t*>(animator + 0x9890 + 0x5ac) = 7;
+        *reinterpret_cast<int32_t*>(animator + 0x9890 + 0x5ec) = 1;
+        *reinterpret_cast<uintptr_t*>(world.data() + 0x1af8 + (i + 7) * 8) = actor;
+        *reinterpret_cast<uint32_t*>(world.data() + 0x21af8 + (i + 7) * 4) = handles[i + 1];
+    }
+    native_clock = +[](uintptr_t, uint64_t* value, int32_t) -> uint64_t* { *value = 123456; return value; };
+    original_darklord_summon = +[](uintptr_t pointer) { *reinterpret_cast<int32_t*>(pointer + 0x3e0) = 3; };
+    const auto previous_stopped = stopped.exchange(false);
+    darklord_summon_detour(address);
+    stopped.store(previous_stopped);
+    bool ok = darklord_calls.size() == 1;
+    if (ok) {
+        auto& call = *darklord_calls.begin()->second;
+        ok &= slots[1] == reinterpret_cast<uintptr_t>(knight.data()) && call.actors.size() == 2;
+        const auto now = call.actors.empty() ? GetTickCount64() : call.actors[0].created;
+        for (auto& actor : call.actors) actor.created = actor.sampled = now;
+        const auto before = lines.size();
+        darklord_sample(world_address, now + 250); darklord_sample(world_address, now + 500);
+        ok &= lines.size() == before;
+        *reinterpret_cast<float*>(actors[0] + 0x74) = 1;
+        *reinterpret_cast<uint16_t*>(animator_bytes[0].data() + 0x9890 + 0x5ac) = 8;
+        for (const auto time : {1000, 2000, 3000, 5000, 8000, 12000}) darklord_sample(world_address, now + time);
+        ok &= darklord_calls.empty();
+    }
+    auto broken = darklord_begin(1);
+    if (broken) {
+        darklord_slots(broken.get(), 1);
+        darklord_call_start(broken.get()); darklord_end(broken.get(), false, 1);
+        darklord_track(*broken, 333);
+        broken->lines = 1023;
+        darklord_emit(*broken, "sample", "unused=1"); darklord_emit(*broken, "sample", "unused=2");
+    } else ok = false;
+    const auto contains = [&](const char* a, const char* b) {
+        return std::any_of(lines.begin(), lines.end(), [&](const auto& line) {
+            return line.find(a) != line.npos && line.find(b) != line.npos;
+        });
+    };
+    ok &= contains("event=begin", "rng_before=0x1234 count_before=1") &&
+        contains("event=end", "count_before=1 count_after=3 original_us=") &&
+        contains("event=slot", "slot=0 decl=ai/heavy/hellknight inherit=null") &&
+        contains("event=slot", "slot=1 decl=ai/boss/darklord/summoned/painelemental") &&
+        contains("event=identity", "slot=0 entity_name=fixture_actor decl=ai/heavy/hellknight inherit=null") &&
+        contains("event=actor", "anim_read=ok anim_enabled=1") &&
+        contains("event=sample", "recovered_at_ms=1000") &&
+        contains("event=summary", "frozen_ms=12000 recovered_at_ms=-1 samples=8") &&
+        contains("event=actor", "read_fault=1") && contains("event=read_fault", "field=handle_diff") &&
+        contains("event=limit", "reason=invocation_line_cap");
+    for (const auto& line : lines) ok &= line.rfind("AP_DARKLORD ", 0) == 0 && line.find(" seq=") != line.npos &&
+        line.find(" at_ms=") != line.npos && line.find(" game_tick=") != line.npos && line.find(" map=e5m4_boss ") != line.npos;
+    Snapshot identity; identity.pid = GetCurrentProcessId(); identity.process_created = 123456;
+    startup_log::record(identity, 0);
+    for (const auto& line : lines) ok &= startup_log::darklord(line.c_str()) == ERROR_SUCCESS;
+    darklord_clear(); darklord_calls = std::move(previous_calls);
+    original_darklord_summon = previous_original; native_clock = previous_clock;
+    darklord_image = previous_image; world_global = previous_world; darklord_sink = previous_sink;
     return ok;
 }
 bool test_recipe_transport() {
@@ -4840,7 +4907,7 @@ bool test_recipe_transport() {
     map_freed(); session_recipe_plan.clear();
     world_global = previous_world; find_entity = previous_find; definition_name = previous_name;
     chunks.clear();
-    return ok && test_darklord_summon_scope();
+    return ok && test_darklord_summon_scope() && test_darklord_telemetry();
 }
 
 bool recipe_fault_call(uintptr_t worker) {
