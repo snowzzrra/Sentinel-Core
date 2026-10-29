@@ -24,6 +24,7 @@ sc_diagnostic_request request(uint64_t id, uint32_t deadline = 100) {
     r.request_id = id; r.nonce[0] = 42; r.deadline_ms = deadline; return r;
 }
 void run_backup_request_contracts();
+void run_command_identity_tests();
 int main() {
     for (int stage = 0; stage <= 4; ++stage) {
         const auto mask = (1u << stage) - 1;
@@ -375,5 +376,6 @@ int main() {
     mastery_result.flags |= 0x80;
     CHECK(!encode_arsenal_response(wire, WireResult::ok, arsenal_result_operation, host, mastery_result));
     run_backup_request_contracts();
+    run_command_identity_tests();
     std::puts("PASS native lifecycle, nested/free/failure/menu, same-name generation, history gaps, queue bounds/deadlines/retention, claimed cancellation race, strict bounded wire; HARNESS ONLY");
 }

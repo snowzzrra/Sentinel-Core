@@ -14,6 +14,9 @@ struct Handle {
 inline std::wstring pipe_name(DWORD pid) {
     return L"\\\\.\\pipe\\sentinel_core.inspect.v1." + std::to_wstring(pid);
 }
+inline std::wstring pipe_name_v2(DWORD pid) {
+    return L"\\\\.\\pipe\\sentinel_core.inspect.v2." + std::to_wstring(pid);
+}
 inline DWORD remaining(ULONGLONG deadline) {
     const auto now = GetTickCount64();
     return now < deadline ? static_cast<DWORD>(deadline - now) : 0;
@@ -48,6 +51,21 @@ inline DWORD transfer(HANDLE pipe, bool write, void* data, DWORD size, DWORD& co
     OVERLAPPED ov{}; ov.hEvent = event.value;
     const BOOL ok = write ? WriteFile(pipe, data, size, &count, &ov) : ReadFile(pipe, data, size, &count, &ov);
     return finish_io(pipe, ov, ok, ok ? ERROR_SUCCESS : GetLastError(), stop, timeout, count);
+}
+inline DWORD transfer_exact(HANDLE pipe, bool write, void* data, DWORD size,
+                            HANDLE stop, ULONGLONG deadline) {
+    auto* bytes = static_cast<uint8_t*>(data);
+    DWORD offset = 0;
+    while (offset < size) {
+        const DWORD timeout = remaining(deadline);
+        if (!timeout) return ERROR_TIMEOUT;
+        DWORD count = 0;
+        const auto error = transfer(pipe, write, bytes + offset, size - offset, count, stop, timeout);
+        if (error != ERROR_SUCCESS) return error;
+        if (!count) return ERROR_BROKEN_PIPE;
+        offset += count;
+    }
+    return ERROR_SUCCESS;
 }
 // os pipe identity queries also require read-attributes access
 constexpr DWORD client_access = FILE_GENERIC_READ | FILE_WRITE_DATA;

@@ -142,6 +142,7 @@ public:
     void stop_requests();
     void fail(SessionFault);
     sc_save_admission_snapshot inspect() const;
+    std::array<uint8_t, 16> binding_token() const;
     bool routed() const { return ever_routed_.load(std::memory_order_acquire); }
     bool native_io() const {
         const auto current = state();
@@ -183,6 +184,8 @@ private:
     ProfileTrace profile_trace_{};
     uintptr_t profile_data_ = 0;
     mutable std::mutex mutex_;
+    std::array<uint8_t, 16> binding_token_{};
+    bool bind_profile_choice(const ProfileChoice&, unsigned campaign);
     std::atomic<SessionState> state_{SessionState::disabled};
     std::atomic<SessionFault> fault_{SessionFault::none};
     std::atomic<bool> requests_{false}, ever_routed_{false};

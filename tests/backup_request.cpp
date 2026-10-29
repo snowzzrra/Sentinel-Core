@@ -25,8 +25,37 @@ sc_diagnostic_result execution(Diagnostics::Slot& slot) {
     e.current_map.length = 11;
     return e;
 }
+void retained_backup_identity() {
+    const auto r = request();
+    generated::submission submission{};
+    submission.reference.scope = {7, 13, {}, 1}; submission.reference.scope.instance_id[0] = 1;
+    submission.reference.command_id = "backup"; submission.reference.command_type = 14;
+    submission.reference.payload_revision = 1; submission.reference.namespace_id.fill('a');
+    submission.save_binding[0] = 9; submission.deadline_ms = 1000;
+    Diagnostics queue;
+    const auto admitted = queue.submit(submission, r, 0, 100);
+    CHECK(admitted.execution.state == SC_DIAGNOSTIC_QUEUED);
+    auto* slot = queue.claim(101); CHECK(slot && slot->backup);
+    const auto job = slot->backup; CHECK(job->bind(91));
+    Diagnostics::await_backup(*slot, execution(*slot), {}, {91, 0, true, true, true});
+    CHECK(queue.query(admitted.reference, false, 50000).execution.state == SC_DIAGNOSTIC_CLAIMED);
+    CHECK(queue.ack(admitted.reference, admitted.result_token, 50000).error == Diagnostics::Error::not_terminal);
+    CHECK(queue.submit(submission, r, 0, 50000).execution.state == SC_DIAGNOSTIC_CLAIMED);
+    for (uint64_t i = 0; i < 7; ++i) CHECK(queue.submit(request(i + 500).execution, 0, 50000).state == SC_DIAGNOSTIC_QUEUED);
+    CHECK(queue.submit(request(600).execution, 0, 50000).reason == SC_NATIVE_QUEUE_FULL);
+    job->readback_finished(false);
+    const auto terminal = queue.query(admitted.reference, false, 50001);
+    CHECK(terminal.execution.state == SC_DIAGNOSTIC_EXECUTED && terminal.retention == Diagnostics::Retention::full_result);
+    CHECK(std::get<sc_save_backup_snapshot>(terminal.value).operation_id == 91);
+    CHECK((std::get<sc_save_backup_snapshot>(terminal.value).flags & (SC_BACKUP_NATIVE_ENTERED | SC_BACKUP_TASK_RETURNED | SC_BACKUP_SOURCE_MATCHED)) ==
+        (SC_BACKUP_NATIVE_ENTERED | SC_BACKUP_TASK_RETURNED | SC_BACKUP_SOURCE_MATCHED));
+    CHECK(queue.ack(admitted.reference, admitted.result_token, 50002).retention == Diagnostics::Retention::compact_terminal);
+    CHECK(queue.submit(submission, r, 0, 50003).retention == Diagnostics::Retention::compact_terminal);
+    CHECK(queue.submit(request(600).execution, 0, 50003).state == SC_DIAGNOSTIC_QUEUED);
+}
 }
 void run_backup_request_contracts() {
+    retained_backup_identity();
     const auto r = request();
     Diagnostics queue;
     CHECK(queue.submit(r.execution, 0, 100, nullptr, &r).state == SC_DIAGNOSTIC_QUEUED);
@@ -36,7 +65,7 @@ void run_backup_request_contracts() {
     CHECK(queue.submit(changed.execution, 0, 101, nullptr, &changed).reason == SC_NATIVE_DUPLICATE_MISMATCH);
     CHECK(queue.backup_result(changed, true, 101).state == SC_BACKUP_UNKNOWN);
     CHECK(queue.submit(r.execution, SC_NATIVE_STOPPED, 102, nullptr, &r).admitted_at_ms == 100);
-    auto* slot = queue.claim(103); CHECK(slot && slot->is_backup && slot->backup);
+    auto* slot = queue.claim(103); CHECK(slot && slot->is<sc_save_backup_request>() && slot->backup);
     const auto job = slot->backup; CHECK(job->bind(91));
     const auto before = queue.backup_result(r, false, 103);
     CHECK(before.state == SC_BACKUP_CLAIMED && !before.operation_id && !before.execution.executed_at_ms);

@@ -2,6 +2,8 @@
 #include "sentinel_version.h"
 #include "pipe_io.h"
 #include "protocol.h"
+#include "protocol_v2.h"
+#include "protocol_dispatch.h"
 #include "save_storage.h"
 #include <aclapi.h>
 #include <cstdio>
@@ -12,6 +14,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include "wire_fixtures.h"
+#include <numeric>
+#include <utility>
 
 #define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL line %d: %s (win32=%lu)\n", __LINE__, #c, GetLastError()); std::exit(1); } } while (0)
 using namespace sentinel;
@@ -73,8 +78,8 @@ std::string probe(const std::wstring& path, const std::wstring& args, DWORD expe
     CHECK(ReadFile(read.value, buffer, sizeof(buffer), &size, nullptr));
     return std::string(buffer, size);
 }
-HANDLE open_pipe(DWORD pid, DWORD access = client_access) {
-    const auto name = pipe_name(pid);
+HANDLE open_pipe(DWORD pid, DWORD access = client_access, bool version2 = false) {
+    const auto name = version2 ? pipe_name_v2(pid) : pipe_name(pid);
     const auto deadline = GetTickCount64() + 3000;
     for (;;) {
         HANDLE pipe = CreateFileW(name.c_str(), access, 0, nullptr, OPEN_EXISTING,
@@ -93,8 +98,8 @@ void exchange(DWORD pid, Message request, DWORD length, WireResult expected) {
     WireResult result{}; Snapshot snapshot;
     CHECK(decode_response(response, count, result, snapshot) && result == expected);
 }
-void permissions(DWORD pid) {
-    Handle pipe(open_pipe(pid, client_access | READ_CONTROL)); CHECK(pipe);
+void permissions(DWORD pid, bool version2 = false) {
+    Handle pipe(open_pipe(pid, client_access | READ_CONTROL, version2)); CHECK(pipe);
     PACL dacl = nullptr; PSECURITY_DESCRIPTOR descriptor = nullptr;
     CHECK(GetSecurityInfo(pipe.value, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr,
                           &dacl, nullptr, &descriptor) == ERROR_SUCCESS);
@@ -116,13 +121,197 @@ void permissions(DWORD pid) {
     CHECK(matched);
     LocalFree(descriptor);
     CloseHandle(pipe.value); pipe.value = nullptr;
-    Handle excessive(open_pipe(pid, GENERIC_READ | GENERIC_WRITE));
+    Handle excessive(open_pipe(pid, GENERIC_READ | GENERIC_WRITE, version2));
     CHECK(!excessive && GetLastError() == ERROR_ACCESS_DENIED);
 }
 HANDLE fake_pipe(DWORD pid) {
     return CreateNamedPipeW(pipe_name(pid).c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
         PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS,
         1, 512, 512, 1000, nullptr);
+}
+void accept_fake(HANDLE pipe) {
+    Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr)); CHECK(event);
+    OVERLAPPED ov{}; ov.hEvent = event.value;
+    const auto connected = ConnectNamedPipe(pipe, &ov);
+    const auto error = connected ? ERROR_SUCCESS : GetLastError();
+    DWORD count = 0;
+    CHECK(error == ERROR_PIPE_CONNECTED || finish_io(pipe, ov, connected, error, nullptr, 2000, count) == ERROR_SUCCESS);
+}
+void finish_fake(HANDLE pipe) {
+    uint8_t byte = 0; DWORD count = 0;
+    CHECK(transfer(pipe, false, &byte, 1, count, nullptr, 2000) == ERROR_BROKEN_PIPE);
+    CHECK(DisconnectNamedPipe(pipe));
+}
+struct RequestFixture {
+    Message data{};
+    DWORD size = 0;
+};
+RequestFixture request_fixture(const std::vector<uint8_t>& bytes) {
+    CHECK(!bytes.empty() && bytes.size() <= max_request);
+    RequestFixture fixture; fixture.size = static_cast<DWORD>(bytes.size());
+    std::copy(bytes.begin(), bytes.end(), fixture.data.begin()); return fixture;
+}
+
+std::array<unsigned, 51> handler_calls{};
+template<size_t Index> size_t counted_handler(Message&, const DecodedRequest& request) {
+    CHECK(request.operation == Index + 1);
+    ++handler_calls[Index];
+    return request.operation;
+}
+template<size_t... Indices> MessageHandlers counted_handlers(std::index_sequence<Indices...>) {
+    return {counted_handler<Indices>...};
+}
+void dispatch_error(RequestFixture fixture, const MessageHandlers& handlers, WireResult code, uint8_t operation) {
+    handler_calls.fill(0);
+    CHECK(process_message(fixture.data, fixture.size, handlers) == header_size);
+    const std::array<uint8_t, 16> expected{0x53, 0x43, 0x49, 0x50, 1, 0, operation, 0,
+                                         0, 0, 0, 0, static_cast<uint8_t>(code), 0, 0, 0};
+    CHECK(std::equal(expected.begin(), expected.end(), fixture.data.begin()));
+    CHECK(std::accumulate(handler_calls.begin(), handler_calls.end(), 0u) == 0);
+}
+void dispatch_contract() {
+    const auto handlers = counted_handlers(std::make_index_sequence<51>{});
+    for (const auto& [name, entry] : wire_fixtures::read(SC_WIRE_FIXTURE_FILE)) {
+        if (entry.response) continue;
+        auto fixture = request_fixture(entry.bytes);
+        const unsigned operation = fixture.data[6];
+        handler_calls.fill(0);
+        CHECK(process_message(fixture.data, fixture.size, handlers) == operation);
+        CHECK(handler_calls[operation - 1] == 1);
+        CHECK(std::accumulate(handler_calls.begin(), handler_calls.end(), 0u) == 1);
+        auto bad = request_fixture(entry.bytes); bad.data[4] = 99;
+        dispatch_error(bad, handlers, WireResult::incompatible_protocol, static_cast<uint8_t>(operation));
+        bad = request_fixture(entry.bytes); bad.data[23] = 0x80;
+        dispatch_error(bad, handlers, WireResult::capability_unavailable, static_cast<uint8_t>(operation));
+        bad = request_fixture(entry.bytes); --bad.size;
+        dispatch_error(bad, handlers, WireResult::malformed, inspect_operation);
+    }
+    handler_calls.fill(0);
+    auto fixture = request_fixture(wire_fixtures::read(SC_WIRE_FIXTURE_FILE).at("command_submit").bytes);
+    fixture.data[6] = 99;
+    CHECK(process_message(fixture.data, fixture.size, handlers) == header_size);
+    WireResult code{}; Snapshot snapshot;
+    CHECK(decode_response(fixture.data, header_size, code, snapshot) && code == WireResult::unsupported_operation);
+    CHECK(std::accumulate(handler_calls.begin(), handler_calls.end(), 0u) == 0);
+}
+void dispatch_live_contract(DWORD pid) {
+    for (const auto& [name, entry] : wire_fixtures::read(SC_WIRE_FIXTURE_FILE)) {
+        if (entry.response) continue;
+        auto fixture = request_fixture(entry.bytes);
+        const unsigned operation = fixture.data[6];
+        Handle pipe(open_pipe(pid)); CHECK(pipe);
+        DWORD count = 0;
+        CHECK(transfer(pipe.value, true, fixture.data.data(), fixture.size, count, nullptr, 2000) == ERROR_SUCCESS);
+        CHECK(transfer(pipe.value, false, fixture.data.data(), static_cast<DWORD>(fixture.data.size()), count, nullptr, 2000) == ERROR_SUCCESS);
+        CHECK(count > header_size && fixture.data[6] == operation && fixture.data[7] == 0 && fixture.data[12] == 0);
+    }
+}
+void partial_read_deadline(const Snapshot& snapshot) {
+    Handle pipe(fake_pipe(GetCurrentProcessId())); CHECK(pipe);
+    Handle written(CreateEventW(nullptr, TRUE, FALSE, nullptr)); CHECK(written);
+    std::thread server([&] {
+        accept_fake(pipe.value);
+        Message data{};
+        const auto size = static_cast<DWORD>(encode_response(data, WireResult::ok, snapshot));
+        DWORD count = 0;
+        Sleep(80);
+        CHECK(transfer(pipe.value, true, data.data(), 8, count, nullptr, 2000) == ERROR_SUCCESS);
+        Sleep(80);
+        CHECK(transfer(pipe.value, true, data.data() + 8, 8, count, nullptr, 2000) == ERROR_SUCCESS);
+        Sleep(250);
+        CHECK(transfer(pipe.value, true, data.data() + 16, size - 16, count, nullptr, 2000) == ERROR_SUCCESS);
+        CHECK(SetEvent(written.value));
+        finish_fake(pipe.value);
+    });
+    {
+        Handle client(open_pipe(GetCurrentProcessId())); CHECK(client);
+        const auto start = GetTickCount64(), deadline = start + 300;
+        Message data{}; DWORD count = 0;
+        CHECK(transfer(client.value, false, data.data(), 8, count, nullptr, remaining(deadline)) == ERROR_SUCCESS && count == 8);
+        CHECK(transfer(client.value, false, data.data() + 8, 8, count, nullptr, remaining(deadline)) == ERROR_SUCCESS && count == 8);
+        CHECK(transfer(client.value, false, data.data() + 16, 1, count, nullptr, remaining(deadline)) == ERROR_TIMEOUT);
+        CHECK(GetTickCount64() - start >= 250 && GetTickCount64() - start < 600);
+        CHECK(WaitForSingleObject(written.value, 2000) == WAIT_OBJECT_0);
+    }
+    server.join();
+}
+void query_deadline(const Snapshot& snapshot) {
+    Handle pipe(fake_pipe(GetCurrentProcessId())); CHECK(pipe);
+    Handle occupied(open_pipe(GetCurrentProcessId())); CHECK(occupied);
+    Handle reading(CreateEventW(nullptr, TRUE, FALSE, nullptr)); CHECK(reading);
+    std::thread server([&] {
+        Sleep(200);
+        CHECK(DisconnectNamedPipe(pipe.value));
+        accept_fake(pipe.value);
+        Message data{}; DWORD count = 0;
+        CHECK(transfer(pipe.value, false, data.data(), static_cast<DWORD>(data.size()), count, nullptr, 2000) == ERROR_SUCCESS);
+        CHECK(SetEvent(reading.value));
+        Sleep(300);
+        auto source = snapshot; source.pid = GetCurrentProcessId();
+        CHECK(process_time(GetCurrentProcess(), source.process_created));
+        const auto size = static_cast<DWORD>(encode_response(data, WireResult::ok, source));
+        const auto error = transfer(pipe.value, true, data.data(), size, count, nullptr, 2000);
+        if (error == ERROR_SUCCESS) finish_fake(pipe.value);
+        else {
+            CHECK(error == ERROR_NO_DATA || error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED);
+            CHECK(DisconnectNamedPipe(pipe.value));
+        }
+    });
+    const auto start = GetTickCount64();
+    const auto result = query(GetCurrentProcessId(), 400);
+    const auto elapsed = GetTickCount64() - start;
+    CHECK(result.result == ProbeResult::timeout && !std::strcmp(result.failure_stage, "pipe_read"));
+    CHECK(WaitForSingleObject(reading.value, 0) == WAIT_OBJECT_0);
+    CHECK(elapsed >= 350 && elapsed < 1000);
+    server.join();
+}
+void forge_command(sc_command_result& response, unsigned variant) {
+    if (variant == 1) ++response.execution.nonce[0];
+    if (variant == 2) ++response.execution.request_id;
+    if (variant == 3) ++response.execution.scope.lifecycle_generation;
+    if (variant == 4) response.namespace_id[0] = 'b';
+    if (variant == 5) response.kind = SC_COMMAND_ECHO;
+}
+void command_identity(const Snapshot& snapshot) {
+    sc_command_request request{};
+    request.execution.expected.pid = GetCurrentProcessId();
+    CHECK(process_time(GetCurrentProcess(), request.execution.expected.process_created));
+    std::memcpy(request.execution.expected.instance_id, snapshot.instance.data(), 16);
+    request.execution.expected.lifecycle_generation = 7; request.execution.request_id = 123;
+    std::memset(request.execution.nonce, 0x45, 16); request.execution.deadline_ms = 1000;
+    std::memset(request.namespace_id, 'a', 64);
+    request.kind = SC_COMMAND_AMMO_REFILL; strcpy_s(request.text, "give ammo");
+    const ProbeResult expected[] = {ProbeResult::ok,
+        ProbeResult::invalid_response, ProbeResult::invalid_response, ProbeResult::invalid_response,
+        ProbeResult::invalid_response, ProbeResult::invalid_response,
+        ProbeResult::capability_unavailable, ProbeResult::capability_unavailable,
+        ProbeResult::invalid_response, ProbeResult::process_mismatch, ProbeResult::process_mismatch};
+    for (unsigned variant = 0; variant < std::size(expected); ++variant) {
+        Handle pipe(fake_pipe(GetCurrentProcessId())); CHECK(pipe);
+        std::thread server([&] {
+            accept_fake(pipe.value);
+            Message data{}; DWORD count = 0;
+            CHECK(transfer(pipe.value, false, data.data(), static_cast<DWORD>(data.size()), count, nullptr, 2000) == ERROR_SUCCESS);
+            auto source = snapshot; source.pid = request.execution.expected.pid;
+            source.process_created = request.execution.expected.process_created;
+            sc_command_result response{}; response.abi_version = SC_COMMAND_ABI_VERSION;
+            response.execution.scope = request.execution.expected; response.execution.request_id = request.execution.request_id;
+            std::memcpy(response.execution.nonce, request.execution.nonce, 16);
+            std::memcpy(response.namespace_id, request.namespace_id, sizeof(response.namespace_id)); response.kind = request.kind;
+            forge_command(response, variant);
+            if (variant == 9) { ++source.process_created; ++response.execution.scope.process_created; }
+            if (variant == 10) { ++source.instance[0]; ++response.execution.scope.instance_id[0]; }
+            size_t size = encode_command_response(data, WireResult::ok, command_submit_operation, source, response);
+            if (variant == 6) size = encode_command_response(data, WireResult::unsupported_operation, command_submit_operation, {}, {});
+            if (variant == 7) size = encode_response(data, WireResult::unsupported_operation, {});
+            if (variant == 8) data[6] = command_result_operation;
+            CHECK(size && transfer(pipe.value, true, data.data(), static_cast<DWORD>(size), count, nullptr, 2000) == ERROR_SUCCESS);
+            finish_fake(pipe.value);
+        });
+        const auto result = query_command(GetCurrentProcessId(), 2000, command_submit_operation, request);
+        CHECK(result.result == expected[variant]);
+        server.join();
+    }
 }
 void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int variant, bool context_query = false) {
     Handle pipe(fake_pipe(GetCurrentProcessId())); CHECK(pipe);
@@ -157,6 +346,14 @@ void fake_response(const std::wstring& probe_path, const Snapshot& snapshot, int
     CHECK(!output.empty() && GetTickCount64() - start < 4000);
     server.join();
 }
+void forge_presentation(sc_combat_presentation_result& response, unsigned variant) {
+    if (variant == 1) ++response.nonce[0];
+    if (variant == 2) ++response.request_id;
+    if (variant == 3) ++response.scope.pid;
+    if (variant == 4) ++response.scope.process_created;
+    if (variant == 5) ++response.scope.instance_id[0];
+    if (variant == 6) ++response.scope.lifecycle_generation;
+}
 void combat_presentation_identity(const Snapshot& snapshot) {
     sc_combat_presentation_request request{};
     request.execution.expected.pid = GetCurrentProcessId();
@@ -168,15 +365,11 @@ void combat_presentation_identity(const Snapshot& snapshot) {
     request.execution.deadline_ms = 1000;
     std::memset(request.namespace_id, 'a', 64);
     request.total = 7; request.target = 50; request.visible = 1;
-    for (bool forged_nonce : {false, true}) {
+    for (unsigned variant = 0; variant < 7; ++variant) {
         Handle pipe(fake_pipe(GetCurrentProcessId())); CHECK(pipe);
         std::thread server([&] {
-            Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr)); CHECK(event);
-            OVERLAPPED ov{}; ov.hEvent = event.value;
-            const auto connected = ConnectNamedPipe(pipe.value, &ov);
-            const auto error = connected ? ERROR_SUCCESS : GetLastError();
+            accept_fake(pipe.value);
             DWORD count = 0;
-            CHECK(error == ERROR_PIPE_CONNECTED || finish_io(pipe.value, ov, connected, error, nullptr, 2000, count) == ERROR_SUCCESS);
             Message data{};
             CHECK(transfer(pipe.value, false, data.data(), static_cast<DWORD>(data.size()), count, nullptr, 2000) == ERROR_SUCCESS);
             uint16_t operation = 0; sc_combat_presentation_request received{};
@@ -189,16 +382,15 @@ void combat_presentation_identity(const Snapshot& snapshot) {
             response.abi_version = SC_COMBAT_PRESENTATION_ABI_VERSION;
             response.scope = request.execution.expected; response.request_id = request.execution.request_id;
             std::memcpy(response.nonce, request.execution.nonce, 16);
-            if (forged_nonce) ++response.nonce[0];
+            forge_presentation(response, variant);
             response.total = request.total; response.target = request.target; response.visible = 1;
             const auto size = static_cast<DWORD>(encode_combat_presentation_response(data, WireResult::ok, source, response));
             CHECK(size && transfer(pipe.value, true, data.data(), size, count, nullptr, 2000) == ERROR_SUCCESS);
-            transfer(pipe.value, false, data.data(), 1, count, nullptr, 2000);
-            DisconnectNamedPipe(pipe.value);
+            finish_fake(pipe.value);
         });
         const auto result = query_combat_presentation(GetCurrentProcessId(), 2000, request);
-        CHECK(result.result == (forged_nonce ? ProbeResult::invalid_response : ProbeResult::ok));
-        if (!forged_nonce) CHECK(result.combat_presentation.total == 7 && result.combat_presentation.target == 50);
+        CHECK(result.result == (variant ? ProbeResult::invalid_response : ProbeResult::ok));
+        if (!variant) CHECK(result.combat_presentation.total == 7 && result.combat_presentation.target == 50);
         server.join();
     }
 }
@@ -350,6 +542,96 @@ void prelaunch_contract(const std::wstring& dll, const std::wstring& probe_path)
     fs::remove_all(root);
     std::puts("PASS production prelaunch reader/lease, DLL retention before hooks, sticky shutdown and probe refusal; synthetic hosts only");
 }
+generated::wire_header_2 v2_fake_read(HANDLE pipe, generated::Bytes& body) {
+    generated::Bytes bytes(32); generated::wire_header_2 header;
+    CHECK(transfer_exact(pipe, false, bytes.data(), 32, nullptr, GetTickCount64() + 2000) == ERROR_SUCCESS);
+    CHECK(v2::header(bytes, header, false)); body.resize(header.payload_length);
+    CHECK(transfer_exact(pipe, false, body.data(), header.payload_length, nullptr, GetTickCount64() + 2000) == ERROR_SUCCESS); return header;
+}
+void v2_fake_accept(HANDLE pipe) {
+    Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr)); CHECK(event);
+    OVERLAPPED ov{}; ov.hEvent = event.value;
+    const auto ok = ConnectNamedPipe(pipe, &ov); const auto error = ok ? ERROR_SUCCESS : GetLastError(); DWORD count = 0;
+    CHECK(error == ERROR_PIPE_CONNECTED || finish_io(pipe, ov, ok, error, nullptr, 2000, count) == ERROR_SUCCESS);
+}
+void v2_fake_server(HANDLE pipe, unsigned mode, generated::hello_result hello) {
+    v2_fake_accept(pipe); generated::Bytes body, bytes;
+    auto header = v2_fake_read(pipe, body); header.flags = 1;
+    if (mode == 5) ++hello.scope.process_created;
+    CHECK(generated::encode(hello, body)); CHECK(v2::frame(header, body, bytes));
+    const auto deadline = GetTickCount64() + 3000;
+    for (auto& byte : bytes) CHECK(transfer_exact(pipe, true, &byte, 1, nullptr, deadline) == ERROR_SUCCESS);
+    if (mode != 5) {
+        header = v2_fake_read(pipe, body); header.flags = 1;
+        generated::command_reference reference; CHECK(generated::decode(body, reference));
+        generated::command_reply reply{hello.scope.instance_id, reference, {3,2,4,2,{}}};
+        if (mode == 1) ++reply.actual_instance_id[0];
+        if (mode == 2) reply.reference.command_id = "other";
+        if (mode == 3) ++header.correlation_id;
+        if (mode == 4) ++reply.reference.scope.process_created;
+        CHECK(generated::encode(generated::command_response{reply, 4, {}}, body)); CHECK(v2::frame(header, body, bytes));
+        for (auto& byte : bytes) CHECK(transfer_exact(pipe, true, &byte, 1, nullptr, deadline) == ERROR_SUCCESS);
+    }
+    DWORD count = 0; uint8_t byte = 0;
+    const auto error = transfer(pipe, false, &byte, 1, count, nullptr, 2000);
+    CHECK(error == ERROR_BROKEN_PIPE || (error == ERROR_SUCCESS && !count));
+}
+void v2_client_identity() {
+    for (unsigned mode = 0; mode < 6; ++mode) {
+        Handle server(CreateNamedPipeW(pipe_name_v2(GetCurrentProcessId()).c_str(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS, 4, 16384, 16384, 1000, nullptr)); CHECK(server);
+        generated::hello_result hello{}; hello.scope.pid = GetCurrentProcessId();
+        CHECK(process_time(GetCurrentProcess(), hello.scope.process_created)); hello.scope.instance_id[0] = 1;
+        hello.max_frame = 16384; hello.execution_slots = 8; hello.full_result_ms = 30000; hello.identity_capacity = 65536;
+        std::thread worker([&] { v2_fake_server(server.value, mode, hello); });
+        V2Connection connection; const auto connected = connection.connect(GetCurrentProcessId(), 2000);
+        if (mode == 5) CHECK(connected == ProbeResult::process_mismatch);
+        else {
+            CHECK(connected == ProbeResult::ok);
+            generated::command_reference reference{hello.scope, {}, "identity", 5, 1, {}}; reference.namespace_id.fill('0');
+            generated::Bytes body; CHECK(generated::encode(reference, body));
+            const auto result = connection.exchange(3, body, 2000);
+            CHECK(result.transport == (mode ? ProbeResult::invalid_response : ProbeResult::ok));
+        }
+        connection.close(); worker.join();
+    }
+}
+void v2_fairness(DWORD pid) {
+    Handle first(open_pipe(pid, client_access, true)), second(open_pipe(pid, client_access, true)), third(open_pipe(pid, client_access, true));
+    CHECK(first && second && third);
+    V2Connection active;
+    CHECK(active.connect(pid, 1000) == ProbeResult::ok);
+    CHECK(active.exchange(6, {}, 1000).transport == ProbeResult::ok);
+    V2Connection excess;
+    CHECK(excess.connect(pid, 100) == ProbeResult::timeout);
+    CHECK(query(pid, 1000).result == ProbeResult::ok);
+}
+void v2_partial_deadline(DWORD pid, bool header_only = false) {
+    Handle pipe(open_pipe(pid, client_access, true)); CHECK(pipe);
+    generated::wire_header_2 header{generated::wire_magic, 2, 2, 100, 0, 1, 0, 0};
+    generated::Bytes bytes; CHECK(generated::encode(header, bytes));
+    const auto begin = GetTickCount64();
+    CHECK(transfer_exact(pipe.value, true, bytes.data(), header_only ? 1u : 32u, nullptr, begin + 1000) == ERROR_SUCCESS);
+    Sleep(650);
+    CHECK(transfer_exact(pipe.value, true, bytes.data(), 1, nullptr, begin + 1000) == ERROR_SUCCESS);
+    Sleep(450); DWORD count = 0;
+    const auto error = transfer(pipe.value, false, bytes.data(), 1, count, nullptr, 500);
+    CHECK(error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED);
+    CHECK(GetTickCount64() - begin < 1600);
+}
+void v2_shutdown_io(DWORD pid, Host& host) {
+    Handle idle(open_pipe(pid, client_access, true)), partial(open_pipe(pid, client_access, true)), blocked(open_pipe(pid, client_access, true));
+    CHECK(idle && partial && blocked);
+    uint8_t byte = 0x53;
+    CHECK(transfer_exact(partial.value, true, &byte, 1, nullptr, GetTickCount64() + 1000) == ERROR_SUCCESS);
+    generated::Bytes frame, bytes;
+    CHECK(v2::frame({generated::wire_magic, 2, 6, 0, 0, 1, 0, 0}, {}, frame));
+    for (unsigned i = 0; i < 200; ++i) bytes.insert(bytes.end(), frame.begin(), frame.end());
+    CHECK(transfer_exact(blocked.value, true, bytes.data(), static_cast<DWORD>(bytes.size()), nullptr, GetTickCount64() + 2000) == ERROR_SUCCESS);
+    const auto start = GetTickCount64(); host.shutdown();
+    CHECK(GetTickCount64() - start < 6000);
+}
 int wmain(int argc, wchar_t** argv) {
     admission_codec(); write_codec();
     executable = argv[0];
@@ -416,6 +698,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(SetInformationJobObject(test_job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits)));
     const std::wstring dll = argv[1], probe_path = argv[2];
     if (argc == 4) { prelaunch_contract(dll, probe_path); return 0; }
+    dispatch_contract();
     Host first(dll, 1), second(dll, 2);
     const auto initial = query(first.child.pid, 2000);
     if (initial.result != ProbeResult::ok) std::fprintf(stderr, "initial query=%s win32=%u server_pid=%u\n",
@@ -428,6 +711,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(std::strcmp(initial.snapshot.core.version, SC_PRODUCT_VERSION) == 0);
     uint64_t created = 0; CHECK(process_time(first.child.process.value, created));
     CHECK(initial.snapshot.process_created == created);
+    dispatch_live_contract(first.child.pid);
     const auto other = query(second.child.pid, 2000);
     CHECK(other.result == ProbeResult::ok && initial.snapshot.instance != other.snapshot.instance);
     for (int i = 0; i < 8; ++i) {
@@ -565,6 +849,10 @@ int wmain(int argc, wchar_t** argv) {
     probe(probe_path, L"--pid 0 --json", 2);
     probe(probe_path, L"--pid 1 --timeout-ms 10001 --json", 2);
     permissions(first.child.pid);
+    permissions(first.child.pid, true);
+    v2_fairness(first.child.pid);
+    v2_partial_deadline(first.child.pid);
+    v2_partial_deadline(first.child.pid, true);
     CHECK(query(first.child.pid, 2000, 2).result == ProbeResult::capability_unavailable);
     Message request{};
     auto size = static_cast<DWORD>(encode_request(request, 1, 99));
@@ -594,7 +882,7 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(query(first.child.pid, 2000).result == ProbeResult::ok);
     { // explicit shutdown must cancel an admitted idle read before unloading core
         Handle held(open_pipe(first.child.pid)); CHECK(held);
-        const auto start = GetTickCount64(); first.shutdown();
+        const auto start = GetTickCount64(); v2_shutdown_io(first.child.pid, first);
         CHECK(GetTickCount64() - start < 6000);
     }
     CHECK(query(first.child.pid, 2000).result == ProbeResult::endpoint_absent);
@@ -608,6 +896,11 @@ int wmain(int argc, wchar_t** argv) {
     { // a same-user impostor occupying another pid's name is rejected by os pid
         Handle imposter(fake_pipe(idle.child.pid)); CHECK(imposter);
         CHECK(query(idle.child.pid, 150).result == ProbeResult::process_mismatch);
+    }
+    {
+        Handle imposter(CreateNamedPipeW(pipe_name_v2(idle.child.pid).c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS, 4, 16384, 16384, 1000, nullptr)); CHECK(imposter);
+        V2Connection connection; CHECK(connection.connect(idle.child.pid, 150) == ProbeResult::process_mismatch);
     }
     { // real denied pipe access to a live task-owned target: never relabel as exit
         ACL empty{}; CHECK(InitializeAcl(&empty, sizeof(empty), ACL_REVISION));
@@ -641,6 +934,10 @@ int wmain(int argc, wchar_t** argv) {
     for (int i = 0; i < 5; ++i) fake_response(probe_path, initial.snapshot, i);
     fake_response(probe_path, initial.snapshot, 4, true);
     combat_presentation_identity(initial.snapshot);
+    command_identity(initial.snapshot);
+    v2_client_identity();
+    partial_read_deadline(initial.snapshot);
+    query_deadline(initial.snapshot);
     CHECK(GetModuleHandleW(L"sentinel_core.dll") == nullptr); // test client never hosts core
     std::puts("PASS separate hosts/CLI, OS PID+creation, identity, ACL, reconnect, malformed/capability/version, timeouts, shutdown; HARNESS ONLY");
     return 0;

@@ -1,19 +1,73 @@
 #include "startup_log.h"
 #include "inspection_server.h"
 #include "pipe_io.h"
-#include "protocol.h"
+#include "protocol_v2.h"
+#include "protocol_dispatch.h"
 #include "engine_observer.h"
 #include "context_observer.h"
 #include "save_observer.h"
-#include "save_session.h"
 #include "native_runtime.h"
-#include "combat_native.h"
 #include <sddl.h>
 #include <vector>
 
 namespace sentinel {
 namespace {
 HANDLE pipe = INVALID_HANDLE_VALUE, stop = nullptr, worker = nullptr, observer = nullptr;
+struct ConnectionWorker { HANDLE pipe = INVALID_HANDLE_VALUE, thread = nullptr; };
+std::array<ConnectionWorker, 4> connections;
+
+DWORD accept_v2(HANDLE endpoint) {
+    Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!event) return GetLastError();
+    OVERLAPPED ov{}; ov.hEvent = event.value;
+    const BOOL ok = ConnectNamedPipe(endpoint, &ov);
+    const auto error = ok ? ERROR_SUCCESS : GetLastError();
+    if (error == ERROR_PIPE_CONNECTED) return ERROR_SUCCESS;
+    DWORD count = 0;
+    return finish_io(endpoint, ov, ok, error, stop, INFINITE, count);
+}
+DWORD read_v2(HANDLE endpoint, generated::wire_header_2& header, generated::Bytes& body) {
+    generated::Bytes bytes(generated::header_size_2);
+    DWORD count = 0;
+    auto error = transfer(endpoint, false, bytes.data(), 1, count, stop, INFINITE);
+    if (error != ERROR_SUCCESS) return error;
+    if (count != 1) return ERROR_BROKEN_PIPE;
+    const auto deadline = GetTickCount64() + 1000;
+    error = transfer_exact(endpoint, false, bytes.data() + 1, 31, stop, deadline);
+    if (error != ERROR_SUCCESS) return error;
+    if (!v2::header(bytes, header, false)) return ERROR_INVALID_DATA;
+    body.resize(header.payload_length);
+    return transfer_exact(endpoint, false, body.data(), header.payload_length, stop, deadline);
+}
+void serve_v2_client(HANDLE endpoint) {
+    for (;;) {
+        generated::wire_header_2 header{}; generated::Bytes body, response;
+        if (read_v2(endpoint, header, body) != ERROR_SUCCESS) return;
+        if (!process_v2(header, body, response)) return;
+#ifdef SC_FAULT_REDIRECT
+        if (testing::drop_pipe_reply(header.operation)) return;
+#endif
+        if (transfer_exact(endpoint, true, response.data(), static_cast<DWORD>(response.size()), stop,
+                           GetTickCount64() + 1000) != ERROR_SUCCESS) return;
+    }
+}
+DWORD serve_v2(void* context) {
+    const auto endpoint = static_cast<ConnectionWorker*>(context)->pipe;
+    try {
+        for (;;) {
+            const auto wait = WaitForSingleObject(stop, 0);
+            if (wait == WAIT_FAILED) { inspection_failed(GetLastError()); return 1; }
+            if (wait != WAIT_TIMEOUT) return 0;
+            const auto error = accept_v2(endpoint);
+            if (error == ERROR_OPERATION_ABORTED) return 0;
+            if (error == ERROR_SUCCESS) serve_v2_client(endpoint);
+            else if (error != ERROR_NO_DATA) { inspection_failed(error); return 1; }
+            if (!DisconnectNamedPipe(endpoint) && GetLastError() != ERROR_PIPE_NOT_CONNECTED) {
+                inspection_failed(GetLastError()); return 1;
+            }
+        }
+    } catch (...) { inspection_failed(ERROR_UNHANDLED_EXCEPTION); return 1; }
+}
 
 DWORD observe(void*) {
     engine::LocalMemory memory;
@@ -45,157 +99,87 @@ DWORD observe(void*) {
     }
     return 0;
 }
-DWORD serve(void*) {
-    Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-    if (!event) { inspection_failed(GetLastError()); return 1; }
-    // one sampler owns all engine reads. resolver startup never blocks basic ipc
+DWORD accept_client(HANDLE event) {
+    if (!ResetEvent(event)) return GetLastError();
+    OVERLAPPED ov{}; ov.hEvent = event;
+    const BOOL connected = ConnectNamedPipe(pipe, &ov);
+    const DWORD error = connected ? ERROR_SUCCESS : GetLastError();
+    DWORD count = 0;
+    if (error == ERROR_PIPE_CONNECTED) return ERROR_SUCCESS;
+    return finish_io(pipe, ov, connected, error, stop, 1000, count);
+}
+DWORD disconnect_client() {
+    if (DisconnectNamedPipe(pipe)) return ERROR_SUCCESS;
+    const auto error = GetLastError();
+    return error == ERROR_PIPE_NOT_CONNECTED ? ERROR_SUCCESS : error;
+}
+bool retry_connection(DWORD error) {
+    return error == ERROR_TIMEOUT || error == ERROR_NO_DATA || error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED;
+}
+void serve_client(uint64_t deadline) {
+    Message data{}; DWORD count = 0;
+    if (transfer(pipe, false, data.data(), static_cast<DWORD>(max_request), count, stop, remaining(deadline)) != ERROR_SUCCESS) return;
+    const auto size = static_cast<DWORD>(process_message(data, count));
+    if (transfer(pipe, true, data.data(), size, count, stop, remaining(deadline)) != ERROR_SUCCESS) return;
+    // wait for client close before disconnecting so an unread reply is not discarded
+    transfer(pipe, false, data.data(), 1, count, stop, remaining(deadline));
+}
+void start_observer() {
     observer = CreateThread(nullptr, 0, observe, nullptr, 0, nullptr);
     if (!observer) {
         publish_engine(engine::unavailable(SC_REASON_INTERNAL_ERROR));
         publish_context(context::unavailable(SC_REASON_INTERNAL_ERROR));
         publish_save(save::unavailable(SC_REASON_INTERNAL_ERROR));
     }
-    while (WaitForSingleObject(stop, 0) == WAIT_TIMEOUT) {
-        ResetEvent(event.value);
-        OVERLAPPED ov{}; ov.hEvent = event.value;
-        const BOOL connected = ConnectNamedPipe(pipe, &ov);
-        const DWORD error = connected ? ERROR_SUCCESS : GetLastError();
-        DWORD count = 0;
-        const DWORD connection = error == ERROR_PIPE_CONNECTED ? ERROR_SUCCESS :
-            finish_io(pipe, ov, connected, error, stop, 1000, count);
+}
+DWORD serve(void*) {
+    Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!event) { inspection_failed(GetLastError()); return 1; }
+    start_observer();
+    for (;;) {
+        const auto wait = WaitForSingleObject(stop, 0);
+        if (wait == WAIT_FAILED) { inspection_failed(GetLastError()); return 1; }
+        if (wait != WAIT_TIMEOUT) break;
+        const auto connection = accept_client(event.value);
         if (connection == ERROR_OPERATION_ABORTED) break;
-        if (connection == ERROR_TIMEOUT) { DisconnectNamedPipe(pipe); continue; }
-        if (connection == ERROR_NO_DATA || connection == ERROR_BROKEN_PIPE || connection == ERROR_PIPE_NOT_CONNECTED) {
-            DisconnectNamedPipe(pipe); continue;
-        }
-        if (connection != ERROR_SUCCESS) { inspection_failed(connection); return 1; }
-        const auto deadline = GetTickCount64() + 1000;
-        Message data{};
-        if (transfer(pipe, false, data.data(), static_cast<DWORD>(max_request), count, stop,
-                     remaining(deadline)) == ERROR_SUCCESS) {
-            uint16_t operation = inspect_operation;
-            sc_diagnostic_request diagnostic{}; uint64_t after_event = 0, write_id = 0;
-            sc_save_backup_request backup{};
-            sc_weapon_points_request points{};
-            sc_campaign_request campaign{};
-            sc_campaign_summary summary{};
-            sc_campaign_rewards rewards{};
-            sc_inventory_request inventory{};
-            sc_arsenal_request arsenal{};
-            sc_runes_request runes{};
-            sc_special_request special{};
-            sc_deathlink_request deathlink{};
-            sc_automap_request automap{};
-            sc_command_request command{};
-            sc_combat_presentation_request combat_presentation{};
-            sc_combat_query combat_query{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink, &automap, &summary, &rewards, &command, &combat_presentation, &combat_query);
-            sc_combat_presentation_result presentation_result{};
-            if (result == WireResult::ok && operation == combat_presentation_operation)
-                presentation_result = native::combat_presentation_request(combat_presentation);
-            sc_command_result command_result{};
-            if (result == WireResult::ok && operation >= command_submit_operation && operation <= command_release_operation) {
-                command_result = operation == command_submit_operation ? native::submit_command(command) :
-                    native::command_result(command, operation == command_cancel_operation, operation == command_release_operation);
-            }
-            sc_automap_result automap_result{};
-            if (result == WireResult::ok && operation == automap_operation) automap_result = native::automap_request(automap);
-            sc_deathlink_result deathlink_result{};
-            if (result == WireResult::ok && operation >= deathlink_submit_operation && operation <= deathlink_release_operation) {
-                deathlink_result = operation == deathlink_submit_operation ? native::submit_deathlink(deathlink) :
-                    native::deathlink_result(deathlink, operation == deathlink_cancel_operation,
-                        operation == deathlink_release_operation);
-            }
-            sc_special_result special_result{};
-            if (result == WireResult::ok && operation >= special_submit_operation && operation <= special_release_operation) {
-                special_result = operation == special_submit_operation ? native::submit_special(special) :
-                    native::special_result(special, operation == special_cancel_operation,
-                        operation == special_release_operation);
-            }
-            sc_runes_result runes_result{};
-            if (result == WireResult::ok && operation >= runes_submit_operation && operation <= runes_release_operation) {
-                runes_result = operation == runes_submit_operation ? native::submit_runes(runes) :
-                    native::runes_result(runes, operation == runes_cancel_operation,
-                        operation == runes_release_operation);
-            }
-            sc_arsenal_result arsenal_result{};
-            if (result == WireResult::ok && operation >= arsenal_submit_operation && operation <= arsenal_release_operation) {
-                arsenal_result = operation == arsenal_submit_operation ? native::submit_arsenal(arsenal) :
-                    native::arsenal_result(arsenal, operation == arsenal_cancel_operation,
-                        operation == arsenal_release_operation);
-            }
-            sc_inventory_result inventory_result{};
-            if (result == WireResult::ok && operation >= inventory_submit_operation && operation <= inventory_release_operation) {
-                inventory_result = operation == inventory_submit_operation ? native::submit_inventory(inventory) :
-                    native::inventory_result(inventory, operation == inventory_cancel_operation,
-                        operation == inventory_release_operation);
-            }
-            sc_campaign_result campaign_result{};
-            if (result==WireResult::ok && operation>=campaign_row_operation && operation<=campaign_inspect_operation)
-                campaign_result=native::campaign_request(operation,campaign,&summary,&rewards);
-            sc_weapon_points_result points_result{};
-            if (result == WireResult::ok && operation >= weapon_points_submit_operation && operation<=weapon_points_release_operation) {
-                points_result = operation == weapon_points_submit_operation ? native::submit_weapon_points(points) :
-                    native::weapon_points_result(points, operation == weapon_points_cancel_operation,
-                        operation == weapon_points_release_operation);
-            }
-            sc_save_backup_snapshot backup_result{};
-            if (result == WireResult::ok && operation >= save_backup_submit_operation && operation <= save_backup_cancel_operation) {
-                backup_result = operation == save_backup_submit_operation ? native::submit_backup(backup) :
-                    native::backup_result(backup, operation == save_backup_cancel_operation);
-            }
-            sc_diagnostic_result diagnostic_result{};
-            sc_diagnostic_detail detail{};
-            if (result == WireResult::ok && operation >= diagnostic_submit_operation && operation <= diagnostic_detail_cancel_operation) {
-                diagnostic_result = operation == diagnostic_submit_operation || operation == diagnostic_detail_submit_operation ?
-                    native::submit(diagnostic, &detail) : native::result(diagnostic,
-                        operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
-            }
-            const DWORD size = static_cast<DWORD>(
-                operation == combat_presentation_operation ? encode_combat_presentation_response(data, result, current_snapshot(), presentation_result) :
-                operation == combat_operation ? encode_combat_response(data, result, current_snapshot(), combat::inspect(combat_query)) :
-                operation >= command_submit_operation && operation <= command_release_operation ? encode_command_response(data, result, operation, current_snapshot(), command_result) :
-                operation == automap_operation ? encode_automap_response(data, result, current_snapshot(), automap_result) :
-                operation >= deathlink_submit_operation ?
-                    encode_deathlink_response(data, result, operation, current_snapshot(), deathlink_result) :
-                operation >= special_submit_operation ?
-                    encode_special_response(data, result, operation, current_snapshot(), special_result) :
-                operation >= runes_submit_operation ?
-                    encode_runes_response(data, result, operation, current_snapshot(), runes_result) :
-                operation >= arsenal_submit_operation ?
-                    encode_arsenal_response(data, result, operation, current_snapshot(), arsenal_result) :
-                operation >= inventory_submit_operation ?
-                    encode_inventory_response(data, result, operation, current_snapshot(), inventory_result) :
-                operation >= campaign_row_operation ?
-                    encode_campaign_response(data, result, operation, current_snapshot(), campaign_result) :
-                operation >= weapon_points_submit_operation ?
-                    encode_weapon_points_response(data, result, operation, current_snapshot(), points_result) :
-                operation == save_installation_operation ?
-                    encode_installation_response(data, result, current_snapshot(), save::session().installation.inspect()) :
-                operation >= save_backup_submit_operation ?
-                    encode_backup_response(data, result, operation, current_snapshot(), backup_result) :
-                operation == save_write_operation ?
-                    encode_save_write_response(data, result, current_snapshot(), save::session().native_writes.snapshot(write_id)) :
-                operation == save_admission_operation ?
-                    encode_save_admission_response(data, result, current_snapshot(), save::session().inspect()) :
-                operation == save_operation ?
-                    encode_save_response(data, result, current_snapshot(), current_save_snapshot()) :
-                operation >= native_operation ?
-                    encode_native_response(data, result, operation, current_snapshot(), native::inspect(after_event), diagnostic_result, detail) :
-                operation == context_operation ?
-                    encode_context_response(data, result, current_snapshot(), current_context_snapshot()) :
-                operation == engine_operation ?
-                    encode_engine_response(data, result, current_snapshot(), current_engine_snapshot()) :
-                    encode_response(data, result, current_snapshot()));
-            if (transfer(pipe, true, data.data(), size, count, stop, remaining(deadline)) == ERROR_SUCCESS) {
-                // wait for the client to close or reject extra input before disconnecting; don't flush the pipe or discard the unread reply
-                transfer(pipe, false, data.data(), 1, count, stop, remaining(deadline));
-            }
-        }
-        DisconnectNamedPipe(pipe);
+        if (connection == ERROR_SUCCESS) serve_client(GetTickCount64() + 1000);
+        else if (!retry_connection(connection)) { inspection_failed(connection); return 1; }
+        const auto error = disconnect_client();
+        if (error != ERROR_SUCCESS) { inspection_failed(error); return 1; }
     }
-    DisconnectNamedPipe(pipe);
+    const auto error = disconnect_client();
+    if (error != ERROR_SUCCESS) { inspection_failed(error); return 1; }
     return 0;
+}
+DWORD create_v2_endpoints(SECURITY_ATTRIBUTES& attributes) {
+    for (size_t i = 0; i < connections.size(); ++i) {
+        connections[i].pipe = CreateNamedPipeW(pipe_name_v2(GetCurrentProcessId()).c_str(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (i == 0 ? FILE_FLAG_FIRST_PIPE_INSTANCE | WRITE_DAC : 0),
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            static_cast<DWORD>(connections.size()), 16384, 16384, 1000, &attributes);
+        if (connections[i].pipe == INVALID_HANDLE_VALUE) return GetLastError();
+    }
+    return ERROR_SUCCESS;
+}
+DWORD create_endpoints(SECURITY_ATTRIBUTES& attributes) {
+    pipe = CreateNamedPipeW(pipe_name(GetCurrentProcessId()).c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, static_cast<DWORD>(max_message), static_cast<DWORD>(max_message), 1000, &attributes);
+    if (pipe == INVALID_HANDLE_VALUE) return GetLastError();
+    BOOL present = FALSE, defaulted = FALSE; PACL dacl = nullptr; void* raw = nullptr;
+    if (!GetSecurityDescriptorDacl(attributes.lpSecurityDescriptor, &present, &dacl, &defaulted)) return GetLastError();
+    if (!present || !dacl) return ERROR_INVALID_SECURITY_DESCR;
+    if (!GetAce(dacl, 0, &raw)) return GetLastError();
+    auto* ace = static_cast<ACCESS_ALLOWED_ACE*>(raw);
+    ace->Mask |= FILE_GENERIC_WRITE;
+    const auto error = create_v2_endpoints(attributes);
+    ace->Mask = client_access;
+    if (error != ERROR_SUCCESS) return error;
+    // All four instances must be owned before removing creation rights and accepting clients.
+    if (!SetKernelObjectSecurity(connections[0].pipe, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                 attributes.lpSecurityDescriptor)) return GetLastError();
+    return ERROR_SUCCESS;
 }
 DWORD secure_pipe() {
     Handle token;
@@ -216,50 +200,58 @@ DWORD secure_pipe() {
     // Protected DACL: only this logon, generic READ + write DATA. Deliberately
     // exclude FILE_CREATE_PIPE_INSTANCE (also implied by GENERIC_WRITE).
     const std::wstring sddl = L"D:P(A;;0x0012008b;;;" + std::wstring(sid) + L")";
-    LocalFree(sid);
+    if (LocalFree(sid)) return GetLastError();
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1,
                                                               &descriptor, nullptr)) return GetLastError();
     SECURITY_ATTRIBUTES attributes{sizeof(attributes), descriptor, FALSE};
-    pipe = CreateNamedPipeW(pipe_name(GetCurrentProcessId()).c_str(),
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-        1, static_cast<DWORD>(max_message), static_cast<DWORD>(max_message), 1000, &attributes);
-    const DWORD error = pipe == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
-    LocalFree(descriptor);
+    DWORD error = create_endpoints(attributes);
+    if (LocalFree(descriptor) && error == ERROR_SUCCESS) error = GetLastError();
     return error;
 }
 }
+DWORD close_service_handles() {
+    DWORD error = ERROR_SUCCESS;
+    auto close = [&](HANDLE& handle) {
+        if (handle && handle != INVALID_HANDLE_VALUE && !CloseHandle(handle)) { error = GetLastError(); return; }
+        handle = nullptr;
+    };
+    close(observer); close(worker);
+    for (auto& connection : connections) { close(connection.thread); close(connection.pipe); }
+    close(pipe); close(stop);
+    return error;
+}
 DWORD start_inspection() {
-    if (worker) return ERROR_BUSY; // a failed stop must be retried, never replaced
+    if (stop || worker) return ERROR_BUSY;
     DWORD error = secure_pipe();
-    if (error != ERROR_SUCCESS) return error;
+    if (error != ERROR_SUCCESS) { const auto cleanup = close_service_handles(); return cleanup ? cleanup : error; }
     stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!stop) error = GetLastError();
-    else {
+    if (!stop) { error = GetLastError(); const auto cleanup = close_service_handles(); return cleanup ? cleanup : error; }
+    for (auto& connection : connections) {
+        connection.thread = CreateThread(nullptr, 0, serve_v2, &connection, 0, nullptr);
+        if (!connection.thread) { error = GetLastError(); break; }
+    }
+    if (error == ERROR_SUCCESS) {
         worker = CreateThread(nullptr, 0, serve, nullptr, 0, nullptr);
         if (!worker) error = GetLastError();
     }
-    if (error != ERROR_SUCCESS) {
-        if (stop) CloseHandle(stop);
-        stop = nullptr; CloseHandle(pipe); pipe = INVALID_HANDLE_VALUE;
-    }
-    return error;
+    if (error != ERROR_SUCCESS) { const auto cleanup = stop_inspection(); return cleanup ? cleanup : error; }
+    return ERROR_SUCCESS;
+}
+DWORD join_service(HANDLE thread, ULONGLONG deadline) {
+    if (!thread) return ERROR_SUCCESS;
+    const auto wait = WaitForSingleObject(thread, remaining(deadline));
+    if (wait == WAIT_OBJECT_0) return ERROR_SUCCESS;
+    return wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
 }
 DWORD stop_inspection() {
-    if (!worker) return ERROR_SUCCESS;
-    SetEvent(stop); // worker cancels/drains its own overlapped i/o
+    if (!stop) return ERROR_SUCCESS;
+    if (!SetEvent(stop)) return GetLastError();
     const auto deadline = GetTickCount64() + 5000;
-    DWORD wait = WaitForSingleObject(worker, remaining(deadline));
-    if (wait != WAIT_OBJECT_0) return wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
-    // joining the service first also synchronizes its observer-handle publication
-    if (observer) {
-        wait = WaitForSingleObject(observer, remaining(deadline));
-        if (wait != WAIT_OBJECT_0) return wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
-        CloseHandle(observer); observer = nullptr;
-    }
-    CloseHandle(worker); CloseHandle(stop); CloseHandle(pipe);
-    worker = nullptr; stop = nullptr; pipe = INVALID_HANDLE_VALUE;
-    return ERROR_SUCCESS;
+    if (const auto error = join_service(worker, deadline)) return error;
+    if (const auto error = join_service(observer, deadline)) return error;
+    for (const auto& connection : connections)
+        if (const auto error = join_service(connection.thread, deadline)) return error;
+    return close_service_handles();
 }
 }

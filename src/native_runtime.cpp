@@ -23,6 +23,7 @@
 #include <cstring>
 #include <cstdio>
 #include <chrono>
+#include <algorithm>
 #ifdef SC_NATIVE_TESTING
 #include "native_test_adapter.h"
 #endif
@@ -119,6 +120,26 @@ uint32_t backup_prerequisite(const sc_save_backup_request& request) {
     const auto& owner = save::session();
     if (owner.state() != save::SessionState::admitted || !owner.accepts_requests()) return SC_NATIVE_BINDING_FAILED;
     return std::memcmp(owner.namespace_id().data(), request.namespace_id, 64) ? SC_NATIVE_SCOPE_MISMATCH : SC_NATIVE_NONE;
+}
+registry::LiveState registry_live(const sc_native_scope& scope, uint32_t gameplay_reason) {
+    registry::LiveState live{};
+    live.scope = scope;
+    live.process_reason = accepting.load(std::memory_order_acquire) ? fault.load(std::memory_order_acquire) : SC_NATIVE_STOPPED;
+    live.gameplay_reason = gameplay_reason;
+    live.save_admitted = save::session().state() == save::SessionState::admitted && save::session().accepts_requests();
+    live.namespace_id = save::session().namespace_id();
+    live.save_binding = save::session().binding_token();
+    return live;
+}
+bool matches_entry_scope(const Diagnostics::Slot& slot, const sc_native_scope& scope, bool process_scoped) {
+    auto expected = slot.request.expected;
+    if (process_scoped && slot.identity) expected.lifecycle_generation = scope.lifecycle_generation;
+    return same_scope(expected, scope);
+}
+bool matches_binding(const Diagnostics::Slot& slot, const registry::LiveState& live) {
+    const auto* descriptor = registry::descriptor(static_cast<uint16_t>(slot.command_type), 1);
+    const bool bound = descriptor && generated::admission_policies[static_cast<size_t>(descriptor->admission)].save_binding == generated::BindingRule::exact;
+    return (!slot.identity && !slot.transient_read) || !bound || slot.save_binding == live.save_binding;
 }
 bool begin_event(uintptr_t root, bool change, uintptr_t descriptor, save::CampaignTransition* transition=nullptr) {
     if (!accepting.load(std::memory_order_acquire)) return false;
@@ -416,9 +437,6 @@ void reconcile_automap(uintptr_t map,const char* map_name,uint64_t generation) {
     ReleaseSRWLockExclusive(&automap_lock);
 }
 
-void execute_client_command(const sc_command_request& request, sc_command_result& result, uintptr_t player) {
-    commands::execute_native(request, result, player);
-}
 struct FrameCost {
     std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last=start;
@@ -451,6 +469,9 @@ void post_frame() {
     if (!accepting.load(std::memory_order_acquire) || fault.load(std::memory_order_acquire)) return;
     if (owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); return; }
     FrameCost cost;
+#ifdef SC_NATIVE_TESTING
+    if (!(fixture_active && fixture.command_fixture && fixture.command_fixture()))
+#endif
     commands::console_tick(epoch.load(std::memory_order_acquire));
     deathlink::expire_pending(GetTickCount64());
     // Missing this diagnostic opportunity is harmless; unlike a lifecycle event,
@@ -473,7 +494,7 @@ void post_frame() {
     auto detail = slot ? slot->detail : sc_diagnostic_detail{};
     detail.stage = why ? SC_STAGE_CLAIM_CONTEXT : SC_STAGE_NONE;
     result.scope = scope; result.thread_id = GetCurrentThreadId();
-    if (slot && slot->is_backup) result.scope = slot->request.expected;
+    if (slot && slot->is<sc_save_backup_request>()) result.scope = slot->request.expected;
     result.site_revision = 1; result.phase = 1; result.lifecycle = life;
     auto reject = [&](uint32_t reason, uint32_t stage) { why = reason; detail.stage = stage; };
     uint8_t pending = 1, pending_after = 1;
@@ -570,21 +591,28 @@ void post_frame() {
     cost.mark(5);
     commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); });
     if (!slot) return;
-    const bool process_scoped = slot->is_command && commands::process_scoped(slot->command_request);
-    if (process_scoped) why = SC_NATIVE_NONE;
+    const bool process_scoped = slot->is<sc_command_request>() && commands::process_scoped(slot->get<sc_command_request>());
+    if (process_scoped) why = accepting.load(std::memory_order_acquire) ? fault.load(std::memory_order_acquire) : SC_NATIVE_STOPPED;
     if (!why && (epoch.load(std::memory_order_acquire) != before || fault.load(std::memory_order_acquire)))
         reject(fault.load() ? fault.load() : SC_NATIVE_EVENT_GAP, SC_STAGE_EVENT_STAMP);
-    if (!same_scope(slot->request.expected, scope)) reject(SC_NATIVE_SCOPE_MISMATCH, SC_STAGE_SCOPE);
-    if (slot->is_command && !commands::admitted(slot->command_request))
+    if (!matches_entry_scope(*slot, scope, process_scoped)) reject(SC_NATIVE_SCOPE_MISMATCH, SC_STAGE_SCOPE);
+    const auto* handler = registry::handler(slot->command_type);
+    const auto live = registry_live(scope, why);
+    if (!why && handler) {
+        const auto reason = handler->admit(slot->payload, live);
+        if (reason) reject(reason, SC_STAGE_SCOPE);
+    }
+    if (!handler) reject(SC_NATIVE_BINDING_FAILED, SC_STAGE_NATIVE_FAULT);
+    if (!why && !matches_binding(*slot, live))
         reject(SC_NATIVE_SCOPE_MISMATCH, SC_STAGE_SCOPE);
     char backup_directory[64]{};
-    if (!why && slot->is_backup) {
-        const auto reason = backup_prerequisite(slot->backup_request);
+    if (!why && slot->is<sc_save_backup_request>()) {
+        const auto reason = backup_prerequisite(slot->get<sc_save_backup_request>());
         if (reason) reject(reason, SC_STAGE_NATIVE_FAULT);
         else {
             constexpr const char* campaigns[] = {"GAME-", "DLC1-", "DLC2-"};
             sprintf_s(backup_directory, "%s/%sAUTOSAVE%u", save::session().native_root().c_str(),
-                campaigns[slot->backup_request.campaign], slot->backup_request.slot);
+                campaigns[slot->get<sc_save_backup_request>().campaign], slot->get<sc_save_backup_request>().slot);
         }
     }
     if (!why && slot->cancel.load(std::memory_order_acquire)) reject(SC_NATIVE_CANCELLED, SC_STAGE_CANCELLATION);
@@ -599,26 +627,15 @@ void post_frame() {
         result.current_map = facts.current_map;
         result.game_state = static_cast<uint32_t>(facts.fields[SC_CONTEXT_GAME_STATE].value);
         result.state = SC_DIAGNOSTIC_EXECUTED;
-        if (slot->is_backup) {
-            // the observation budget ends above. native serialization has its own ordinary engine scheduling; it isn't a two-millisecond job
-            const auto submitted = save::submit_native_backup(slot->backup, backup_directory);
-            Diagnostics::await_backup(*slot, result, detail, submitted);
+        registry::ExecutionContext context{};
+        context.player = player; context.backup = slot->backup; context.backup_directory = backup_directory;
+        slot->entered.store(true, std::memory_order_release);
+        handler->execute(slot->payload, slot->value, context);
+        if (slot->is<sc_save_backup_request>()) {
+            Diagnostics::await_backup(*slot, result, detail, context.submission);
             return;
         }
-        if (slot->is_weapon_points)
-            weapon_points::execute_native(slot->weapon_points_request, slot->weapon_points_result);
-        if (slot->is_inventory)
-            inventory::execute_native(slot->inventory_request, slot->inventory_result);
-        if (slot->is_command)
-            execute_client_command(slot->command_request, slot->command_result, player);
-        if (slot->is_arsenal)
-            arsenal::execute_native(slot->arsenal_request, slot->arsenal_result);
-        if (slot->is_runes)
-            runes::execute_native(slot->runes_request, slot->runes_result);
-        if (slot->is_special)
-            special::execute_native(slot->special_request, slot->special_result);
-        if (slot->is_deathlink)
-            deathlink::execute_native(slot->deathlink_request, slot->deathlink_result);
+        slot->evidence = handler->classify(slot->payload, slot->value, result);
     } else {
         result.state = why == SC_NATIVE_CANCELLED ? SC_DIAGNOSTIC_CANCELLED :
             (why == SC_NATIVE_DEADLINE ? SC_DIAGNOSTIC_EXPIRED : SC_DIAGNOSTIC_REJECTED);
@@ -800,6 +817,9 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
                     return MH_RemoveHook(reinterpret_cast<void*>(targets[i].address)); });
             if (mh == MH_OK) installation.hook(SC_INSTALL_UNINITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Uninitialize(); });
         }
+#ifdef SC_NATIVE_TESTING
+        if (testing::real_hook_targets()) {
+#endif
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
         // check menu callees before domain hooks patch shared swf entries
         if (!why && !stopping.load(std::memory_order_acquire) && save::session().campaign_run.enabled() &&
@@ -834,6 +854,9 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
             why=SC_NATIVE_EXCEPTION;
         }
+#ifdef SC_NATIVE_TESTING
+        }
+#endif
         AcquireSRWLockExclusive(&lock);
         status.installed_hooks = initial.installed_hooks; status.retained_module = pinned.load();
         status.reason = why; status.coverage = why ? 0 : 7;
@@ -896,6 +919,83 @@ sc_native_snapshot inspect(uint64_t after) {
     }
     lifetime.page(out, after); diagnostics.counts(out, GetTickCount64());
     ReleaseSRWLockExclusive(&lock); return out;
+}
+uint32_t namespace_reason(const generated::submission_identity& reference, const generated::AdmissionPolicy& policy,
+        const registry::LiveState& live) {
+    if (policy.namespace_rule == generated::NamespaceRule::process_zero &&
+        !std::all_of(reference.namespace_id.begin(), reference.namespace_id.end(), [](uint8_t value) { return value == '0'; }))
+        return SC_NATIVE_SCOPE_MISMATCH;
+    if (policy.namespace_rule != generated::NamespaceRule::admitted_save) return SC_NATIVE_NONE;
+    if (!live.save_admitted) return SC_NATIVE_BINDING_FAILED;
+    const bool matches = live.namespace_id.size() == reference.namespace_id.size() &&
+        std::equal(reference.namespace_id.begin(), reference.namespace_id.end(), live.namespace_id.begin());
+    return matches ? SC_NATIVE_NONE : SC_NATIVE_SCOPE_MISMATCH;
+}
+uint32_t submission_reason(const generated::submission& submission, const generated::Descriptor* descriptor,
+        const registry::LiveState& live) {
+    const auto& reference = submission.reference;
+    if (live.process_reason) return live.process_reason;
+    if (reference.scope.pid != live.scope.pid || reference.scope.process_created != live.scope.process_created ||
+        !std::equal(reference.scope.instance_id.begin(), reference.scope.instance_id.end(), live.scope.instance_id))
+        return SC_NATIVE_SCOPE_MISMATCH;
+    if (!descriptor) return SC_NATIVE_NONE;
+    const auto& policy = generated::admission_policies[static_cast<size_t>(descriptor->admission)];
+    if (const auto why = namespace_reason(reference, policy, live)) return why;
+    if (policy.generation == generated::GenerationRule::exact_nonzero && !reference.scope.generation)
+        return SC_NATIVE_SCOPE_MISMATCH;
+    if (policy.generation != generated::GenerationRule::none && reference.scope.generation != live.scope.lifecycle_generation)
+        return SC_NATIVE_SCOPE_MISMATCH;
+    if (policy.save_binding == generated::BindingRule::exact && submission.save_binding != live.save_binding)
+        return SC_NATIVE_SCOPE_MISMATCH;
+    return SC_NATIVE_NONE;
+}
+Diagnostics::Reply complete_publication(Diagnostics::Slot& slot, const generated::command_reference& reference,
+        const registry::Handler& handler) {
+    auto result = slot.result;
+    if (slot.cancel.load(std::memory_order_acquire)) {
+        result.state = SC_DIAGNOSTIC_CANCELLED; result.reason = SC_NATIVE_CANCELLED;
+    } else if (GetTickCount64() >= result.deadline_at_ms) {
+        result.state = SC_DIAGNOSTIC_EXPIRED; result.reason = SC_NATIVE_DEADLINE;
+    } else if (slot.save_binding != save::session().binding_token()) {
+        result.state = SC_DIAGNOSTIC_REJECTED; result.reason = SC_NATIVE_SCOPE_MISMATCH;
+    } else {
+        registry::ExecutionContext context{};
+        handler.execute(slot.payload, slot.value, context);
+        result.state = SC_DIAGNOSTIC_EXECUTED;
+        slot.evidence = handler.classify(slot.payload, slot.value, result);
+    }
+    result.completed_at_ms = GetTickCount64();
+    Diagnostics::finish(slot, result);
+    return query(reference);
+}
+Diagnostics::Reply submit(const generated::submission& submission, const generated::NativeRequest& payload) {
+    AcquireSRWLockExclusive(&lock);
+    std::unique_ptr<SRWLOCK, decltype(&ReleaseSRWLockExclusive)> guard(&lock, ReleaseSRWLockExclusive);
+    const auto now = GetTickCount64();
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    const auto live = registry_live(scope, prerequisite(now));
+    const auto& reference = submission.reference;
+    const auto* handler = registry::handler(static_cast<registry::Id>(reference.command_type));
+    const auto* descriptor = registry::descriptor(reference.command_type, reference.payload_revision);
+    const auto why = submission_reason(submission, descriptor, live);
+    auto out = diagnostics.submit(submission, payload, why, now, handler, &live);
+    auto* publication = descriptor && descriptor->execution == generated::Execution::publication && out.error == Diagnostics::Error::none ?
+        diagnostics.claim(out.reference, now) : nullptr;
+    guard.reset();
+    if (publication) return complete_publication(*publication, out.reference, *handler);
+    return out;
+}
+Diagnostics::Reply query(const generated::command_reference& reference, bool cancel) {
+    AcquireSRWLockExclusive(&lock);
+    std::unique_ptr<SRWLOCK, decltype(&ReleaseSRWLockExclusive)> guard(&lock, ReleaseSRWLockExclusive);
+    auto out = diagnostics.query(reference, cancel, GetTickCount64());
+    guard.reset(); return out;
+}
+Diagnostics::Reply ack(const generated::command_reference& reference, const std::array<uint8_t, 16>& token) {
+    AcquireSRWLockExclusive(&lock);
+    std::unique_ptr<SRWLOCK, decltype(&ReleaseSRWLockExclusive)> guard(&lock, ReleaseSRWLockExclusive);
+    auto out = diagnostics.ack(reference, token, GetTickCount64());
+    guard.reset(); return out;
 }
 sc_diagnostic_result submit(const sc_diagnostic_request& request, sc_diagnostic_detail* detail) {
     AcquireSRWLockExclusive(&lock);
@@ -1175,4 +1275,32 @@ void test_start(const TestAdapter& adapter, const Snapshot& identity, HANDLE sto
     start(source, identity, stop_event);
 }
 #endif
+}
+namespace sentinel::native {
+Diagnostics::Reply read(const generated::submission& submission, const generated::NativeRequest& payload) {
+    Diagnostics::Reply out{};
+    AcquireSRWLockExclusive(&lock);
+    const auto now = GetTickCount64();
+    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
+    const auto live = registry_live(scope, prerequisite(now));
+    const auto* descriptor = registry::descriptor(submission.reference.command_type, submission.reference.payload_revision);
+    const auto* handler = registry::handler(static_cast<registry::Id>(submission.reference.command_type));
+    auto reason = submission_reason(submission, descriptor, live);
+    if (!reason && handler) reason = handler->admit(payload, live);
+    ::sc_diagnostic_request request{};
+    request.expected = {submission.reference.scope.pid, submission.reference.scope.process_created, {}, submission.reference.scope.generation};
+    std::copy(submission.reference.scope.instance_id.begin(), submission.reference.scope.instance_id.end(), request.expected.instance_id);
+    request.request_id = now; request.nonce[0] = 1; request.deadline_ms = submission.deadline_ms;
+    auto* slot = diagnostics.transient(request, payload, reason, now);
+    if (slot) { slot->transient_read = true; slot->save_binding = submission.save_binding; slot->command_type = static_cast<registry::Id>(submission.reference.command_type); }
+    ReleaseSRWLockExclusive(&lock);
+    if (!slot) { out.execution.state = SC_DIAGNOSTIC_REJECTED; out.execution.reason = reason ? reason : SC_NATIVE_QUEUE_FULL; return out; }
+    for (;;) {
+        AcquireSRWLockExclusive(&lock);
+        const bool done = diagnostics.collect_transient(*slot, out, GetTickCount64());
+        ReleaseSRWLockExclusive(&lock);
+        if (done) return out;
+        Sleep(1);
+    }
+}
 }

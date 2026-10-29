@@ -20,6 +20,7 @@
 #include <array>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 // native client value types, not wire layouts or a dll abi
 namespace sentinel {
@@ -170,5 +171,32 @@ const char* field_name(size_t field);
 const char* result_name(ProbeResult result);
 const char* service_name(ServiceState state);
 std::string instance_text(const std::array<uint8_t, 16>& instance);
+}
+namespace sentinel {
+namespace generated { struct submission; struct command_reference; }
+struct V2Response {
+    ProbeResult transport = ProbeResult::io_error;
+    WireResult wire = WireResult::malformed;
+    uint32_t win32_error = 0;
+    std::vector<uint8_t> body;
+};
+class V2Connection {
+public:
+    V2Connection() = default;
+    ~V2Connection();
+    V2Connection(const V2Connection&) = delete;
+    V2Connection& operator=(const V2Connection&) = delete;
+    ProbeResult connect(uint32_t pid, uint32_t timeout_ms, const std::array<uint8_t, 16>* expected_instance = nullptr);
+    V2Response exchange(uint16_t operation, const std::vector<uint8_t>& body, uint32_t timeout_ms);
+    void close();
+    const sc_native_scope& identity() const { return identity_; }
+private:
+    ProbeResult accept_hello(const std::vector<uint8_t>&, uint16_t, uint64_t, uint32_t, const std::array<uint8_t, 16>*);
+    void* pipe_ = nullptr;
+    void* process_ = nullptr;
+    sc_native_scope identity_{};
+    uint64_t correlation_ = 0;
+};
+bool v2_reference(const generated::submission&, const std::vector<uint8_t>& payload, generated::command_reference&);
 }
 #endif

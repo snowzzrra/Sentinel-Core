@@ -5,6 +5,10 @@
 #include "sentinel_inspection.h"
 
 namespace sentinel::native {
+Diagnostics::Reply submit(const generated::submission&, const generated::NativeRequest&);
+Diagnostics::Reply query(const generated::command_reference&, bool cancel = false);
+Diagnostics::Reply ack(const generated::command_reference&, const std::array<uint8_t, 16>& token);
+Diagnostics::Reply read(const generated::submission&, const generated::NativeRequest&);
 sc_automap_result automap_request(const sc_automap_request&);
 sc_combat_presentation_result combat_presentation_request(const sc_combat_presentation_request&);
 void prepare(const Snapshot& identity);

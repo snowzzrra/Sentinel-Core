@@ -1,11 +1,13 @@
 #pragma once
 #include "sentinel_inspection.h"
 #include <windows.h>
+#include "sentinel_protocol_generated.h"
 
 namespace sentinel {
 // only core's serialized explicit lifecycle calls start/stop; no dllmain work
 DWORD start_inspection();
 DWORD stop_inspection();
+bool process_v2(const generated::wire_header_2&, const generated::Bytes&, generated::Bytes&);
 Snapshot current_snapshot();
 sc_engine_snapshot current_engine_snapshot();
 void publish_engine(const sc_engine_snapshot& snapshot);

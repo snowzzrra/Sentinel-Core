@@ -1,9 +1,26 @@
 #pragma once
 #include "sentinel_inspection.h"
+#include <variant>
 
 namespace sentinel {
 using Message = std::array<uint8_t, max_message>;
 constexpr size_t header_size = 16;
+struct CampaignRequest {
+    sc_campaign_request request{};
+    sc_campaign_summary summary{};
+    sc_campaign_rewards rewards{};
+};
+using RequestPayload = std::variant<std::monostate, sc_save_backup_request, sc_weapon_points_request,
+    CampaignRequest, sc_inventory_request, sc_arsenal_request, sc_runes_request, sc_special_request,
+    sc_deathlink_request, sc_automap_request, sc_command_request, sc_combat_presentation_request, sc_combat_query>;
+struct DecodedRequest {
+    uint16_t operation = inspect_operation;
+    uint64_t capability = 0;
+    sc_diagnostic_request execution{};
+    uint64_t cursor = 0;
+    RequestPayload payload{};
+};
+WireResult decode_request(const Message&, size_t, DecodedRequest&);
 size_t encode_request(Message& out, uint64_t required, uint16_t version = wire_version,
                       uint16_t operation = inspect_operation);
 WireResult decode_request(const Message& in, size_t size, uint16_t* operation = nullptr,

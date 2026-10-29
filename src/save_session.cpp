@@ -1,6 +1,7 @@
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #include "save_session.h"
 #include <windows.h>
+#include <bcrypt.h>
 #include <cstring>
 
 namespace sentinel::save {
@@ -70,6 +71,8 @@ storage::Result Session::configure(const storage::Descriptor& descriptor,
         return result.ok() ? storage::Result{storage::Outcome::identity_mismatch, 0} : result;
     }
     namespace_id_ = hash;
+    if (BCryptGenRandom(nullptr, binding_token_.data(), static_cast<ULONG>(binding_token_.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
+        return {storage::Outcome::io_error, ERROR_GEN_FAILURE};
     native_root_ = lease->metadata().native_root;
     constexpr char hex[] = "0123456789abcdef";
     std::string seed;
@@ -389,10 +392,11 @@ bool Session::publish_profile_catalog(uintptr_t provider, std::string_view owner
         (static_cast<size_t>(index) >= entries.size() || !steam_name_equal(entries[index], selected))) return false;
     ProfileChoice choice{};
     std::memcpy(choice.name.data(), selected.data(), selected.size()); choice.index = index;
+    const bool bound = bind_profile_choice(choice, campaign);
     profile_catalog_ = std::move(entries); profile_choice_ = choice;
     prospective_choice_ = prospective; choice_ready_ = true;
     profile_campaign_ = campaign;
-    return true;
+    return bound;
 }
 bool Session::profile_choice(ProfileChoice& out) const {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -413,9 +417,20 @@ bool Session::observe_profile_choice(std::string_view name, int32_t index) {
          {"name_length",name.size()},{"slot_shape",shape},{"name_matches",steam_name_equal(name,profile_choice_.name.data())},
          {"listed",listed},{"prospective",prospective},{"prospective_allowed",prospective_choice_},{"campaign",profile_campaign_}});
     if (!valid) return false;
-    profile_choice_ = {}; std::memcpy(profile_choice_.name.data(), name.data(), name.size());
-    profile_choice_.index = index; prospective_choice_ = prospective;
-    return true;
+    ProfileChoice choice{}; std::memcpy(choice.name.data(), name.data(), name.size()); choice.index = index;
+    const bool bound = bind_profile_choice(choice, profile_campaign_);
+    profile_choice_ = choice; prospective_choice_ = prospective;
+    return bound;
+}
+bool Session::bind_profile_choice(const ProfileChoice& choice, unsigned campaign) {
+    const bool changed = !choice_ready_ || choice.index != profile_choice_.index || campaign != profile_campaign_ ||
+        !steam_name_equal(choice.name.data(), profile_choice_.name.data());
+    if (!changed) return true;
+    if (BCryptGenRandom(nullptr, binding_token_.data(), static_cast<ULONG>(binding_token_.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) >= 0)
+        return true;
+    binding_token_ = {}; profile_failed_ = true; requests_ = false;
+    fault_ = SessionFault::native_profile; state_ = SessionState::faulted;
+    return false;
 }
 bool Session::capture_profile_write(std::string_view name, int32_t index, unsigned campaign, ProfileWrite& out) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -508,6 +523,11 @@ sc_save_admission_snapshot Session::inspect() const {
     std::memcpy(out.namespace_id, namespace_id_.c_str(), namespace_id_.size() + 1);
     std::memcpy(out.native_root, native_root_.c_str(), native_root_.size() + 1);
     return out;
+}
+std::array<uint8_t, 16> Session::binding_token() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (state_ != SessionState::admitted || !requests_) return {};
+    return binding_token_;
 }
 bool Session::collecting(uintptr_t provider, std::string_view root) const {
     std::lock_guard<std::mutex> guard(mutex_);

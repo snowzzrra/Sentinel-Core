@@ -67,7 +67,7 @@ int main() {
     assert(submit(changed).reason == SC_NATIVE_DUPLICATE_MISMATCH);
     changed = r; ++changed.execution.expected.lifecycle_generation;
     assert(submit(changed).reason == SC_NATIVE_DUPLICATE_MISMATCH);
-    auto* slot = queue.claim(11); assert(slot && slot->is_command); assert(!queue.claim(12));
+    auto* slot = queue.claim(11); assert(slot && slot->is<sc_command_request>()); assert(!queue.claim(12));
     assert(queue.command_result(r, false, 12).execution.state == SC_DIAGNOSTIC_CLAIMED);
     auto terminal = slot->result; terminal.state = SC_DIAGNOSTIC_CANCELLED;
     terminal.reason = SC_NATIVE_CANCELLED; terminal.completed_at_ms = 13;

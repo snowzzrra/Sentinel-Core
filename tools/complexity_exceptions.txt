@@ -1,0 +1,292 @@
+# path::qualified_name(signature) cognitive cyclomatic
+src/ap_controls_native.cpp::sentinel::ap_controls::install(const engine :: Binding & binding , HANDLE stop_event) 28 17
+src/arsenal.cpp::sentinel::arsenal::execute(const sc_arsenal_request & request , sc_arsenal_result & out , const Calls & calls) 52 42
+src/arsenal_native.cpp::sentinel::arsenal::(anonymous)::arsenal_ui_hook(uintptr_t out , uintptr_t weapon , uintptr_t family , uintptr_t p) 18 31
+src/arsenal_native.cpp::sentinel::arsenal::(anonymous)::mastery_target(uintptr_t p , unsigned index , uintptr_t & component , uintptr_t & upgrade , bool & selected) 15 20
+src/arsenal_native.cpp::sentinel::arsenal::(anonymous)::menu::correct_mastery(uintptr_t widget) 18 18
+src/arsenal_native.cpp::sentinel::arsenal::execute_native(const sc_arsenal_request & request , sc_arsenal_result & out) 24 24
+src/arsenal_native.cpp::sentinel::arsenal::install(const engine :: Binding & binding , HANDLE stop) 70 32
+src/arsenal_native.cpp::sentinel::arsenal::test_mastery_masks() 9 25
+src/arsenal_native.cpp::sentinel::arsenal::tick_masteries(uint64_t generation , uintptr_t p) 30 23
+src/campaign_menu.cpp::sentinel::campaign_menu::Menu::request(uint16_t operation , const sc_campaign_request & r , bool admitted , const sc_campaign_summary * summary , const sc_campaign_rewards * rewards) 103 52
+src/campaign_menu_native.cpp::sentinel::campaign_menu::(anonymous)::boss_update(uintptr_t screen , uintptr_t event) 19 16
+src/campaign_menu_native.cpp::sentinel::campaign_menu::(anonymous)::compact_root(uintptr_t screen) 11 17
+src/campaign_menu_native.cpp::sentinel::campaign_menu::(anonymous)::populate(uintptr_t screen , uintptr_t list) 32 38
+src/campaign_menu_native.cpp::sentinel::campaign_menu::(anonymous)::present_details(uintptr_t details) 66 59
+src/campaign_menu_native.cpp::sentinel::campaign_menu::(anonymous)::present_end_items(uintptr_t screen) 17 22
+src/campaign_menu_native.cpp::sentinel::campaign_menu::(anonymous)::present_found_counts(uintptr_t root , const sc_campaign_summary & summary , const char * label_name = "literal" , bool nested_label = true) 14 20
+src/campaign_menu_native.cpp::sentinel::campaign_menu::(anonymous)::present_gate_status(uintptr_t root , uint32_t flags) 20 20
+src/campaign_menu_native.cpp::sentinel::campaign_menu::(anonymous)::present_save_preview(uintptr_t screen , const save :: CampaignSnapshot & snapshot) 24 24
+src/campaign_menu_native.cpp::sentinel::campaign_menu::(anonymous)::update(uintptr_t screen) 19 22
+src/campaign_menu_native.cpp::sentinel::campaign_menu::present_campaign_actions(uintptr_t screen , bool entered) 26 37
+src/campaign_menu_native.cpp::sentinel::campaign_menu::test_question_material() 19 17
+src/campaign_menu_native.cpp::sentinel::campaign_menu::validate_native_targets(save :: Installation & record , engine :: Memory & source_memory , const engine :: Image & image , HANDLE stop , const std :: array < native :: Target , 46 > & targets) 16 17
+src/challenge_match.h::sentinel::challenge::suppression_mismatch(const ScopeFacts & scope , const CallFacts & call) 17 20
+src/challenge_suppression.cpp::sentinel::challenge::(anonymous)::canonical_group(const Scope & current) 23 16
+src/challenge_suppression.cpp::sentinel::challenge::(anonymous)::capture_scope(uintptr_t manager , uintptr_t record) 4 17
+src/challenge_suppression.cpp::sentinel::challenge::(anonymous)::unique_leaf(engine :: Memory & memory , const engine :: Image & image , uintptr_t address , const char * hex , HANDLE stop , uint64_t deadline) 28 16
+src/challenge_suppression.cpp::sentinel::challenge::install(const engine :: Binding & binding , HANDLE stop) 21 23
+src/combat.cpp::sentinel::combat::Model::publish(const Capture & saved , const DeathRecord & record , uint64_t now , uint64_t stamp , uint32_t thread) noexcept 12 23
+src/combat.h::sentinel::combat::valid_query(const sc_combat_query & query) noexcept 23 17
+src/combat_presentation.h::sentinel::combat::valid_presentation(const sc_combat_presentation_request & request) 16 19
+src/commands.cpp::sentinel::commands::(anonymous)::kind(std :: string_view text) 55 50
+src/commands.cpp::sentinel::commands::parse_manual(int argc , const char * const * argv , ManualRequest & out) 25 23
+src/commands_local.cpp::sentinel::commands::(anonymous)::effect(const ManualRequest & r , uintptr_t player , uint64_t expected , uint64_t ( * current ) ( )) 20 17
+src/commands_native.cpp::sentinel::commands::execute_native(const sc_command_request & request , sc_command_result & result , uintptr_t player) 19 19
+src/context_observer.cpp::sentinel::context::(anonymous)::frame(engine :: Memory & memory , const engine :: Binding & b) 43 29
+src/context_observer.cpp::sentinel::context::sample(engine :: Memory & memory , const engine :: Binding & b , uint64_t sequence , HANDLE stop , uint32_t budget_ms , Evidence * evidence , const Clock * supplied_clock) 43 30
+src/darklord_telemetry.h::darklord_sample(uintptr_t world , uint64_t now) noexcept 66 39
+src/darklord_telemetry.h::darklord_state(uintptr_t world , uint32_t handle , uintptr_t actor) noexcept 30 30
+src/deathlink.cpp::sentinel::deathlink::execute(const sc_deathlink_request & r , sc_deathlink_result & out , const Calls & c) 70 36
+src/deathlink.cpp::sentinel::deathlink::tick(const Calls & c) 31 26
+src/deathlink.cpp::sentinel::deathlink::valid(const sc_deathlink_request & r) 17 28
+src/deathlink_native.cpp::sentinel::deathlink::(anonymous)::apply_lethal(void * , uintptr_t p , ApplicationOutcome & outcome) 24 20
+src/enemy_checkpoint_native.cpp::sentinel::expanded::install_recipe_checkpoint(const engine :: Binding & binding , HANDLE stop_event , const RecipeCheckpointCalls & callbacks) 23 17
+src/enemy_checkpoint_native.cpp::sentinel::expanded::test_recipe_checkpoint() 27 39
+src/enemy_recipe_state.cpp::sentinel::expanded::(anonymous)::valid(const RecipeRequest & value) 10 24
+src/enemy_recipe_state.cpp::sentinel::expanded::RecipeNativeCheckpoint::capture(std :: string & out) const 41 36
+src/enemy_recipe_state.cpp::sentinel::expanded::RecipeNativeCheckpoint::restore(std :: string_view bytes , std :: string_view expected_map) 156 137
+src/enemy_recipe_state.cpp::sentinel::expanded::RecipeState::capture(std :: string & out) const 23 16
+src/enemy_recipe_state.cpp::sentinel::expanded::RecipeState::restore(std :: string_view bytes , std :: string_view expected_plan , std :: string_view expected_map) 99 125
+src/engine_observer.cpp::sentinel::engine::(anonymous)::disk_hash(const wchar_t * path , char ( & out ) [ 65 ] , HANDLE stop , uint64_t deadline) 29 22
+src/engine_observer.cpp::sentinel::engine::(anonymous)::frame(Memory & memory , const Binding & b) 37 30
+src/engine_observer.cpp::sentinel::engine::LocalMemory::copy(uintptr_t address , void * out , size_t size) 12 16
+src/engine_observer.cpp::sentinel::engine::bind(Memory & memory , Image image , const char * hash , uint32_t hash_reason , HANDLE stop , uint64_t deadline , bool exact_layout) 77 45
+src/engine_observer.cpp::sentinel::engine::read_image(Memory & memory , uintptr_t base , Image & image) 22 30
+src/expanded.cpp::sentinel::expanded::parse_recipe_library(std :: string_view text , RecipeLibrary & out) 113 77
+src/expanded.cpp::sentinel::expanded::spawn_allowed(const SpawnLimits & limits , const std :: array < std :: uint32_t , 9 > & active) noexcept 28 30
+src/expanded.cpp::sentinel::expanded::spawn_limits(std :: string_view name) noexcept 61 49
+src/expanded.cpp::sentinel::expanded::spawn_recipe(std :: string_view name) noexcept 17 23
+src/expanded.cpp::sentinel::expanded::spawn_tracking(std :: string_view name) noexcept 15 20
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::actor_factory_detour(uintptr_t info) 13 16
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::begin_recipe_creation(RecipeCreation & creation , uintptr_t manager , std :: string_view origin , std :: string_view label) 58 40
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::capture_autonomous_summons(RecipeNativeCheckpoint & checkpoint) 95 43
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::capture_recipe_checkpoint(std :: string & bytes) 63 36
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::dispatch_recipe_locked(uintptr_t manager , uintptr_t output , uint64_t type , uintptr_t alias , uintptr_t label , bool group , const std :: string & origin , uintptr_t & result) 25 20
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::drain_component_summons(uintptr_t component) 31 21
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::drain_direct_point(uintptr_t point) 39 21
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::finish_independent_show(uintptr_t actor , IndependentShow & show) noexcept 31 19
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::functional_body(RecipeCreation * creation , uintptr_t group) 20 19
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::health_result(uintptr_t command) 28 27
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::kill_dead_detour(uintptr_t command , uintptr_t record) 23 16
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::kill_result(uintptr_t command) 30 26
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::load_native_recipes() 319 194
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::native_future(uintptr_t manager , uint64_t mask = uint64_t { 1 } < < 44 , uintptr_t label = 0) 62 37
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::native_memberships(uintptr_t world , uintptr_t actor , std :: vector < RecipeMembership > & result) 27 13
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::open_component_summons(SummonCollection & collection) 57 31
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::optional_zombie_completion(uintptr_t command) 40 43
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::point_factory_locked(uintptr_t point , uintptr_t group) 18 17
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::population_member(uintptr_t world , uintptr_t actor , uint64_t scope , unsigned depth = 0) 41 24
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::possessed_recipe_locked(uintptr_t manager , uintptr_t output , uint64_t type , uintptr_t host , uintptr_t label , uintptr_t spirit , const std :: string & host_origin , const std :: string & spirit_origin) 21 19
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::prepare_independent_show_locked(uintptr_t actor , IndependentShow & show) 20 20
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::prepare_recipe_worker(uintptr_t worker , bool maintenance , bool & marked) 47 26
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::prepare_show(uintptr_t actor , SpawnLimits & limits , bool & reserved) 52 37
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::read_recipe_metadata(uintptr_t world , uintptr_t root , std :: string & metadata) 12 18
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::register_independent_extras(uintptr_t manager , const NativeRecipe & recipe , const std :: array < uint64_t , 13 > & source , const std :: string & label) 28 15
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::register_spawn_locked(uintptr_t manager , uint64_t * record) 38 27
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::remaining_encounter_heavy(uintptr_t command) 28 18
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::remaining_inputs(uintptr_t command , std :: vector < RecipeCredit > & total , std :: vector < RecipeCredit > & living , std :: vector < RemainingItem > & present , bool & tracked , bool & blocked , int32_t & threshold) 36 29
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::remaining_weight(uintptr_t actor) 25 21
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::restore_autonomous_summons(uintptr_t world) 109 49
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::restore_recipe_checkpoint(std :: string_view bytes , std :: string_view map) 20 23
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::special_kind(uintptr_t actor , unsigned * physical = nullptr) 69 29
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::summon_recipe(uintptr_t component , uint64_t monster_type , uint64_t logical_type) 25 17
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::synchronous_remainders(uintptr_t command , std :: vector < SynchronousRemainder > & result) 65 43
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::trace_recipe_spawn(const RecipeCreation & creation , uintptr_t body , uintptr_t point , uint8_t stage) 29 15
+src/expanded_native.cpp::sentinel::expanded::(anonymous)::tracked_point_type(uintptr_t manager , uintptr_t point , uint64_t type) 3 16
+src/expanded_native.cpp::sentinel::expanded::install(const engine :: Binding & binding , HANDLE stop_event) 58 53
+src/expanded_native.cpp::sentinel::expanded::observe(uintptr_t world) 66 50
+src/expanded_native.cpp::sentinel::expanded::read_recipe_actors(uintptr_t world , std :: map < uintptr_t , bool > & actors , std :: map < std :: string , std :: vector < RecipeMembership > > & memberships , std :: set < uintptr_t > & workers , std :: set < uintptr_t > & owners , uint64_t * living = nullptr) 52 34
+src/expanded_native.cpp::sentinel::expanded::synchronize_independent_memberships(uintptr_t world) 43 22
+src/expanded_native.cpp::sentinel::expanded::test_darklord_telemetry() 23 28
+src/expanded_native.cpp::sentinel::expanded::test_limit_inputs() 27 48
+src/expanded_native.cpp::sentinel::expanded::test_quantity_inputs() 135 113
+src/expanded_native.cpp::sentinel::expanded::test_recipe_inputs() 328 391
+src/expanded_native.cpp::sentinel::expanded::test_recipe_transport() 20 27
+src/inventory.cpp::sentinel::inventory::execute(const sc_inventory_request & r , sc_inventory_result & out , const Calls & calls) 41 44
+src/inventory.cpp::sentinel::inventory::valid(const sc_inventory_request & r) 21 30
+src/inventory.cpp::sentinel::inventory::valid_facts(const SnapshotFacts & f) 15 23
+src/inventory_native.cpp::sentinel::inventory::(anonymous)::read(void * , uintptr_t p , SnapshotFacts & facts) 76 50
+src/inventory_native.cpp::sentinel::inventory::(anonymous)::read_capacity(uintptr_t p , uintptr_t inv , uintptr_t type , uintptr_t perk_type , const char * family , unsigned index) 19 16
+src/local_controls.h::sentinel::controls::from_native_key(int native) 15 28
+src/local_controls.h::sentinel::controls::key(const char * text) 25 23
+src/native_model.cpp::sentinel::native::Diagnostics::backup_result(const sc_save_backup_request & r , bool cancel , uint64_t now) 23 22
+src/native_runtime.cpp::sentinel::native::(anonymous)::begin_event(uintptr_t root , bool change , uintptr_t descriptor , save :: CampaignTransition * transition = nullptr) 16 17
+src/native_runtime.cpp::sentinel::native::(anonymous)::free_detour(uintptr_t root , uintptr_t slot) 11 16
+src/native_runtime.cpp::sentinel::native::(anonymous)::post_frame() 121 96
+src/native_runtime.cpp::sentinel::native::(anonymous)::reconcile_automap(uintptr_t map , const char * map_name , uint64_t generation) 27 28
+src/native_runtime.cpp::sentinel::native::automap_request(const sc_automap_request & request) 20 21
+src/native_runtime.cpp::sentinel::native::publish_context(const sc_context_snapshot & observed , uint64_t before) 12 22
+src/native_runtime.cpp::sentinel::native::start(const engine :: Binding & source , const Snapshot & identity , HANDLE stop_event) 126 78
+src/native_target.cpp::sentinel::native::(anonymous)::same_unwind_owner(engine :: Memory & memory , const engine :: Image & image , RUNTIME_FUNCTION part , const RUNTIME_FUNCTION & entry , ValidationDetail * detail) 19 16
+src/native_target.cpp::sentinel::native::(anonymous)::unique_signature(engine :: Memory & memory , const engine :: Image & image , const std :: array < uint8_t , 32 > & signature , HANDLE stop , uint64_t deadline , ValidationDetail * detail) 32 14
+src/native_target.cpp::sentinel::native::save_target(uintptr_t base , unsigned index) 43 27
+src/native_target.cpp::sentinel::native::validate_leaf_target(engine :: Memory & memory , const engine :: Image & image , const Target & target , size_t length , HANDLE stop , uint64_t deadline , ValidationDetail * detail) 13 17
+src/native_target.cpp::sentinel::native::validate_target(engine :: Memory & memory , const engine :: Image & image , const Target & target , HANDLE stop , uint64_t deadline , ValidationDetail * detail) 22 22
+src/prelaunch.cpp::sentinel::prelaunch::resolve(const wchar_t * local_file , storage :: Descriptor & descriptor , bool & requested) 34 42
+src/protocol.cpp::sentinel::(anonymous)::backup_values(C & c , sc_save_backup_snapshot & v) 49 80
+src/protocol.cpp::sentinel::(anonymous)::command_values(C & c , sc_command_result & v) 16 21
+src/protocol.cpp::sentinel::(anonymous)::deathlink_values(Codec & c , sc_deathlink_result & v) 5 17
+src/protocol.cpp::sentinel::(anonymous)::detail_values(C & c , sc_diagnostic_detail & d , const sc_diagnostic_result & result) 19 40
+src/protocol.cpp::sentinel::(anonymous)::diagnostic_values(C & c , sc_diagnostic_result & d , bool backup = false , bool process_scoped = false) 17 51
+src/protocol.cpp::sentinel::(anonymous)::inventory_values(Codec & c , sc_inventory_result & v) 31 49
+src/protocol.cpp::sentinel::(anonymous)::native_values(C & c , sc_native_snapshot & n) 18 44
+src/protocol.cpp::sentinel::(anonymous)::points_values(Codec & c , sc_weapon_points_result & v) 6 16
+src/protocol.cpp::sentinel::(anonymous)::special_values(Codec & c , sc_special_result & v) 5 19
+src/protocol.cpp::sentinel::decode_combat_response(const Message & in , size_t size , WireResult & result , Snapshot & source , sc_combat_snapshot & value) 16 21
+src/protocol.cpp::sentinel::decode_context_response(const Message & in , size_t size , WireResult & result , Snapshot & s , sc_context_snapshot & c) 49 53
+src/protocol.cpp::sentinel::decode_engine_response(const Message & in , size_t size , WireResult & result , Snapshot & s , sc_engine_snapshot & e) 33 32
+src/protocol.cpp::sentinel::decode_installation_response(const Message & in , size_t size , WireResult & result , Snapshot & s , sc_save_installation_snapshot & v) 11 20
+src/protocol.cpp::sentinel::decode_native_response(const Message & in , size_t size , WireResult & result , uint16_t op , Snapshot & s , sc_native_snapshot & n , sc_diagnostic_result & d , sc_diagnostic_detail * detail) 29 34
+src/protocol.cpp::sentinel::decode_save_admission_response(const Message & in , size_t size , WireResult & result , Snapshot & s , sc_save_admission_snapshot & v) 51 53
+src/protocol.cpp::sentinel::decode_save_response(const Message & in , size_t size , WireResult & result , Snapshot & s , sc_save_snapshot & v) 46 40
+src/protocol.cpp::sentinel::decode_save_write_response(const Message & in , size_t size , WireResult & result , Snapshot & s , sc_save_write_snapshot & v) 61 78
+src/runes.cpp::sentinel::runes::execute(const sc_runes_request & r , sc_runes_result & out , const Calls & c) 81 51
+src/runes.cpp::sentinel::runes::valid(const sc_runes_request & r) 20 21
+src/runes_native.cpp::sentinel::runes::(anonymous)::bind_run_state(void * , uintptr_t p) 40 28
+src/runes_native.cpp::sentinel::runes::(anonymous)::ensure_normal_runes(void * , uintptr_t p , uint32_t normal_mask) 42 25
+src/runes_native.cpp::sentinel::runes::(anonymous)::ensure_support_runes(void * , uintptr_t p , uint32_t support_mask) 42 25
+src/runes_native.cpp::sentinel::runes::(anonymous)::read(void * , uintptr_t p , SnapshotFacts & facts) 69 38
+src/save_backup.cpp::sentinel::save::BackupJob::copy(Session & owner , engine :: Memory & memory , const SdkWriteObservation & manifest , const std :: vector < uintptr_t > & buffers) 36 22
+src/save_campaign.cpp::sentinel::save::Campaign::allow_access(uintptr_t data , const std :: string & directory , bool write , bool erase) 17 25
+src/save_campaign.cpp::sentinel::save::Campaign::begin_resume(const std :: string & mission_destination) 15 20
+src/save_campaign.cpp::sentinel::save::Campaign::checkpoint_ready(const CampaignTransition & result) 24 36
+src/save_campaign.cpp::sentinel::save::Campaign::map_begin(std :: string map , uint64_t generation , uint64_t event_id , uint32_t native_subtype) 31 25
+src/save_campaign.cpp::sentinel::save::Campaign::map_end(const CampaignTransition & result) 25 34
+src/save_campaign.cpp::sentinel::save::Campaign::parse_checkpoint(std :: string_view value) 40 32
+src/save_campaign.cpp::sentinel::save::Campaign::prepare_menu_save(const CampaignTransition & boundary) 14 24
+src/save_campaign.cpp::sentinel::save::Campaign::verify_source(engine :: Memory & memory , uintptr_t data , uintptr_t image) 56 37
+src/save_campaign.cpp::sentinel::save::Campaign::write_observed(uint64_t operation , bool terminal , bool successful , engine :: Memory & memory) 11 19
+src/save_campaign_native.cpp::sentinel::save::(anonymous)::campaign_action(uintptr_t screen , uintptr_t action) 16 38
+src/save_campaign_native.cpp::sentinel::save::(anonymous)::new_game(uintptr_t menu , uint32_t requested , uint8_t extra_life) 12 21
+src/save_campaign_native.cpp::sentinel::save::(anonymous)::parse_game_at(uintptr_t caller , SaveReference * data , uintptr_t files , uintptr_t prepared , uintptr_t request) 25 29
+src/save_campaign_native.cpp::sentinel::save::campaign_change_begin(uintptr_t self , uintptr_t descriptor , CampaignTransition & transition) 17 19
+src/save_catalog.cpp::sentinel::save::(anonymous)::CatalogFuture::reconcile() 30 30
+src/save_catalog.cpp::sentinel::save::enumerate_provider(Session & owner , engine :: Memory & memory , uintptr_t provider , SaveFuture * * out , uintptr_t identity , SaveReference * data , const char * prefix , const CatalogCalls & calls) 13 16
+src/save_collector.cpp::sentinel::save::collect_scoped(Session & owner , engine :: Memory & memory , const CollectorContext * context , CollectorResult * out , const CollectorCalls & calls) 21 26
+src/save_delete.cpp::sentinel::save::(anonymous)::campaign_directory(Session & owner , engine :: Memory & memory , const NativeString & name) 8 17
+src/save_delete.cpp::sentinel::save::delete_auxiliary_scoped(Session & owner , engine :: Memory & memory , uintptr_t object , DeleteOperationResult * out , DeleteOperation original) 23 33
+src/save_delete.cpp::sentinel::save::poll_scoped_delete(Session & owner , engine :: Memory & memory , DeleteFuture * future , DeleteResult * output , void * executor , const DeleteCalls & calls) 13 17
+src/save_installation.cpp::sentinel::save::Installation::finish(sc_install_event event , uint32_t reason , uint32_t minhook , uint32_t win32) 24 20
+src/save_native_hooks.cpp::sentinel::save::install_native_hooks(const engine :: Binding & binding , HANDLE stop) 52 41
+src/save_native_hooks.cpp::sentinel::save::validate_native_helpers(Installation & record , engine :: Memory & memory , const engine :: Image & image , uintptr_t & initializer) 18 17
+src/save_observer.cpp::sentinel::save::(anonymous)::frame(engine :: Memory & memory , const engine :: Binding & b) 56 32
+src/save_observer.cpp::sentinel::save::sample(engine :: Memory & memory , const engine :: Binding & b , uint64_t sequence , HANDLE stop , const context :: Clock * supplied_clock) 31 28
+src/save_profile.cpp::sentinel::save::(anonymous)::WireReader::node(unsigned depth , std :: string_view field) 63 42
+src/save_profile.cpp::sentinel::save::(anonymous)::callbacks(engine :: Memory & memory , ProfileOwner & owner , const ProfileCalls & calls , Session & session , BStage stage) 3 20
+src/save_profile.cpp::sentinel::save::(anonymous)::payload(engine :: Memory & memory , uintptr_t data , const ProfileCalls & calls , Fields & fields , Session & trace , bool output = false) 27 38
+src/save_profile.cpp::sentinel::save::(anonymous)::values(Session & owner , BStage stage , engine :: Memory & memory , const ProfileHolder & view , const ProfileCalls & calls , ProfileValue * & name , ProfileValue * & index , std :: string & text , int32_t & number , const char * & predicate , int cursor_state = 1) 16 19
+src/save_profile.cpp::sentinel::save::prepare_profile_write(Session & owner , engine :: Memory & memory , SaveReference * profile , SaveReference * data , uintptr_t native_user , const char * suffix , PrepareProfile original , RetainProfileReference retain , const ProfileCalls & calls) 10 17
+src/save_profile.cpp::sentinel::save::read_profile(Session & owner , engine :: Memory & memory , SaveReference * reference , SaveReference * data , const ProfileCalls & calls) 16 22
+src/save_profile.cpp::sentinel::save::serialize_profile(Session & owner , engine :: Memory & memory , uintptr_t manager , uintptr_t profile , ProfileHolder * holder , const ProfileCalls & calls) 40 36
+src/save_profile_prerequisite.cpp::sentinel::save::(anonymous)::poll(SaveFuture * value , SaveResult * out , void * executor) 21 19
+src/save_provider.cpp::sentinel::save::(anonymous)::inspect_remote(Session & owner , engine :: Memory & memory , uintptr_t remote , NativeCatalogSource & catalog , bool prepare) 93 68
+src/save_provider.cpp::sentinel::save::Session::persist_profile_write(const ProfileWrite & write , engine :: Memory & memory) 21 22
+src/save_provider.cpp::sentinel::save::provider_initialized(Session & owner , engine :: Memory & memory , uintptr_t manager , const ProviderCalls & calls) 23 28
+src/save_provider.cpp::sentinel::save::query_exists_scoped(Session & owner , engine :: Memory & memory , SaveFuture * * out , SaveReference * identity , const char * input , const ExistenceCalls & calls) 36 28
+src/save_provider.cpp::sentinel::save::snapshot_campaign_manifest(Session & owner , engine :: Memory & memory , const std :: string & directory , std :: vector < SdkFileWrite > & files) 11 17
+src/save_readback.cpp::sentinel::save::(anonymous)::ordinary_directory(Session & owner , engine :: Memory & memory , uintptr_t data , BIoTrace trace) 12 19
+src/save_readback.cpp::sentinel::save::(anonymous)::poll(SaveFuture * value , SaveResult * out , void * task) 30 20
+src/save_readback.cpp::sentinel::save::prepare_readback(Session & owner , engine :: Memory & memory , uintptr_t context , ReadWorkerResult * out , SaveReference * waiter , PrepareRead original) 29 24
+src/save_readback.cpp::sentinel::save::verify_readback(Session & owner , engine :: Memory & memory , uintptr_t context , ReadWorkerResult * out , DecodeRead original , uintptr_t image) 55 54
+src/save_recovery.cpp::sentinel::save::(anonymous)::capture(const RecoveryTransport & t , const std :: string & directory , storage :: TransportMetadata & out , Payloads & payloads) 29 20
+src/save_recovery.cpp::sentinel::save::(anonymous)::checkpoint(std :: string_view value , const std :: string & contract , const std :: string & directory , Checkpoint & out) 19 29
+src/save_recovery.cpp::sentinel::save::recover_campaign(storage :: Namespace & lease , const storage :: Descriptor & descriptor , const RecoveryTransport & t) 89 103
+src/save_sdk_write.cpp::sentinel::save::NativeWrites::begin(uintptr_t remote , uintptr_t files , uint64_t count , const std :: string & directory) 18 21
+src/save_sdk_write.cpp::sentinel::save::NativeWrites::poll_released(uintptr_t utilities , bool ( * completed ) ( uintptr_t , uint64_t , bool * )) 32 17
+src/save_sdk_write.cpp::sentinel::save::NativeWrites::prepared(uint64_t sequence , std :: vector < SdkFileWrite > files) 26 12
+src/save_sdk_write.cpp::sentinel::save::NativeWrites::readback_manifest(uint64_t id , SdkWriteObservation & out) const 47 29
+src/save_sdk_write.cpp::sentinel::save::NativeWrites::snapshot(uint64_t id) const 64 47
+src/save_sdk_write.cpp::sentinel::save::prepare_sdk_payloads(NativeWrites & writes , engine :: Memory & memory , uint64_t sequence , uintptr_t files , uint64_t count , const std :: string & directory , uintptr_t image , BTrace * diagnostics , uint64_t operation) 29 33
+src/save_session.cpp::sentinel::save::Session::capture_profile_baseline(const ProfileOwner & owner , std :: string name , int32_t index) 5 19
+src/save_session.cpp::sentinel::save::Session::observe_profile_choice(std :: string_view name , int32_t index) 22 18
+src/save_session.cpp::sentinel::save::Session::profile_step(ProfileStage stage , ProfileStatus status , const char * predicate , bool attempted , int64_t state , int64_t outcome , uint32_t value , ProfileRead read) 15 21
+src/save_session.cpp::sentinel::save::Session::publish_profile_catalog(uintptr_t provider , std :: string_view ownership , std :: vector < std :: string > entries , std :: string_view selected , int32_t index , bool prospective , unsigned campaign) 17 19
+src/save_session.cpp::sentinel::save::Session::startup_enter(uintptr_t root , uintptr_t caller , uint32_t thread) 29 25
+src/save_session.cpp::sentinel::save::Session::unrouted_import(const char * route , const char * operation , uintptr_t provider , uintptr_t identity , const UnroutedSource & source) 32 17
+src/save_storage.cpp::sentinel::storage::(anonymous)::collect(const std :: wstring & base , const std :: wstring & relative , unsigned depth , std :: vector < Entry > & entries , uint64_t & total , bool transport = false) 48 30
+src/save_storage.cpp::sentinel::storage::(anonymous)::component(std :: wstring_view name) 17 27
+src/save_storage.cpp::sentinel::storage::(anonymous)::open_namespace(const Descriptor & descriptor , bool create , Lease & lease) 44 37
+src/save_storage.cpp::sentinel::storage::(anonymous)::parse_transport(std :: string_view text , const Descriptor & descriptor , const std :: string & id , const std :: string & native_root , TransportMetadata & out) 29 48
+src/save_storage.cpp::sentinel::storage::(anonymous)::read_descriptor_text(const wchar_t * filename , std :: string & text) 49 35
+src/save_storage.cpp::sentinel::storage::(anonymous)::transport_metadata(const TransportMetadata & value , const std :: string & native_root) 25 24
+src/save_storage.cpp::sentinel::storage::(anonymous)::transport_name(std :: string_view value) 19 18
+src/save_storage.cpp::sentinel::storage::(anonymous)::verify_transport_file(HANDLE file , const TransportFile & expected , uint64_t deadline) 19 17
+src/save_storage.cpp::sentinel::storage::Namespace::backup_offline(Backup & backup) 31 18
+src/save_storage.cpp::sentinel::storage::Namespace::backup_transport(const TransportMetadata & metadata , ReadTransport read , void * source , Backup & backup) 25 16
+src/save_storage.cpp::sentinel::storage::Namespace::reopen_transport(std :: wstring_view basename , std :: unique_ptr < TransportArchive > & archive) 27 24
+src/save_storage.cpp::sentinel::storage::parse_descriptor(std :: string_view text , Descriptor & descriptor) 34 39
+src/save_write.cpp::sentinel::save::(anonymous)::access_scoped(Session & owner , engine :: Memory & memory , uintptr_t provider , SaveFuture * * out , uintptr_t identity , SaveReference * reference , const WriteCalls & calls , Access access , bool native_checkpoint = false) 52 32
+src/save_write.cpp::sentinel::save::(anonymous)::poll_access(SaveFuture * base , SaveResult * out , void * task) 25 24
+src/save_write.cpp::sentinel::save::(anonymous)::prepare_name(Session & owner , engine :: Memory & memory , SaveReference * reference , const WriteCalls & calls , Access access , bool & profile , ProfileWrite & selection , uintptr_t & data , std :: string & name) 28 23
+src/save_write.cpp::sentinel::save::(anonymous)::relative_files(engine :: Memory & memory , uintptr_t data , const WriteCalls & calls , bool root_auxiliary , BIoTrace trace) 41 38
+src/save_write.cpp::sentinel::save::preflight_scoped(Session & owner , engine :: Memory & memory , uintptr_t context , WritePreflightResult * out , WritePreflight original , uintptr_t image) 19 22
+src/special.cpp::sentinel::special::bind_run_state_if_needed(uintptr_t player , uint64_t generation) 14 17
+src/special.cpp::sentinel::special::execute(const sc_special_request & r , sc_special_result & out , const Calls & c) 101 83
+src/special.cpp::sentinel::special::valid(const sc_special_request & r) 22 43
+src/special_hud_native.h::hud::graphics_source(uintptr_t element) 16 21
+src/special_hud_native.h::hud::project(uintptr_t element , const HudOwnerSnapshot & owner , const GraphicsSource & context , unsigned keys , uint64_t epoch , bool & clips_applied) 348 271
+src/special_hud_owner_fixture.h::test_hud_owner_path() 158 340
+src/special_native.cpp::sentinel::special::(anonymous)::best_weapon_detour(uintptr_t p , bool exclude_current , uintptr_t excluded) 11 16
+src/special_native.cpp::sentinel::special::(anonymous)::filter_hammer_input(uintptr_t caller , uint64_t button , bool raw , uintptr_t input = 0) 23 24
+src/special_native.cpp::sentinel::special::(anonymous)::hands_restore_weapon(uintptr_t p , int16_t & subweb , uint32_t & ordinal) 34 23
+src/special_native.cpp::sentinel::special::(anonymous)::install_hands_restore(const engine :: Binding & binding , HANDLE stop) 29 17
+src/special_native.cpp::sentinel::special::(anonymous)::project_special_hud(uintptr_t element) 80 66
+src/special_native.cpp::sentinel::special::(anonymous)::record_use(const char * predicate , save :: BStatus status , std :: initializer_list < save :: BFact > facts) 21 22
+src/special_native.cpp::sentinel::special::(anonymous)::sample_use_attempt(uintptr_t p , bool safe) 13 17
+src/special_native.cpp::sentinel::special::(anonymous)::weapon_info_label_detour(uintptr_t parent , const char * label , bool warn) 13 21
+src/special_native.cpp::sentinel::special::ensure(void * , uintptr_t p , uint32_t own_crucible , uint32_t own_hammer , uint32_t hammer_tier) 27 22
+src/special_native.cpp::sentinel::special::install(const engine :: Binding & binding , HANDLE stop) 215 134
+src/special_native.cpp::sentinel::special::poll_input(uintptr_t p , bool safe_gameplay) 72 48
+src/special_native.cpp::sentinel::special::present_selection(uintptr_t p) 23 22
+src/special_native.cpp::sentinel::special::refill(void * , uintptr_t p) 48 29
+src/special_native.cpp::sentinel::special::select(void * , uintptr_t p , uint32_t selected) 12 16
+src/special_native.cpp::sentinel::special::test_hud_source() 11 20
+src/startup_log.cpp::sentinel::startup_log::record(const Snapshot & core , uint32_t engine_reason) noexcept 49 19
+src/weapon_points_native.cpp::sentinel::weapon_points::install(const engine :: Binding & binding , HANDLE stop) 33 19
+tests/backup_request.cpp::run_backup_request_contracts() 38 33
+tests/campaign_menu_fixture.h::menu_fixture::exercise() 52 44
+tests/campaign_navigation_fixture.h::navigation_fixture::create(uint32_t difficulty , const std :: wstring & defect) 15 17
+tests/campaign_travel_fixture.h::travel_fixture::run(uint32_t difficulty , const std :: wstring & defect , const std :: function < void ( ) > & save) 22 18
+tests/campaign_writer_fixture.h::writer_fixture::load(Model & m , bool metadata_only , const std :: wstring & defect) 33 38
+tests/campaign_writer_fixture.h::writer_fixture::save(Model & m , const std :: wstring & defect , const std :: shared_ptr < BackupJob > & backup = { }) 28 36
+tests/combat.cpp::main(int argc , char * * argv) 27 40
+tests/context.cpp::main() 27 25
+tests/enemy_recipe_state.cpp::main() 31 36
+tests/expanded.cpp::main() 30 53
+tests/inspection.cpp::wmain(int argc , wchar_t * * argv) 58 59
+tests/installation.cpp::contract() 15 22
+tests/installation.cpp::wmain(int argc , wchar_t * * argv) 23 22
+tests/native_host.cpp::(anonymous)::observe(context :: Evidence & measured) 18 16
+tests/native_host.cpp::wmain(int argc , wchar_t * * argv) 112 75
+tests/native_model.cpp::main() 47 78
+tests/save_campaign.cpp::(anonymous)::native_load(uintptr_t self , uintptr_t descriptor , uintptr_t files) 19 21
+tests/save_campaign.cpp::(anonymous)::native_transition(uint32_t difficulty , const std :: wstring & defect = "literal" , std :: function < void ( ) > checkpoint = { } , std :: function < void ( ) > after_ready = { } , std :: function < void ( ) > on_menu = { } , std :: string destination = { } , std :: function < void ( ) > after_menu = { }) 35 42
+tests/save_campaign.cpp::wmain(int argc , wchar_t * * argv) 502 241
+tests/save_observer.cpp::main() 62 51
+tests/save_profile.cpp::(anonymous)::frame(Frame & f , const std :: string & name , int index , unsigned variant = 0 , size_t target_size = 0) 34 23
+tests/save_profile.cpp::exercise_profile_caller(Session & owner , const std :: function < bool ( SaveReference & ) > & provider , bool malformed) 21 17
+tests/save_profile.cpp::run_profile_contracts(const std :: function < std :: unique_ptr < Session > ( ) > & make) 278 158
+tests/save_provider.cpp::run_catalog_contracts(const std :: function < std :: unique_ptr < Session > ( ) > & make) 99 69
+tests/save_provider.cpp::run_prerequisite_contracts(const std :: function < std :: unique_ptr < Session > ( ) > & make) 149 100
+tests/save_provider.cpp::run_provider_contracts(const std :: function < std :: unique_ptr < Session > ( ) > & make) 347 218
+tests/save_readback.cpp::(anonymous)::backup_worker_contracts(const std :: function < std :: unique_ptr < Session > ( ) > & make) 41 26
+tests/save_readback.cpp::ordinary_worker_contracts(const std :: function < std :: unique_ptr < Session > ( ) > & make) 50 40
+tests/save_readback.cpp::run_readback_contracts(const std :: function < std :: unique_ptr < Session > ( ) > & make) 89 76
+tests/save_sdk_write.cpp::(anonymous)::run_write_owner_contracts(const std :: function < std :: unique_ptr < Session > ( ) > & make) 61 61
+tests/save_sdk_write.cpp::run_sdk_write_contracts(const std :: function < std :: unique_ptr < Session > ( ) > & make) 166 126
+tests/save_session.cpp::(anonymous)::auxiliary_contracts(Fixture & fixtures , engine :: Memory & memory) 39 24
+tests/save_session.cpp::(anonymous)::delete_contracts(Fixture & fixtures , engine :: Memory & memory) 15 27
+tests/save_session.cpp::(anonymous)::preflight_contracts(Fixture & fixtures , engine :: Memory & memory) 74 59
+tests/save_session.cpp::(anonymous)::route_contracts(Fixture & fixtures , engine :: Memory & memory) 49 38
+tests/save_session.cpp::(anonymous)::scoped_delete_contracts(Fixture & fixtures , engine :: Memory & memory) 83 88
+tests/save_session.cpp::(anonymous)::write_contracts(Fixture & fixtures , engine :: Memory & memory) 108 97
+tests/save_session.cpp::main(int argc , char * * argv) 78 64
+tests/save_storage.cpp::(anonymous)::lifecycle_and_backup(Fixture & f) 14 18
+tests/save_storage.cpp::(anonymous)::transport_backups(Fixture & fixture) 49 37
+tests/save_submission.cpp::(anonymous)::make(uintptr_t manager , SaveReference * out , uint32_t user , uintptr_t request) 12 17
+tests/save_submission.cpp::run_submission_contracts() 18 20
+tests/special_model.cpp::main() 15 16
+tests/startup_route_fixture.h::startup_route_fixture::exercise(Session & owner , unsigned defect = 0) 35 38
+tests/startup_route_fixture.h::startup_route_fixture::exercise_gate() 36 23
+tests/workflow.cpp::main() 26 28
