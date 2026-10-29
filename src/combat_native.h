@@ -13,6 +13,7 @@ void observe(const Context&);
 sc_combat_snapshot inspect(const sc_combat_query&);
 save::BSnapshot diagnostics();
 bool confirmed_dead(uintptr_t world, uintptr_t actor);
+bool suppress(uint64_t generation, uintptr_t world, uintptr_t actor);
 void stop();
 #ifdef SC_NATIVE_TESTING
 bool test_observation_contention();

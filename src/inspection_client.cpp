@@ -31,7 +31,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
                                    const sc_campaign_summary* summary = nullptr, const sc_campaign_rewards* rewards = nullptr,
                                    const sc_command_request* command = nullptr,
                                    const sc_combat_presentation_request* combat_presentation = nullptr,
-                                   const sc_combat_query* combat = nullptr, const recovery::Request* recovery_request = nullptr) {
+                                   const sc_combat_query* combat = nullptr) {
     Inspection result;
     Handle process;
     auto fail = [&](DWORD error) {
@@ -87,7 +87,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
         result.result = ProbeResult::process_mismatch; return result;
     }
     Message data{};
-    const DWORD size = static_cast<DWORD>(recovery_request ? encode_recovery_request(data, operation, *recovery_request) : combat_presentation ? encode_combat_presentation_request(data, *combat_presentation) :
+    const DWORD size = static_cast<DWORD>(combat_presentation ? encode_combat_presentation_request(data, *combat_presentation) :
         command ? encode_command_request(data, operation, *command) :
         combat ? encode_combat_request(data, pid, *combat) :
         automap ? encode_automap_request(data, *automap) :
@@ -114,7 +114,7 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
     if (error != ERROR_SUCCESS) return fail(error);
     WireResult code{};
     result.failure_stage = "decode_response";
-    bool decoded = recovery_request ? decode_recovery_response(data, count, code, operation, result.snapshot, result.recovery) : combat_presentation ? decode_combat_presentation_response(data, count, code, result.snapshot, result.combat_presentation) :
+    bool decoded = combat_presentation ? decode_combat_presentation_response(data, count, code, result.snapshot, result.combat_presentation) :
         command ? decode_command_response(data, count, code, operation, result.snapshot, result.command) :
         operation == combat_operation ? decode_combat_response(data, count, code, result.snapshot, result.combat) :
         automap ? decode_automap_response(data, count, code, result.snapshot, result.automap) :
@@ -158,19 +158,8 @@ static Inspection query_operation(uint32_t pid, uint32_t timeout_ms, uint64_t re
          (result.automap.revision != automap->revision || result.automap.known != automap->known)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
-    if (recovery_request) {
-        const auto& r = result.recovery.request;
-        if (r.execution.request_id != recovery_request->execution.request_id ||
-            r.execution.expected.lifecycle_generation != recovery_request->execution.expected.lifecycle_generation ||
-            std::memcmp(r.execution.nonce, recovery_request->execution.nonce, 16) ||
-            std::memcmp(r.namespace_id, recovery_request->namespace_id, 65) ||
-            (operation != encounter_observe_operation && (r.token != recovery_request->token ||
-                r.stamp != recovery_request->stamp || std::memcmp(r.save, recovery_request->save, 96)))) {
-            result.result = ProbeResult::invalid_response; return result;
-        }
-    }
     const auto& execution = command ? result.command.execution : (deathlink ? result.deathlink.execution : (special ? result.special.execution : (runes ? result.runes.execution : (arsenal ? result.arsenal.execution : (inventory ? result.inventory.execution : (points ? result.weapon_points.execution : (backup ? result.backup.execution : result.diagnostic)))))));
-    if (request && !recovery_request && !campaign && !automap && !combat_presentation && (execution.request_id != request->request_id ||
+    if (request && !campaign && !automap && !combat_presentation && (execution.request_id != request->request_id ||
         std::memcmp(execution.nonce, request->nonce, sizeof(request->nonce)))) {
         result.result = ProbeResult::invalid_response; return result;
     }
@@ -334,13 +323,5 @@ Inspection query_command(uint32_t pid, uint32_t timeout_ms, uint16_t operation, 
     }
     return query_operation(pid, timeout_ms, command_capability, operation, &r.execution, 0, 0,
         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &r);
-}
-}
-
-namespace sentinel {
-Inspection query_recovery(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const recovery::Request& r) {
-    return query_operation(pid, timeout_ms, encounter_recovery_capability, operation, &r.execution,
-        0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-        nullptr, nullptr, nullptr, nullptr, nullptr, &r);
 }
 }

@@ -383,7 +383,6 @@ int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool en
     }
     return 0;
 }
-int encounter_recovery_command(int argc, wchar_t** argv);
 int weapon_points_command(int argc, wchar_t** argv);
 int campaign_menu_command(int argc,wchar_t** argv);
 int inventory_command(int argc, wchar_t** argv);
@@ -435,8 +434,6 @@ int wmain(int argc, wchar_t** argv) {
     if (runes_res >= 0) return runes_res;
     const int arsenal_result = arsenal_command(argc, argv);
     if (arsenal_result >= 0) return arsenal_result;
-    const int recovery_result = encounter_recovery_command(argc, argv);
-    if (recovery_result >= 0) return recovery_result;
     const int points_result = weapon_points_command(argc, argv);
     const int campaign_result=campaign_menu_command(argc,argv);
     if (campaign_result>=0) return campaign_result;

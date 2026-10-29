@@ -5,6 +5,8 @@
 #include "combat_native.h"
 #include "inventory.h"
 #include "native_target.h"
+#include "native_runtime.h"
+#include <stdexcept>
 #include "save_session.h"
 #include "save_collector.h"
 #include "commands_native.h"
@@ -35,6 +37,7 @@
 
 namespace sentinel::expanded {
 namespace {
+void prepare_recovery(const engine::Binding&, HANDLE);
 using CostClock = std::chrono::steady_clock;
 uint64_t elapsed_us(CostClock::time_point start) {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(CostClock::now()-start).count());
@@ -4562,6 +4565,7 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
         native::validate_target(memory, binding.image, lookup, stop_event, deadline) ||
         native::validate_leaf_target(memory, binding.image, ignored, 18, stop_event, deadline) ||
         native::validate_leaf_target(memory, binding.image, rewind, 10, stop_event, deadline)) return false;
+    prepare_recovery(binding, stop_event);
     definition_name = reinterpret_cast<DefinitionName>(name.address);
     resolve_actor = reinterpret_cast<ResolveActor>(binding.image.base + 0x6cb100);
     grow_hosts = reinterpret_cast<GrowHosts>(binding.image.base + 0x357040);
@@ -4818,57 +4822,237 @@ bool read_recipe_actors(uintptr_t world, std::map<uintptr_t, bool>& actors,
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 namespace {
-struct RecoveryScan {
-    uint32_t candidates = 0;
-    uint64_t fingerprint = 14695981039346656037ull;
-    char encounter[512]{};
-    uint8_t completion = 0;
-};
-bool scan_recovery(uintptr_t world, RecoveryScan& scan) noexcept {
-    __try {
-        const auto managers = *reinterpret_cast<const uintptr_t*>(world + 0x126658);
-        const auto count = *reinterpret_cast<const int32_t*>(world + 0x126660);
-        if (count < 0 || count > 100000) return false;
-        for (int32_t i = 0; i < count; ++i) {
-            const auto manager = *reinterpret_cast<const uintptr_t*>(managers + static_cast<uintptr_t>(i) * 0x20 + 8);
-            if (!manager) continue;
-            bool live = false;
-            for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
-                const auto records = *reinterpret_cast<const uintptr_t*>(manager + offset);
-                const auto length = *reinterpret_cast<const int32_t*>(manager + offset + 8);
-                if (length < 0 || length > 1000000) return false;
-                for (int32_t index = 0; index < length; ++index) {
-                    const auto actor = resolve_actor(records + static_cast<uintptr_t>(index) * 0x68 + 8);
-                    if (actor && !combat::confirmed_dead(world, actor)) { live = true; break; }
-                }
-            }
-            if (!live) continue;
-            ++scan.candidates;
-            scan.fingerprint = (scan.fingerprint ^ manager) * 1099511628211ull;
-            const auto workers = *reinterpret_cast<const uintptr_t*>(manager + 0xcc0);
-            const auto length = *reinterpret_cast<const int32_t*>(manager + 0xcc8);
-            if (length < 0 || length > 100000) return false;
-            for (int32_t index = 0; index < length; ++index)
-                scan.fingerprint = (scan.fingerprint ^ *reinterpret_cast<const uintptr_t*>(workers + static_cast<uintptr_t>(index) * 8)) * 1099511628211ull;
-            scan.completion = *reinterpret_cast<const uint8_t*>(manager + 0xdb3);
-            scan.fingerprint = (scan.fingerprint ^ scan.completion) * 1099511628211ull;
-            if (scan.candidates == 1 && !read_definition_name(manager, scan.encounter)) return false;
+using RecoveryNotify = void(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uint8_t);
+using RecoveryDeath = void(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, int32_t, int32_t, uintptr_t, uintptr_t, float);
+using RecoveryClock = uintptr_t(*)(uintptr_t, int64_t*, int32_t);
+using RecoveryMilliseconds = int32_t*(*)(int32_t*, int64_t);
+using RecoveryStopMaintaining = uintptr_t(*)(uintptr_t, uintptr_t, uint64_t, const char*);
+RecoveryNotify recovery_notify = nullptr;
+RecoveryDeath recovery_death = nullptr;
+RecoveryClock recovery_clock = nullptr;
+RecoveryMilliseconds recovery_milliseconds = nullptr;
+PostOne recovery_post = nullptr;
+RecoveryStopMaintaining recovery_stop_maintaining = nullptr;
+uintptr_t recovery_image = 0;
+
+void prepare_recovery(const engine::Binding& binding, HANDLE stop_event) {
+    recovery_death = nullptr;
+    struct Site { uint32_t rva; const char* bytes; size_t leaf; };
+    const Site sites[]{
+        {0x11f8700, "40555356574155488d6c24c04881ec40010000488b05be62fb024833c4488945", 0},
+        {0x120e730, "4883ec58f30f108424a0000000488b842498000000f30f11442448c644244000", 0},
+        {0x682380, "488b05f938f7034c8bc983780800750f488b4110488b4808488bc248890ac380", 80},
+        {0x17fae60, "488b05d9643f040f57c0f3480f2ac2f30f5905e1bb2501f30f594028f30f2cc0", 38},
+        {0x17dd390, "44894c24205356574883ec40488b01418bd8488bfa488bf1ff504084c00f84a6", 0},
+        {0xba3070, "40535556574883ec68488b0558b960034833c44889442450488bea488bf9498b", 0},
+        {0x143c000, "4883ec28486381a088000085c07e5548895c2420488bd0488b999888000048c1", 0},
+    };
+    engine::LocalMemory memory;
+    const auto deadline = GetTickCount64() + 10000;
+    for (const auto& site : sites) {
+        native::Target target{}; target.address = binding.image.base + site.rva;
+        for (size_t i = 0; i < target.bytes.size(); ++i) {
+            unsigned byte = 0;
+            if (sscanf_s(site.bytes + 2 * i, "%2x", &byte) != 1) return;
+            target.bytes[i] = static_cast<uint8_t>(byte);
         }
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+        if (site.leaf ? native::validate_leaf_target(memory, binding.image, target, site.leaf, stop_event, deadline) :
+            native::validate_target(memory, binding.image, target, stop_event, deadline)) return;
+    }
+    recovery_image = binding.image.base;
+    recovery_notify = reinterpret_cast<RecoveryNotify>(recovery_image + sites[0].rva);
+    recovery_death = reinterpret_cast<RecoveryDeath>(recovery_image + sites[1].rva);
+    recovery_clock = reinterpret_cast<RecoveryClock>(recovery_image + sites[2].rva);
+    recovery_milliseconds = reinterpret_cast<RecoveryMilliseconds>(recovery_image + sites[3].rva);
+    recovery_post = reinterpret_cast<PostOne>(recovery_image + sites[4].rva);
+    recovery_stop_maintaining = reinterpret_cast<RecoveryStopMaintaining>(recovery_image + sites[5].rva);
+}
+std::string recovery_type(uintptr_t object) {
+    const auto table = *reinterpret_cast<const uintptr_t*>(object);
+    const auto locator = *reinterpret_cast<const uintptr_t*>(table - 8);
+    const auto descriptor = *reinterpret_cast<const uint32_t*>(locator + 12);
+    const auto name = reinterpret_cast<const char*>(recovery_image + descriptor + 16);
+    size_t length = 0;
+    while (length < 192 && name[length]) ++length;
+    if (length == 192) return "unknown";
+    return std::string(name, length);
+}
+bool scan_recovery_impl(uintptr_t world, recovery::Context& context) {
+    const auto managers = *reinterpret_cast<const uintptr_t*>(world + 0x126658);
+    const auto count = *reinterpret_cast<const int32_t*>(world + 0x126660);
+    if (count < 0 || count > 100000) return false;
+    for (int32_t i = 0; i < count; ++i) {
+        const auto address = *reinterpret_cast<const uintptr_t*>(managers + static_cast<uintptr_t>(i) * 0x20 + 8);
+        if (!address) continue;
+        recovery::Manager manager;
+        manager.address = address; manager.identifier = actor_identifier(address);
+        char name[512];
+        if (!read_definition_name(address, name)) return false;
+        manager.name = name; manager.kind = recovery_type(address);
+        manager.complete = *reinterpret_cast<const uint8_t*>(address + 0xdb3) != 0;
+        manager.active = *reinterpret_cast<const uint8_t*>(address + 0xdb2) &&
+            *reinterpret_cast<const uint8_t*>(address + 0xba0) && *reinterpret_cast<const int32_t*>(address + 0xda0) >= 0;
+        const auto workers = *reinterpret_cast<const uintptr_t*>(address + 0xcc0);
+        const auto length = *reinterpret_cast<const int32_t*>(address + 0xcc8);
+        if (length < 0 || length > 100000) return false;
+        for (int32_t j = 0; j < length; ++j) {
+            const auto worker = *reinterpret_cast<const uintptr_t*>(workers + static_cast<uintptr_t>(j) * 8);
+            if (!worker || cast_maintain(worker) || cast_stagger(worker)) continue;
+            if (!manager.wait.empty()) manager.wait += ", ";
+            const auto type = recovery_type(worker);
+            manager.wait += type;
+            if (type.find("WaitForEventFlag") != std::string::npos) {
+                const auto flag = *reinterpret_cast<const int32_t*>(worker + 0xa8);
+                manager.wait += " flag=" + std::to_string(flag);
+                manager.noncombat_wait |= flag != 3 && !*reinterpret_cast<const uint8_t*>(worker + 0xac);
+            }
+        }
+        std::set<uintptr_t> seen;
+        for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
+            const auto records = *reinterpret_cast<const uintptr_t*>(address + offset);
+            const auto size = *reinterpret_cast<const int32_t*>(address + offset + 8);
+            if (size < 0 || size > 1000000) return false;
+            for (int32_t j = 0; j < size; ++j) {
+                const auto actor = record_actor(records + static_cast<uintptr_t>(j) * 0x68);
+                if (!actor || !seen.insert(actor).second || combat::confirmed_dead(world, actor)) continue;
+                char actor_name[512];
+                if (!read_instance_name(actor, actor_name)) return false;
+                manager.actors.push_back({actor, actor_identifier(actor), recovery::protected_actor(actor_name, recovery_type(actor))});
+            }
+        }
+        context.managers.push_back(std::move(manager));
+    }
+    return true;
+}
+bool scan_recovery(uintptr_t world, recovery::Context& context) noexcept {
+    __try { return scan_recovery_impl(world, context); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+void stop_recovery_producers(recovery::Attempt& attempt, const recovery::Manager& target) {
+    const auto count = *reinterpret_cast<const int32_t*>(target.address + 0xcc8);
+    const auto workers = *reinterpret_cast<const uintptr_t*>(target.address + 0xcc0);
+    if (count < 0 || count > 100000) throw std::runtime_error("worker list unreadable");
+    for (int32_t i = 0; i < count; ++i) {
+        const auto command = *reinterpret_cast<const uintptr_t*>(workers + static_cast<uintptr_t>(i) * 8);
+        const auto maintain = cast_maintain(command);
+        const auto worker = maintain ? maintain : cast_stagger(command);
+        if (!worker) continue;
+        auto& complete = *reinterpret_cast<uint8_t*>(worker + (maintain ? 0xcc : 0xb9));
+        if (!complete) ++attempt.producers_stopped;
+        if (!maintain) { *reinterpret_cast<int32_t*>(worker + 0xa8) = 0; complete = 1; }
+        const auto found = worker_recipes.find(command);
+        if (found != worker_recipes.end()) { recipe_state.cancel(found->second); worker_recipes.erase(found); }
+        worker_diagnostics.erase(command);
+    }
+    alignas(8) uint8_t output[32]{};
+    recovery_stop_maintaining(target.address, reinterpret_cast<uintptr_t>(output), uint64_t{1} << 44, "");
+    if (native::observation_stamp() != attempt.stamp) { attempt.outcome = recovery::changed; return; }
+    for (auto pending = pending_recipes.begin(); pending != pending_recipes.end();) {
+        if (pending->first.first != target.address) { ++pending; continue; }
+        recipe_state.cancel(pending->second); ++attempt.producers_stopped;
+        pending = pending_recipes.erase(pending);
+    }
+    std::set<std::string> closed;
+    for (const auto& [key, progress] : recipe_state.requests()) {
+        const auto members = recipe_state.request_memberships(key);
+        const bool owned = progress.request.owner == target.name ||
+            std::any_of(members.begin(), members.end(), [&](const auto& member) { return member.owner == target.name; }) ||
+            std::any_of(target.actors.begin(), target.actors.end(), [&](const auto& actor) {
+                char name[512]; return read_definition_name(actor.address, name) && progress.request.owner == name;
+            });
+        if (!owned) continue;
+        if (!progress.closed) { recipe_state.cancel(key); ++attempt.producers_stopped; }
+        closed.insert(key);
+    }
+    for (auto* producers : {&component_summons, &direct_points}) for (auto& [component, pending] : *producers) {
+        (void)component;
+        for (auto& request : pending.requests) if (closed.count(request.key)) request.completed = true;
+        if (!pending.requests.empty() && std::all_of(pending.requests.begin(), pending.requests.end(),
+                [](const auto& request) { return request.completed; })) pending.completed = true;
+    }
+    if (pending_summon_checkpoint) for (auto& component : pending_summon_checkpoint->summons)
+        for (auto& request : component.requests) if (closed.count(request.key)) request.completed = true;
+    for (auto pending = pending_independent_shows.begin(); pending != pending_independent_shows.end();) {
+        const bool cancelled = std::any_of(closed.begin(), closed.end(), [&](const auto& key) {
+            const auto& request = recipe_state.requests().at(key).request;
+            const auto recipe = native_recipes.find(request.origin);
+            if (key.rfind("independent/", 0) != 0 || recipe == native_recipes.end()) return false;
+            for (uint64_t i = 0; i < recipe->second.bodies.size(); ++i)
+                if (independent_body_name(recipe->second, i) == pending->first) return true;
+            return false;
+        });
+        if (cancelled) { independent_shows.insert(pending->first); pending = pending_independent_shows.erase(pending); }
+        else ++pending;
+    }
+}
+bool kill_recovery_actor(recovery::Attempt& attempt, const recovery::Context& context, const recovery::Actor& actor) {
+    if (actor_identifier(actor.address) != actor.identifier || combat::confirmed_dead(context.world, actor.address)) return true;
+    if (resolve_actor(actor.address + 0x167d0)) { attempt.wait = "actor has a native owner"; return true; }
+    const auto challenge = *reinterpret_cast<const uintptr_t*>(context.world + 0x65b48);
+    if (!challenge || *reinterpret_cast<const uint32_t*>(context.world + 0x65b40) !=
+        *reinterpret_cast<const uint32_t*>(context.world + 0x65b44)) return false;
+    const auto data = *reinterpret_cast<const uintptr_t*>(challenge + 0x35f8);
+    const auto declaration = data ? *reinterpret_cast<const uintptr_t*>(data + 0xc0) : 0;
+    const auto dispatcher = *reinterpret_cast<const uintptr_t*>(context.world + 0x126648);
+    if (!declaration || !dispatcher || !combat::suppress(context.scope.lifecycle_generation, context.world, actor.address)) return false;
+    ++attempt.kills_suppressed;
+    recovery_notify(dispatcher, context.player, actor.address, context.player, declaration + 0x90, declaration + 0x90, 0);
+    if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
+    recovery_death(context.world + 0xac660, context.player, context.player, actor.address, -1, 5,
+        *reinterpret_cast<const uintptr_t*>(declaration + 0xad8), declaration + 0x9c8, 0.0f);
+    if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
+    int64_t step = 0; int32_t delay = 0;
+    recovery_clock(context.world + 0x125a60, &step, 1);
+    recovery_milliseconds(&delay, static_cast<int64_t>(static_cast<float>(step) * 2.0f));
+    if (!recovery_post(actor.address, recovery_image + 0x6bebf80, delay, 0)) return false;
+    if (!combat::confirmed_dead(context.world, actor.address)) return false;
+    ++attempt.actors_killed;
+    return true;
+}
+bool drain_recovery_impl(recovery::Attempt& attempt, const recovery::Context& context) {
+    std::set<uintptr_t> killed;
+    std::vector<const recovery::Manager*> targets;
+    // close every target before deaths can trigger a checkpoint.
+    for (const auto& target : attempt.targets) {
+        const auto found = std::find_if(context.managers.begin(), context.managers.end(), [&](const auto& manager) {
+            return manager.address == target.address && manager.identifier == target.identifier;
+        });
+        if (found == context.managers.end()) return false;
+        if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
+        stop_recovery_producers(attempt, *found);
+        targets.push_back(&*found);
+    }
+    for (const auto* target : targets) {
+        if (target->complete) continue;
+        for (const auto& actor : target->actors) {
+            if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
+            if (killed.insert(actor.address).second && !kill_recovery_actor(attempt, context, actor)) return false;
+        }
+    }
+    return true;
+}
+bool drain_recovery_safe(recovery::Attempt& attempt, const recovery::Context& context) noexcept {
+    __try { return drain_recovery_impl(attempt, context); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 }
 recovery::Context recovery_context(uintptr_t world) {
     recovery::Context context;
-    RecoveryScan scan{};
-    context.readable = !stopped.load() && resolve_actor && definition_name && scan_recovery(world, scan);
-    context.candidates = scan.candidates; context.fingerprint = scan.fingerprint;
-    context.encounter = scan.candidates == 1 ? scan.encounter : scan.candidates ? "ambiguous" : "none";
-    context.completion = scan.candidates == 1 ? (scan.completion ? "latch_set_unqualified" : "latch_clear_unqualified") : "unqualified";
-    // actor membership does not establish which encounter contains the player.
-    context.ownership_proven = false;
+    std::lock_guard<std::recursive_mutex> admission(admission_mutex);
+    context.supported = !stopped.load() && recovery_death && resolve_actor && definition_name && cast_maintain && cast_stagger;
+    context.readable = context.supported && scan_recovery(world, context);
     return context;
 }
+bool drain_recovery(recovery::Attempt& attempt, const recovery::Context& context) {
+    std::lock_guard<std::recursive_mutex> admission(admission_mutex);
+    try { return !stopped.load() && recovery_death && drain_recovery_safe(attempt, context); }
+    catch (...) { return false; }
+}
+bool recovery_player_allowed(uintptr_t player) {
+    __try { return player && *reinterpret_cast<const int32_t*>(player + 0x88a0) == 0; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 void observe(uintptr_t world) {
     if (stopped.load(std::memory_order_acquire)) return;
     ObserveCost cost; cost.world=world;
@@ -5146,6 +5330,176 @@ bool test_darklord_telemetry() {
     darklord_image = previous_image; world_global = previous_world; darklord_sink = previous_sink;
     return ok;
 }
+bool test_recovery_kill(uintptr_t world, uintptr_t actor, TestRecoveryDeath death) {
+    const auto saved_notify = recovery_notify;
+    const auto saved_death = recovery_death;
+    const auto saved_clock = recovery_clock;
+    const auto saved_milliseconds = recovery_milliseconds;
+    const auto saved_post = recovery_post;
+    const auto saved_stop = recovery_stop_maintaining;
+    const auto saved_resolve = resolve_actor;
+    const auto saved_identifier = actor_identifier;
+    static bool notified, removed, valid, owned;
+    static unsigned stops;
+    static uintptr_t expected_world, expected_actor;
+    expected_world = world; expected_actor = actor;
+    notified = removed = false; valid = owned = true; stops = 0;
+    auto challenge = std::make_unique<std::array<uint8_t, 0x3600>>();
+    std::array<uint8_t, 0x100> data{};
+    std::array<uint8_t, 0xb00> declaration{};
+    std::array<std::array<uint8_t, 0xe30>, 2> managers{};
+    const auto owner = reinterpret_cast<uintptr_t>(managers[0].data());
+    *reinterpret_cast<uintptr_t*>(world + 0x65b48) = reinterpret_cast<uintptr_t>(challenge->data());
+    *reinterpret_cast<uintptr_t*>(challenge->data() + 0x35f8) = reinterpret_cast<uintptr_t>(data.data());
+    *reinterpret_cast<uintptr_t*>(data.data() + 0xc0) = reinterpret_cast<uintptr_t>(declaration.data());
+    *reinterpret_cast<uintptr_t*>(world + 0x126648) = 44;
+    resolve_actor = [](uintptr_t reference) -> uintptr_t {
+        valid &= reference == expected_actor + 0x167d0;
+        return owned ? 77 : 0;
+    };
+    actor_identifier = [](uintptr_t object) -> uint32_t { valid &= object == expected_actor; return 7; };
+    recovery_notify = [](uintptr_t dispatcher, uintptr_t player, uintptr_t victim, uintptr_t attacker, uintptr_t damage, uintptr_t direct, uint8_t flag) {
+        valid &= stops == 2 && dispatcher == 44 && player == 1 && attacker == 1 && victim == expected_actor && damage == direct && !flag;
+        notified = true;
+    };
+    recovery_death = death;
+    recovery_clock = [](uintptr_t clock, int64_t* output, int32_t which) -> uintptr_t {
+        valid &= notified && clock == expected_world + 0x125a60 && which == 1;
+        *output = 1; return reinterpret_cast<uintptr_t>(output);
+    };
+    recovery_milliseconds = [](int32_t* output, int64_t value) { *output = static_cast<int32_t>(value * 1000); return output; };
+    recovery_post = [](uintptr_t victim, uintptr_t event, int32_t delay, uintptr_t args) -> uintptr_t {
+        valid &= notified && victim == expected_actor && event == recovery_image + 0x6bebf80 && delay == 2000 && !args;
+        removed = true; return 1;
+    };
+    recovery_stop_maintaining = [](uintptr_t, uintptr_t output, uint64_t, const char*) { ++stops; return output; };
+    recovery::Context context;
+    context.world = world; context.player = 1; context.scope.lifecycle_generation = 1; context.stamp = native::observation_stamp();
+    recovery::Manager target;
+    target.address = owner; target.identifier = 9; target.name = "arena";
+    target.actors.push_back({actor, 7});
+    context.managers.push_back(target);
+    auto overlap = target;
+    overlap.address = reinterpret_cast<uintptr_t>(managers[1].data());
+    context.managers.push_back(overlap);
+    context.managers.push_back(target);
+    context.managers.back().address = owner + 1;
+    context.managers.back().actors = {{0xdead, 99}};
+    recovery::Attempt attempt;
+    attempt.stamp = context.stamp;
+    attempt.targets.push_back(target);
+    attempt.targets.push_back(overlap);
+    bool ok = drain_recovery_impl(attempt, context) && !notified && !removed && !attempt.actors_killed && !attempt.kills_suppressed;
+    owned = false; stops = 0;
+    ok &= drain_recovery_impl(attempt, context) && valid && notified && removed &&
+        attempt.actors_killed == 1 && attempt.kills_suppressed == 1;
+    ok &= drain_recovery_impl(attempt, context) && attempt.actors_killed == 1 && attempt.kills_suppressed == 1;
+    recovery_notify = saved_notify; recovery_death = saved_death; recovery_clock = saved_clock;
+    recovery_milliseconds = saved_milliseconds; recovery_post = saved_post; recovery_stop_maintaining = saved_stop;
+    resolve_actor = saved_resolve; actor_identifier = saved_identifier;
+    return ok;
+}
+
+bool test_recovery_inputs() {
+    const auto saved_name = definition_name;
+    const auto saved_identifier = actor_identifier;
+    const auto saved_maintain = cast_maintain, saved_stagger = cast_stagger;
+    const auto saved_stop = recovery_stop_maintaining;
+    const auto saved_image = recovery_image;
+    auto world = std::make_unique<std::array<uint8_t, 0x126680>>();
+    std::array<uint8_t, 0x800> image{};
+    std::array<std::array<uint8_t, 0xe30>, 2> managers{};
+    std::array<std::array<uint8_t, 0x28>, 3> actors{};
+    std::array<std::array<uint8_t, 0x140>, 2> workers{};
+    std::array<uintptr_t, 8> manager_records{};
+    std::array<std::array<uint8_t, 0xd0>, 2> records{};
+    std::array<uintptr_t, 2> commands{};
+    const auto address = reinterpret_cast<uintptr_t>(world->data());
+    const auto owner = reinterpret_cast<uintptr_t>(managers[0].data());
+    const auto other = reinterpret_cast<uintptr_t>(managers[1].data());
+    recovery_image = reinterpret_cast<uintptr_t>(image.data());
+    const auto put = [](uintptr_t base, size_t offset, auto value) { std::memcpy(reinterpret_cast<void*>(base + offset), &value, sizeof(value)); };
+    put(recovery_image, 0x1f8, recovery_image + 0x40);
+    put(recovery_image, 0x4c, uint32_t{0x100});
+    std::memcpy(image.data() + 0x110, ".?AVidEncounterManager@@", 24);
+    const auto name = +[](uintptr_t object) { return *reinterpret_cast<const char**>(object + 0x18); };
+    put(recovery_image, 0x260, reinterpret_cast<uintptr_t>(name));
+    definition_name = name;
+    actor_identifier = [](uintptr_t object) { return *reinterpret_cast<const uint32_t*>(object + 0x20); };
+    cast_maintain = [](uintptr_t object) -> uintptr_t { return object && *reinterpret_cast<const uint32_t*>(object + 0x18) == 1 ? object : 0; };
+    cast_stagger = [](uintptr_t object) -> uintptr_t { return object && *reinterpret_cast<const uint32_t*>(object + 0x18) == 2 ? object : 0; };
+    for (size_t i = 0; i < managers.size(); ++i) {
+        const auto manager = reinterpret_cast<uintptr_t>(managers[i].data());
+        put(manager, 0, recovery_image + 0x200);
+        put(manager, 0x18, i ? "other" : "arena");
+        put(manager, 0x20, static_cast<uint32_t>(100 + i));
+        put(manager, 0xdb2, uint8_t{1}); put(manager, 0xba0, uint8_t{1});
+        manager_records[i * 4 + 1] = manager;
+        put(manager, 0xc80, reinterpret_cast<uintptr_t>(records[i].data()));
+        put(manager, 0xc88, int32_t{2});
+        for (size_t j = 0; j < 2; ++j) {
+            const auto actor = reinterpret_cast<uintptr_t>(actors[i + j].data());
+            put(actor, 0, recovery_image + 0x200); put(actor, 0x18, "imp");
+            put(actor, 0x20, static_cast<uint32_t>(i + j + 1));
+            const auto record = reinterpret_cast<uintptr_t>(records[i].data()) + j * 0x68;
+            put(record, 8, uint32_t{1}); put(record, 12, uint32_t{1}); put(record, 16, actor);
+        }
+    }
+    put(address, 0x126658, reinterpret_cast<uintptr_t>(manager_records.data()));
+    put(address, 0x126660, int32_t{2});
+    for (size_t i = 0; i < workers.size(); ++i) {
+        commands[i] = reinterpret_cast<uintptr_t>(workers[i].data());
+        put(commands[i], 0x18, static_cast<uint32_t>(i + 1));
+        put(commands[i], 0x40, owner); put(commands[i], 0xa8, int32_t{4});
+    }
+    put(owner, 0xcc0, reinterpret_cast<uintptr_t>(commands.data())); put(owner, 0xcc8, int32_t{2});
+    static bool stopped_correctly;
+    stopped_correctly = false;
+    recovery_stop_maintaining = [](uintptr_t manager, uintptr_t output, uint64_t mask, const char* label) {
+        stopped_correctly = mask == (uint64_t{1} << 44) && !*label;
+        const auto data = *reinterpret_cast<uintptr_t*>(manager + 0xcc0);
+        *reinterpret_cast<uintptr_t*>(data) = *reinterpret_cast<uintptr_t*>(data + 8);
+        *reinterpret_cast<int32_t*>(manager + 0xcc8) = 1;
+        return output;
+    };
+    map_freed();
+    const std::string plan(64, 'a'), map = "game/test";
+    bool ok = recipe_state.reset(plan, map);
+    RecipeRequest request{"arena", "origin", "", 1, 1, 3, 3, 3, 1};
+    for (const auto* key : {"worker", "pending", "direct/test", "summon/test", "independent/test"}) ok &= recipe_state.request(key, request);
+    request.owner = "other"; ok &= recipe_state.request("unrelated", request);
+    worker_recipes[commands[0]] = "worker"; pending_recipes[{owner, "origin"}] = "pending";
+    component_summons[1].requests.push_back({"summon/test", "origin"});
+    direct_points[2].requests.push_back({"direct/test", "origin"});
+    native_recipes["origin"].definition.origin = "origin";
+    native_recipes["origin"].definition.source = "hidden";
+    native_recipes["origin"].bodies.push_back(1);
+    pending_independent_shows["hidden"] = {};
+    recovery::Context context;
+    ok &= scan_recovery(address, context) && context.managers.size() == 2;
+    if (context.managers.size() == 2) {
+        ok &= context.managers[0].active && !context.managers[0].complete && context.managers[0].actors.size() == 2 &&
+            context.managers[1].actors.size() == 2 && context.managers[0].actors[1].address == context.managers[1].actors[0].address;
+        recovery::Attempt attempt;
+        attempt.stamp = native::observation_stamp();
+        stop_recovery_producers(attempt, context.managers[0]);
+        ok &= stopped_correctly && workers[1][0xb9] && !*reinterpret_cast<int32_t*>(workers[1].data() + 0xa8) &&
+            !*reinterpret_cast<int32_t*>(other + 0xcc8) && worker_recipes.empty() && pending_recipes.empty();
+        for (const auto* key : {"worker", "pending", "direct/test", "summon/test", "independent/test"}) ok &= recipe_state.requests().at(key).closed;
+        ok &= !recipe_state.requests().at("unrelated").closed && component_summons.at(1).completed && direct_points.at(2).completed;
+        ok &= pending_independent_shows.empty() && independent_shows.count("hidden");
+        std::string checkpoint;
+        RecipeState restored;
+        ok &= recipe_state.capture(checkpoint) && restored.restore(checkpoint, plan, map);
+        for (const auto* key : {"direct/test", "summon/test", "independent/test"}) ok &= !restored.reserve(key);
+    }
+    map_freed();
+    definition_name = saved_name; actor_identifier = saved_identifier;
+    cast_maintain = saved_maintain; cast_stagger = saved_stagger;
+    recovery_stop_maintaining = saved_stop; recovery_image = saved_image;
+    return ok;
+}
+
 bool test_recipe_transport() {
     static uintptr_t root, library;
     static std::vector<std::array<uint8_t, 0xbe0 + sizeof(save::NativeString)>> chunks;

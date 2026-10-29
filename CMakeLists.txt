@@ -42,7 +42,7 @@ add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
 configure_file(bootstrap/msimg32.def.in msimg32.def COPYONLY)
 configure_file(include/sentinel_version.h.in generated/sentinel_version.h @ONLY)
 include_directories("${CMAKE_BINARY_DIR}/generated")
-set(identity_inputs include/sentinel_recovery.h src/encounter_recovery.h src/encounter_recovery.cpp tools/encounter_recovery_probe.cpp CMakeLists.txt version.json include/sentinel_version.h.in resources/version.rc.in include/sentinel_core.h include/sentinel_bootstrap.h
+set(identity_inputs src/encounter_recovery.h src/encounter_recovery.cpp CMakeLists.txt version.json include/sentinel_version.h.in resources/version.rc.in include/sentinel_core.h include/sentinel_bootstrap.h
   include/sentinel_engine.h src/engine_observer.h src/engine_observer.cpp
   include/sentinel_context.h src/context_observer.h src/context_observer.cpp
   include/sentinel_native.h src/native_model.h src/native_model.cpp
@@ -110,7 +110,7 @@ target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
 add_library(sentinel_save_storage STATIC src/save_storage.cpp src/prelaunch.cpp)
 target_include_directories(sentinel_save_storage PUBLIC src)
 target_link_libraries(sentinel_save_storage PUBLIC bcrypt)
-add_executable(sentinel_probe tools/encounter_recovery_probe.cpp tools/probe.cpp tools/local_controls_probe.cpp tools/combat_probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp tools/campaign_menu_probe.cpp tools/inventory_probe.cpp tools/arsenal_probe.cpp tools/runes_probe.cpp tools/special_probe.cpp tools/deathlink_probe.cpp)
+add_executable(sentinel_probe tools/probe.cpp tools/local_controls_probe.cpp tools/combat_probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp tools/campaign_menu_probe.cpp tools/inventory_probe.cpp tools/arsenal_probe.cpp tools/runes_probe.cpp tools/special_probe.cpp tools/deathlink_probe.cpp)
 target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client sentinel_save_storage bcrypt)
 add_library(sentinel_observer STATIC src/engine_observer.cpp src/context_observer.cpp src/save_observer.cpp)
 target_include_directories(sentinel_observer PUBLIC include src)
@@ -146,7 +146,7 @@ target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)
 target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_native_model sentinel_minhook sentinel_save_session sentinel_protocol)
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures")
-foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write limit_inputs quantity_inputs recipe_inputs recipe_checkpoint combat_contention expanded_stop hook_cleanup)
+foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write limit_inputs quantity_inputs recipe_inputs recipe_checkpoint combat_contention expanded_stop hook_cleanup encounter_recovery)
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures/${case}")
   file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/campaign-fixtures/${case}" campaign_fixture)
   add_test(NAME native_campaign_${case}_contract COMMAND sentinel_campaign_tests create "${campaign_fixture}" 1 ${case})

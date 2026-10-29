@@ -406,4 +406,12 @@ bool input_inhibited() noexcept {
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return true; }
 }
+bool recovery_input_allowed() noexcept {
+    if (!enabled.load(std::memory_order_acquire) || visible_popup.load(std::memory_order_acquire) ||
+        editing_chat.load(std::memory_order_acquire)) return false;
+    __try {
+        const auto menu = *reinterpret_cast<const uintptr_t*>(menu_pointer);
+        return !menu || !menu_active(menu);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 }

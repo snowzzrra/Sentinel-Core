@@ -84,17 +84,22 @@ std::string recovery_history(const Snapshot& core) {
     std::string out = "[";
     for (const auto& attempt : recovery::queue().history()) {
         if (out.size() > 1) out += ",";
-        const auto& r = attempt.result.request;
         const auto& c = attempt.context;
-        out += "{\"request_id\":\"" + std::to_string(r.execution.request_id) + "\",\"origin\":" +
-            quoted(attempt.console ? "console" : "button") + ",\"build\":" + quoted(core.core.build_id) +
-            ",\"namespace\":" + quoted(r.namespace_id) + ",\"save\":" + quoted(r.save) +
-            ",\"map\":" + quoted(c.map.c_str()) + ",\"generation\":\"" + std::to_string(r.execution.expected.lifecycle_generation) +
-            "\",\"stamp\":\"" + std::to_string(r.stamp) + "\",\"token\":\"" + std::to_string(r.token) +
-            "\",\"encounter\":" + quoted(c.encounter.c_str()) + ",\"kind\":" + quoted(c.kind.c_str()) +
-            ",\"candidates\":" + std::to_string(c.candidates) +
-            ",\"producers_retired\":0,\"kills_suppressed\":0,\"completion_read\":" + quoted(c.completion.c_str()) +
-            ",\"state\":" + std::to_string(attempt.result.state) + ",\"result\":" + quoted(recovery::message(attempt.result.outcome)) + "}";
+        out += "{\"request_id\":\"" + std::to_string(attempt.id) + "\",\"origin\":\"console\",\"build\":" + quoted(core.core.build_id) +
+            ",\"namespace\":" + quoted(c.namespace_id.c_str()) + ",\"save\":" + quoted(c.save.c_str()) +
+            ",\"map\":" + quoted(c.map.c_str()) + ",\"generation\":\"" + std::to_string(c.scope.lifecycle_generation) +
+            "\",\"stamp\":\"" + std::to_string(attempt.stamp) + "\",\"managers\":[";
+        bool first = true;
+        for (const auto& manager : attempt.targets) {
+            if (!first) out += ',';
+            first = false;
+            out += "{\"name\":" + quoted(manager.name.c_str()) + ",\"kind\":" + quoted(manager.kind.c_str()) + "}";
+        }
+        out += "],\"producers_stopped\":" + std::to_string(attempt.producers_stopped) +
+            ",\"actors_killed\":" + std::to_string(attempt.actors_killed) +
+            ",\"kills_suppressed\":" + std::to_string(attempt.kills_suppressed) +
+            ",\"elapsed_ms\":" + std::to_string(attempt.elapsed) + ",\"wait\":" + quoted(attempt.wait.c_str()) +
+            ",\"result\":" + quoted(recovery::message(attempt.outcome)) + "}";
     }
     return out + "]";
 }

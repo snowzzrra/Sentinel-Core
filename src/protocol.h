@@ -16,10 +16,7 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation = 
                           sc_campaign_summary* summary = nullptr, sc_campaign_rewards* rewards = nullptr,
                           sc_command_request* command = nullptr,
                           sc_combat_presentation_request* combat_presentation = nullptr,
-                          sc_combat_query* combat = nullptr, recovery::Request* recovery = nullptr);
-size_t encode_recovery_request(Message&, uint16_t, const recovery::Request&);
-size_t encode_recovery_response(Message&, WireResult, uint16_t, const Snapshot&, const recovery::Result&);
-bool decode_recovery_response(const Message&, size_t, WireResult&, uint16_t, Snapshot&, recovery::Result&);
+                          sc_combat_query* combat = nullptr);
 size_t encode_combat_presentation_request(Message&, const sc_combat_presentation_request&);
 size_t encode_combat_presentation_response(Message&, WireResult, const Snapshot&, const sc_combat_presentation_result&);
 bool decode_combat_presentation_response(const Message&, size_t, WireResult&, Snapshot&, sc_combat_presentation_result&);

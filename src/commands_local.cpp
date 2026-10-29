@@ -4,6 +4,7 @@
 #include "native_runtime.h"
 #include "startup_log.h"
 #include "encounter_recovery.h"
+#include "expanded_native.h"
 #include "save_session.h"
 #include <atomic>
 #include <cmath>
@@ -268,9 +269,20 @@ void console_tick(uint64_t epoch) {
     } __except (EXCEPTION_EXECUTE_HANDLER) { disable(); }
 }
 void manual_tick(uintptr_t player, uint64_t epoch, uint64_t (*current)(), bool recovery_pending) {
-    if (recovery_pending)
-        for (const auto outcome : recovery::queue().tick(current(), GetTickCount64()))
+    if (recovery_pending) {
+        const auto outcomes = recovery::queue().tick(current(), GetTickCount64(), expanded::drain_recovery);
+        for (const auto outcome : outcomes) {
             if (print) print("%s\n", recovery::message(outcome));
+            const auto attempt = recovery::queue().history().back();
+            diagnostic_trace("AP_ENCOUNTER_RECOVERY origin=console id=%llu map=%s generation=%llu state=%s producers_stopped=%llu actors_killed=%llu kills_suppressed=%llu elapsed_ms=%llu wait=%s",
+                static_cast<unsigned long long>(attempt.id), attempt.context.map.c_str(),
+                static_cast<unsigned long long>(attempt.context.scope.lifecycle_generation), recovery::message(outcome),
+                static_cast<unsigned long long>(attempt.producers_stopped), static_cast<unsigned long long>(attempt.actors_killed),
+                static_cast<unsigned long long>(attempt.kills_suppressed), static_cast<unsigned long long>(attempt.elapsed), attempt.wait.c_str());
+            for (const auto& manager : attempt.targets)
+                diagnostic_trace("AP_ENCOUNTER_RECOVERY manager=%s kind=%s", manager.name.c_str(), manager.kind.c_str());
+        }
+    }
     if (!TryAcquireSRWLockExclusive(&manual_lock)) return;
     const auto r = pending; const auto expected = pending_generation;
     pending = {}; ReleaseSRWLockExclusive(&manual_lock);

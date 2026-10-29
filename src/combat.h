@@ -61,6 +61,7 @@ public:
                         uint64_t stamp, uint32_t thread) noexcept;
     bool ready(uint64_t now) const noexcept;
     bool confirmed_dead(uintptr_t world, uintptr_t object, uint32_t slot, uint32_t spawn_id) const noexcept;
+    bool suppress(uint64_t generation, uintptr_t world, uintptr_t object, uint32_t slot, uint32_t spawn_id) noexcept;
     uint64_t generation() const noexcept { return generation_; }
     void snapshot(const sc_combat_query&, sc_combat_snapshot&) const noexcept;
 private:
@@ -69,12 +70,12 @@ private:
         uint32_t spawn_id = 0;
         uint64_t serial = 0;
         uint32_t claim_index = UINT32_MAX;
-        bool emitted = false;
+        bool emitted = false, suppressed = false;
     };
     struct Claim {
         uint64_t serial = 0;
         uint32_t slot = 0, references = 0;
-        bool emitted = false;
+        bool emitted = false, suppressed = false;
     };
     struct Counter {
         char namespace_id[65]{};

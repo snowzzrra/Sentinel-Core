@@ -271,6 +271,10 @@ int wmain(int argc,wchar_t** argv) {
         CHECK(sentinel::expanded::test_quantity_inputs());
         std::puts("PASS weighted native remaining populations preserve partial thresholds and pause conditions"); return 0;
     }
+    if (defect==L"encounter_recovery") {
+        CHECK(sentinel::expanded::test_recovery_inputs());
+        std::puts("PASS encounter ownership and producer cancellation survive checkpoint capture"); return 0;
+    }
     if (defect==L"recipe_inputs") {
         CHECK(sentinel::expanded::test_recipe_transport());
         CHECK(sentinel::expanded::test_recipe_inputs());
