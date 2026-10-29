@@ -552,6 +552,7 @@ void post_frame() {
     cost.mark(3);
     combat::Context combat_context{};
     if (!why && player && gameplay_admitted()) {
+        commands::checkpoint_player_position(player, scope.lifecycle_generation);
         combat_context.generation = scope.lifecycle_generation;
         combat_context.stamp = before;
         combat_context.sampled_at_ms = GetTickCount64();
@@ -568,7 +569,22 @@ void post_frame() {
     if (!why && player) repair_crystal_first_contact(expected_map_address,facts.current_map.bytes,player);
     if (!why && player) arsenal::tick_masteries(scope.lifecycle_generation, player);
     cost.mark(5);
-    commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); });
+    const bool recovery_pending = recovery::queue().has_pending();
+    if (recovery_pending) {
+        recovery::Context recovery_context;
+        const auto campaign = save::session().campaign_run.snapshot();
+        const bool recovery_gameplay = !why && player && gameplay_admitted_locked_scope() && deathlink::player_alive(player) &&
+            facts.current_map.bytes[0] && std::strcmp(facts.current_map.bytes, "game/hub/hub") &&
+            campaign.map_active && !campaign.slot.empty();
+        if (recovery_gameplay) recovery_context = expanded::recovery_context(expected_map_address);
+        recovery_context.scope = scope; recovery_context.stamp = before;
+        recovery_context.namespace_id = save::session().namespace_id();
+        recovery_context.save = save::session().native_root() + "/" + campaign.slot;
+        recovery_context.map = facts.current_map.bytes;
+        recovery_context.gameplay = recovery_gameplay && before == epoch.load(std::memory_order_acquire);
+        recovery::queue().observe(std::move(recovery_context), GetTickCount64());
+    }
+    commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); }, recovery_pending);
     if (!slot) return;
     const bool process_scoped = slot->is_command && commands::process_scoped(slot->command_request);
     if (process_scoped) why = SC_NATIVE_NONE;

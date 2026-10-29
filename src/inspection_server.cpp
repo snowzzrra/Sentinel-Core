@@ -8,6 +8,7 @@
 #include "save_session.h"
 #include "native_runtime.h"
 #include "combat_native.h"
+#include "encounter_recovery.h"
 #include <sddl.h>
 #include <vector>
 
@@ -89,7 +90,22 @@ DWORD serve(void*) {
             sc_command_request command{};
             sc_combat_presentation_request combat_presentation{};
             sc_combat_query combat_query{};
-            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink, &automap, &summary, &rewards, &command, &combat_presentation, &combat_query);
+            recovery::Request recovery_request{};
+            const auto result = decode_request(data, count, &operation, &diagnostic, &after_event, &write_id, &backup, &points, &campaign, &inventory, &arsenal, &runes, &special, &deathlink, &automap, &summary, &rewards, &command, &combat_presentation, &combat_query, &recovery_request);
+            recovery::Result recovery_result{};
+            if (result == WireResult::ok && operation >= encounter_observe_operation) {
+                const auto live = native::inspect();
+                const auto& expected = recovery_request.execution.expected;
+                const bool scope_current = expected.pid == live.scope.pid && expected.process_created == live.scope.process_created &&
+                    expected.lifecycle_generation == live.scope.lifecycle_generation &&
+                    !std::memcmp(expected.instance_id, live.scope.instance_id, 16);
+                if (operation == encounter_observe_operation)
+                    recovery_result = recovery::queue().inspect(recovery_request, GetTickCount64(), scope_current);
+                else if (operation == encounter_submit_operation)
+                    recovery_result = recovery::queue().submit(recovery_request, GetTickCount64(), scope_current);
+                else recovery_result = recovery::queue().result(recovery_request,
+                    operation == encounter_release_operation, GetTickCount64(), scope_current);
+            }
             sc_combat_presentation_result presentation_result{};
             if (result == WireResult::ok && operation == combat_presentation_operation)
                 presentation_result = native::combat_presentation_request(combat_presentation);
@@ -152,6 +168,7 @@ DWORD serve(void*) {
                         operation == diagnostic_cancel_operation || operation == diagnostic_detail_cancel_operation, &detail);
             }
             const DWORD size = static_cast<DWORD>(
+                operation >= encounter_observe_operation ? encode_recovery_response(data, result, operation, current_snapshot(), recovery_result) :
                 operation == combat_presentation_operation ? encode_combat_presentation_response(data, result, current_snapshot(), presentation_result) :
                 operation == combat_operation ? encode_combat_response(data, result, current_snapshot(), combat::inspect(combat_query)) :
                 operation >= command_submit_operation && operation <= command_release_operation ? encode_command_response(data, result, operation, current_snapshot(), command_result) :

@@ -3,12 +3,17 @@
 #include "native_target.h"
 #include "native_runtime.h"
 #include "startup_log.h"
+#include "encounter_recovery.h"
+#include "save_session.h"
 #include <atomic>
 #include <cmath>
 #include <cstring>
 #include <string_view>
 #include <charconv>
 #include <cstdio>
+#include <cstdarg>
+#include <deque>
+#include <mutex>
 
 namespace sentinel::commands {
 namespace {
@@ -20,9 +25,21 @@ std::atomic<uint64_t> generation{0};
 uintptr_t registered_system = 0;
 using Print = void (*)(const char*, ...);
 Print print = nullptr;
+std::mutex diagnostic_mutex;
+std::deque<std::string> diagnostic_events, diagnostic_spawns;
+uint64_t diagnostic_second = 0;
+unsigned diagnostic_rate = 0;
+uint64_t diagnostic_console_limited = 0;
+void print_diagnostic(const char* line) noexcept {
+    __try { if (print) print("%s\n", line); }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
 struct NativeArgs { int count; int padding; const char* argv[512]; };
 struct alignas(8) EventArg { char type; char padding[7]; float value[4]; };
 static_assert(sizeof(EventArg) == 24);
+void recovery_callback(const NativeArgs* args) {
+    if (args && args->count == 1) recovery::queue().enqueue_console(generation.load(), GetTickCount64());
+}
 void callback(const NativeArgs* args) {
     if (!available()) { print("Sentinel console: provider unavailable.\n"); return; }
     ManualRequest request{};
@@ -130,13 +147,54 @@ bool execute_boon(const char* text, sc_command_result& result, uintptr_t player)
     // prop spawners ignore spawnAt, so use the qualified entity factory and world-position event.
     const auto error = safe_effect(request, player, native::observation_stamp(), native::observation_stamp);
     result.outcome = error ? SC_COMMAND_NATIVE_FAILED : SC_COMMAND_DISPATCHED;
-    if (print) print("AP_BOON_SPAWN pickup=%s outcome=%s x=%g y=%g z=%g detail=%s\n", pickup,
+    diagnostic_trace("AP_BOON_SPAWN pickup=%s effect=unverified swimming=unavailable underwater=unavailable outcome=%s x=%g y=%g z=%g detail=%s", pickup,
         error ? "failed" : "created", request.position[0], request.position[1], request.position[2], error ? error : "ok");
     return true;
 }
-void enemy_spawn_trace(const char* state, const char* origin, const char* body, const char* point, uintptr_t actor) {
-    if (print) print("AP_ENEMY_SPAWN state=%s origin=%s body=%s point=%s actor=%llx\n",
-        state, origin, body, point, static_cast<unsigned long long>(actor));
+void diagnostic_trace(const char* format, ...) noexcept {
+    char line[768];
+    va_list args; va_start(args, format);
+    vsnprintf(line, sizeof(line), format, args); va_end(args);
+    try {
+        std::lock_guard<std::mutex> lock(diagnostic_mutex);
+        const auto now = GetTickCount64();
+        if (diagnostic_second != now / 1000) { diagnostic_second = now / 1000; diagnostic_rate = 0; }
+        auto& events = std::strncmp(line, "AP_ENEMY_SPAWN", 14) == 0 ? diagnostic_spawns : diagnostic_events;
+        events.push_back("at_ms=" + std::to_string(now) + " " + line);
+        if (events.size() > 16) events.pop_front();
+        if (diagnostic_rate++ >= 32) { ++diagnostic_console_limited; return; }
+        print_diagnostic(events.back().c_str());
+    } catch (...) {}
+}
+std::vector<std::string> diagnostic_history() {
+    std::lock_guard<std::mutex> lock(diagnostic_mutex);
+    std::vector<std::string> result(diagnostic_events.begin(), diagnostic_events.end());
+    result.insert(result.end(), diagnostic_spawns.begin(), diagnostic_spawns.end());
+    result.push_back("console_rate_limited=" + std::to_string(diagnostic_console_limited));
+    return result;
+}
+void checkpoint_player_position(uintptr_t player, uint64_t lifecycle) {
+    static uint64_t observed = UINT64_MAX;
+    if (!player || observed == lifecycle) return;
+    observed = lifecycle;
+    float xyz[3]{};
+    const bool readable = player_position(player, xyz);
+    const auto campaign = save::session().campaign_run.snapshot();
+    diagnostic_trace("AP_CHECKPOINT stage=player_position generation=%llu checkpoint=%llu source_checkpoint=%llu resumed=%d readable=%d xyz=%g,%g,%g reason=%s",
+        static_cast<unsigned long long>(lifecycle), static_cast<unsigned long long>(campaign.checkpoint),
+        static_cast<unsigned long long>(campaign.source_checkpoint), campaign.resumed, readable, xyz[0], xyz[1], xyz[2],
+        readable ? "first_eligible_player_observation" : "player_position_unreadable");
+}
+void enemy_spawn_trace(const char* state, const char* origin, const char* body, const char* point, uintptr_t actor,
+                       const char* request, const char* parent, uint64_t ordinal) {
+    diagnostic_trace("AP_ENEMY_SPAWN state=%.32s origin=%.80s body=%.160s point=%.160s actor=%llx request=%.96s parent=%.64s ordinal=%llu",
+        state, origin, body, point, static_cast<unsigned long long>(actor), request, parent, static_cast<unsigned long long>(ordinal));
+}
+void enemy_worker_trace(const char* state, const char* manager, uintptr_t worker, uint64_t mask, const char* label,
+                        const char* request, uint64_t emitted, bool closed) {
+    if (print) print("AP_ENEMY_WORKER state=%.32s manager=%.511s worker=%llx mask=%llx label=%.191s request=%.192s emitted=%llu closed=%d\n",
+        state, manager, static_cast<unsigned long long>(worker), static_cast<unsigned long long>(mask), label, request,
+        static_cast<unsigned long long>(emitted), closed ? 1 : 0);
 }
 void darklord_trace(const char* line, bool console_allowed) noexcept {
     const auto error = startup_log::darklord(line);
@@ -152,7 +210,7 @@ void enemy_kill_wait_trace(const char* owner, const char* label, uint64_t mask, 
         owner, label, static_cast<unsigned long long>(mask), target, seen, complete ? 1 : 0);
 }
 void enemy_quantity_wait_trace(char kind, const char* owner, uint64_t mask, double target, int32_t count, bool complete, bool fault) {
-    if (print) print("AP_ENEMY_WAIT kind=%c owner=%s mask=%llx target=%g count=%d complete=%d fault=%d\n",
+    diagnostic_trace("AP_ENEMY_WAIT kind=%c owner=%.192s mask=%llx target=%g count=%d complete=%d fault=%d",
         kind, owner, static_cast<unsigned long long>(mask), target, count, complete ? 1 : 0, fault ? 1 : 0);
 }
 uint32_t prepare_local(const engine::Binding& binding, HANDLE stop) {
@@ -202,13 +260,17 @@ void console_tick(uint64_t epoch) {
         using Add = void (*)(uintptr_t, const char*, void (*)(const NativeArgs*), const char*, uintptr_t, int);
         const auto remove = reinterpret_cast<Remove>(image.base + 0x179cbc0);
         const auto add = reinterpret_cast<Add>(image.base + 0x179baf0);
-        remove(system, "noclip"); remove(system, "chrispy");
+        remove(system, "noclip"); remove(system, "chrispy"); remove(system, "ap_finish_encounter");
         add(system, "noclip", callback, "Sentinel: noclip [on|off]", 0, 2);
         add(system, "chrispy", callback, "Sentinel: chrispy <loaded entitydef> [x y z]", 0, 2);
+        add(system, "ap_finish_encounter", recovery_callback, "Sentinel: finish current encounter", 0, 2);
         registered_system = system;
     } __except (EXCEPTION_EXECUTE_HANDLER) { disable(); }
 }
-void manual_tick(uintptr_t player, uint64_t epoch, uint64_t (*current)()) {
+void manual_tick(uintptr_t player, uint64_t epoch, uint64_t (*current)(), bool recovery_pending) {
+    if (recovery_pending)
+        for (const auto outcome : recovery::queue().tick(current(), GetTickCount64()))
+            if (print) print("%s\n", recovery::message(outcome));
     if (!TryAcquireSRWLockExclusive(&manual_lock)) return;
     const auto r = pending; const auto expected = pending_generation;
     pending = {}; ReleaseSRWLockExclusive(&manual_lock);

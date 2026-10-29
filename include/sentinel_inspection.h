@@ -17,6 +17,7 @@
 #include "sentinel_commands.h"
 #include "sentinel_combat.h"
 #include "sentinel_automap.h"
+#include "sentinel_recovery.h"
 #include <array>
 #include <cstddef>
 #include <string>
@@ -27,7 +28,7 @@ constexpr uint16_t wire_version = 1;
 constexpr uint16_t inspect_operation = 1;
 constexpr uint64_t inspect_capability = 1;
 constexpr uint16_t engine_operation = 2;
-constexpr uint64_t engine_capability = 2; // operation 2 only; basic op 1 is unchanged
+constexpr uint64_t engine_capability = 2;
 constexpr uint16_t context_operation = 3;
 constexpr uint64_t context_capability = 4;
 constexpr uint16_t native_operation = 4, diagnostic_submit_operation = 5,
@@ -79,6 +80,9 @@ constexpr uint16_t combat_operation = 50;
 constexpr uint64_t combat_capability = 4194304;
 constexpr uint16_t combat_presentation_operation = 51;
 constexpr uint64_t combat_presentation_capability = 8388608;
+constexpr uint64_t encounter_recovery_capability = 16777216;
+constexpr uint16_t encounter_observe_operation = 52, encounter_submit_operation = 53,
+    encounter_result_operation = 54, encounter_release_operation = 55;
 constexpr uint64_t automap_capability = 262144;
 constexpr size_t max_request = 16384, max_message = 16384;
 constexpr uint32_t min_timeout_ms = 50, max_timeout_ms = 10000;
@@ -128,6 +132,7 @@ struct Inspection {
     sc_combat_snapshot combat{};
     sc_combat_presentation_result combat_presentation{};
     sc_automap_result automap{};
+    recovery::Result recovery{};
 };
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required = inspect_capability);
 Inspection query_engine(uint32_t pid, uint32_t timeout_ms);
@@ -137,6 +142,7 @@ Inspection query_save_admission(uint32_t pid, uint32_t timeout_ms);
 Inspection query_save_installation(uint32_t pid, uint32_t timeout_ms);
 Inspection query_save_write(uint32_t pid, uint32_t timeout_ms, uint64_t operation_id = 0);
 Inspection query_save_backup(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_save_backup_request&);
+Inspection query_recovery(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const recovery::Request&);
 Inspection query_weapon_points(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_weapon_points_request&);
 Inspection query_campaign(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_campaign_request&,
                           const sc_campaign_summary* = nullptr, const sc_campaign_rewards* = nullptr);

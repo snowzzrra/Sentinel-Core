@@ -1,11 +1,13 @@
 #pragma once
 #include "engine_observer.h"
+#include "encounter_recovery.h"
 
 namespace sentinel::expanded {
 bool install(const engine::Binding&, HANDLE stop);
 void stop();
 void map_freed();
 void observe(uintptr_t world);
+recovery::Context recovery_context(uintptr_t world);
 #ifdef SC_NATIVE_TESTING
 bool test_stopped_hooks();
 bool test_hook_faults();

@@ -10,6 +10,7 @@
 #include "native_runtime.h"
 #include "native_target.h"
 #include "enemy_checkpoint_native.h"
+#include "commands_native.h"
 #include "MinHook.h"
 #include <cstring>
 #include <intrin.h>
@@ -378,6 +379,10 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
             if (!read(root,0x50,map) || !read(map,0,table) || table!=image+0x2ab30c8 ||
                 !read(map,0xae5e0,serializer) ||
                 !expanded::read_recipe_checkpoint(serializer,checkpoint.map,checkpoint.native_subtype)) {
+                commands::diagnostic_trace("AP_CHECKPOINT stage=parser_enemy_restore result=failed checkpoint=%llu reason=%s map=%llx table=%llx serializer=%llx",
+                    static_cast<unsigned long long>(checkpoint.checkpoint), !map ? "map_unreadable" : table!=image+0x2ab30c8 ? "map_table_unreadable_or_unexpected" :
+                    !serializer ? "serializer_unreadable" : "enemy_archive_or_state_invalid", static_cast<unsigned long long>(map),
+                    static_cast<unsigned long long>(table), static_cast<unsigned long long>(serializer));
                 session().campaign_run.refuse("native_enemy_checkpoint_invalid",BStage::parser); result=0x10;
             }
         }
@@ -467,7 +472,9 @@ void campaign_checkpoint_boundary(CampaignTransition transition) {
     // already checked map::IsRunning and native user/slot readiness. Cutscene
     // player control and diagnostic publication are not writer prerequisites.
     transition.state_read=read(root,0x44,transition.game); map_facts(transition);
-    session().campaign_run.checkpoint_ready(transition);
+    const auto ready=session().campaign_run.checkpoint_ready(transition);
+    commands::diagnostic_trace("AP_CHECKPOINT stage=checkpoint_trigger ready=%d generation=%llu state_read=%d map_read=%d difficulty_read=%d",
+        ready, static_cast<unsigned long long>(transition.generation_after), transition.state_read, transition.map_read, transition.difficulty_read);
 }
 SaveReference* campaign_save_factory(uintptr_t caller,uintptr_t expected_caller,uintptr_t manager,
         SaveReference* out,uint32_t user,uintptr_t request,NativeSaveFactory original) {

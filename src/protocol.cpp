@@ -69,16 +69,33 @@ WireResult decode_request(const Message& in, size_t size, uint16_t* operation,
                           sc_runes_request* runes, sc_special_request* special,
                           sc_deathlink_request* deathlink, sc_automap_request* automap, sc_campaign_summary* summary,
                           sc_campaign_rewards* rewards, sc_command_request* command,
-                          sc_combat_presentation_request* combat_presentation, sc_combat_query* combat) {
+                          sc_combat_presentation_request* combat_presentation, sc_combat_query* combat, recovery::Request* recovery_request) {
     if (operation) *operation = inspect_operation;
     if (size < header_size || size > max_request) return WireResult::malformed;
     Reader r{in, size};
     if (r.number(4) != magic) return WireResult::malformed;
     const auto version = r.number(2), op = r.number(2), length = r.number(4), result = r.number(4);
     if (length != size - header_size || result != 0) return WireResult::malformed;
-    if (operation && op >= engine_operation && op <= combat_presentation_operation) *operation = static_cast<uint16_t>(op);
+    if (operation && op >= engine_operation && op <= encounter_release_operation) *operation = static_cast<uint16_t>(op);
     if (version != wire_version) return WireResult::incompatible_protocol;
-    if (op < inspect_operation || op > combat_presentation_operation) return WireResult::unsupported_operation;
+    if (op < inspect_operation || op > encounter_release_operation) return WireResult::unsupported_operation;
+    if (op >= encounter_observe_operation) {
+        if (length != 249) return WireResult::malformed;
+        if (r.number(8) != encounter_recovery_capability) return WireResult::capability_unavailable;
+        Message identity = in;
+        Writer fixed{identity, 6}; fixed.number(diagnostic_submit_operation, 2); fixed.number(72, 4);
+        Writer capability{identity, header_size}; capability.number(diagnostic_capability, 8);
+        recovery::Request value{};
+        const auto decoded = decode_request(identity, 88, nullptr, &value.execution);
+        if (decoded != WireResult::ok) return decoded;
+        r.pos = 88;
+        for (auto& ch : value.namespace_id) ch = static_cast<char>(r.number(1));
+        for (auto& ch : value.save) ch = static_cast<char>(r.number(1));
+        r.u64(value.token); r.u64(value.stamp);
+        if (!r.valid || r.pos != size || !recovery::valid(value)) return WireResult::malformed;
+        if (recovery_request) *recovery_request = value;
+        return WireResult::ok;
+    }
     if (op == combat_presentation_operation) {
         if (length != 185) return WireResult::malformed;
         if (r.number(8) != combat_presentation_capability) return WireResult::capability_unavailable;
@@ -1972,5 +1989,51 @@ bool decode_automap_response(const Message& in, size_t size, WireResult& result,
     return s.core.abi_version == SC_ABI_VERSION && automap_values(r, v) && r.valid && r.pos == size &&
         v.scope.pid == s.pid && v.scope.process_created == s.process_created &&
         !std::memcmp(v.scope.instance_id, s.instance.data(), 16);
+}
+}
+
+namespace sentinel {
+size_t encode_recovery_request(Message& out, uint16_t op, const recovery::Request& request) {
+    if (op < encounter_observe_operation || op > encounter_release_operation || !recovery::valid(request)) return 0;
+    const auto end = encode_native_request(out, diagnostic_submit_operation, request.execution);
+    if (!end) return 0;
+    Writer h{out}; header(h, wire_version, op, 249, WireResult::ok); h.number(encounter_recovery_capability, 8);
+    Writer w{out, end};
+    for (auto ch : request.namespace_id) w.number(static_cast<uint8_t>(ch), 1);
+    for (auto ch : request.save) w.number(static_cast<uint8_t>(ch), 1);
+    w.number(request.token, 8); w.number(request.stamp, 8);
+    return w.valid ? w.pos : 0;
+}
+size_t encode_recovery_response(Message& out, WireResult code, uint16_t op, const Snapshot& s, const recovery::Result& value) {
+    Writer w{out}; header(w, wire_version, op, 0, code);
+    if (code == WireResult::ok) {
+        w.number(encounter_recovery_capability, 8); w.number(s.pid, 4); w.number(s.process_created, 8);
+        for (auto b : s.instance) w.number(b, 1);
+        w.number(s.core.abi_version, 4); w.text(s.core.version); w.text(s.core.build_id);
+        Message request{}; const auto length = encode_recovery_request(request, op, value.request);
+        if (!length) return 0;
+        for (size_t i = header_size; i < length; ++i) w.number(request[i], 1);
+        w.number(value.state, 4); w.number(value.outcome, 4);
+    }
+    Writer length{out, 8}; length.number(w.pos - header_size, 4); return w.valid ? w.pos : 0;
+}
+bool decode_recovery_response(const Message& in, size_t size, WireResult& code, uint16_t op, Snapshot& s, recovery::Result& value) {
+    if (size < header_size || size > max_message || op < encounter_observe_operation || op > encounter_release_operation) return false;
+    Reader r{in, size};
+    if (r.number(4) != magic || r.number(2) != wire_version || r.number(2) != op || r.number(4) != size - header_size) return false;
+    const auto result = r.number(4); if (result > static_cast<uint32_t>(WireResult::malformed)) return false;
+    code = static_cast<WireResult>(result); if (code != WireResult::ok) return size == header_size;
+    if (r.number(8) != encounter_recovery_capability) return false;
+    s = {}; r.u32(s.pid); r.u64(s.process_created); for (auto& b : s.instance) r.byte(b);
+    r.u32(s.core.abi_version); r.text(s.core.version); r.text(s.core.build_id);
+    Message request{}; Writer h{request}; header(h, wire_version, op, 249, WireResult::ok);
+    for (size_t i = 0; i < 249; ++i) h.number(r.number(1), 1);
+    if (decode_request(request, h.pos, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &value.request) != WireResult::ok) return false;
+    r.u32(value.state); uint32_t outcome = 0; r.u32(outcome); value.outcome = static_cast<recovery::Outcome>(outcome);
+    return s.core.abi_version == SC_ABI_VERSION && value.state <= SC_DIAGNOSTIC_CANCELLED && outcome <= recovery::unknown &&
+        r.valid && r.pos == size && value.request.execution.expected.pid == s.pid &&
+        value.request.execution.expected.process_created == s.process_created &&
+        !std::memcmp(value.request.execution.expected.instance_id, s.instance.data(), 16);
 }
 }

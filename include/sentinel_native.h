@@ -89,7 +89,6 @@ typedef struct sc_diagnostic_result {
 } sc_diagnostic_result;
 
 // Separate detail revision, carried only by explicit detail wire operations.
-// Existing sc_diagnostic_result, native ABI 1 and operations 1-7 stay exact.
 #define SC_DIAGNOSTIC_DETAIL_REVISION 1u
 enum {
     SC_STAGE_NONE, SC_STAGE_ADMISSION, SC_STAGE_QUEUE, SC_STAGE_CLAIM_CONTEXT,

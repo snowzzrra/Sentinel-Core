@@ -8,6 +8,8 @@
 #include "weapon_points.h"
 #include "deathlink.h"
 #include "combat_native.h"
+#include "encounter_recovery.h"
+#include "commands_native.h"
 #include <filesystem>
 #include <windows.h>
 #include <string>
@@ -77,6 +79,24 @@ std::string profile_step(const save::ProfileStep& s) {
         ",\"read_reason\":" + std::to_string(s.read.reason) + ",\"read_error\":" + std::to_string(s.read.error) +
         ",\"read_requested\":" + std::to_string(s.read.requested) + ",\"read_offset\":" + std::to_string(s.read.offset) +
         ",\"read_size\":" + std::to_string(s.read.size) + "}";
+}
+std::string recovery_history(const Snapshot& core) {
+    std::string out = "[";
+    for (const auto& attempt : recovery::queue().history()) {
+        if (out.size() > 1) out += ",";
+        const auto& r = attempt.result.request;
+        const auto& c = attempt.context;
+        out += "{\"request_id\":\"" + std::to_string(r.execution.request_id) + "\",\"origin\":" +
+            quoted(attempt.console ? "console" : "button") + ",\"build\":" + quoted(core.core.build_id) +
+            ",\"namespace\":" + quoted(r.namespace_id) + ",\"save\":" + quoted(r.save) +
+            ",\"map\":" + quoted(c.map.c_str()) + ",\"generation\":\"" + std::to_string(r.execution.expected.lifecycle_generation) +
+            "\",\"stamp\":\"" + std::to_string(r.stamp) + "\",\"token\":\"" + std::to_string(r.token) +
+            "\",\"encounter\":" + quoted(c.encounter.c_str()) + ",\"kind\":" + quoted(c.kind.c_str()) +
+            ",\"candidates\":" + std::to_string(c.candidates) +
+            ",\"producers_retired\":0,\"kills_suppressed\":0,\"completion_read\":" + quoted(c.completion.c_str()) +
+            ",\"state\":" + std::to_string(attempt.result.state) + ",\"result\":" + quoted(recovery::message(attempt.result.outcome)) + "}";
+    }
+    return out + "]";
 }
 std::string b_event(const save::BEvent& e) {
     if(!e.sequence) return "null";
@@ -256,7 +276,13 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"checkpoint_state_read\":"+flag(campaign.checkpoint_boundary.state_read)+
                 ",\"checkpoint_map_read\":"+flag(campaign.checkpoint_boundary.map_read)+
                 ",\"checkpoint_difficulty_read\":"+flag(campaign.checkpoint_boundary.difficulty_read)+"}";
-            const auto facts = "\"engine_reason\":" + std::to_string(engine_reason) + ",\"installation\":{\"phase\":" + std::to_string(install.phase) +
+            std::string runtime_history = "[";
+            for (const auto& line : commands::diagnostic_history()) {
+                if (runtime_history.size() > 1) runtime_history += ',';
+                runtime_history += quoted(line.c_str());
+            }
+            runtime_history += ']';
+            const auto facts = "\"runtime_diagnostics\":" + runtime_history + ",\"engine_reason\":" + std::to_string(engine_reason) + ",\"installation\":{\"phase\":" + std::to_string(install.phase) +
                 ",\"sequence\":" + std::to_string(install.sequence) + ",\"startup_observation\":" + std::to_string(install.startup_observation) +
                 ",\"last_completed_stage\":" + std::to_string(install.last_completed_stage) + ",\"validated\":" + std::to_string(install.validated) +
                 ",\"created\":" + std::to_string(install.created) + ",\"enabled\":" + std::to_string(install.enabled) +
@@ -279,6 +305,7 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"special_route\":"+b_trace(special::route_diagnostics())+
                 ",\"special_hud\":"+b_trace(special::hud_diagnostics())+
                 ",\"combat\":"+b_trace(combat::diagnostics())+
+                ",\"encounter_recovery_history\":"+recovery_history(core)+
                 ",\"special_use_history\":"+use_json+
                 ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
             if (facts != last) {

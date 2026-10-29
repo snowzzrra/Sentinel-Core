@@ -1,6 +1,7 @@
 #include "enemy_checkpoint_native.h"
 #include "native_target.h"
 #include "save_collector.h"
+#include "commands_native.h"
 #include <MinHook.h>
 #include <cstring>
 #include <cstdio>
@@ -49,8 +50,14 @@ bool decode(const save::NativeString& text, std::string& out) {
 bool capture(Snapshot& snapshot) {
     try {
         std::string bytes;
-        return calls.capture(bytes) && encode(bytes, snapshot.hex);
-    } catch (...) { return false; }
+        if (!calls.capture(bytes)) {
+            commands::diagnostic_trace("AP_CHECKPOINT stage=capture result=failed reason=recipe_capture_refused"); return false;
+        }
+        const bool encoded = encode(bytes, snapshot.hex);
+        commands::diagnostic_trace("AP_CHECKPOINT stage=capture result=%s reason=%s bytes=%zu", encoded ? "ok" : "failed",
+            encoded ? "encoded" : "size_limit", bytes.size());
+        return encoded;
+    } catch (...) { commands::diagnostic_trace("AP_CHECKPOINT stage=capture result=failed reason=exception"); return false; }
 }
 bool capture_locked(Snapshot& snapshot) {
     calls.lock();
@@ -79,6 +86,7 @@ void serialize_spawn(uintptr_t prepared, uintptr_t archive) {
              static_cast<uint32_t>(active->hex.size() + 1), {}};
     serialize_string(archive, *reinterpret_cast<const uintptr_t*>(archive + 8), field, &value);
     active->written = true;
+    commands::diagnostic_trace("AP_CHECKPOINT stage=enemy_serialization result=written bytes=%zu", active->hex.size());
 }
 uint64_t save_checkpoint(uintptr_t world, uintptr_t output, uintptr_t request, uintptr_t fourth, uintptr_t fifth) {
     if (!checkpoint_enabled.load(std::memory_order_acquire)) return original_save(world, output, request, fourth, fifth);
@@ -86,9 +94,14 @@ uint64_t save_checkpoint(uintptr_t world, uintptr_t output, uintptr_t request, u
     uint64_t result = 0;
     __try {
         snapshot = new_snapshot(world);
+        commands::diagnostic_trace("AP_CHECKPOINT stage=native_save_enter world=%llx capture=%s",
+            static_cast<unsigned long long>(world), snapshot ? "allocated" : "allocation_failed");
         if (snapshot) {
             active = snapshot;
             result = original_save(world, output, request, fourth, fifth);
+            commands::diagnostic_trace("AP_CHECKPOINT stage=native_save_return native_result=%llu enemy_written=%d reason=%s",
+                static_cast<unsigned long long>(result), snapshot->written,
+                !(result & 0xff) ? "native_refused" : !snapshot->written ? "enemy_serialization_missing_or_failed" : "ok");
             if ((result & 0xff) && !snapshot->written) result &= ~uint64_t{0xff};
         }
     } __finally {
@@ -112,7 +125,9 @@ void stop_recipe_checkpoint() { checkpoint_enabled.store(false, std::memory_orde
 bool read_recipe_checkpoint(uintptr_t serializer, std::string_view map, uint32_t native_subtype) {
     if (!recipe_checkpoint_enabled() || !calls.restore) return true;
     if (!serializer || map.empty() || map.size() > 191 || map.find('\0') != map.npos ||
-        (native_subtype != 1 && native_subtype != 2)) return false;
+         (native_subtype != 1 && native_subtype != 2)) {
+        commands::diagnostic_trace("AP_CHECKPOINT stage=enemy_restore result=failed reason=invalid_context subtype=%u", native_subtype); return false;
+    }
     const auto key_text = native_subtype == 1 ? std::string("campaignSpawnInfo") : "missionSelectSpawnInfo_" + std::string(map);
     save::NativeString key{};
     construct_string(&key); const auto table = key.vtable; destroy_string(&key);
@@ -122,8 +137,15 @@ bool read_recipe_checkpoint(uintptr_t serializer, std::string_view map, uint32_t
     const uintptr_t callbacks[]{0, reinterpret_cast<uintptr_t>(read_archive), reinterpret_cast<uintptr_t>(valid_read)};
     ReadFunctor functor{callbacks, &bytes, false};
     if (!read_block(serializer, reinterpret_cast<uintptr_t>(&functor), reinterpret_cast<uintptr_t>(&key), 2) ||
-        !functor.valid) return false;
-    try { return calls.restore(bytes, map); } catch (...) { return false; }
+        !functor.valid) {
+        commands::diagnostic_trace("AP_CHECKPOINT stage=enemy_restore result=failed reason=archive_read_or_decode"); return false;
+    }
+    try {
+        const bool restored = calls.restore(bytes, map);
+        commands::diagnostic_trace("AP_CHECKPOINT stage=enemy_restore result=%s reason=%s bytes=%zu map=%.*s", restored ? "ok" : "failed",
+            restored ? "accepted" : "recipe_state_refused", bytes.size(), static_cast<int>(map.size()), map.data());
+        return restored;
+    } catch (...) { commands::diagnostic_trace("AP_CHECKPOINT stage=enemy_restore result=failed reason=exception"); return false; }
 }
 bool install_recipe_checkpoint(const engine::Binding& binding, HANDLE stop_event, const RecipeCheckpointCalls& callbacks) {
     if (binding.metadata.profile != SC_PROFILE_STEAM_20260818 || !callbacks.lock || !callbacks.unlock ||
@@ -240,6 +262,13 @@ bool test_recipe_checkpoint() {
     ok = ok && !save_checkpoint(100, 0, 0, 0, 0) && locks == unlocks && !active;
     emit = true; save_ok = false;
     ok = ok && !save_checkpoint(100, 0, 0, 0, 0) && locks == unlocks && !active;
+    size_t diagnostic_bytes = 0;
+    bool capture_failure_logged = false;
+    for (const auto& line : commands::diagnostic_history()) {
+        diagnostic_bytes += line.size();
+        capture_failure_logged |= line.find("reason=recipe_capture_refused") != std::string::npos;
+    }
+    ok = ok && capture_failure_logged && diagnostic_bytes <= 32768;
     calls = previous_calls; original_save = previous_save; original_spawn = previous_spawn;
     serialize_string = previous_string; construct_string = previous_construct; destroy_string = previous_destroy;
     read_block = previous_read;

@@ -42,7 +42,7 @@ add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0602)
 configure_file(bootstrap/msimg32.def.in msimg32.def COPYONLY)
 configure_file(include/sentinel_version.h.in generated/sentinel_version.h @ONLY)
 include_directories("${CMAKE_BINARY_DIR}/generated")
-set(identity_inputs CMakeLists.txt version.json include/sentinel_version.h.in resources/version.rc.in include/sentinel_core.h include/sentinel_bootstrap.h
+set(identity_inputs include/sentinel_recovery.h src/encounter_recovery.h src/encounter_recovery.cpp tools/encounter_recovery_probe.cpp CMakeLists.txt version.json include/sentinel_version.h.in resources/version.rc.in include/sentinel_core.h include/sentinel_bootstrap.h
   include/sentinel_engine.h src/engine_observer.h src/engine_observer.cpp
   include/sentinel_context.h src/context_observer.h src/context_observer.cpp
   include/sentinel_native.h src/native_model.h src/native_model.cpp
@@ -110,7 +110,7 @@ target_link_libraries(sentinel_inspection_client PUBLIC sentinel_protocol)
 add_library(sentinel_save_storage STATIC src/save_storage.cpp src/prelaunch.cpp)
 target_include_directories(sentinel_save_storage PUBLIC src)
 target_link_libraries(sentinel_save_storage PUBLIC bcrypt)
-add_executable(sentinel_probe tools/probe.cpp tools/local_controls_probe.cpp tools/combat_probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp tools/campaign_menu_probe.cpp tools/inventory_probe.cpp tools/arsenal_probe.cpp tools/runes_probe.cpp tools/special_probe.cpp tools/deathlink_probe.cpp)
+add_executable(sentinel_probe tools/encounter_recovery_probe.cpp tools/probe.cpp tools/local_controls_probe.cpp tools/combat_probe.cpp tools/save_probe.cpp tools/backup_probe.cpp tools/installation_probe.cpp tools/weapon_points_probe.cpp tools/campaign_menu_probe.cpp tools/inventory_probe.cpp tools/arsenal_probe.cpp tools/runes_probe.cpp tools/special_probe.cpp tools/deathlink_probe.cpp)
 target_link_libraries(sentinel_probe PRIVATE sentinel_inspection_client sentinel_save_storage bcrypt)
 add_library(sentinel_observer STATIC src/engine_observer.cpp src/context_observer.cpp src/save_observer.cpp)
 target_include_directories(sentinel_observer PUBLIC include src)
@@ -122,7 +122,7 @@ target_include_directories(sentinel_minhook PUBLIC third_party/minhook/include t
 # Pinned upstream uses intentional byte casts/anonymous unions; HDE initializes
 # its prefix byte in the loop. Keep upstream unchanged and Core warnings strict.
 target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
-add_library(sentinel_native_model STATIC src/native_model.cpp src/combat.cpp src/expanded.cpp src/enemy_recipe_state.cpp src/weapon_points.cpp src/campaign_menu.cpp src/inventory.cpp src/arsenal.cpp src/runes.cpp src/special.cpp src/deathlink.cpp)
+add_library(sentinel_native_model STATIC src/encounter_recovery.cpp src/native_model.cpp src/combat.cpp src/expanded.cpp src/enemy_recipe_state.cpp src/weapon_points.cpp src/campaign_menu.cpp src/inventory.cpp src/arsenal.cpp src/runes.cpp src/special.cpp src/deathlink.cpp)
 target_link_libraries(sentinel_native_model PUBLIC sentinel_protocol)
 target_include_directories(sentinel_native_model PUBLIC include src)
 add_executable(sentinel_combat_tests tests/combat.cpp)
@@ -277,3 +277,8 @@ target_compile_options(sentinel_weapon_points_tests PRIVATE /UNDEBUG)
 add_test(NAME weapon_points_contract COMMAND sentinel_weapon_points_tests)
 set_tests_properties(core_lifecycle proxy_forwarding_lifecycle proxy_normal_exit static_import_drawing missing_dll missing_core_dependency
   PROPERTIES TIMEOUT 15)
+
+add_executable(sentinel_encounter_recovery_tests tests/encounter_recovery.cpp)
+target_link_libraries(sentinel_encounter_recovery_tests PRIVATE sentinel_native_model)
+target_compile_options(sentinel_encounter_recovery_tests PRIVATE /UNDEBUG)
+add_test(NAME encounter_recovery_contract COMMAND sentinel_encounter_recovery_tests)
