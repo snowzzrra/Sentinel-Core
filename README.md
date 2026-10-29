@@ -68,6 +68,10 @@ The DLLs and probe executable are in `build/bin`.
 
 ## Development and diagnostics
 
+Run `python -B tools/complexity_gate.py` to check `src/` and `tests/`; configure with `-DSC_ENABLE_COMPLEXITY_GATE=ON` and build target `complexity_gate` for the optional development check (default OFF, outside distribution builds).
+The sorted `tools/complexity_exceptions.txt` lists only functions above cognitive 25 or cyclomatic 15. Listed functions cannot exceed either saved number; unlisted functions must meet both limits. Use `--update` to lower or remove exceptions; it never adds or raises them. Use `--write-exceptions` to regenerate explicitly after reviewing scanner changes. Warnings appear only with `--verbose`.
+Apply clang-format only to changed lines or files; keep existing source formatting outside the change.
+
 Start with [sentinel_inspection.h](include/sentinel_inspection.h) for the C++
 client API. The headers in `include/` define the gameplay and save interfaces.
 Clients communicate with Core through a local named pipe for the game process.

@@ -40,6 +40,14 @@ jobs:
         with:
           python-version: '3.12.10'
           architecture: x64
+      - name: Check generated protocol projections
+        run: python -B tools/generate_protocol.py --check
+      - name: Check development function complexity
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
+        run: |
+          python -B -m unittest discover -s tests -p test_complexity_gate.py -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B tools/complexity_gate.py
       - name: Locate supported installed MSVC and CMake
         shell: pwsh
         run: |
