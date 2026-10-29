@@ -233,6 +233,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
         target(image_base, rva_player, "488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc"),
         target(image_base, rva_damage_typeinfo, "488d05e9660603c3cccccccccccccccc488d0549f00603c3cccccccccccccccc"),
     };
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets())
+#endif
     for (const auto& t : required) if (!matches(memory, binding.image, t)) return;
 
     const auto deadline = GetTickCount64() + 10000;

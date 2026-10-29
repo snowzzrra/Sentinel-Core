@@ -166,6 +166,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
     const auto deadline = GetTickCount64()+10000;
     for (const auto& s : sites)
         if (native::validate_target(memory,binding.image,target(image_base,s.offset,s.bytes),stop,deadline)) return;
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets()) {
+#endif
     if (!leaf(memory,binding.image,0x69af70,"488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc") ||
         !leaf(memory,binding.image,0x13e8680,"4863c28b84816ccd0400c3cccccccccc4863c28b848190cd0400c3cccccccccc") ||
         !leaf(memory,binding.image,0x13e8690,"4863c28b848190cd0400c3cccccccccc4883ec084c8b91f8f402004c63da4d85")) return;
@@ -176,6 +179,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
     for (auto site : pairs) if (!call_site(memory,image_base,site,0x13ce4a0)) return;
     if (!call_site(memory,image_base,0xeeaa0a,0xeea070)) return;
     if (!call_site(memory,image_base,0x13ce5b1,0x1273710)) return;
+#ifdef SC_NATIVE_TESTING
+    }
+#endif
     for (const auto& s : sites) if (s.detour) {
         if (MH_CreateHook(reinterpret_cast<void*>(image_base+s.offset),s.detour,s.original) != MH_OK) return;
     }

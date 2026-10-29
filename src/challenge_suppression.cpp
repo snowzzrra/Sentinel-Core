@@ -276,6 +276,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
     const auto deadline = GetTickCount64() + 10000;
     if (native::validate_target(memory, binding.image, target(image_base, 0x1474a00,
             "48895c24185556574154415541564157488dac2400faffff4881ec0007000048"), stop, deadline)) return;
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets()) {
+#endif
     if (!unique_leaf(memory, binding.image, image_base + 0x14703b0,
             "4c8bd24c8bc94885d20f8485000000488b4a084533c00fb60184c074180f1f00", stop, deadline)) return;
     if (!binding.image.contains(seam::currency_entry_rva, seam::wup_entry_patch_bytes,
@@ -293,6 +296,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
         !bytes_match(memory, image_base + 0x147546e, "418b953c01000083faff741b488b4e10", 16) ||
         !call_site(memory, image_base, 0x147546e, seam::currency_entry_rva)) return;
 
+#ifdef SC_NATIVE_TESTING
+    }
+#endif
     adapter = static_cast<uint8_t*>(VirtualAlloc(nullptr, seam::adapter_size,
         MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     if (!adapter) return;

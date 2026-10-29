@@ -238,6 +238,9 @@ bool profile_payload(Session& owner, engine::Memory& memory, uintptr_t data) {
     return profile_payload_valid(owner, memory, data, profile_calls);
 }
 bool checked_bytes(engine::Memory& memory, uintptr_t address, const uint8_t* expected, size_t count, sc_install_event& event) {
+#ifdef SC_NATIVE_TESTING
+    if (!testing::real_hook_targets()) return true;
+#endif
     std::array<uint8_t, 88> actual{};
     const auto read = memory.copy(address, actual.data(), count);
     attach_read(event, read);
@@ -427,6 +430,9 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         }
     }
     uintptr_t initializer = 0;
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets())
+#endif
     if (!validate_native_helpers(record, memory, binding.image, initializer)) { session().reject(SessionFault::installation); return; }
     const auto context_init = reinterpret_cast<InitializeSteamContext>(initializer);
     constexpr unsigned hooks[] = {0, 1, 4, 6, 8, 9, 13, 14, 15, 16, 17, 18, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34, 35, 37, 38, 40, 41, 42, 43, 44};

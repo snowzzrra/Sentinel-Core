@@ -1,6 +1,8 @@
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 // Synthetic task-owned files only. No game/native serializer or real AP seed proof.
 #include "save_storage.h"
+#include "save_session.h"
+#include "fault_injection.h"
 #include <windows.h>
 #include <winioctl.h>
 #include <bcrypt.h>
@@ -8,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <iterator>
 #include <string>
@@ -15,7 +18,7 @@
 #include <vector>
 
 #define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL save_storage line %d: %s (win32=%lu)\n", \
-    __LINE__, #c, GetLastError()); std::exit(1); } } while (0)
+    __LINE__, #c, GetLastError()); std::abort(); } } while (0)
 using namespace sentinel::storage;
 namespace fs = std::filesystem;
 namespace {
@@ -476,8 +479,103 @@ void redirect_and_links(Fixture& f) {
     CHECK(fs::directory_iterator(protected_path) != fs::directory_iterator());
     CHECK(std::distance(fs::directory_iterator(protected_path), fs::directory_iterator()) == 1);
 }
+Descriptor metadata_descriptor(const std::wstring& root) {
+    auto value = descriptor(root);
+    value.campaign = {CampaignIntent::resume, 1};
+    return value;
+}
+std::string seed_checkpoint(const std::wstring& root) {
+    auto value = metadata_descriptor(root); value.campaign.intent = CampaignIntent::create;
+    std::unique_ptr<Namespace> owner;
+    CHECK(prepare(value, owner).ok());
+    const auto contract = sentinel::save::campaign_contract(value, owner->metadata().namespace_id);
+    const auto checkpoint = contract + "checkpoint=1\nmap=game/hub/hub\nsubtype=1\nfiles=1\nfile=" +
+        owner->metadata().native_root + "/GAME-AUTOSAVE0/game.details,3," + std::string(64, 'a') +
+        "\nstate=native_saved_readback_verified\n";
+    CHECK(owner->publish_campaign_record(false, contract, true).ok());
+    CHECK(owner->publish_campaign_record(true, checkpoint, true).ok());
+    return checkpoint;
+}
+bool can_resume(const std::wstring& root) {
+    auto value = metadata_descriptor(root);
+    std::unique_ptr<Namespace> lease;
+    CHECK(reopen(value, lease).ok());
+    sentinel::save::Session owner;
+    return owner.configure(value, std::move(lease)).ok();
+}
+int metadata_child(const wchar_t* root, const wchar_t* number, const wchar_t* stem) {
+    using namespace sentinel::testing;
+    const auto mode = static_cast<FileFault>(std::wcstoul(number, nullptr, 10));
+    HANDLE entered = OpenEventW(EVENT_MODIFY_STATE, FALSE, (std::wstring(stem) + L"-entered").c_str());
+    HANDLE release = OpenEventW(SYNCHRONIZE, FALSE, (std::wstring(stem) + L"-release").c_str());
+    CHECK(entered && release);
+    auto value = metadata_descriptor(root);
+    std::unique_ptr<Namespace> owner; CHECK(reopen(value, owner).ok());
+    const auto pending = sentinel::save::campaign_contract(value, owner->metadata().namespace_id) + "state=native_save_pending\n";
+    file_fault(mode, L"\\campaign.checkpoint", entered, release);
+    const auto result = owner->publish_campaign_record(true, pending, false);
+    CHECK(!result.ok() && file_fault_hits() == 1);
+    file_fault(FileFault::none, L"");
+    CHECK(CloseHandle(entered) && CloseHandle(release));
+    return 0;
+}
+void interrupt_metadata(const std::wstring& root, sentinel::testing::FileFault mode) {
+    const auto stem = L"Local\\Sentinel-metadata-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(static_cast<unsigned>(mode));
+    HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, (stem + L"-entered").c_str());
+    HANDLE release = CreateEventW(nullptr, TRUE, FALSE, (stem + L"-release").c_str());
+    CHECK(entered && release);
+    wchar_t executable[MAX_PATH]{}; CHECK(GetModuleFileNameW(nullptr, executable, MAX_PATH));
+    auto line = L"\"" + std::wstring(executable) + L"\" --metadata-child \"" + root + L"\" " +
+        std::to_wstring(static_cast<unsigned>(mode)) + L" \"" + stem + L"\"";
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
+    CHECK(CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process));
+    const HANDLE waits[]{entered, process.hProcess};
+    const bool terminate = mode >= sentinel::testing::FileFault::after_write;
+    CHECK(WaitForMultipleObjects(2, waits, FALSE, 10000) == (terminate ? WAIT_OBJECT_0 : WAIT_OBJECT_0 + 1));
+    if (terminate) CHECK(TerminateProcess(process.hProcess, sentinel::testing::interrupted_exit));
+    CHECK(WaitForSingleObject(process.hProcess, 4000) == WAIT_OBJECT_0);
+    DWORD code = 0; CHECK(GetExitCodeProcess(process.hProcess, &code));
+    CHECK(code == (terminate ? sentinel::testing::interrupted_exit : 0));
+    CHECK(CloseHandle(process.hThread) && CloseHandle(process.hProcess));
+    CHECK(CloseHandle(entered) && CloseHandle(release));
+}
+void interrupted_metadata(Fixture& fixture) {
+    using sentinel::testing::FileFault;
+    for (const auto mode : {FileFault::short_write, FileFault::truncate, FileFault::flush,
+                           FileFault::after_write, FileFault::after_truncate, FileFault::after_flush}) {
+        const auto root = fixture.path + L"\\metadata-" + std::to_wstring(static_cast<unsigned>(mode));
+        CHECK(CreateDirectoryW(root.c_str(), nullptr));
+        seed_checkpoint(root);
+        CHECK(can_resume(root));
+        interrupt_metadata(root, mode);
+        CHECK(!can_resume(root));
+    }
+    std::puts("PASS test_interrupted_metadata_blocks_unsafe_resume");
+}
+int previous_checkpoint(Fixture& fixture) {
+    const auto root = fixture.path + L"\\previous";
+    CHECK(CreateDirectoryW(root.c_str(), nullptr));
+    const auto previous = seed_checkpoint(root);
+    CHECK(can_resume(root));
+    interrupt_metadata(root, sentinel::testing::FileFault::after_truncate);
+    std::unique_ptr<Namespace> owner; CHECK(reopen(metadata_descriptor(root), owner).ok());
+    std::string record; CHECK(owner->campaign_record(true, record).ok());
+    if (record == previous) { std::puts("XPASS previous_checkpoint_generation; remove WILL_FAIL after two-generation checkpoint"); return 0; }
+    std::puts("XFAIL in-place pending metadata overwrites the previous checkpoint");
+    return 1;
+}
+
+void metadata_arguments(int argc, wchar_t** argv) {
+    if (argc == 5 && std::wstring_view(argv[1]) == L"--metadata-child") std::exit(metadata_child(argv[2], argv[3], argv[4]));
+    if (argc != 2) return;
+    if (std::wstring_view(argv[1]) == L"--metadata") { { Fixture fixture; interrupted_metadata(fixture); } std::exit(0); }
+    if (std::wstring_view(argv[1]) != L"--previous-checkpoint") return;
+    int code = 0; { Fixture fixture; code = previous_checkpoint(fixture); } std::exit(code);
+}
+
 } // namespace
 int wmain(int argc, wchar_t** argv) {
+    metadata_arguments(argc, argv);
     if (argc == 2 && std::wstring_view(argv[1]) == L"--descriptor-guards") {
         identities_and_descriptor();
         return 0;

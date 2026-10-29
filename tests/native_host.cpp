@@ -20,8 +20,10 @@ namespace {
 std::atomic<uint32_t> owner{0}, game{SC_GAME_IN_GAME}, command{0};
 std::atomic<uintptr_t> caller{0}, map{42};
 std::atomic<uint64_t> originals{0}, changes{0}, frees{0}, last_return{0};
+std::atomic<uint64_t> executions{0};
 std::atomic<bool> pause_frames{false}, finish_thread{false}, pending{false}, recurse{false};
 std::atomic<unsigned> campaign_map{0};
+std::atomic<bool> command_testing{false};
 constexpr const char* campaign_maps[]={"fixture/same-name-and-address", "game/sp/e2m2_base/e2m2_base",
     "game/hub/hub", "game/dlc/e4m1_rig/e4m1_rig", "game/dlc2/e5m2_earth/e5m2_earth"};
 std::atomic<unsigned> gate_stage{0};
@@ -119,6 +121,7 @@ sc_context_snapshot observe(context::Evidence& measured) {
     return c;
 }
 void gate(bool executed) {
+    if (executed) ++executions;
     const unsigned expected = executed ? 2u : 1u;
     if (gate_stage.load() != expected) return;
     SetEvent(gate_entered);
@@ -186,6 +189,78 @@ sc_diagnostic_request request(uint64_t id) {
     sc_diagnostic_request r{}; r.expected = native::inspect().scope;
     r.request_id = id; r.nonce[0] = 17; r.deadline_ms = 5000; return r;
 }
+generated::submission identity_submission(const char* name) {
+    const auto scope = native::inspect().scope;
+    generated::submission out{};
+    out.reference.scope = {scope.pid, scope.process_created, {}, scope.lifecycle_generation};
+    std::copy(std::begin(scope.instance_id), std::end(scope.instance_id), out.reference.scope.instance_id.begin());
+    out.reference.namespace_id.fill('0'); out.reference.command_id = name;
+    out.reference.command_type = 5; out.reference.payload_revision = 1; out.deadline_ms = 5000;
+    return out;
+}
+void registry_evidence_contract() {
+    using registry::EffectEvidence;
+    sc_weapon_points_request request{}; request.kind = SC_WUP_GRANT; request.amount = 3;
+    sc_weapon_points_result result{}; result.flags = SC_WUP_NATIVE_ENTERED | SC_WUP_BEFORE_VALID | SC_WUP_AFTER_VALID;
+    result.balance_after = result.gained_after = 3;
+    sc_diagnostic_result execution{}; execution.executed_at_ms = 1;
+    const auto* points = registry::handler(registry::Id::weapon_points);
+    CHECK(points->classify(request, result, {}).effect == EffectEvidence::no_effect);
+    CHECK(points->classify(request, result, execution).effect == EffectEvidence::observed_effect);
+    result.balance_after = 2;
+    CHECK(points->classify(request, result, execution).effect == EffectEvidence::effect_unknown);
+    sc_deathlink_request remote{}; remote.kind = SC_DEATHLINK_APPLY_REMOTE;
+    sc_deathlink_result accepted{}; accepted.outcome = SC_DEATHLINK_OUTCOME_OK;
+    const auto* deathlink = registry::handler(registry::Id::deathlink);
+    CHECK(deathlink->classify(remote, accepted, execution).effect == EffectEvidence::dispatch_only);
+    accepted.outcome = SC_DEATHLINK_OUTCOME_QUEUE_FULL;
+    CHECK(deathlink->classify(remote, accepted, execution).effect == EffectEvidence::effect_unknown);
+    const auto* descriptor = registry::descriptor(18, 1);
+    generated::Payload payload = generated::weapon_points_payload{generated::weapon_points_grant_payload{3, 0}};
+    generated::Bytes bytes;
+    CHECK(descriptor->encode_payload(payload, bytes) && bytes == generated::Bytes({1,0,0,0,3,0,0,0,0,0,0,0}));
+    generated::Payload decoded{};
+    CHECK(descriptor->decode_payload(bytes, decoded));
+    CHECK(std::get<generated::weapon_points_grant_payload>(std::get<generated::weapon_points_payload>(decoded)).amount == 3);
+}
+void identity_registry_contract() {
+    using native::Diagnostics;
+    registry_evidence_contract();
+    CHECK(registry::handler_count() == 25);
+    for (size_t i = 0; i < generated::descriptor_count; ++i) {
+        const auto& descriptor = generated::descriptors[i];
+        const auto* handler = registry::handler(static_cast<registry::Id>(descriptor.id));
+        CHECK(handler && handler->admit && handler->execute && handler->classify);
+    }
+    park();
+    const auto original = identity_submission("concurrent");
+    std::array<Diagnostics::Reply, 8> replies{};
+    std::array<std::thread, 8> clients;
+    for (size_t i = 0; i < clients.size(); ++i) clients[i] = std::thread([&, i] { replies[i] = native::submit(original, sc_diagnostic_request{}); });
+    for (auto& client : clients) client.join();
+    for (const auto& reply : replies) CHECK(reply.execution.state == SC_DIAGNOSTIC_QUEUED && reply.reference.fingerprint == replies[0].reference.fingerprint);
+    const auto before = executions.load();
+    resume(); until([&] { return native::query(replies[0].reference).execution.state == SC_DIAGNOSTIC_EXECUTED; });
+    CHECK(executions.load() == before + 1);
+    park();
+    auto altered = original; ++altered.save_binding[0];
+    CHECK(native::submit(altered, sc_diagnostic_request{}).error == Diagnostics::Error::duplicate_mismatch);
+    altered = original; altered.reference.command_type = 18;
+    CHECK(native::submit(altered, sc_diagnostic_request{}).error == Diagnostics::Error::duplicate_mismatch);
+    CHECK(native::ack(replies[0].reference, replies[0].result_token).retention == Diagnostics::Retention::compact_terminal);
+    CHECK(native::submit(original, sc_diagnostic_request{}).execution.state == SC_DIAGNOSTIC_EXECUTED);
+    const auto stale = native::submit(identity_submission("stale-context"), sc_diagnostic_request{});
+    CHECK(stale.execution.state == SC_DIAGNOSTIC_QUEUED);
+    transition(4); ready();
+    until([&] { return native::query(stale.reference).execution.state >= SC_DIAGNOSTIC_EXECUTED; });
+    const auto blocked = native::query(stale.reference);
+    CHECK(blocked.execution.state == SC_DIAGNOSTIC_REJECTED && !blocked.execution.executed_at_ms);
+    CHECK(blocked.reference.scope.generation == original.reference.scope.generation);
+    CHECK(native::query(replies[0].reference).execution.state == SC_DIAGNOSTIC_EXECUTED);
+    CHECK(native::ack(stale.reference, stale.result_token).error == Diagnostics::Error::none);
+    CHECK(executions.load() == before + 1);
+    std::puts("PASS native registry concurrent identity, entry context, old-generation query and ack");
+}
 std::wstring retrieve_args(const sc_diagnostic_request& r, bool cancel) {
     std::array<uint8_t, 16> nonce{}, instance{};
     std::copy(std::begin(r.nonce), std::end(r.nonce), nonce.begin());
@@ -196,7 +271,85 @@ std::wstring retrieve_args(const sc_diagnostic_request& r, bool cancel) {
         std::to_wstring(r.expected.process_created) + L" --expect-instance " + std::wstring(i.begin(), i.end()) +
         L" --expect-generation " + std::to_wstring(r.expected.lifecycle_generation);
 }
+std::atomic<uint32_t> mutations{0}, restriction{7};
+std::atomic<bool> mutation_fault{false};
+void command_body(uintptr_t, const char* text) {
+    CHECK(!std::strcmp(text, "condump AP_SUPPORT_FILE.txt") && restriction.load() == 0);
+    ++mutations;
+    if (mutation_fault.load()) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
 }
+sc_command_request command_request() {
+    sc_command_request value{}; value.execution = request(901);
+    std::memcpy(value.namespace_id, SC_COMMAND_PROCESS_NAMESPACE, 65);
+    value.kind = SC_COMMAND_CONDUMP; strcpy_s(value.text, "condump AP_SUPPORT_FILE.txt");
+    return value;
+}
+void stopped_result(const sc_command_result& result, bool executed, bool claimed) {
+    if (claimed) {
+        CHECK(result.execution.cancel_requested && !result.execution.executed_at_ms);
+        CHECK(result.execution.state == SC_DIAGNOSTIC_CANCELLED || result.execution.state == SC_DIAGNOSTIC_REJECTED);
+    } else CHECK(result.execution.state == static_cast<uint32_t>(executed ? SC_DIAGNOSTIC_EXECUTED : SC_DIAGNOSTIC_CANCELLED));
+    CHECK(mutations.load() == static_cast<unsigned>(executed));
+    CHECK(result.outcome == static_cast<uint32_t>(executed ? SC_COMMAND_DISPATCHED : SC_COMMAND_NOT_EXECUTED));
+}
+void stop_command(const wchar_t* mode, const sc_command_request& value) {
+    const bool claimed = !std::wcscmp(mode, L"stop-claimed");
+    const bool executed = !std::wcscmp(mode, L"stop-executing");
+    if (claimed || executed) {
+        ResetEvent(gate_entered); gate_stage.store(executed ? 2 : 1); resume();
+        CHECK(WaitForSingleObject(gate_entered, 4000) == WAIT_OBJECT_0);
+    }
+    CHECK(native::stop());
+    if (claimed || executed) {
+        CHECK(SetEvent(gate_release));
+        until([&] { return native::command_result(value, false).execution.state != SC_DIAGNOSTIC_CLAIMED; });
+        park();
+    }
+    const auto result = native::command_result(value, false);
+    stopped_result(result, executed, claimed);
+    const auto sequence = native::inspect().callback_sequence, before = originals.load();
+    call_frame();
+    CHECK(originals.load() == before + 1 && native::inspect().callback_sequence == sequence);
+    const auto again = native::command_result(value, false);
+    CHECK(again.execution.state == result.execution.state && again.outcome == result.outcome);
+    CHECK(again.native_exception == result.native_exception && again.execution.executed_at_ms == result.execution.executed_at_ms);
+    CHECK(again.execution.completed_at_ms == result.execution.completed_at_ms);
+    CHECK(mutations.load() == static_cast<unsigned>(executed) && restriction.load() == 7);
+    auto late = command_request(); ++late.execution.request_id;
+    CHECK(native::submit_command(late).execution.state == SC_DIAGNOSTIC_REJECTED);
+}
+void command_scenario(const wchar_t* mode, std::thread& callback) {
+    const std::wstring_view name(mode);
+    if (name != L"stop-queued" && name != L"stop-claimed" && name != L"stop-executing" &&
+        name != L"wrong-command-thread" && name != L"partial-seh") return;
+    park();
+    command_testing.store(true);
+    commands::test_command_calls(command_body, +[] { return restriction.load(); },
+        +[](uintptr_t, uint32_t level) { restriction.store(level); }, 1);
+    const auto value = command_request();
+    CHECK(native::submit_command(value).execution.state == SC_DIAGNOSTIC_QUEUED);
+    if (name == L"partial-seh") {
+        mutation_fault.store(true); resume();
+        until([&] { return native::command_result(value, false).execution.completed_at_ms != 0; });
+        park();
+        const auto result = native::command_result(value, false);
+        CHECK(mutations.load() == 1 && restriction.load() == 7);
+        CHECK(result.outcome == SC_COMMAND_NATIVE_FAILED && result.native_exception == EXCEPTION_ACCESS_VIOLATION);
+        CHECK(result.outcome != SC_COMMAND_DISPATCHED);
+    } else if (name == L"wrong-command-thread") {
+        native::test_post_frame();
+        CHECK(native::inspect().reason == SC_NATIVE_WRONG_THREAD && mutations.load() == 0);
+        CHECK(!native::command_result(value, false).execution.executed_at_ms);
+    } else stop_command(mode, value);
+    CHECK(native::stop());
+    finish_thread.store(true); resume(); callback.join();
+    CHECK(sc_shutdown() == SC_UNLOAD_RETAINED);
+    std::fwprintf(stdout, L"PASS %s\n", mode);
+    std::exit(0);
+}
+
+}
+void protocol_v2_contract(const wchar_t*, void (*)(), void (*)(), HANDLE, HANDLE, std::atomic<unsigned>&, std::atomic<uint64_t>&);
 int wmain(int argc, wchar_t** argv) {
     CHECK(argc == 3); const wchar_t* probe = argv[1];
     sc_automap_request automap{}; automap.known=1;
@@ -300,6 +453,7 @@ int wmain(int argc, wchar_t** argv) {
     adapter.owner = [] { return owner.load(); }; adapter.game = [] { return game.load(); };
     adapter.pending = [] { return static_cast<uint8_t>(pending.load()); }; adapter.context = facts; adapter.observe = observe;
     adapter.map = [] { return map.load(); };
+    adapter.command_fixture = [] { return command_testing.load(); };
     adapter.checkpoint = [](uintptr_t p, uint8_t& value) { value = reinterpret_cast<const Descriptor*>(p)->checkpoint; return true; };
     adapter.primary = [](uintptr_t p, uintptr_t& value) { value = map.load(); return p == reinterpret_cast<uintptr_t>(&slot_object); };
     adapter.gate = gate;
@@ -334,6 +488,8 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(native::inspect().availability == SC_NATIVE_ENABLED && native::inspect().installed_hooks == 7);
     CHECK(native::inspect().lifecycle == SC_LIFETIME_UNOBSERVED && !native::inspect().context_generation);
     transition(1); ready();
+    command_scenario(argv[2], callback);
+    protocol_v2_contract(argv[2], park, resume, gate_entered, gate_release, gate_stage, executions);
     const bool special_service = std::wcscmp(argv[2], L"special-service") == 0;
     if (std::wcscmp(argv[2], L"weapon-points-service") == 0 || special_service) {
         struct Currency { uint32_t current = 0, gained = 0, purchases = 0, other = 41, encounters = 0; } currency;
@@ -412,6 +568,7 @@ int wmain(int argc, wchar_t** argv) {
         transition(1);
         CHECK(stale.complete(8).find("scope_mismatch") != std::string::npos); ready();
         CHECK(native::inspect().scope.lifecycle_generation == 2);
+        identity_registry_contract();
         Child fresh(probe, L"--diagnostic --deadline-ms 1500");
         CHECK(fresh.complete(0).find("callback_executed") != std::string::npos);
         park(); Child expired(probe, L"--diagnostic --deadline-ms 150");

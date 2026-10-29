@@ -340,6 +340,9 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
     if (!save::session().campaign_run.enabled()) return true;
     engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 10000;
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets())
+#endif
     for (size_t i = 0; i < sizeof(sites) / sizeof(sites[0]); ++i) {
         const auto expected = target(binding.image.base, sites[i]);
         if (i < 8 || i >= 24) {

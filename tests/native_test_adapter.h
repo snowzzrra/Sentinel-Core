@@ -2,6 +2,7 @@
 #include "native_target.h"
 #include "sentinel_inspection.h"
 #include "context_observer.h"
+#include "fault_injection.h"
 
 // Compiled only into the task-owned test host, never the candidate Core DLL.
 // These explicit fixture facts exercise hook/queue mechanics, not DOOM offsets.
@@ -18,6 +19,7 @@ struct TestAdapter {
     bool (*checkpoint)(uintptr_t descriptor, uint8_t& flag);
     bool (*primary)(uintptr_t slot, uintptr_t& map);
     void (*gate)(bool executed); // deterministic race gate in this test build only
+    bool (*command_fixture)() = nullptr;
 };
 void test_start(const TestAdapter& adapter, const Snapshot& identity, HANDLE stop);
 void test_events(const engine::Binding&, uint64_t (*change)(uintptr_t,uintptr_t,uintptr_t));
@@ -32,4 +34,8 @@ bool test_arm_first_contact(uintptr_t,uintptr_t,uintptr_t);
 bool test_automap_checked(const sc_automap_request&,const char*,const char*);
 bool test_automap_collect(uintptr_t,uintptr_t,uintptr_t,void (*)(uintptr_t,uintptr_t));
 bool test_automap_uncollected(uintptr_t,void (*)(uintptr_t,int));
+}
+
+namespace sentinel::commands {
+void test_command_calls(void (*)(uintptr_t, const char*), uint32_t (*)(), void (*)(uintptr_t, uint32_t), uintptr_t);
 }

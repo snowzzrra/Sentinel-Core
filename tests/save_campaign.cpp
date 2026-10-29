@@ -240,6 +240,11 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
 }
 #include "startup_route_fixture.h"
 void test_campaign_hook_cleanup();
+void run_hook_case(const std::wstring& defect) {
+    if (defect.find(L"hook-fault:")==0) std::exit(sentinel::testing::hook_failure(defect));
+    if (defect.find(L"hook_cleanup-")!=0) return;
+    sentinel::testing::hook_cleanup(defect.substr(13)); std::exit(0);
+}
 int wmain(int argc,wchar_t** argv) {
     CHECK(argc==4 || argc==5);
     std::filesystem::create_directories(argv[2]);
@@ -250,6 +255,7 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
+    run_hook_case(defect);
     if (defect==L"expanded_stop") {
         CHECK(sentinel::expanded::test_stopped_hooks());
         CHECK(sentinel::expanded::test_hook_faults());

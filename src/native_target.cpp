@@ -1,3 +1,8 @@
+#ifdef SC_NATIVE_TESTING
+#undef validate_target
+#undef validate_leaf_target
+#undef validate_recorded
+#endif
 #include "native_target.h"
 #include "save_installation.h"
 #include "hde/hde64.h"

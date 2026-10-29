@@ -17,6 +17,17 @@ constexpr uintptr_t image_base = 0x10000000;
 constexpr uintptr_t manager = 0x8000;
 constexpr uint32_t magic = 0x44357301;
 using Bytes = std::vector<uint8_t>;
+void check_binding_rotation(Session& owner) {
+    const auto first = owner.binding_token();
+    REQUIRE((first != std::array<uint8_t, 16>{}));
+    REQUIRE(owner.observe_profile_choice("AUTOSAVE10", 1));
+    REQUIRE(owner.binding_token() == first);
+    REQUIRE(owner.observe_profile_choice("AUTOSAVE3", 0));
+    const auto second = owner.binding_token();
+    REQUIRE(second != first);
+    REQUIRE(owner.observe_profile_choice("AUTOSAVE10", 1));
+    REQUIRE(owner.binding_token() != second && owner.binding_token() != first);
+}
 template<class T, size_t N> void put(std::array<uint8_t, N>& bytes, size_t offset, const T& value) {
     REQUIRE(offset + sizeof(value) <= bytes.size()); std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
@@ -459,6 +470,7 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
             continue;
         }
         REQUIRE(owner->state() == SessionState::admitted && owner->accepts_requests());
+        check_binding_rotation(*owner);
         REQUIRE(f.selected == "AUTOSAVE10" && f.selected_index == 1 && f.serializers == 1);
         REQUIRE(f.strings_freed == 1 && f.comments_freed == 1);
         const char* baseline = nullptr; int32_t baseline_index = -1;

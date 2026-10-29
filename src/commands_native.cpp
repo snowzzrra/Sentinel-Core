@@ -15,6 +15,9 @@ using SetLevel = void (*)(uintptr_t, uint32_t);
 Execute execute = nullptr;
 Level get_level = nullptr;
 SetLevel set_level = nullptr;
+#ifdef SC_NATIVE_TESTING
+uintptr_t test_system = 0;
+#endif
 constexpr uint32_t command_global = 0x4271ba8, command_vtable = 0x2e453e0;
 void dispatch(uintptr_t system, const char* text) {
     const auto level = get_level();
@@ -52,6 +55,12 @@ uint32_t prepare(const engine::Binding& binding, HANDLE stop) {
     if (const auto local_reason = prepare_local(binding, stop)) { ready.store(false); return local_reason; }
     return SC_NATIVE_NONE;
 }
+#ifdef SC_NATIVE_TESTING
+void test_command_calls(Execute callback, Level level, SetLevel assign, uintptr_t system) {
+    execute = callback; get_level = level; set_level = assign; test_system = system;
+    ready.store(true, std::memory_order_release);
+}
+#endif
 bool available() { return ready.load(std::memory_order_acquire); }
 void disable() { ready.store(false); }
 bool admitted(const sc_command_request& request) {
@@ -78,6 +87,10 @@ void execute_native(const sc_command_request& request, sc_command_result& result
     if (execute_visual_cleanup(request.text, result)) return;
     engine::LocalMemory memory;
     uintptr_t system = 0, table = 0;
+#ifdef SC_NATIVE_TESTING
+    if (test_system) system = test_system;
+    else
+#endif
     if (memory.copy(image_base + command_global, &system, sizeof(system)).reason || !system ||
         memory.copy(system, &table, sizeof(table)).reason || table != image_base + command_vtable) {
         result.outcome = SC_COMMAND_UNAVAILABLE; return;

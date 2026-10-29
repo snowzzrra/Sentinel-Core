@@ -809,6 +809,9 @@ void install_hands_restore(const engine::Binding& binding, HANDLE stop) {
         {0x14641a2, "80bba24e0000000f848d00000041b1014533c033d2488bcbe85162ffff4885c0", 0x1464140, 29},
         {0x13614f0, "8b8e5803000041b1014533c033d2e80d8f0f004c8bf84885c07517488b8e5803", 0x13612fd, 19},
     };
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets())
+#endif
     for (const auto& site : sites) {
         native::Target target{};
         target.address = image_base + site.rva;
@@ -1624,6 +1627,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {rva_player, "488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc"},
         {rva_inventory_typeinfo, "488d0569210803c3cccccccccccccccc4883ec28ba33000000b9d8000000e84d"},
     };
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets())
+#endif
     for (const auto& s : sites) {
         native::Target target{};
         target.address = image_base + s.offset;
@@ -1651,6 +1657,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
 
     constexpr uint32_t expected_vtable_slots[] = {0x1641b80, 0x16466a0, 0x1647be0, 0x355140};
     std::array<uintptr_t, std::size(expected_vtable_slots)> actual_vtable{};
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets()) {
+#endif
     if (!binding.image.contains(rva_equipment_upgrade_vtable, sizeof(actual_vtable), IMAGE_SCN_MEM_READ, 0) ||
         memory.copy(image_base + rva_equipment_upgrade_vtable, actual_vtable.data(), sizeof(actual_vtable)).reason)
     {
@@ -1666,6 +1675,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
             return;
         }
 
+#ifdef SC_NATIVE_TESTING
+    }
+#endif
     enum class RouteSiteKind : uint32_t { function_entry = 1, exact_leaf = 2, call_window = 3 };
     struct RouteSite { uint32_t offset; const char* bytes; RouteSiteKind kind; uint32_t owner; size_t length; };
     const RouteSite route_sites[] = {
@@ -1693,6 +1705,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
     bool route_valid = true;
     const auto route_deadline = GetTickCount64() + 10000;
     size_t site_index = 0;
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets())
+#endif
     for (const auto& site : route_sites) {
         native::Target target{};
         target.address = image_base + site.offset;
@@ -1813,6 +1828,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {rva_active_perk, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
     };
     bool upgrade_valid = true;
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets())
+#endif
     for (const auto& site : upgrade_sites) {
         native::Target target{};
         target.address = image_base + site.offset;
