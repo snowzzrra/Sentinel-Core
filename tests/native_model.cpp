@@ -313,8 +313,8 @@ int main() {
     CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
     detail = {}; detail.revision = 1; detail.stage = SC_STAGE_OBSERVATION_BUDGET;
     detail.observation_attempted = detail.timing_valid = 1;
-    detail.observation_started_at_ms = 1000; detail.observation_elapsed_ns = 2000001;
-    detail.observation_budget_ns = 2000000; detail.sample_reason = SC_REASON_BUDGET;
+    detail.observation_started_at_ms = 1000; detail.observation_elapsed_ns = 10000001;
+    detail.observation_budget_ns = 10000000; detail.sample_reason = SC_REASON_BUDGET;
     size = encode_native_request(wire, diagnostic_detail_submit_operation, r);
     CHECK(size == 88 && decode_request(wire, size, &op, &decoded) == WireResult::ok && op == diagnostic_detail_submit_operation);
     const auto old_size = encode_native_response(wire, WireResult::ok, diagnostic_result_operation, host, {}, d);
@@ -322,7 +322,7 @@ int main() {
     CHECK(size > old_size && size <= max_message);
     sc_diagnostic_detail restored{};
     CHECK(decode_native_response(wire, size, code, diagnostic_detail_result_operation, s, roundtrip, d, &restored));
-    CHECK(restored.observation_elapsed_ns == 2000001 && restored.stage == SC_STAGE_OBSERVATION_BUDGET);
+    CHECK(restored.observation_elapsed_ns == 10000001 && restored.stage == SC_STAGE_OBSERVATION_BUDGET);
     CHECK(!decode_native_response(wire, size, code, diagnostic_result_operation, s, roundtrip, d));
     CHECK(!decode_native_response(wire, size - 1, code, diagnostic_detail_result_operation, s, roundtrip, d));
     wire[size] = 0; CHECK(!decode_native_response(wire, size + 1, code, diagnostic_detail_result_operation, s, roundtrip, d));

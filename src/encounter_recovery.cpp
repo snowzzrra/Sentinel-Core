@@ -67,7 +67,8 @@ std::vector<Outcome> Queue::tick(uint64_t stamp, uint64_t now, Drain drain) {
         if (!attempt.started) {
             attempt.context = context;
             for (const auto& manager : context.managers)
-                if (manager.active && !manager.complete && !manager.actors.empty()) attempt.targets.push_back(manager);
+                if (manager.active && !manager.complete && (!manager.actors.empty() ||
+                    (manager.recipe_blocked && !manager.noncombat_wait))) attempt.targets.push_back(manager);
             attempt.started = true;
             if (attempt.targets.empty()) outcome = no_active;
         }

@@ -498,7 +498,7 @@ void post_frame() {
             if (fixture_active) { facts = fixture.observe(measured); pending_after = fixture.pending(); }
             else
 #endif
-            { facts = context::sample(memory, binding, status.callback_sequence, nullptr, 2, &measured);
+            { facts = context::sample(memory, binding, status.callback_sequence, nullptr, context::native_budget_ms, &measured);
               after_read = memory.copy(binding.root + 0xb8, &pending_after, sizeof(pending_after)); }
             detail.observation_started_at_ms = measured.started_at_ms;
             detail.observation_elapsed_ns = measured.elapsed_ns; detail.observation_budget_ns = measured.budget_ns;
@@ -583,7 +583,7 @@ void post_frame() {
         recovery::Context recovery_context;
         const auto campaign = save::session().campaign_run.snapshot();
         if (recovery_gameplay && before == epoch.load(std::memory_order_acquire))
-            recovery_context = expanded::recovery_context(expected_map_address);
+            recovery_context = expanded::recovery_context(expected_map_address, facts.current_map.bytes);
         recovery_context.world = expected_map_address; recovery_context.player = player;
         recovery_context.scope = scope; recovery_context.stamp = before;
         recovery_context.namespace_id = save::session().namespace_id();

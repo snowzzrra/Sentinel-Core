@@ -23,6 +23,7 @@ struct Manager {
     bool active = false, complete = false, protected_fight = false, noncombat_wait = false;
     std::string name, kind, wait;
     std::vector<Actor> actors;
+    bool recipe_blocked = false;
 };
 struct Context {
     sc_native_scope scope{};

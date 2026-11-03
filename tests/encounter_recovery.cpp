@@ -49,6 +49,36 @@ int main() {
     current.managers[0].complete = true; current.managers[1].complete = true;
     queue.observe(current, 300); assert(queue.tick(8, 300, drain) == std::vector<Outcome>{finished});
     assert(!queue.has_pending());
+    for (const bool partial : {false, true}) {
+        Queue empty;
+        auto blocked = context();
+        blocked.managers.resize(1);
+        blocked.managers[0].actors.clear();
+        blocked.managers[0].recipe_blocked = true;
+        blocked.managers[0].wait = partial ? "combat remainder" : "combat spawn";
+        empty.enqueue_console(8, 100); empty.observe(blocked, 100);
+        const auto bodies = killed;
+        assert(empty.tick(8, 100, drain) == std::vector<Outcome>{pending});
+        assert(empty.history().back().targets.size() == 1 && killed == bodies);
+        empty.observe(blocked, 200);
+        assert(empty.tick(8, 200, drain).empty() && !blocked.managers[0].complete);
+        blocked.managers[0].complete = true;
+        empty.observe(blocked, 300);
+        assert(empty.tick(8, 300, drain) == std::vector<Outcome>{finished});
+        for (unsigned refusal = 0; refusal < 5; ++refusal) {
+            Queue refused;
+            blocked.managers[0].complete = false;
+            blocked.managers[0].recipe_blocked = refusal != 0;
+            blocked.managers[0].noncombat_wait = refusal == 1;
+            blocked.managers[0].protected_fight = refusal == 2;
+            blocked.map = refusal == 3 ? "game/sp/e1m4_boss/e1m4_boss" : "game/test";
+            refused.enqueue_console(8, 100); refused.observe(blocked, 100);
+            const auto before = calls;
+            assert(refused.tick(refusal == 4 ? 9 : 8, 100, drain) ==
+                std::vector<Outcome>{refusal < 2 ? no_active : refusal < 4 ? unsupported : changed});
+            assert(calls == before);
+        }
+    }
     const auto done_calls = calls;
     assert(queue.tick(8, 301, drain).empty() && calls == done_calls);
     for (const auto result : {no_active, unsupported, unknown, changed}) {
@@ -75,8 +105,9 @@ int main() {
     assert(protected_actor("boss_intro_ai_superheavy_doomhunter_stage1_1", "idai"));
     assert(protected_actor("renamed", ".?AVidAI2_SamuelBoss@@"));
     assert(!protected_actor("regular_doomhunter", ".?AVidAI2_DoomHunter@@"));
-    for (unsigned path = 0; path < 7; ++path) {
+    for (const bool empty : {false, true}) for (unsigned path = 0; path < 7; ++path) {
         Queue attempt; current = context();
+        if (empty) for (auto& manager : current.managers) { manager.actors.clear(); manager.recipe_blocked = true; }
         attempt.enqueue_console(8, 100); attempt.observe(current, 100); attempt.tick(8, 100, drain);
         switch (path) {
         case 0: current.gameplay = false; break;

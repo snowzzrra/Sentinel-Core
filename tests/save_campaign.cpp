@@ -250,6 +250,10 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
+    if (defect==L"hands_restore") {
+        CHECK(sentinel::special::test_hands_restore());
+        std::puts("PASS embedded hands restore an owned empty weapon and preserve vanilla selection"); return 0;
+    }
     if (defect==L"expanded_stop") {
         CHECK(sentinel::expanded::test_stopped_hooks());
         CHECK(sentinel::expanded::test_hook_faults());

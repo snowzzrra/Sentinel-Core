@@ -9,6 +9,7 @@
 #include "deathlink.h"
 #include "combat_native.h"
 #include "encounter_recovery.h"
+#include "expanded_native.h"
 #include "commands_native.h"
 #include <filesystem>
 #include <windows.h>
@@ -134,6 +135,23 @@ std::string special_use_history(const special::UseHistory& s, uint64_t after = 0
         if (!first) out += ',';
         first = false;
         out += b_event(e);
+    }
+    return out + "]}";
+}
+std::string refill_history(const special::RefillHistory& history) {
+    auto out = "{\"sequence\":" + std::to_string(history.sequence) + ",\"pools\":[";
+    for (uint32_t i = 0; i < history.count; ++i) {
+        if (i) out += ',';
+        const auto& pool = history.pools[(history.sequence - history.count + i) % history.pools.size()];
+        out += "{\"weapon\":" + quoted(pool.weapon) + ",\"declaration\":" + quoted(pool.declaration) +
+            ",\"weapon_decl\":" + std::to_string(pool.weapon_decl) + ",\"list_decl\":" + std::to_string(pool.list_decl) +
+            ",\"list_source\":" + std::to_string(pool.list_source) + ",\"ammo_decl\":" + std::to_string(pool.ammo_decl) +
+            ",\"quantity_before\":" + std::to_string(pool.quantity_before) + ",\"quantity_after\":" + std::to_string(pool.quantity_after) +
+            ",\"capacity_before\":" + std::to_string(pool.capacity_before) + ",\"capacity_after\":" + std::to_string(pool.capacity_after) +
+            ",\"capacity_known\":" + (pool.capacity_before != UINT32_MAX && pool.capacity_after != UINT32_MAX ? "true" : "false") +
+            ",\"writer_result\":" + std::to_string(pool.writer_result) + ",\"step\":" + quoted(pool.step) +
+            ",\"writer_result_known\":" + (pool.writer_result_known ? "true" : "false") +
+            ",\"error\":" + std::to_string(pool.error) + "}";
     }
     return out + "]}";
 }
@@ -310,8 +328,10 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"special_route\":"+b_trace(special::route_diagnostics())+
                 ",\"special_hud\":"+b_trace(special::hud_diagnostics())+
                 ",\"combat\":"+b_trace(combat::diagnostics())+
+                ",\"recipe_first_fault\":"+quoted(expanded::recipe_fault_diagnostic().c_str())+
                 ",\"encounter_recovery_history\":"+recovery_history(core)+
                 ",\"special_use_history\":"+use_json+
+                ",\"ammo_refill_history\":"+refill_history(special::refill_history())+
                 ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
             if (facts != last) {
                 const auto& wide_key = prelaunch::diagnostic_key();

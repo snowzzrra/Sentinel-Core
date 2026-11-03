@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "context_observer.h"
 #include "commands.h"
 #include "combat_presentation.h"
 #include "combat.h"
@@ -1049,7 +1050,7 @@ template<class C> bool detail_values(C& c, sc_diagnostic_detail& d, const sc_dia
         (d.pending_after == 3) != (d.pending_after_reason != 0)) return false;
     if (!d.observation_attempted && (d.observation_started_at_ms || d.observation_elapsed_ns ||
         d.observation_budget_ns || d.timing_valid || d.sample_reason || d.state_validity || d.map_validity)) return false;
-    if (d.observation_attempted && (!d.observation_started_at_ms || d.observation_budget_ns != 2000000)) return false;
+    if (d.observation_attempted && (!d.observation_started_at_ms || d.observation_budget_ns != context::native_budget_ms * 1000000ULL)) return false;
     if (d.observation_accepted && (!d.timing_valid || d.sample_reason ||
         d.state_validity != SC_OBSERVATION_OBSERVED || d.map_validity != SC_OBSERVATION_OBSERVED)) return false;
     if (result.state == SC_DIAGNOSTIC_CLAIMED && (d.stage || d.observation_attempted)) return false;
