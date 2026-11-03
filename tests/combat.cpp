@@ -48,6 +48,28 @@ int main(int argc, char** argv) {
     auto model = std::make_unique<Model>();
     const auto ctx = context();
     {
+        auto recovery = std::make_unique<Model>();
+        recovery->transition(1); recovery->context(ctx);
+        recovery->registered(ctx.world, 0x30000, 3, 0x123456);
+        check(!recovery->suppress(2, ctx.world, 0x30000, 3, 0x123456), "recovery suppression lost registration bookkeeping or kill credit isolation");
+        check(!recovery->suppress(1, ctx.world, 0x30000, 3, 0x123457), "recovery suppression lost registration bookkeeping or kill credit isolation");
+        auto captured = recovery->capture(ctx.world, 0x30000, 3, 0x123456, 101, ctx.stamp, 17);
+        check(recovery->suppress(1, ctx.world, 0x30000, 3, 0x123456), "recovery suppression lost registration bookkeeping or kill credit isolation");
+        check(recovery->publish(captured, death(ctx), 102, ctx.stamp, 18) == Publication::ignored, "recovery suppression lost registration bookkeeping or kill credit isolation");
+        check(!recovery->confirmed_dead(ctx.world, 0x30000, 3, 0x123456), "recovery suppression lost registration bookkeeping or kill credit isolation");
+        check(recovery->publish(captured, death(ctx), 102, ctx.stamp, 17) == Publication::ignored, "recovery suppression lost registration bookkeeping or kill credit isolation");
+        check(recovery->confirmed_dead(ctx.world, 0x30000, 3, 0x123456), "recovery suppression lost registration bookkeeping or kill credit isolation");
+        check(recovery->publish(captured, death(ctx), 102, ctx.stamp, 17) == Publication::duplicate, "recovery suppression lost registration bookkeeping or kill credit isolation");
+        recovery->release(captured);
+        sc_combat_snapshot snapshot{}; recovery->snapshot(query_for(ctx), snapshot);
+        check(snapshot.qualified_kills == 0 && snapshot.observation_gaps == 0, "recovery suppression lost registration bookkeeping or kill credit isolation");
+        recovery->registered(ctx.world, 0x30000, 3, 0x123456);
+        captured = recovery->capture(ctx.world, 0x30000, 3, 0x123456, 103, ctx.stamp, 17);
+        check(recovery->publish(captured, death(ctx), 103, ctx.stamp, 17) == Publication::published, "recovery suppression lost registration bookkeeping or kill credit isolation");
+        recovery->release(captured);
+        recovery->snapshot(query_for(ctx), snapshot); check(snapshot.qualified_kills == 1, "recovery suppression lost registration bookkeeping or kill credit isolation");
+    }
+    {
         auto worker = std::make_unique<Model>();
         worker->transition(1); worker->context(ctx);
         worker->registered(ctx.world, 0x30000, 3, 0x123456);

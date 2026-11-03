@@ -74,6 +74,20 @@ struct UseHistory {
     std::array<save::BEvent, 32> events{};
 };
 UseHistory use_history();
+struct RefillPool {
+    char weapon[192]{}, declaration[192]{};
+    const char* step = "unobserved";
+    uintptr_t weapon_decl = 0, list_decl = 0, ammo_decl = 0, writer_result = 0;
+    uint32_t list_source = 0, quantity_before = UINT32_MAX, quantity_after = UINT32_MAX;
+    uint32_t capacity_before = UINT32_MAX, capacity_after = UINT32_MAX, error = 0;
+    bool writer_result_known = false;
+};
+struct RefillHistory {
+    uint64_t sequence = 0;
+    uint32_t count = 0;
+    std::array<RefillPool, 32> pools{};
+};
+RefillHistory refill_history();
 // cumulative owner state and selection policy, independent of native presence/resources
 struct HudOwnerSnapshot {
     uint64_t revision = 0, request_revision = 0;
@@ -93,6 +107,7 @@ bool present_challenge_completion(uintptr_t widget,const char* name, const char*
 void reset_session(const char* namespace_id);
 
 #ifdef SC_NATIVE_TESTING
+bool test_hands_restore();
 bool test_physical_completion_owner();
 bool test_hud_source();
 bool test_hud_owner_path();

@@ -9,8 +9,12 @@
 namespace {
 unsigned enable_calls=0,fail_enable=0;
 MH_STATUS WINAPI enable(void* site) {
-    if (++enable_calls==fail_enable) return MH_ERROR_MEMORY_PROTECT;
-    return MH_EnableHook(site);
+    if (++enable_calls==fail_enable) {
+        // batch thread suspension; earlier hooks are active when cleanup starts.
+        CHECK(MH_ApplyQueued()==MH_OK);
+        return MH_ERROR_MEMORY_PROTECT;
+    }
+    return MH_QueueEnableHook(site);
 }
 void detour() {}
 }

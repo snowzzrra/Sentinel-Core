@@ -71,6 +71,14 @@ void Model::registered(uintptr_t world, uintptr_t object, uint32_t slot, uint32_
     if (!world || !object || slot >= registrations_.size() || spawn_id == 0x1fffffeu) return;
     registrations_[slot] = {world, object, spawn_id, ++serial_};
 }
+bool Model::suppress(uint64_t generation, uintptr_t world, uintptr_t object, uint32_t slot, uint32_t spawn_id) noexcept {
+    if (generation != generation_ || slot >= registrations_.size()) return false;
+    auto& entry = registrations_[slot];
+    if (!entry.serial || entry.world != world || entry.object != object || entry.spawn_id != spawn_id || entry.emitted) return false;
+    entry.suppressed = true;
+    if (entry.claim_index < claims_.size()) claims_[entry.claim_index].suppressed = true;
+    return true;
+}
 Capture Model::capture(uintptr_t world, uintptr_t object, uint32_t slot, uint32_t spawn_id,
                        uint64_t now, uint64_t stamp, uint32_t thread) noexcept {
     if (!ready(now) || world != context_.world || stamp != context_.stamp ||
@@ -83,7 +91,7 @@ Capture Model::capture(uintptr_t world, uintptr_t object, uint32_t slot, uint32_
         for (claim_index = 0; claim_index < claims_.size(); ++claim_index)
             if (!claims_[claim_index].references) break;
         if (claim_index == claims_.size()) return {context_, 0, spawn_id, UINT32_MAX, thread};
-        claims_[claim_index] = {entry.serial, slot, 0, entry.emitted};
+        claims_[claim_index] = {entry.serial, slot, 0, entry.emitted, entry.suppressed};
         entry.claim_index = claim_index;
     }
     ++claims_[claim_index].references;
@@ -119,6 +127,7 @@ Publication Model::publish(const Capture& saved, const DeathRecord& record, uint
     claim.emitted = true;
     auto& entry = registrations_[claim.slot];
     if (entry.serial == claim.serial) entry.emitted = true;
+    if (claim.suppressed) return Publication::ignored;
     if (current_counter_ >= counter_count_ || counters_[current_counter_].kills == UINT64_MAX) {
         if (counter_gaps_ != UINT64_MAX) ++counter_gaps_;
         return Publication::ignored;

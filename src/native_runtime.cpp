@@ -519,7 +519,7 @@ void post_frame() {
             if (fixture_active) { facts = fixture.observe(measured); pending_after = fixture.pending(); }
             else
 #endif
-            { facts = context::sample(memory, binding, status.callback_sequence, nullptr, 2, &measured);
+            { facts = context::sample(memory, binding, status.callback_sequence, nullptr, context::native_budget_ms, &measured);
               after_read = memory.copy(binding.root + 0xb8, &pending_after, sizeof(pending_after)); }
             detail.observation_started_at_ms = measured.started_at_ms;
             detail.observation_elapsed_ns = measured.elapsed_ns; detail.observation_budget_ns = measured.budget_ns;
@@ -571,8 +571,19 @@ void post_frame() {
     cost.mark(2);
     if (!why) reconcile_automap(expected_map_address, facts.current_map.bytes, scope.lifecycle_generation);
     cost.mark(3);
+    const bool recovery_pending = recovery::queue().has_pending();
+    bool recovery_gameplay = false;
+    if (recovery_pending) {
+        const auto recovery_campaign = save::session().campaign_run.snapshot();
+        recovery_gameplay = !why && player && gameplay_admitted_locked_scope() &&
+        ap_controls::recovery_input_allowed() && deathlink::player_alive(player) && expanded::recovery_player_allowed(player) &&
+        (std::strncmp(facts.current_map.bytes, "game/sp/", 8) == 0 || std::strncmp(facts.current_map.bytes, "game/dlc/", 9) == 0 ||
+         std::strncmp(facts.current_map.bytes, "game/dlc2/", 10) == 0) &&
+        recovery_campaign.map_active && !recovery_campaign.slot.empty();
+    }
     combat::Context combat_context{};
-    if (!why && player && gameplay_admitted()) {
+    if (!why && player && (gameplay_admitted() || recovery_gameplay)) {
+        commands::checkpoint_player_position(player, scope.lifecycle_generation);
         combat_context.generation = scope.lifecycle_generation;
         combat_context.stamp = before;
         combat_context.sampled_at_ms = GetTickCount64();
@@ -589,7 +600,22 @@ void post_frame() {
     if (!why && player) repair_crystal_first_contact(expected_map_address,facts.current_map.bytes,player);
     if (!why && player) arsenal::tick_masteries(scope.lifecycle_generation, player);
     cost.mark(5);
-    commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); });
+    if (recovery_pending) {
+        recovery::Context recovery_context;
+        const auto campaign = save::session().campaign_run.snapshot();
+        if (recovery_gameplay && before == epoch.load(std::memory_order_acquire))
+            recovery_context = expanded::recovery_context(expected_map_address, facts.current_map.bytes);
+        recovery_context.world = expected_map_address; recovery_context.player = player;
+        recovery_context.scope = scope; recovery_context.stamp = before;
+        recovery_context.namespace_id = save::session().namespace_id();
+        recovery_context.save = save::session().native_root() + "/" + campaign.slot;
+        recovery_context.map = facts.current_map.bytes;
+        for (auto& manager : recovery_context.managers)
+            manager.protected_fight = recovery::protected_manager(recovery_context.map, manager.name);
+        recovery_context.gameplay = recovery_gameplay && before == epoch.load(std::memory_order_acquire);
+        recovery::queue().observe(std::move(recovery_context), GetTickCount64());
+    }
+    commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); }, recovery_pending);
     if (!slot) return;
     const bool process_scoped = slot->is<sc_command_request>() && commands::process_scoped(slot->get<sc_command_request>());
     if (process_scoped) why = accepting.load(std::memory_order_acquire) ? fault.load(std::memory_order_acquire) : SC_NATIVE_STOPPED;

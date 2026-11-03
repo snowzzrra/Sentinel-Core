@@ -112,11 +112,11 @@ sc_context_snapshot observe(context::Evidence& measured) {
     engine::Binding b{}; b.image.base = 0x140000000ULL; b.root = 0x1445ea6f0ULL;
     b.metadata.profile = SC_PROFILE_STEAM_20260818;
     static thread_local int64_t ticks = 0, delta = 0;
-    ticks = 0; delta = mode == 3 ? 2000001 : (mode == 4 ? 15000000 : 100000);
+    ticks = 0; delta = mode == 3 ? 10000001 : (mode == 4 ? 15000000 : (mode == 9 ? 4600000 : 100000));
     const context::Clock clock{
         [](int64_t& out) { out = ticks; ticks += delta; return true; },
         []() -> uint64_t { return GetTickCount64(); }, 1000000000};
-    auto c = context::sample(memory, b, 1, nullptr, 2, &measured, mode ? &clock : nullptr);
+    auto c = context::sample(memory, b, 1, nullptr, context::native_budget_ms, &measured, mode ? &clock : nullptr);
     if (mode == 8) pending.store(true);
     return c;
 }
@@ -604,7 +604,7 @@ int wmain(int argc, wchar_t** argv) {
         park(); transition(1); ready();
         recurse.store(true); until([] { return native::inspect().reason == SC_NATIVE_REENTRANT; });
     } else if (std::wcscmp(argv[2], L"wrong-thread") == 0) {
-        for (const unsigned mode : {1u, 3u, 4u, 5u, 6u, 8u}) {
+        for (const unsigned mode : {1u, 3u, 9u, 4u, 5u, 6u, 8u}) {
             park(); observation_case.store(mode);
             const auto req = request(300 + mode);
             const auto admitted = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_submit_operation, req);
@@ -612,9 +612,9 @@ int wmain(int argc, wchar_t** argv) {
             resume(); until([&] { return native::result(req, false).state >= SC_DIAGNOSTIC_EXECUTED; });
             const auto out = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, req);
             CHECK(out.result == ProbeResult::ok && out.detail.revision == 1 && out.detail.observation_attempted);
-            CHECK(out.detail.timing_valid && out.detail.observation_budget_ns == 2000000);
-            CHECK(out.detail.observation_elapsed_ns == (mode == 3 ? 2000001u : (mode == 4 ? 15000000u : 100000u)));
-            if (mode == 1) CHECK(out.diagnostic.state == SC_DIAGNOSTIC_EXECUTED && out.detail.observation_accepted);
+            CHECK(out.detail.timing_valid && out.detail.observation_budget_ns == 10000000);
+            CHECK(out.detail.observation_elapsed_ns == (mode == 3 ? 10000001u : (mode == 4 ? 15000000u : (mode == 9 ? 4600000u : 100000u))));
+            if (mode == 1 || mode == 9) CHECK(out.diagnostic.state == SC_DIAGNOSTIC_EXECUTED && out.detail.observation_accepted);
             else {
                 CHECK(out.diagnostic.state == SC_DIAGNOSTIC_REJECTED && !out.diagnostic.current_map.length && !out.diagnostic.observed_at_ms);
                 if (mode == 3 || mode == 4) CHECK(out.diagnostic.reason == SC_NATIVE_BUDGET && out.detail.stage == SC_STAGE_OBSERVATION_BUDGET);
@@ -623,7 +623,7 @@ int wmain(int argc, wchar_t** argv) {
                 if (mode == 8) CHECK(out.detail.stage == SC_STAGE_PENDING_AFTER && out.detail.pending_before == 1 && out.detail.pending_after == 2);
             }
             Child captured(probe, retrieve_args(req, false));
-            CHECK(captured.complete(mode == 1 ? 0 : 8).find("\"observation_attempted\":true") != std::string::npos);
+            CHECK(captured.complete(mode == 1 || mode == 9 ? 0 : 8).find("\"observation_attempted\":true") != std::string::npos);
             const auto again = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, req);
             CHECK(std::memcmp(&out.detail, &again.detail, sizeof(out.detail)) == 0);
             observation_case.store(0); pending.store(false); ready();

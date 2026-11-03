@@ -256,6 +256,10 @@ int wmain(int argc,wchar_t** argv) {
     const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
     const std::wstring defect=argc==5?argv[4]:L"";
     run_hook_case(defect);
+    if (defect==L"hands_restore") {
+        CHECK(sentinel::special::test_hands_restore());
+        std::puts("PASS embedded hands restore an owned empty weapon and preserve vanilla selection"); return 0;
+    }
     if (defect==L"expanded_stop") {
         CHECK(sentinel::expanded::test_stopped_hooks());
         CHECK(sentinel::expanded::test_hook_faults());
@@ -276,6 +280,10 @@ int wmain(int argc,wchar_t** argv) {
     if (defect==L"quantity_inputs") {
         CHECK(sentinel::expanded::test_quantity_inputs());
         std::puts("PASS weighted native remaining populations preserve partial thresholds and pause conditions"); return 0;
+    }
+    if (defect==L"encounter_recovery") {
+        CHECK(sentinel::expanded::test_recovery_inputs());
+        std::puts("PASS encounter ownership and producer cancellation survive checkpoint capture"); return 0;
     }
     if (defect==L"recipe_inputs") {
         CHECK(sentinel::expanded::test_recipe_transport());

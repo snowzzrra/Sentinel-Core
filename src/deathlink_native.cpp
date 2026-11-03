@@ -197,6 +197,11 @@ bool matches(engine::Memory& memory, const engine::Image& image, const native::T
 Calls calls{nullptr, player, apply_lethal, nullptr, force_death};
 
 bool available() { return ready.load(std::memory_order_acquire); }
+bool player_alive(uintptr_t p) {
+    if (!p || !available()) return false;
+    __try { return reinterpret_cast<char(*)(uintptr_t)>(image_base + rva_player_is_dead)(p) == 0; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 
 bool admitted(const char* id) {
 #ifdef SC_NATIVE_TESTING

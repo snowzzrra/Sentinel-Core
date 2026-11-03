@@ -8,6 +8,9 @@
 #include "weapon_points.h"
 #include "deathlink.h"
 #include "combat_native.h"
+#include "encounter_recovery.h"
+#include "expanded_native.h"
+#include "commands_native.h"
 #include <filesystem>
 #include <windows.h>
 #include <string>
@@ -78,6 +81,29 @@ std::string profile_step(const save::ProfileStep& s) {
         ",\"read_requested\":" + std::to_string(s.read.requested) + ",\"read_offset\":" + std::to_string(s.read.offset) +
         ",\"read_size\":" + std::to_string(s.read.size) + "}";
 }
+std::string recovery_history(const Snapshot& core) {
+    std::string out = "[";
+    for (const auto& attempt : recovery::queue().history()) {
+        if (out.size() > 1) out += ",";
+        const auto& c = attempt.context;
+        out += "{\"request_id\":\"" + std::to_string(attempt.id) + "\",\"origin\":\"console\",\"build\":" + quoted(core.core.build_id) +
+            ",\"namespace\":" + quoted(c.namespace_id.c_str()) + ",\"save\":" + quoted(c.save.c_str()) +
+            ",\"map\":" + quoted(c.map.c_str()) + ",\"generation\":\"" + std::to_string(c.scope.lifecycle_generation) +
+            "\",\"stamp\":\"" + std::to_string(attempt.stamp) + "\",\"managers\":[";
+        bool first = true;
+        for (const auto& manager : attempt.targets) {
+            if (!first) out += ',';
+            first = false;
+            out += "{\"name\":" + quoted(manager.name.c_str()) + ",\"kind\":" + quoted(manager.kind.c_str()) + "}";
+        }
+        out += "],\"producers_stopped\":" + std::to_string(attempt.producers_stopped) +
+            ",\"actors_killed\":" + std::to_string(attempt.actors_killed) +
+            ",\"kills_suppressed\":" + std::to_string(attempt.kills_suppressed) +
+            ",\"elapsed_ms\":" + std::to_string(attempt.elapsed) + ",\"wait\":" + quoted(attempt.wait.c_str()) +
+            ",\"result\":" + quoted(recovery::message(attempt.outcome)) + "}";
+    }
+    return out + "]";
+}
 std::string b_event(const save::BEvent& e) {
     if(!e.sequence) return "null";
     auto out="{\"sequence\":"+std::to_string(e.sequence)+",\"at_ms\":"+std::to_string(e.at_ms)+
@@ -109,6 +135,23 @@ std::string special_use_history(const special::UseHistory& s, uint64_t after = 0
         if (!first) out += ',';
         first = false;
         out += b_event(e);
+    }
+    return out + "]}";
+}
+std::string refill_history(const special::RefillHistory& history) {
+    auto out = "{\"sequence\":" + std::to_string(history.sequence) + ",\"pools\":[";
+    for (uint32_t i = 0; i < history.count; ++i) {
+        if (i) out += ',';
+        const auto& pool = history.pools[(history.sequence - history.count + i) % history.pools.size()];
+        out += "{\"weapon\":" + quoted(pool.weapon) + ",\"declaration\":" + quoted(pool.declaration) +
+            ",\"weapon_decl\":" + std::to_string(pool.weapon_decl) + ",\"list_decl\":" + std::to_string(pool.list_decl) +
+            ",\"list_source\":" + std::to_string(pool.list_source) + ",\"ammo_decl\":" + std::to_string(pool.ammo_decl) +
+            ",\"quantity_before\":" + std::to_string(pool.quantity_before) + ",\"quantity_after\":" + std::to_string(pool.quantity_after) +
+            ",\"capacity_before\":" + std::to_string(pool.capacity_before) + ",\"capacity_after\":" + std::to_string(pool.capacity_after) +
+            ",\"capacity_known\":" + (pool.capacity_before != UINT32_MAX && pool.capacity_after != UINT32_MAX ? "true" : "false") +
+            ",\"writer_result\":" + std::to_string(pool.writer_result) + ",\"step\":" + quoted(pool.step) +
+            ",\"writer_result_known\":" + (pool.writer_result_known ? "true" : "false") +
+            ",\"error\":" + std::to_string(pool.error) + "}";
     }
     return out + "]}";
 }
@@ -256,7 +299,13 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"checkpoint_state_read\":"+flag(campaign.checkpoint_boundary.state_read)+
                 ",\"checkpoint_map_read\":"+flag(campaign.checkpoint_boundary.map_read)+
                 ",\"checkpoint_difficulty_read\":"+flag(campaign.checkpoint_boundary.difficulty_read)+"}";
-            const auto facts = "\"engine_reason\":" + std::to_string(engine_reason) + ",\"installation\":{\"phase\":" + std::to_string(install.phase) +
+            std::string runtime_history = "[";
+            for (const auto& line : commands::diagnostic_history()) {
+                if (runtime_history.size() > 1) runtime_history += ',';
+                runtime_history += quoted(line.c_str());
+            }
+            runtime_history += ']';
+            const auto facts = "\"runtime_diagnostics\":" + runtime_history + ",\"engine_reason\":" + std::to_string(engine_reason) + ",\"installation\":{\"phase\":" + std::to_string(install.phase) +
                 ",\"sequence\":" + std::to_string(install.sequence) + ",\"startup_observation\":" + std::to_string(install.startup_observation) +
                 ",\"last_completed_stage\":" + std::to_string(install.last_completed_stage) + ",\"validated\":" + std::to_string(install.validated) +
                 ",\"created\":" + std::to_string(install.created) + ",\"enabled\":" + std::to_string(install.enabled) +
@@ -279,7 +328,10 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
                 ",\"special_route\":"+b_trace(special::route_diagnostics())+
                 ",\"special_hud\":"+b_trace(special::hud_diagnostics())+
                 ",\"combat\":"+b_trace(combat::diagnostics())+
+                ",\"recipe_first_fault\":"+quoted(expanded::recipe_fault_diagnostic().c_str())+
+                ",\"encounter_recovery_history\":"+recovery_history(core)+
                 ",\"special_use_history\":"+use_json+
+                ",\"ammo_refill_history\":"+refill_history(special::refill_history())+
                 ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
             if (facts != last) {
                 const auto& wide_key = prelaunch::diagnostic_key();

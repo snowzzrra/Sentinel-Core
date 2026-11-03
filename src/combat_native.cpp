@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstring>
 #ifdef SC_NATIVE_TESTING
+#include "expanded_native.h"
 #include <memory>
 #include <thread>
 #include <vector>
@@ -200,6 +201,15 @@ bool confirmed_dead(uintptr_t world, uintptr_t actor) {
     ReleaseSRWLockShared(&lock);
     return dead;
 }
+bool suppress(uint64_t generation, uintptr_t world, uintptr_t actor) {
+    if (!enabled.load(std::memory_order_acquire)) return false;
+    uint32_t slot = 0, spawn_id = 0;
+    if (!object_identity(world, actor, slot, spawn_id)) return false;
+    AcquireSRWLockExclusive(&lock);
+    const auto marked = model.suppress(generation, world, actor, slot, spawn_id);
+    ReleaseSRWLockExclusive(&lock);
+    return marked;
+}
 void stop() {
     enabled.store(false, std::memory_order_release);
     install_reason.store(SC_NATIVE_STOPPED);
@@ -227,6 +237,11 @@ void test_dispatch(uintptr_t compiler, uintptr_t, uintptr_t, uintptr_t, int32_t,
                    uintptr_t, const void*, uint8_t, float) {
     with_combat_reader([&] { notify_detour(compiler + 0x18, test_death_record.data()); });
 }
+void test_recovery_dispatch(uintptr_t compiler, uintptr_t inflictor, uintptr_t attacker, uintptr_t victim,
+                            int32_t group, int32_t attack_type, uintptr_t declaration, uintptr_t tag, float amount) {
+    dispatch_detour(compiler, inflictor, attacker, victim, group, attack_type, declaration,
+        reinterpret_cast<const void*>(tag), 0, amount);
+}
 }
 bool test_observation_contention() {
     const auto saved_model = std::make_unique<Model>(model);
@@ -236,9 +251,9 @@ bool test_observation_contention() {
     const auto saved_register = original_register;
     const auto saved_dispatch = original_dispatch;
     const auto saved_notify = original_notify;
-    std::vector<uint8_t> world(0x21b10);
+    std::vector<uint8_t> world(0x126680);
     std::array<uint8_t, 0x58> root{};
-    std::array<uint8_t, 0x18> victim{};
+    std::array<uint8_t, 0x16800> victim{};
     const auto world_address = reinterpret_cast<uintptr_t>(world.data());
     const auto victim_address = reinterpret_cast<uintptr_t>(victim.data());
     const uint32_t slot = 1, spawn_id = 7;
@@ -287,6 +302,9 @@ bool test_observation_contention() {
         result.qualified_kills == before + 1 && result.observation_gaps == saved_gaps;
     register_detour(world_address, victim_address, slot, spawn_id, 0, 0);
     const auto reused = !confirmed_dead(world_address, victim_address);
+    const auto recovery_before = inspect(query).qualified_kills;
+    const auto recovery_passed = expanded::test_recovery_kill(world_address, victim_address, test_recovery_dispatch) &&
+        confirmed_dead(world_address, victim_address) && inspect(query).qualified_kills == recovery_before;
     model = *saved_model;
     root_address = saved_root;
     enabled.store(saved_enabled);
@@ -294,7 +312,7 @@ bool test_observation_contention() {
     original_register = saved_register;
     original_dispatch = saved_dispatch;
     original_notify = saved_notify;
-    return passed && reused;
+    return passed && reused && recovery_passed;
 }
 #endif
 }

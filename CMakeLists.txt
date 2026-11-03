@@ -51,7 +51,7 @@ endif()
 configure_file(bootstrap/msimg32.def.in msimg32.def COPYONLY)
 configure_file(include/sentinel_version.h.in generated/sentinel_version.h @ONLY)
 include_directories("${CMAKE_BINARY_DIR}/generated")
-set(identity_inputs CMakeLists.txt version.json include/sentinel_version.h.in resources/version.rc.in include/sentinel_core.h include/sentinel_bootstrap.h
+set(identity_inputs src/encounter_recovery.h src/encounter_recovery.cpp CMakeLists.txt version.json include/sentinel_version.h.in resources/version.rc.in include/sentinel_core.h include/sentinel_bootstrap.h
   include/sentinel_engine.h src/engine_observer.h src/engine_observer.cpp
   include/sentinel_context.h src/context_observer.h src/context_observer.cpp
   include/sentinel_native.h src/native_model.h src/native_model.cpp
@@ -148,7 +148,7 @@ target_compile_options(sentinel_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
 add_library(sentinel_fault_minhook STATIC tests/fault_minhook.c)
 target_compile_options(sentinel_fault_minhook PRIVATE /wd4201 /wd4244 /wd4310 /wd4701)
 target_link_libraries(sentinel_fault_minhook PUBLIC sentinel_minhook)
-add_library(sentinel_native_model STATIC src/native_model.cpp src/combat.cpp src/expanded.cpp src/enemy_recipe_state.cpp src/weapon_points.cpp src/campaign_menu.cpp src/inventory.cpp src/arsenal.cpp src/runes.cpp src/special.cpp src/deathlink.cpp)
+add_library(sentinel_native_model STATIC src/encounter_recovery.cpp src/native_model.cpp src/combat.cpp src/expanded.cpp src/enemy_recipe_state.cpp src/weapon_points.cpp src/campaign_menu.cpp src/inventory.cpp src/arsenal.cpp src/runes.cpp src/special.cpp src/deathlink.cpp)
 target_link_libraries(sentinel_native_model PUBLIC sentinel_protocol)
 target_include_directories(sentinel_native_model PUBLIC include src)
 add_executable(sentinel_combat_tests tests/combat.cpp)
@@ -178,7 +178,7 @@ target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)
 target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_fault_storage sentinel_native_model sentinel_fault_minhook sentinel_save_session sentinel_protocol)
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures")
-foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write limit_inputs quantity_inputs recipe_inputs recipe_checkpoint combat_contention expanded_stop hook_cleanup)
+foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write limit_inputs quantity_inputs recipe_inputs recipe_checkpoint combat_contention expanded_stop hook_cleanup encounter_recovery hands_restore)
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/campaign-fixtures/${case}")
   file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/campaign-fixtures/${case}" campaign_fixture)
   add_test(NAME native_campaign_${case}_contract COMMAND sentinel_campaign_tests create "${campaign_fixture}" 1 ${case})
@@ -313,6 +313,11 @@ target_compile_options(sentinel_weapon_points_tests PRIVATE /UNDEBUG)
 add_test(NAME weapon_points_contract COMMAND sentinel_weapon_points_tests)
 set_tests_properties(core_lifecycle proxy_forwarding_lifecycle proxy_normal_exit static_import_drawing missing_dll missing_core_dependency
   PROPERTIES TIMEOUT 15)
+
+add_executable(sentinel_encounter_recovery_tests tests/encounter_recovery.cpp)
+target_link_libraries(sentinel_encounter_recovery_tests PRIVATE sentinel_native_model)
+target_compile_options(sentinel_encounter_recovery_tests PRIVATE /UNDEBUG)
+add_test(NAME encounter_recovery_contract COMMAND sentinel_encounter_recovery_tests)
 
 foreach(target sentinel_campaign_tests sentinel_native_host sentinel_save_storage_tests)
   target_sources(${target} PRIVATE tests/fault_injection.cpp)

@@ -43,6 +43,7 @@ void tick_native();
 void expire_pending(uint64_t now);
 void install(const engine::Binding&, HANDLE stop);
 bool available();
+bool player_alive(uintptr_t player);
 bool admitted(const char* namespace_id);
 void execute_native(const sc_deathlink_request&, sc_deathlink_result&);
 void reset_session(const char* namespace_id);

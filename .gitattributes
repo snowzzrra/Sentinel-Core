@@ -1,0 +1,4 @@
+/protocol/schema.json text eol=lf
+/include/sentinel_protocol_generated.h text eol=lf
+/src/protocol_generated.cpp text eol=lf
+/protocol/generated/sentinel_protocol.py text eol=lf

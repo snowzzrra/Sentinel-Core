@@ -24,7 +24,7 @@ bool process_scoped(const sc_command_request& request) {
 bool compatible_product(std::string_view version) {
     const auto rc = version.find("-rc-");
     const auto base = version.substr(0, rc);
-    if (base.substr(0, 4) != "1.0." && base.substr(0, 4) != "1.1.") return false;
+    if (base.substr(0, 4) != "1.0." && base.substr(0, 4) != "1.1." && base.substr(0, 4) != "2.0.") return false;
     const auto patch = base.substr(4);
     unsigned number = 0;
     const auto parsed = std::from_chars(patch.data(), patch.data() + patch.size(), number);

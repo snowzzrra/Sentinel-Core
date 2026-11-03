@@ -3,6 +3,7 @@
 #include "engine_observer.h"
 
 namespace sentinel::context {
+constexpr uint32_t native_budget_ms = 10;
 // Uptime timestamps record absolute samples; elapsed acceptance uses QPC.
 // Explicit clock injection is an internal test seam, never an IPC control.
 struct Clock {

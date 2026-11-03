@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import unittest
 
-EXE = Path(__file__).resolve().parents[1] / 'build/bin/sentinel_campaign_tests.exe'
+EXE = Path(__file__).resolve().parents[1] / '.tmp/build/bin/sentinel_campaign_tests.exe'
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows production adapters')
