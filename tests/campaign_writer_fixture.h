@@ -240,12 +240,47 @@ SaveFuture** write(uintptr_t,SaveFuture** out,uintptr_t identity,SaveReference* 
     CHECK(identity==0x7788); ++model->creates; auto* f=new Future; f->vtable=&write_table; f->data=*source; source->control=0; *out=f; return out;
 }
 SaveReference* factory(uintptr_t,SaveReference* out,uint32_t,uintptr_t) {
-    ReadbackCalls readback{{allocate,construct,destroy_data,{nullptr,retain,release,name,nullptr,image},read},stream};
+    ReadbackCalls readback{{allocate,construct,destroy_data,{nullptr,retain,release,name,nullptr,image},read},stream,steam_owner};
     WriteCalls calls{write,name,release,nullptr,image,nullptr,&readback};
     if (model->queued) campaign_write_provider(image+(model->foreign?0x14897c4:0x14897c3),memory,
         reinterpret_cast<uintptr_t>(&model->remote),&model->future,0x7788,&model->source_ref,calls);
     else write_scoped(session(),memory,reinterpret_cast<uintptr_t>(&model->remote),&model->future,0x7788,&model->source_ref,calls);
     return out;
+}
+bool poll_save_archive(Model& m, const std::wstring& defect, const CampaignSnapshot& before, SaveResult& result,
+                       std::array<unsigned char, 32>& native_task) {
+    if (defect == L"menu_pending_save") {
+        menu_transition();
+        CHECK(session().native_io() && !session().campaign_run.snapshot().map_active);
+    }
+    const bool archive_failure = defect == L"archive_payload_failure" || defect == L"archive_manifest_failure";
+    if (archive_failure)
+        sentinel::testing::file_fault(defect == L"archive_payload_failure" ? sentinel::testing::FileFault::short_write
+                                                                           : sentinel::testing::FileFault::flush,
+                                      defect == L"archive_payload_failure" ? L"\\payload-0.bin"
+                                                                           : L"\\transport.manifest");
+    m.future->vtable->poll(m.future, &result, native_task.data());
+    if (archive_failure) {
+        CHECK(sentinel::testing::file_fault_hits() == 1);
+        sentinel::testing::file_fault(sentinel::testing::FileFault::none, L"");
+        const auto completed = session().campaign_run.snapshot();
+        const auto archive = session().native_writes.backup(m.operation);
+        CHECK(archive);
+        CHECK(archive->progress().state == BackupState::failed && !archive->progress().storage_complete);
+        CHECK(!completed.archive_complete && !completed.continuity_persisted &&
+              completed.checkpoint == before.checkpoint);
+        CHECK(!session().accepts_requests() && completed.reason == "checkpoint_archive_incomplete");
+        m.future->vtable->destroy(m.future, 1);
+        m.future = nullptr;
+        return false;
+    }
+    if (defect == L"delta_retained_hash") {
+        CHECK(!result.state && result.outcome && !session().campaign_run.snapshot().readback_verified);
+        m.future->vtable->destroy(m.future, 1);
+        m.future = nullptr;
+        return false;
+    }
+    return true;
 }
 void save(Model& m,const std::wstring& defect,const std::shared_ptr<BackupJob>& backup = {}) {
     const auto before=session().campaign_run.snapshot();
@@ -274,20 +309,16 @@ void save(Model& m,const std::wstring& defect,const std::shared_ptr<BackupJob>& 
         CHECK(result.state==-1);
         CHECK(waiting.operation==started.operation && waiting.operation==m.operation && waiting.checkpoint==before.checkpoint);
         CHECK(!waiting.continuity_persisted && waiting.native_saved && !waiting.readback_verified);
-        if (defect==L"menu_pending_save") {
-            menu_transition();
-            CHECK(session().native_io() && !session().campaign_run.snapshot().map_active);
-        }
-        m.future->vtable->poll(m.future,&result,native_task.data());
-        if (defect==L"delta_retained_hash") {
-            CHECK(!result.state && result.outcome && !session().campaign_run.snapshot().readback_verified);
-            m.future->vtable->destroy(m.future,1); m.future=nullptr; return;
-        }
+        if (!poll_save_archive(m, defect, before, result, native_task)) return;
         CHECK(!result.state && !result.outcome && result.value==1);
         const auto completed=session().campaign_run.snapshot();
         CHECK(completed.operation==m.operation && completed.readback_verified);
         CHECK(completed.checkpoint==before.checkpoint+(completed.continuity_persisted?1u:0u));
-        CHECK(session().native_writes.backup(m.operation)==backup);
+        const auto archive=session().native_writes.backup(m.operation);
+        CHECK(archive && (!backup || archive==backup));
+        const auto progress=archive->progress();
+        CHECK(progress.state==BackupState::complete && progress.storage_complete);
+        std::printf("archive files=%u bytes=%llu copy_us=%llu\n",progress.output.files,progress.output.bytes,progress.copy_us);
     }
     m.future->vtable->destroy(m.future,1); m.future=nullptr;
 }

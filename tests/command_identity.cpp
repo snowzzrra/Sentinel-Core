@@ -107,9 +107,35 @@ void capacity() {
     }
     const auto refused = queue.submit(submission("overflow", 5), diagnostic, 0, 101);
     CHECK(refused.error == Diagnostics::Error::identity_capacity && !queue.claim(101));
+    CHECK(refused.evidence.execution == registry::ExecutionEvidence::not_entered && refused.evidence.effect == registry::EffectEvidence::no_effect);
     CHECK(queue.identity_count() == generated::identity_records);
     CHECK(queue.query(first.reference, false, 101).execution.reason == SC_NATIVE_STALE);
     CHECK(queue.submit(submission("0", 5), diagnostic, 0, 101).execution.reason == SC_NATIVE_STALE);
+}
+void refusal_evidence() {
+    using registry::ExecutionEvidence;
+    using registry::EffectEvidence;
+    Diagnostics queue;
+    const auto input = submission("not-admitted");
+    const auto refused = queue.submit(input, grant(), SC_NATIVE_BINDING_FAILED, 100);
+    CHECK(refused.execution.state == SC_DIAGNOSTIC_REJECTED && refused.execution.reason == SC_NATIVE_BINDING_FAILED);
+    CHECK(refused.evidence.execution == ExecutionEvidence::not_entered && refused.evidence.effect == EffectEvidence::no_effect && !queue.claim(101));
+    CHECK(queue.ack(refused.reference, refused.result_token, 101).execution.reason == SC_NATIVE_BINDING_FAILED);
+    CHECK(queue.submit(input, grant(), 0, 102).execution.reason == SC_NATIVE_BINDING_FAILED && !queue.claim(102));
+    const auto invalid = queue.submit(submission("invalid-scope"), grant(), SC_NATIVE_SCOPE_MISMATCH, 102);
+    CHECK(invalid.execution.state == SC_DIAGNOSTIC_REJECTED && invalid.execution.reason != refused.execution.reason);
+    const auto replacement = submission("replacement");
+    const auto admitted = queue.submit(replacement, grant(), 0, 103);
+    auto* slot = queue.claim(104); CHECK(slot);
+    slot->entered.store(true); slot->evidence = {ExecutionEvidence::entered, EffectEvidence::effect_unknown};
+    auto execution = slot->result; execution.state = SC_DIAGNOSTIC_EXECUTED; execution.executed_at_ms = 104; execution.completed_at_ms = 105;
+    Diagnostics::finish(*slot, execution);
+    const auto unknown = queue.query(admitted.reference, false, 106);
+    CHECK(unknown.evidence.execution == ExecutionEvidence::entered && unknown.evidence.effect == EffectEvidence::effect_unknown);
+    CHECK(queue.submit(replacement, grant(), 0, 107).execution.state == SC_DIAGNOSTIC_EXECUTED && !queue.claim(107));
+    auto absent = admitted.reference; absent.command_id = "missing";
+    const auto missing = queue.query(absent, false, 108);
+    CHECK(missing.error == Diagnostics::Error::not_found);
 }
 void publication_retention() {
     Diagnostics queue;
@@ -128,8 +154,32 @@ void publication_retention() {
     CHECK(compact.evidence.execution == registry::ExecutionEvidence::not_entered && compact.evidence.effect == registry::EffectEvidence::accepted_publication);
     CHECK(queue.submit(original, payload, 0, 104).retention == Diagnostics::Retention::compact_terminal && !queue.claim(104));
 }
+void currency_retention() {
+    Diagnostics queue;
+    auto original = submission("battery", 53);
+    sc_currency_request payload{}; std::memset(payload.namespace_id, 'a', 64);
+    payload.kind = SC_CURRENCY_GRANT; payload.currency = 4; payload.amount = 2; payload.expected_gained = 7;
+    const auto admitted = queue.submit(original, payload, 0, 100);
+    CHECK(admitted.error == Diagnostics::Error::none);
+    auto changed = payload; changed.amount = 1;
+    CHECK(queue.submit(original, changed, 0, 101).error == Diagnostics::Error::duplicate_mismatch);
+    auto* slot = queue.claim(101); CHECK(slot);
+    auto& result = slot->output<sc_currency_result>();
+    result.balance_before = 0; result.gained_before = 7; result.balance_after = 2; result.gained_after = 9;
+    result.flags = SC_CURRENCY_BEFORE_VALID | SC_CURRENCY_AFTER_VALID | SC_CURRENCY_WRITER_ENTERED;
+    result.outcome = SC_CURRENCY_GRANTED;
+    auto execution = slot->result; execution.state = SC_DIAGNOSTIC_EXECUTED; execution.executed_at_ms = 101; execution.completed_at_ms = 102;
+    Diagnostics::finish(*slot, execution);
+    original.reference.scope.generation = 2;
+    CHECK(queue.submit(original, payload, 0, 103).error == Diagnostics::Error::duplicate_mismatch);
+    const auto retained = queue.query(admitted.reference, false, 103);
+    CHECK(retained.reference.fingerprint == admitted.reference.fingerprint);
+    CHECK(std::get<sc_currency_result>(retained.value).gained_after == 9 && !queue.claim(103));
+    CHECK(queue.ack(admitted.reference, admitted.result_token, 104).retention == Diagnostics::Retention::compact_terminal);
+    CHECK(queue.query(admitted.reference, false, 30103).retention == Diagnostics::Retention::compact_terminal);
+}
 }
 void run_command_identity_tests() {
-    retention(false); retention(true); capacity(); publication_retention();
+    retention(false); retention(true); capacity(); refusal_evidence(); publication_retention(); currency_retention();
     std::puts("PASS command identity concurrency, immutable submission, compact results, ack, expiry and capacity");
 }

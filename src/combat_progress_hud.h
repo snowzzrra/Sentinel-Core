@@ -19,7 +19,7 @@ void project_progress(uintptr_t parent, uintptr_t anchor, const combat::Progress
     if (!match_linear(value, anchor, parent, movie)) { hide(); return; }
     place(value, {origin.x, origin.y + (rect.br.y - rect.tl.y) * 1.25f});
     char label[80]{};
-    std::snprintf(label, sizeof(label), "KILLS %llu / %llu", progress.total, progress.target);
+    std::snprintf(label, sizeof(label), player_strings::hud_kills_progress, progress.total, progress.target);
     if (!text_is(text, label)) { swf.set_text(text, label); swf.dirty(value); }
     show(value, true);
 }

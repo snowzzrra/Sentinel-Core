@@ -11,6 +11,12 @@
 
 namespace sentinel::save {
 namespace {
+uint64_t read_owner(SteamOwner owner,uintptr_t remote) {
+    __try { return owner ? owner(remote) : 0; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+}
+namespace {
 static_assert(sizeof(SaveResult) == 24 && offsetof(SaveResult, value) == 16);
 static_assert(sizeof(SaveReference) == 8 && sizeof(SaveFutureVtable) == 16);
 SaveFuture* destroy_refusal(SaveFuture* future, uint32_t) { return future; }
@@ -210,23 +216,32 @@ UnroutedSource unrouted_source(engine::Memory& memory, SaveReference* reference)
     result.kind = text == "PROFILE" ? 2u : campaign_slot(text) ? 3u : text.substr(0,3) == "ap-" ? 4u : 5u;
     return result;
 }
-SaveFuture** access_scoped(Session& owner, engine::Memory& memory, uintptr_t provider,
-        SaveFuture** out, uintptr_t identity, SaveReference* reference, const WriteCalls& calls, Access access,
-        bool native_checkpoint = false) {
+SaveFuture** access_unrouted(Session& owner, engine::Memory& memory, uintptr_t provider, SaveFuture** out,
+                             uintptr_t identity, SaveReference* reference, const WriteCalls& calls, Access access) {
+    UnroutedSource source;
+    if (owner.state() == SessionState::prepared || owner.state() == SessionState::starting)
+        source = unrouted_source(memory, reference);
+    owner.unrouted_import(access == Access::read ? "provider_read" : "provider_mutation",
+                          access == Access::read ? "import" : "mutate", provider, identity,
+                          source); // metadata never permits late admission
+    if (owner.state() == SessionState::disabled) return calls.create(provider, out, identity, reference);
+    owner.btrace.record(BStage::provider, BStatus::blocked, "provider_route_unavailable", 0,
+                        {{"access", access}, {"session_state", owner.state()}, {"session_fault", owner.fault()}});
+    calls.release(reference);
+    *out = refused_save_future();
+    return out;
+}
+SaveFuture** access_scoped(Session& owner, engine::Memory& memory, uintptr_t provider, SaveFuture** out,
+                           uintptr_t identity, SaveReference* reference, const WriteCalls& calls, Access access,
+                           bool native_checkpoint = false) {
     owner.native_writes.bind_diagnostics(owner.btrace);
     owner.btrace.record(BStage::provider, BStatus::entered, "provider_factory_entered", 0,
-        {{"access", access}, {"native_checkpoint", native_checkpoint}, {"session_state", owner.state()}, {"session_fault", owner.fault()}}, provider);
-    if (!owner.routed()) {
-        UnroutedSource source;
-        if (owner.state() == SessionState::prepared || owner.state() == SessionState::starting)
-            source = unrouted_source(memory, reference);
-        owner.unrouted_import(access == Access::read ? "provider_read" : "provider_mutation",
-            access == Access::read ? "import" : "mutate", provider, identity, source); // metadata never permits late admission
-        if (owner.state() == SessionState::disabled) return calls.create(provider, out, identity, reference);
-        owner.btrace.record(BStage::provider, BStatus::blocked, "provider_route_unavailable", 0,
-            {{"access", access}, {"session_state", owner.state()}, {"session_fault", owner.fault()}});
-        calls.release(reference); *out = refused_save_future(); return out;
-    }
+                        {{"access", access},
+                         {"native_checkpoint", native_checkpoint},
+                         {"session_state", owner.state()},
+                         {"session_fault", owner.fault()}},
+                        provider);
+    if (!owner.routed()) return access_unrouted(owner, memory, provider, out, identity, reference, calls, access);
     bool prepared = false, profile = false; ProfileWrite selection{};
     uintptr_t data = 0; std::string name;
     const auto failure = access == Access::read ? SessionFault::native_read : access == Access::write ?
@@ -250,8 +265,11 @@ SaveFuture** access_scoped(Session& owner, engine::Memory& memory, uintptr_t pro
             else if (!profile && !capture_submission(owner.native_writes, future->operation, name)) {
                 owner.btrace.record(BStage::provider, BStatus::refused, "provider_submission_not_correlated", future->operation); future.reset();
             }
+            uintptr_t remote=0;
+            const auto user=calls.readback && owner.native_provider(remote) ? read_owner(calls.readback->owner,remote) : 0;
             if (future && !owner.campaign_run.write_started(future->operation, name,
-                native_checkpoint || capture_native_checkpoint(owner.native_writes))) {
+                native_checkpoint || capture_native_checkpoint(owner.native_writes),
+                user)) {
                 owner.btrace.record(BStage::provider, BStatus::blocked, "campaign_write_start_refused", future->operation); future.reset();
             }
         }

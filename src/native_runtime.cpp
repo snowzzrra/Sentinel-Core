@@ -1,3 +1,4 @@
+#include "engine/builds/build_descriptor.h"
 #include "native_runtime.h"
 #include "combat_native.h"
 #include "expanded_native.h"
@@ -19,6 +20,7 @@
 #include "save_session.h"
 #include "context_observer.h"
 #include "MinHook.h"
+#include "engine/hooks/hook_set.h"
 #include <intrin.h>
 #include <cstring>
 #include <cstdio>
@@ -46,6 +48,7 @@ std::atomic<uint64_t> epoch{0}, gaps{0};
 std::atomic<uint32_t> fault{SC_NATIVE_NONE};
 std::atomic<bool> accepting{false}, pinned{false};
 std::atomic<bool> stopping{true};
+std::atomic<bool> hook_residue{false};
 thread_local uint32_t frame_depth = 0;
 thread_local uint32_t event_depth = 0;
 thread_local bool loading_checkpoint = false;
@@ -56,6 +59,22 @@ using Free = void (*)(uintptr_t, uintptr_t);
 Frame original_frame = nullptr;
 Change original_change = nullptr;
 Free original_free = nullptr;
+std::array<Target,3> lifecycle_targets;
+uint32_t lifecycle_reason = SC_NATIVE_NONE, lifecycle_history = 0;
+MH_STATUS WINAPI enable_lifecycle(void* site);
+hooks::HookSet lifecycle_hooks("native", {MH_CreateHook, enable_lifecycle, MH_DisableHook, MH_RemoveHook},
+    &save::session().installation, 1);
+struct RuntimeAttempt {
+    hooks::Transaction groups;
+    bool committed = false;
+    ~RuntimeAttempt() {
+        if (!committed) {
+            accepting.store(false, std::memory_order_release);
+            save::complete_native_installation(false, nullptr);
+        }
+    }
+};
+
 #ifdef SC_NATIVE_TESTING
 TestAdapter fixture{};
 std::atomic<bool> fixture_active{false};
@@ -75,27 +94,35 @@ uint32_t owner_thread() {
 #ifdef SC_NATIVE_TESTING
     if (fixture_active) return fixture.owner();
 #endif
+    if (!binding.descriptor) return 0;
     uintptr_t context = 0; uint64_t tid = 0;
-    if (!read(binding.image.base + 0x4276160, context) || !context ||
-        !read(context + 0x238, tid) || !tid || tid > UINT32_MAX) return 0;
+    if (!read(binding.image.base + binding.descriptor->thread_context, context) || !context ||
+        !read(context + binding.descriptor->thread_id_offset, tid) || !tid || tid > UINT32_MAX) return 0;
     return static_cast<uint32_t>(tid);
 }
 uintptr_t map_address() {
 #ifdef SC_NATIVE_TESTING
     if (fixture_active) return fixture.map();
 #endif
+    if (!binding.descriptor) return 0;
     uintptr_t address = 0;
-    return read(binding.root + 0x50, address) ? address : 0;
+    return read(binding.root + binding.descriptor->map_offset, address) ? address : 0;
 }
 bool same_map(const sc_context_map& a, const sc_context_map& b) {
     return a.length == b.length && std::memcmp(a.bytes, b.bytes, a.length) == 0;
 }
 bool valid_frame(uintptr_t self, uintptr_t caller) {
     if (frame_depth != 1) { invalidate(SC_NATIVE_REENTRANT); return false; }
-    uintptr_t expected_self = binding.image.base + 0x440fc10, expected_caller = binding.image.base + 0x5f5ab6;
+    uintptr_t expected_self = 0, expected_caller = 0;
 #ifdef SC_NATIVE_TESTING
     if (fixture_active) { expected_self = fixture.common; expected_caller = fixture.caller; }
+    else
 #endif
+    {
+        if (!binding.descriptor) { invalidate(SC_NATIVE_UNKNOWN_BUILD); return false; }
+        expected_self = binding.image.base + binding.descriptor->common;
+        expected_caller = binding.image.base + binding.descriptor->frame_caller;
+    }
     if (self != expected_self || caller != expected_caller) {
         invalidate(SC_NATIVE_WRONG_CALLER); return false;
     }
@@ -120,6 +147,19 @@ uint32_t backup_prerequisite(const sc_save_backup_request& request) {
     const auto& owner = save::session();
     if (owner.state() != save::SessionState::admitted || !owner.accepts_requests()) return SC_NATIVE_BINDING_FAILED;
     return std::memcmp(owner.namespace_id().data(), request.namespace_id, 64) ? SC_NATIVE_SCOPE_MISMATCH : SC_NATIVE_NONE;
+}
+sc_evidence_scope evidence_scope(const sc_native_scope& scope, const sc_context_map& map) {
+    sc_evidence_scope out{}; out.process = scope;
+    const auto& session = save::session();
+    const auto id = session.namespace_id(); const auto token = session.binding_token();
+    if (id.size() == 64) std::memcpy(out.namespace_id, id.c_str(), 65);
+    std::copy(token.begin(), token.end(), out.save_binding);
+    if (map.validity == SC_OBSERVATION_OBSERVED && map.length < sizeof(out.map_name))
+        std::memcpy(out.map_name, map.bytes, map.length + 1);
+    if (id.size() == 64 && session.state() == save::SessionState::admitted && session.accepts_requests() &&
+        (map.validity != SC_OBSERVATION_OBSERVED || map.length < sizeof(out.map_name)))
+        out.readiness = SC_EVIDENCE_READY;
+    return out;
 }
 registry::LiveState registry_live(const sc_native_scope& scope, uint32_t gameplay_reason) {
     registry::LiveState live{};
@@ -465,6 +505,20 @@ struct FrameCost {
              {"automap_max_us",maxima[3]},{"combat_max_us",maxima[4]},{"arsenal_max_us",maxima[5]}});
     }
 };
+void observe_mission_access(uint32_t why, uintptr_t player, bool recovery_pending, uint64_t stamp,
+                           const sc_native_scope& scope, const sc_context_snapshot& facts) {
+    if (!why && player && !recovery_pending && gameplay_admitted() && stamp == epoch.load(std::memory_order_acquire))
+        campaign_menu::menu().destination_ready(evidence_scope(scope, facts.current_map));
+}
+void invalidate_changed_evidence(generated::NativeResult& result, uint64_t stamp, const std::array<uint8_t, 16>& token) {
+    if (epoch.load(std::memory_order_acquire) == stamp && !fault.load(std::memory_order_acquire) &&
+        save::session().accepts_requests() && token == save::session().binding_token()) return;
+    std::visit([](auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, sc_currency_result> || std::is_same_v<T, sc_progression_result>)
+            value.after_scope.readiness = SC_EVIDENCE_UNPROVEN;
+    }, result);
+}
 void post_frame() {
     if (!accepting.load(std::memory_order_acquire) || fault.load(std::memory_order_acquire)) return;
     if (owner_thread() != GetCurrentThreadId()) { invalidate(SC_NATIVE_WRONG_THREAD); return; }
@@ -616,6 +670,7 @@ void post_frame() {
         recovery::queue().observe(std::move(recovery_context), GetTickCount64());
     }
     commands::manual_tick(why ? 0 : player, before, []() { return epoch.load(std::memory_order_acquire); }, recovery_pending);
+    observe_mission_access(why, player, recovery_pending, before, scope, facts);
     if (!slot) return;
     const bool process_scoped = slot->is<sc_command_request>() && commands::process_scoped(slot->get<sc_command_request>());
     if (process_scoped) why = accepting.load(std::memory_order_acquire) ? fault.load(std::memory_order_acquire) : SC_NATIVE_STOPPED;
@@ -654,9 +709,11 @@ void post_frame() {
         result.game_state = static_cast<uint32_t>(facts.fields[SC_CONTEXT_GAME_STATE].value);
         result.state = SC_DIAGNOSTIC_EXECUTED;
         registry::ExecutionContext context{};
+        context.evidence_scope = evidence_scope(scope, facts.current_map);
         context.player = player; context.backup = slot->backup; context.backup_directory = backup_directory;
         slot->entered.store(true, std::memory_order_release);
         handler->execute(slot->payload, slot->value, context);
+        invalidate_changed_evidence(slot->value, before, live.save_binding);
         if (slot->is<sc_save_backup_request>()) {
             Diagnostics::await_backup(*slot, result, detail, context.submission);
             return;
@@ -673,8 +730,8 @@ void post_frame() {
     result.completed_at_ms = GetTickCount64();
     Diagnostics::finish(*slot, result, detail);
 }
-void frame_detour(uintptr_t self) {
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+void frame_detour(uintptr_t self, void* hook_caller = nullptr) {
+    const auto caller = reinterpret_cast<uintptr_t>(hook_caller);
     ++frame_depth;
     const bool observe = accepting.load(std::memory_order_acquire) && valid_frame(self, caller);
     __try { original_frame(self); }
@@ -733,11 +790,122 @@ void prepare(const Snapshot& identity) {
     stopping.store(false, std::memory_order_release);
     ReleaseSRWLockExclusive(&lock);
 }
+void frame_detour_entry(uintptr_t self) {
+    const auto caller = _ReturnAddress();
+    const auto lease = lifecycle_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_frame)>(lease.original)(self);
+        return frame_detour(self, caller);
+    } __finally { lifecycle_hooks.leave(lease); }
+}
+
+uint64_t change_detour_entry(uintptr_t root, uintptr_t descriptor, uintptr_t files) {
+    const auto lease = lifecycle_hooks.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_change)>(lease.original)(root, descriptor, files);
+        return change_detour(root, descriptor, files);
+    } __finally { lifecycle_hooks.leave(lease); }
+}
+
+void free_detour_entry(uintptr_t root, uintptr_t slot) {
+    const auto lease = lifecycle_hooks.enter(2);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_free)>(lease.original)(root, slot);
+        return free_detour(root, slot);
+    } __finally { lifecycle_hooks.leave(lease); }
+}
+
+namespace {
+bool retain_module() {
+    auto& installation = save::session().installation;
+    if (!pinned.load(std::memory_order_acquire)) {
+        HMODULE module = nullptr;
+        auto event = installation.begin(SC_INSTALL_PIN);
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(frame_detour_entry), &module)) {
+            lifecycle_reason = SC_NATIVE_PIN_FAILED;
+            installation.finish(event, lifecycle_reason, SC_INSTALL_UNKNOWN, GetLastError());
+            return false;
+        }
+        installation.finish(event);
+        pinned.store(true, std::memory_order_release);
+    }
+    return true;
+}
+MH_STATUS WINAPI enable_lifecycle(void* site) {
+    auto& installation = save::session().installation;
+    if (!retain_module()) return MH_ERROR_MEMORY_ALLOC;
+    const auto index = static_cast<size_t>(std::find_if(lifecycle_targets.begin(), lifecycle_targets.end(),
+        [&](const auto& target) { return target.address == reinterpret_cast<uintptr_t>(site); }) - lifecycle_targets.begin());
+    const auto& target = lifecycle_targets[index];
+    engine::LocalMemory memory;
+    std::array<uint8_t,32> current{};
+    auto event = installation.begin(SC_INSTALL_NATIVE_BINDING, 1, static_cast<uint32_t>(index),
+        static_cast<uint32_t>(target.address - binding.image.base));
+    const auto result = memory.copy(target.address, current.data(), current.size());
+    save::attach_read(event, result); event.byte_count = 32;
+    std::memcpy(event.expected_bytes, target.bytes.data(), 32);
+    std::memcpy(event.actual_bytes, current.data(), 32);
+    if (result.reason || current != target.bytes) {
+        lifecycle_reason = SC_NATIVE_TARGET_BYTES;
+        installation.finish(event, lifecycle_reason);
+        return MH_ERROR_UNSUPPORTED_FUNCTION;
+    }
+    installation.finish(event);
+    const auto enabled = MH_EnableHook(site);
+    if (enabled == MH_OK) lifecycle_history |= 1u << index;
+    return enabled;
+}
+
+}
+void install_world_domains(uint32_t why, HANDLE stop_event) {
+    if (!why && !stopping.load(std::memory_order_acquire)) deathlink::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire)) combat::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire)) install_automap(binding);
+    if (!why && !stopping.load(std::memory_order_acquire)) install_fast_travel(binding);
+}
+void install_optional_domains(uint32_t why, HANDLE stop_event) {
+    // validate the currency seam after WUP patches the shared entry.
+    if (!why && !stopping.load(std::memory_order_acquire)) weapon_points::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire)) challenge::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire)) inventory::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire)) arsenal::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire)) runes::install(binding, stop_event);
+    install_world_domains(why, stop_event);
+}
+void validate_menu_targets(uint32_t& why, engine::Memory& memory, save::Installation& installation, HANDLE stop_event) {
+    // check menu callees before domain hooks patch shared swf entries
+    if (!why && !stopping.load(std::memory_order_acquire) && save::session().campaign_requested() &&
+        !campaign_menu::validate_native_targets(installation, memory, binding.image, stop_event,
+                                                campaign_menu::native_targets(binding.image.base))) {
+        save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
+        why = SC_NATIVE_EXCEPTION;
+    }
+}
+void install_domains(uint32_t& why, engine::Memory& memory, save::Installation& installation, HANDLE stop_event) {
+    validate_menu_targets(why, memory, installation, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire) && !ap_controls::install(binding, stop_event)) {
+        save::session().campaign_run.refuse("native_ap_controls_installation_failed");
+        why = SC_NATIVE_EXCEPTION;
+    }
+    // hud validation needs the shared string entry before enemizer hooks it.
+    if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire) && !expanded::install(binding, stop_event)) {
+        save::session().campaign_run.refuse("native_expanded_installation_failed");
+        why = SC_NATIVE_EXCEPTION;
+    }
+    install_optional_domains(why, stop_event);
+    if (!why && !stopping.load(std::memory_order_acquire) && !campaign_menu::install(binding, stop_event)) {
+        save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
+        why = SC_NATIVE_EXCEPTION;
+    }
+}
 void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_event) {
     auto& installation = save::session().installation;
     (void)context::observation_clock(); // cache qpc frequency before any hook is reachable
     AcquireSRWLockExclusive(&startup);
-    if (pinned.load(std::memory_order_acquire) || stopping.load(std::memory_order_acquire)) {
+    if (pinned.load(std::memory_order_acquire) || hook_residue.load(std::memory_order_acquire) ||
+        stopping.load(std::memory_order_acquire)) {
         ReleaseSRWLockExclusive(&startup); return;
     }
     accepting.store(false, std::memory_order_release);
@@ -777,10 +945,10 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
             const auto result = memory.copy(address, &value, sizeof(value));
             save::attach_read(binding_event, result); return !result.reason;
         };
-        if (!initial.reason && check_binding && (binding.root != binding.image.base + 0x45ea6f0 ||
-            !observed_read(binding.image.base + 0x2a6b040, common) || common != binding.image.base + 0x440fc10 ||
-            !observed_read(common, vtable) || vtable != binding.image.base + 0x2a6b9c0 ||
-            !observed_read(vtable + 0x20, frame) || frame != targets[0].address)) initial.reason = SC_NATIVE_BINDING_FAILED;
+        if (!initial.reason && check_binding && (binding.root != binding.image.base + binding.descriptor->root_rva ||
+            !observed_read(binding.image.base + binding.descriptor->common_pointer, common) || common != binding.image.base + binding.descriptor->common ||
+            !observed_read(common, vtable) || vtable != binding.image.base + binding.descriptor->common_vtable ||
+            !observed_read(vtable + binding.descriptor->frame_slot, frame) || frame != targets[0].address)) initial.reason = SC_NATIVE_BINDING_FAILED;
     }
     installation.finish(binding_event, initial.reason);
 #ifdef SC_NATIVE_TESTING
@@ -793,103 +961,57 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
     lifetime = {}; status = initial; fault.store(SC_NATIVE_NONE); gaps.store(0); epoch.fetch_add(1);
     ReleaseSRWLockExclusive(&lock);
     if (!initial.reason && !stopping.load() && WaitForSingleObject(stop_event, 0) == WAIT_TIMEOUT) {
+        RuntimeAttempt attempt;
         uint32_t why = SC_NATIVE_NONE;
         const auto mh = installation.hook(SC_INSTALL_MH_INITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Initialize(); });
-        if (mh != MH_OK) why = SC_NATIVE_HOOK_FAILED;
-        void* trampolines[3]{};
-        void* detours[] = {reinterpret_cast<void*>(frame_detour), reinterpret_cast<void*>(change_detour), reinterpret_cast<void*>(free_detour)};
-        unsigned created = 0;
-        while (!why && created < targets.size()) {
-            if (installation.hook(SC_INSTALL_NATIVE_CREATE, 1, created,
-                static_cast<uint32_t>(targets[created].address - binding.image.base), [&] {
-                    return MH_CreateHook(reinterpret_cast<void*>(targets[created].address), detours[created], &trampolines[created]); }) != MH_OK)
-                why = SC_NATIVE_HOOK_FAILED;
-            else ++created;
-        }
-        HMODULE module = nullptr;
-        if (!why) {
-            auto event = installation.begin(SC_INSTALL_PIN);
-            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                    reinterpret_cast<LPCWSTR>(frame_detour), &module)) {
-                const auto error = GetLastError(); why = SC_NATIVE_PIN_FAILED;
-                installation.finish(event, why, SC_INSTALL_UNKNOWN, error);
-            } else installation.finish(event);
-        }
-        if (!why) {
-            pinned.store(true, std::memory_order_release);
-            original_frame = reinterpret_cast<Frame>(trampolines[0]);
-            original_change = reinterpret_cast<Change>(trampolines[1]);
-            original_free = reinterpret_cast<Free>(trampolines[2]);
-            // per-target operations only. never mh_all_hooks or a foreign target
-            for (unsigned i = 0; i < targets.size() && !why; ++i) {
-                std::array<uint8_t, 32> current{};
-                auto event = installation.begin(SC_INSTALL_NATIVE_ENABLE, 1, i,
-                    static_cast<uint32_t>(targets[i].address - binding.image.base));
-                const auto read_result = memory.copy(targets[i].address, current.data(), current.size());
-                save::attach_read(event, read_result); event.byte_count = 32;
-                std::memcpy(event.expected_bytes, targets[i].bytes.data(), 32); std::memcpy(event.actual_bytes, current.data(), 32);
-                uint32_t enabled = SC_INSTALL_UNKNOWN;
-                if (read_result.reason || std::memcmp(current.data(), targets[i].bytes.data(), current.size())) why = SC_NATIVE_TARGET_BYTES;
-                else {
-                    enabled = static_cast<uint32_t>(MH_EnableHook(reinterpret_cast<void*>(targets[i].address)));
-                    if (enabled) why = SC_NATIVE_HOOK_FAILED; else initial.installed_hooks |= 1u << i;
-                }
-                installation.finish(event, why, enabled);
-            }
-        } else {
-            // these trampolines have never been reachable. removing them can't race a detour entry. once pinned/enabled, removal is unsupported
-            for (unsigned i = 0; i < created; ++i) installation.hook(SC_INSTALL_REMOVE, 1, i,
-                static_cast<uint32_t>(targets[i].address - binding.image.base), [&] {
-                    return MH_RemoveHook(reinterpret_cast<void*>(targets[i].address)); });
-            if (mh == MH_OK) installation.hook(SC_INSTALL_UNINITIALIZE, 0, SC_INSTALL_UNKNOWN, 0, [] { return MH_Uninitialize(); });
-        }
+        if (mh != MH_OK && mh != MH_ERROR_ALREADY_INITIALIZED) why = SC_NATIVE_HOOK_FAILED;
+        lifecycle_targets = targets; lifecycle_reason = SC_NATIVE_NONE; lifecycle_history = 0;
+        const hooks::HookSpec specs[]{
+            hooks::bind(targets[0].address, frame_detour_entry, original_frame),
+            hooks::bind(targets[1].address, change_detour_entry, original_change),
+            hooks::bind(targets[2].address, free_detour_entry, original_free)};
+        if (!why && !lifecycle_hooks.install(specs, stop_event))
+            why = lifecycle_reason ? lifecycle_reason :
+                lifecycle_hooks.inspect().first_error.operation == hooks::Operation::cancel ? SC_NATIVE_CANCELLED : SC_NATIVE_HOOK_FAILED;
+        initial.installed_hooks = lifecycle_history;
 #ifdef SC_NATIVE_TESTING
         if (testing::real_hook_targets()) {
 #endif
         if (!why && !stopping.load(std::memory_order_acquire)) save::install_native_hooks(binding, stop_event);
-        // check menu callees before domain hooks patch shared swf entries
-        if (!why && !stopping.load(std::memory_order_acquire) && save::session().campaign_run.enabled() &&
-            !campaign_menu::validate_native_targets(installation, memory, binding.image, stop_event,
-                                                   campaign_menu::native_targets(binding.image.base))) {
-            save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
-            why=SC_NATIVE_EXCEPTION;
-        }
-        if (!why && !stopping.load(std::memory_order_acquire) && !ap_controls::install(binding, stop_event)) {
-            save::session().campaign_run.refuse("native_ap_controls_installation_failed");
-            why = SC_NATIVE_EXCEPTION;
-        }
-        // hud validation needs the shared string entry before enemizer hooks it.
-        if (!why && !stopping.load(std::memory_order_acquire)) special::install(binding, stop_event);
-        if (!why && !stopping.load(std::memory_order_acquire) && !expanded::install(binding, stop_event)) {
-            save::session().campaign_run.refuse("native_expanded_installation_failed");
-            why = SC_NATIVE_EXCEPTION;
-        }
-        // The WUP owner validates and patches the 13ce4c0 entry first; the
-        // challenge scope then qualifies the untouched seam/continuation windows
-        // and coexists with that detour on the same function.
-        if (!why && !stopping.load(std::memory_order_acquire)) weapon_points::install(binding, stop_event);
-        if (!why && !stopping.load(std::memory_order_acquire)) challenge::install(binding, stop_event);
-        if (!why && !stopping.load(std::memory_order_acquire)) inventory::install(binding, stop_event);
-        if (!why && !stopping.load(std::memory_order_acquire)) arsenal::install(binding, stop_event);
-        if (!why && !stopping.load(std::memory_order_acquire)) runes::install(binding, stop_event);
-    if (!why && !stopping.load(std::memory_order_acquire)) deathlink::install(binding, stop_event);
-    if (!why && !stopping.load(std::memory_order_acquire)) combat::install(binding, stop_event);
-    if (!why && !stopping.load(std::memory_order_acquire)) install_automap(binding);
-    if (!why && !stopping.load(std::memory_order_acquire)) install_fast_travel(binding);
-        if (!why && !stopping.load(std::memory_order_acquire) && !campaign_menu::install(binding,stop_event)) {
-            save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
-            why=SC_NATIVE_EXCEPTION;
-        }
+        if (!why && save::session().campaign_requested() && save::session().state() != save::SessionState::prepared)
+            why = SC_NATIVE_BINDING_FAILED;
+        install_domains(why, memory, installation, stop_event);
 #ifdef SC_NATIVE_TESTING
         }
 #endif
-        AcquireSRWLockExclusive(&lock);
-        status.installed_hooks = initial.installed_hooks; status.retained_module = pinned.load();
-        status.reason = why; status.coverage = why ? 0 : 7;
-        status.availability = why ? SC_NATIVE_DISABLED : SC_NATIVE_ENABLED;
-        accepting.store(!why && !stopping.load(std::memory_order_acquire), std::memory_order_release);
-        ReleaseSRWLockExclusive(&lock);
-        save::complete_native_installation(accepting.load(std::memory_order_acquire), stop_event);
+        if (!why && (stopping.load(std::memory_order_acquire) ||
+            (stop_event && WaitForSingleObject(stop_event, 0) != WAIT_TIMEOUT))) why = SC_NATIVE_CANCELLED;
+        if (!why) {
+            AcquireSRWLockExclusive(&lock);
+            status.installed_hooks = initial.installed_hooks; status.retained_module = pinned.load();
+            status.reason = SC_NATIVE_NONE; status.coverage = 7; status.availability = SC_NATIVE_ENABLED;
+            accepting.store(true, std::memory_order_release);
+            ReleaseSRWLockExclusive(&lock);
+            if (!save::complete_native_installation(true, stop_event) || stopping.load(std::memory_order_acquire) ||
+                (stop_event && WaitForSingleObject(stop_event, 0) != WAIT_TIMEOUT)) {
+                accepting.store(false, std::memory_order_release);
+                why = stopping.load(std::memory_order_acquire) ? SC_NATIVE_CANCELLED : SC_NATIVE_BINDING_FAILED;
+            }
+        }
+        if (why) {
+            accepting.store(false, std::memory_order_release);
+            save::complete_native_installation(false, stop_event);
+            commands::disable();
+            const auto clean = attempt.groups.rollback();
+            if (!clean) hook_residue.store(true, std::memory_order_release);
+            const bool kept = clean || retain_module();
+            save::session().btrace.record(save::BStage::native_start, save::BStatus::refused,
+                "native_installation_rollback", 0, {{"reason", why}, {"cleanup_complete", clean}, {"code_retained", kept}});
+            AcquireSRWLockExclusive(&lock);
+            status.installed_hooks = initial.installed_hooks; status.retained_module = pinned.load();
+            status.reason = why; status.coverage = 0; status.availability = SC_NATIVE_DISABLED;
+            ReleaseSRWLockExclusive(&lock);
+        } else { attempt.groups.commit(); attempt.committed = true; }
     }
     ReleaseSRWLockExclusive(&startup);
 }
@@ -945,6 +1067,13 @@ sc_native_snapshot inspect(uint64_t after) {
     }
     lifetime.page(out, after); diagnostics.counts(out, GetTickCount64());
     ReleaseSRWLockExclusive(&lock); return out;
+}
+sc_evidence_scope evidence_scope() {
+    const auto snapshot = inspect();
+    auto out = evidence_scope(snapshot.scope, snapshot.current_map);
+    if (snapshot.reason || snapshot.depth || (snapshot.lifecycle != SC_LIFETIME_ACTIVE && snapshot.lifecycle != SC_LIFETIME_MENU))
+        out.readiness = SC_EVIDENCE_UNPROVEN;
+    return out;
 }
 uint32_t namespace_reason(const generated::submission_identity& reference, const generated::AdmissionPolicy& policy,
         const registry::LiveState& live) {
@@ -1238,6 +1367,7 @@ bool stop() {
     save::session().stop_requests();
     stopping.store(true, std::memory_order_release);
     accepting.store(false, std::memory_order_release);
+    save::cancel_native_installation();
     AcquireSRWLockExclusive(&startup); // never called from a native callback
     accepting.store(false, std::memory_order_release);
     AcquireSRWLockExclusive(&lock);
@@ -1247,7 +1377,7 @@ bool stop() {
     ReleaseSRWLockExclusive(&lock); ReleaseSRWLockExclusive(&startup);
     return retained();
 }
-bool retained() { return pinned.load(std::memory_order_acquire) || save::owner_retained(); }
+bool retained() { return pinned.load(std::memory_order_acquire) || hook_residue.load(std::memory_order_acquire) || save::owner_retained(); }
 save::CampaignTransition checkpoint_transition() {
     save::CampaignTransition result{};
     result.at_ms=GetTickCount64();

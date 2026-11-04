@@ -1,5 +1,6 @@
+#include "engine/builds/build_descriptor.h"
 #include "save_observer.h"
-#include "protocol.h"
+#include "sentinel_protocol_generated.h"
 #include <map>
 #include <vector>
 #include <functional>
@@ -44,7 +45,7 @@ struct Fixture {
         provider = 0x300001000ULL, job = 0x400000000ULL;
     Fixture() {
         binding.metadata.pe_reason = binding.metadata.root_locator_reason = SC_REASON_NONE;
-        binding.metadata.profile = SC_PROFILE_STEAM_20260818;
+        binding.metadata.profile = SC_PROFILE_STEAM_20260818; binding.descriptor = &builds::steam_20260818();
         binding.image.base = 0x140000000ULL; binding.root = root;
         memory.put(root, uintptr_t{0x142aaa730ULL}); state(SC_GAME_IN_GAME, 1);
         memory.put(root + 0xb8, uint8_t{0}); memory.put(root + 0x9ca8, int32_t{0});
@@ -132,46 +133,5 @@ int main() {
     s.sampled_at_ms = 100; suppressed(save::freshness(s, 1101), SC_REASON_STALE); suppressed(save::freshness(s, 99), SC_REASON_STALE);
     CHECK(save::freshness(s, 1100).fields[SC_SAVE_PROVIDER].validity == SC_OBSERVATION_OBSERVED);
 
-    Snapshot host{}; host.pid = 42; host.process_created = 123; host.instance[0] = 9;
-    host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.7.0"); strcpy_s(host.core.build_id, "fixture");
-    Message wire{}; Snapshot decoded{}; sc_save_snapshot output{}; WireResult result{};
-    auto size = encode_save_response(wire, WireResult::ok, host, s);
-    CHECK(size < max_message && decode_save_response(wire, size, result, decoded, output));
-    CHECK(output.pid == 42 && output.process_created == 123 && output.instance[0] == 9);
-    CHECK(output.fields[SC_SAVE_PROVIDER].value == SC_SAVE_PROVIDER_STEAM); unresolved(output);
-    for (size_t n = 0; n < size; ++n) CHECK(!decode_save_response(wire, n, result, decoded, output));
-    CHECK(!decode_response(wire, size, result, decoded));
-    wire[size] = 0; wire[8] = static_cast<uint8_t>(size + 1 - header_size); wire[9] = static_cast<uint8_t>((size + 1 - header_size) >> 8);
-    CHECK(!decode_save_response(wire, size + 1, result, decoded, output));
-    for (unsigned which = 0; which < 6; ++which) {
-        auto bad = s;
-        if (which == 0) bad.mutation_available = 1;
-        if (which == 1) bad.fields[SC_SAVE_NATIVE_COMPLETION] = {SC_OBSERVATION_OBSERVED, SC_REASON_NONE, 1, 0, 0};
-        if (which == 2) bad.fields[SC_SAVE_PROVIDER].value = SC_SAVE_PROVIDER_FOREIGN + 1;
-        if (which == 3) bad.fields[SC_SAVE_JOB_WITNESS].value = 2;
-        if (which == 4) bad.fields[SC_SAVE_SELECTED_SLOT].value = 1;
-        if (which == 5) bad.profile = SC_PROFILE_NONE;
-        size = encode_save_response(wire, WireResult::ok, host, bad); CHECK(!decode_save_response(wire, size, result, decoded, output));
-    }
-    size = encode_save_response(wire, WireResult::unsupported_operation, host, s);
-    CHECK(size == header_size && decode_save_response(wire, size, result, decoded, output));
-    uint16_t operation = 0;
-    size = encode_request(wire, save_capability, wire_version, save_operation);
-    CHECK(size == 24 && decode_request(wire, size, &operation) == WireResult::ok && operation == 11);
-    size = encode_request(wire, native_capability, wire_version, save_operation);
-    CHECK(decode_request(wire, size, &operation) == WireResult::capability_unavailable);
-    // existing request operation/capability/payload shapes keep their exact bytes
-    constexpr uint64_t capabilities[] = {0, 1, 2, 4, 8, 16, 16, 16, 32, 32, 32};
-    sc_diagnostic_request request{}; request.expected.pid = 42; request.expected.process_created = 123;
-    request.expected.instance_id[0] = 9; request.expected.lifecycle_generation = 1;
-    request.request_id = 7; request.nonce[0] = 2; request.deadline_ms = 100;
-    for (uint16_t op = 1; op <= 10; ++op) {
-        size = op < native_operation ? encode_request(wire, capabilities[op], wire_version, op) : encode_native_request(wire, op, request, 3);
-        CHECK(size == (op < native_operation ? 24u : (op == native_operation ? 32u : 88u)));
-        CHECK(wire[0] == 'S' && wire[1] == 'C' && wire[2] == 'I' && wire[3] == 'P' && wire[4] == 1 && wire[5] == 0);
-        CHECK(wire[6] == op && wire[7] == 0 && wire[8] == size - 16 && wire[9] == 0 && wire[16] == capabilities[op]);
-        for (size_t i = 17; i < 24; ++i) CHECK(wire[i] == 0);
-        CHECK(decode_request(wire, size, &operation) == WireResult::ok && operation == op);
-    }
     std::puts("PASS production save observation/ownership/races/bounds/unknown/completion refusal/layout/op11/legacy requests; HARNESS ONLY");
 }

@@ -3,6 +3,7 @@
 #include "native_runtime.h"
 #include "pipe_io.h"
 #include "fault_injection.h"
+#include "campaign_menu.h"
 #include <atomic>
 #include <cstring>
 #include <cstdio>
@@ -110,6 +111,38 @@ void cancellation(V2Connection& connection, void (*resume)(), void (*park)(), HA
     const auto done = terminal(connection, admitted.envelope.reference); park();
     CHECK(done.execution.state == SC_DIAGNOSTIC_EXECUTED && done.envelope.dimensions.execution == 1 && executions.load() == before + 1);
 }
+void admission_refusals(V2Connection& connection, std::atomic<uint64_t>& executions) {
+    const auto before = executions.load();
+    auto input = submission(connection, "not-admitted"); input.reference.command_type = 18; input.reference.namespace_id.fill('a');
+    auto body = encode(input); const auto payload = encode(generated::weapon_points_payload{generated::weapon_points_grant_payload{3,0}});
+    body.insert(body.end(),payload.begin(),payload.end());
+    const auto refused = request(connection,2,body);
+    CHECK(refused.error == v2::CommandError::none && refused.execution.state == SC_DIAGNOSTIC_REJECTED && refused.execution.reason == SC_NATIVE_BINDING_FAILED);
+    CHECK(refused.envelope.dimensions.progress == 2 && refused.envelope.dimensions.execution == 0 && refused.envelope.dimensions.effect == 0);
+    std::array<Reply, SC_DIAGNOSTIC_CAPACITY> held;
+    for (size_t i = 0; i < held.size(); ++i) {
+        const auto id = "held-" + std::to_string(i);
+        held[i] = request(connection,2,submit_body(submission(connection,id.c_str())));
+        CHECK(held[i].execution.state == SC_DIAGNOSTIC_QUEUED);
+    }
+    input = submission(connection,"queue-full");
+    const auto full = request(connection,2,submit_body(input));
+    CHECK(full.error == v2::CommandError::none && full.execution.state == SC_DIAGNOSTIC_REJECTED && full.execution.reason == SC_NATIVE_QUEUE_FULL);
+    CHECK(full.envelope.dimensions.progress == 2 && full.envelope.dimensions.execution == 0 && full.envelope.dimensions.effect == 0);
+    for (const auto& queued : held) {
+        const auto cancelled = request(connection,4,encode(queued.envelope.reference));
+        CHECK(cancelled.execution.state == SC_DIAGNOSTIC_CANCELLED);
+        CHECK(request(connection,5,encode(generated::ack{queued.envelope.reference,cancelled.envelope.dimensions.result_token})).error == v2::CommandError::none);
+    }
+    CHECK(request(connection,5,encode(generated::ack{full.envelope.reference,full.envelope.dimensions.result_token})).error == v2::CommandError::none);
+    CHECK(request(connection,2,submit_body(input)).execution.reason == SC_NATIVE_QUEUE_FULL);
+    CHECK(request(connection,3,encode(full.envelope.reference)).envelope.dimensions.execution == 0);
+    input.reference.command_id = "queue-full-replacement";
+    const auto replacement = request(connection,2,submit_body(input));
+    CHECK(replacement.execution.state == SC_DIAGNOSTIC_QUEUED);
+    CHECK(request(connection,4,encode(replacement.envelope.reference)).execution.state == SC_DIAGNOSTIC_CANCELLED);
+    CHECK(executions.load() == before);
+}
 HANDLE raw_pipe() {
     const auto deadline = GetTickCount64() + 2000; const auto name = pipe_name_v2(GetCurrentProcessId());
     for (;;) {
@@ -124,6 +157,14 @@ generated::wire_header_2 read_frame(HANDLE pipe, Bytes& body) {
     CHECK(transfer_exact(pipe, false, bytes.data(), 32, nullptr, GetTickCount64() + 2000) == ERROR_SUCCESS);
     CHECK(v2::header(bytes, header, true)); body.resize(header.payload_length);
     CHECK(transfer_exact(pipe, false, body.data(), header.payload_length, nullptr, GetTickCount64() + 2000) == ERROR_SUCCESS); return header;
+}
+void refused_v1() {
+    Handle pipe(raw_pipe());
+    const auto bytes = wire_fixtures::read(std::filesystem::path(SC_WIRE_V2_FIXTURE_FILE).parent_path() / "v1_refused.json").at("inspect_request").bytes;
+    CHECK(transfer_exact(pipe.value, true, const_cast<uint8_t*>(bytes.data()), static_cast<DWORD>(bytes.size()), nullptr, GetTickCount64()+1000) == ERROR_SUCCESS);
+    uint8_t byte = 0; DWORD count = 0;
+    const auto error = transfer(pipe.value, false, &byte, 1, count, nullptr, 2000);
+    CHECK(error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED);
 }
 void framing() {
     Handle pipe(raw_pipe()); Bytes frame, body;
@@ -226,6 +267,54 @@ void adapters(V2Connection& c) {
 Bytes fixture(const char* name) {
     return wire_fixtures::read(SC_WIRE_V2_FIXTURE_FILE).at(name).bytes;
 }
+generated::NativeCampaign campaign_fixture(const char* name, uint16_t revision = 4, char namespace_first = 'a') {
+    const auto bytes = fixture(name); generated::submission input; Bytes payload;
+    CHECK(v2::split_submission(Bytes(bytes.begin() + 32, bytes.end()), input, payload));
+    input.reference.payload_revision = revision;
+    input.reference.namespace_id[0] = namespace_first;
+    if (revision < 4) {
+        if (input.reference.command_type == 23) payload.resize(12);
+        else if (revision == 1) payload.resize(320);
+        else if (revision == 2) payload.resize(612);
+        else payload.erase(payload.begin() + 612, payload.begin() + 616);
+    }
+    const auto* descriptor = registry::descriptor(input.reference.command_type, revision); CHECK(descriptor);
+    generated::NativeRequest native;
+    CHECK(v2::native_payload(*descriptor, payload, input, native, generated::Operation::submit));
+    return std::get<generated::NativeCampaign>(native);
+}
+void campaign_upload() {
+    campaign_menu::Menu menu;
+    const auto hub = campaign_fixture("campaign_row_unknown");
+    const auto mission = campaign_fixture("campaign_row_known");
+    const auto commit = campaign_fixture("campaign_commit_selection");
+    CHECK(commit.request.count == 2 && commit.request.row.id == 2);
+    CHECK(menu.request(campaign_row_operation, hub.request, true, &hub.summary, &hub.rewards).status == 0);
+    const auto incomplete = menu.request(campaign_commit_operation, commit.request, true);
+    CHECK(incomplete.status == SC_CAMPAIGN_REFUSED && incomplete.reason == SC_CAMPAIGN_INCOMPLETE);
+    CHECK(menu.projection().count == 0);
+    CHECK(menu.request(campaign_row_operation, mission.request, true, &mission.summary, &mission.rewards).status == 0);
+    CHECK(menu.request(campaign_commit_operation, commit.request, true).committed_revision == 7);
+    const auto wrong = campaign_fixture("campaign_commit_selection", 4, 'b');
+    CHECK(wrong.request.namespace_id[0] == 'b');
+    const bool same_namespace = !std::strcmp(wrong.request.namespace_id, hub.request.namespace_id);
+    const auto refused = menu.request(campaign_commit_operation, wrong.request, same_namespace);
+    CHECK(refused.status == SC_CAMPAIGN_REFUSED && refused.reason == SC_CAMPAIGN_SCOPE);
+    CHECK(refused.committed_revision == 0 && refused.selected_id == 0);
+    const auto shown = menu.projection();
+    CHECK(shown.revision == 7 && shown.count == 2 && shown.focus_id == 2 && menu.focus_id() == 2);
+    CHECK(shown.rewards_known[0] == 0 && shown.rewards[0].empty());
+    CHECK(shown.rewards_known[1] == 1 && shown.rewards[1].size() == 1);
+    CHECK(shown.rewards[1][0].location_id == 7770001);
+    menu.selected(1);
+    CHECK(menu.request(campaign_commit_operation, commit.request, true).status == 0 && menu.focus_id() == 1);
+    for (uint16_t revision = 1; revision <= 3; ++revision) {
+        const auto old = campaign_fixture("campaign_row_known", revision);
+        CHECK(old.request.row.id == 2 && old.request.count == 2);
+        CHECK(old.rewards.known == (revision == 3 ? 1u : 0u));
+        CHECK(campaign_fixture("campaign_commit_selection", revision).request.revision == 7);
+    }
+}
 void fixture_requests() {
     const auto expected = fixture("queued_query");
     generated::command_reference reference;
@@ -281,13 +370,14 @@ void protocol_v2_contract(const wchar_t* mode, void (*park)(), void (*resume)(),
                           std::atomic<unsigned>& stage, std::atomic<uint64_t>& executions) {
     using namespace sentinel;
     if (std::wcscmp(mode, L"v2")) return;
-    fixture_requests(); fixture_responses(); transient_model();
+    fixture_requests(); fixture_responses(); transient_model(); campaign_upload();
     park(); V2Connection connection; reconnect(connection);
     const auto hello = connection.exchange(6, {}, 2000); generated::hello_result supported;
     CHECK(hello.transport == ProbeResult::ok && generated::decode(hello.body, supported));
     CHECK(supported.max_frame == 16384 && supported.execution_slots == 8 && supported.full_result_ms == 30000 && supported.identity_capacity == 65536);
     CHECK(supported.supported.size() == generated::descriptor_count);
-    adapters(connection); framing(); identity(connection); observations(connection); reconnect(connection); snapshot_reads(connection);
+    adapters(connection); refused_v1(); framing(); identity(connection); observations(connection); reconnect(connection); snapshot_reads(connection);
+    admission_refusals(connection, executions);
     dropped(connection, resume, park, executions);
     cancellation(connection, resume, park, entered, release, stage, executions);
     connection.close(); resume();

@@ -1,5 +1,5 @@
 #include "sentinel_inspection.h"
-#include "protocol.h"
+#include "probe_v2.h"
 #include <cstdio>
 #include <cwchar>
 #include <io.h>
@@ -17,16 +17,8 @@ void json_text(const char* value) {
 }
 int combat_command(int argc, wchar_t** argv) {
     if (argc == 2 && !std::wcscmp(argv[1], L"--combat-presentation")) {
-        _setmode(_fileno(stdin), _O_BINARY);
-        sentinel::Message message{};
-        const auto count = std::fread(message.data(), 1, message.size(), stdin);
-        uint16_t operation = 0; sc_combat_presentation_request request{};
-        if (sentinel::decode_request(message, count, &operation, nullptr, nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-            &request) != sentinel::WireResult::ok || operation != sentinel::combat_presentation_operation) {
-            std::puts("{\"result\":\"malformed_request\"}"); return 2;
-        }
-        const auto result = sentinel::query_combat_presentation(request.execution.expected.pid, 2000, request);
+        const auto result = binary_probe(51);
+
         if (result.result != sentinel::ProbeResult::ok) {
             std::printf("{\"result\":\"%s\",\"win32_error\":%u}\n",
                 sentinel::result_name(result.result), result.win32_error); return static_cast<int>(result.result);
@@ -46,19 +38,10 @@ int combat_command(int argc, wchar_t** argv) {
     }
     if (argc < 2 || std::wcscmp(argv[1], L"--combat")) return -1;
     if (argc != 2) {
-        std::puts("--combat reads one SCIP combat request on binary stdin and returns JSON."); return 2;
+        std::puts("--combat reads one SCIP v2 combat request on binary stdin and returns JSON."); return 2;
     }
-    _setmode(_fileno(stdin), _O_BINARY);
-    sentinel::Message message{};
-    const auto count = std::fread(message.data(), 1, message.size(), stdin);
-    uint16_t operation = 0; sc_diagnostic_request request{}; sc_combat_query query{};
-    if (sentinel::decode_request(message, count, &operation, &request, nullptr, nullptr, nullptr,
-        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-        nullptr, nullptr, &query) != sentinel::WireResult::ok ||
-        operation != sentinel::combat_operation) {
-        std::puts("{\"result\":\"malformed_request\"}"); return 2;
-    }
-    const auto result = sentinel::query_combat(request.expected.pid, 2000, query);
+    const auto result = binary_probe(50);
+
     if (result.result != sentinel::ProbeResult::ok) {
         std::printf("{\"result\":\"%s\",\"win32_error\":%u}\n",
                     sentinel::result_name(result.result), result.win32_error);

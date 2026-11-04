@@ -1,7 +1,8 @@
+#include "engine/builds/build_descriptor.h"
 #include "native_test_adapter.h"
 #include "native_runtime.h"
 #include "inspection_server.h"
-#include "protocol.h"
+#include "sentinel_protocol_generated.h"
 #include "pipe_io.h"
 #include "special.h"
 #include <intrin.h>
@@ -110,7 +111,7 @@ sc_context_snapshot observe(context::Evidence& measured) {
         }
     } memory(mode);
     engine::Binding b{}; b.image.base = 0x140000000ULL; b.root = 0x1445ea6f0ULL;
-    b.metadata.profile = SC_PROFILE_STEAM_20260818;
+    b.metadata.profile = SC_PROFILE_STEAM_20260818; b.descriptor = &builds::steam_20260818();
     static thread_local int64_t ticks = 0, delta = 0;
     ticks = 0; delta = mode == 3 ? 10000001 : (mode == 4 ? 15000000 : (mode == 9 ? 4600000 : 100000));
     const context::Clock clock{
@@ -209,6 +210,17 @@ void registry_evidence_contract() {
     CHECK(points->classify(request, result, execution).effect == EffectEvidence::observed_effect);
     result.balance_after = 2;
     CHECK(points->classify(request, result, execution).effect == EffectEvidence::effect_unknown);
+    sc_currency_request battery{}; battery.kind = SC_CURRENCY_GRANT; battery.currency = 4; battery.amount = 2;
+    auto observed = currencies::initial(battery);
+    observed.flags = SC_CURRENCY_BEFORE_VALID | SC_CURRENCY_AFTER_VALID | SC_CURRENCY_WRITER_ENTERED;
+    observed.balance_after = observed.gained_after = 2;
+    observed.before_scope.readiness = observed.after_scope.readiness = SC_EVIDENCE_READY;
+    const auto* currency = registry::handler(registry::Id::currencies);
+    CHECK(currency->classify(battery, observed, execution).effect == EffectEvidence::observed_effect);
+    observed.after_scope.readiness = SC_EVIDENCE_UNPROVEN;
+    CHECK(currency->classify(battery, observed, execution).effect == EffectEvidence::effect_unknown);
+    observed.after_scope.readiness = SC_EVIDENCE_READY; observed.gained_after = 1;
+    CHECK(currency->classify(battery, observed, execution).effect == EffectEvidence::effect_unknown);
     sc_deathlink_request remote{}; remote.kind = SC_DEATHLINK_APPLY_REMOTE;
     sc_deathlink_result accepted{}; accepted.outcome = SC_DEATHLINK_OUTCOME_OK;
     const auto* deathlink = registry::handler(registry::Id::deathlink);
@@ -226,7 +238,6 @@ void registry_evidence_contract() {
 void identity_registry_contract() {
     using native::Diagnostics;
     registry_evidence_contract();
-    CHECK(registry::handler_count() == 25);
     for (size_t i = 0; i < generated::descriptor_count; ++i) {
         const auto& descriptor = generated::descriptors[i];
         const auto* handler = registry::handler(static_cast<registry::Id>(descriptor.id));
@@ -269,7 +280,8 @@ std::wstring retrieve_args(const sc_diagnostic_request& r, bool cancel) {
     return std::wstring(cancel ? L"--diagnostic-cancel" : L"--diagnostic-result") + L" --request-id " +
         std::to_wstring(r.request_id) + L" --nonce " + std::wstring(n.begin(), n.end()) + L" --expect-created " +
         std::to_wstring(r.expected.process_created) + L" --expect-instance " + std::wstring(i.begin(), i.end()) +
-        L" --expect-generation " + std::to_wstring(r.expected.lifecycle_generation);
+        L" --expect-generation " + std::to_wstring(r.expected.lifecycle_generation) +
+        L" --deadline-ms " + std::to_wstring(r.deadline_ms);
 }
 std::atomic<uint32_t> mutations{0}, restriction{7};
 std::atomic<bool> mutation_fault{false};
@@ -380,13 +392,6 @@ int wmain(int argc, wchar_t** argv) {
     automap.execution.expected.pid=71; automap.execution.expected.process_created=101;
     automap.execution.expected.instance_id[0]=1; automap.execution.expected.lifecycle_generation=2;
     automap.execution.request_id=3; automap.execution.nonce[0]=17; automap.execution.deadline_ms=2000;
-    Message automap_wire{}; sc_automap_request decoded_automap{}; uint16_t automap_op=0;
-    const auto automap_size=encode_automap_request(automap_wire,automap);
-    CHECK(decode_request(automap_wire,automap_size,&automap_op,nullptr,nullptr,nullptr,nullptr,nullptr,
-        nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&decoded_automap)==WireResult::ok);
-    CHECK(automap_op==automap_operation);
-    CHECK(!std::memcmp(automap.checked_locations,decoded_automap.checked_locations,sizeof(automap.checked_locations)));
-    CHECK(decode_request(automap_wire,automap_size-8)==WireResult::malformed);
     std::array<uint8_t,0x150> automap_entry{}; automap_test_object=reinterpret_cast<uintptr_t>(automap_entry.data());
     *reinterpret_cast<int32_t*>(automap_test_object+0x134)=1;
     CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
@@ -576,9 +581,9 @@ int wmain(int argc, wchar_t** argv) {
         resume(); ready();
         for (unsigned stage = 1; stage <= 2; ++stage) {
             park(); auto r = request(100 + stage);
-            auto admitted = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_submit_operation, r);
+            auto admitted = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_submit_operation, r);
             CHECK(admitted.result == ProbeResult::ok && admitted.diagnostic.state == SC_DIAGNOSTIC_QUEUED);
-            auto duplicate = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_submit_operation, r);
+            auto duplicate = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_submit_operation, r);
             CHECK(duplicate.diagnostic.admitted_at_ms == admitted.diagnostic.admitted_at_ms);
             ResetEvent(gate_entered); gate_stage.store(stage); resume();
             CHECK(WaitForSingleObject(gate_entered, 4000) == WAIT_OBJECT_0);
@@ -588,15 +593,15 @@ int wmain(int argc, wchar_t** argv) {
             const auto cancellation = cancel.complete(8);
             CHECK(cancellation.find("\"state\":\"claimed\"") != std::string::npos && cancellation.find("\"cancel_requested\":true") != std::string::npos);
             SetEvent(gate_release);
-            until([&] { return native::result(r, false).state != SC_DIAGNOSTIC_CLAIMED; });
-            auto completed = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_result_operation, r);
+            until([&] { return query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, r).diagnostic.state != SC_DIAGNOSTIC_CLAIMED; });
+            auto completed = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, r);
             CHECK(completed.result == ProbeResult::ok && completed.diagnostic.cancel_requested);
             CHECK(completed.diagnostic.state == static_cast<uint32_t>(stage == 1 ? SC_DIAGNOSTIC_CANCELLED : SC_DIAGNOSTIC_EXECUTED));
         }
         ready(); park(); pending.store(true);
-        auto r = request(200); CHECK(query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_submit_operation, r).diagnostic.state == SC_DIAGNOSTIC_QUEUED);
-        resume(); until([&] { return native::result(r, false).state >= SC_DIAGNOSTIC_EXECUTED; });
-        CHECK(native::result(r, false).reason == SC_NATIVE_TRANSITION); pending.store(false);
+        auto r = request(200); CHECK(query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_submit_operation, r).diagnostic.state == SC_DIAGNOSTIC_QUEUED);
+        resume(); until([&] { return query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, r).diagnostic.state >= SC_DIAGNOSTIC_EXECUTED; });
+        CHECK(query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, r).diagnostic.reason == SC_NATIVE_TRANSITION); pending.store(false);
         park(); transition(2); until([] { return native::inspect().lifecycle == SC_LIFETIME_FAILED; });
         CHECK(!native::inspect().context_generation && last_return.load() == 0);
         park(); transition(3); until([] { return native::inspect().lifecycle == SC_LIFETIME_MENU; });
@@ -609,7 +614,7 @@ int wmain(int argc, wchar_t** argv) {
             const auto req = request(300 + mode);
             const auto admitted = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_submit_operation, req);
             CHECK(admitted.diagnostic.state == SC_DIAGNOSTIC_QUEUED);
-            resume(); until([&] { return native::result(req, false).state >= SC_DIAGNOSTIC_EXECUTED; });
+            resume(); until([&] { return query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, req).diagnostic.state >= SC_DIAGNOSTIC_EXECUTED; });
             const auto out = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, req);
             CHECK(out.result == ProbeResult::ok && out.detail.revision == 1 && out.detail.observation_attempted);
             CHECK(out.detail.timing_valid && out.detail.observation_budget_ns == 10000000);

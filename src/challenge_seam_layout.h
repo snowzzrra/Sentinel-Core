@@ -1,7 +1,4 @@
-// Mid-function adapter for the hardcoded Sentinel Battery grant at image+0x13ce4df.
-// MinHook redirects the first mutation instruction there; this adapter evaluates
-// the AP suppression predicate with the native seam state intact and then either
-// tail-jumps to the documented continuation or to the MinHook trampoline.
+// preserves native seam state while choosing the mutation or suppression path.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -16,8 +13,10 @@ namespace sentinel::challenge::seam {
 // ABI; XMM0-XMM5 are volatile and unused by the continuation.
 inline constexpr std::size_t adapter_size = 112;
 inline constexpr std::size_t predicate_slot = 88;
-inline constexpr std::size_t trampoline_slot = 96;
+inline constexpr std::size_t replay_slot = 96;
 inline constexpr std::size_t continuation_slot = 104;
+inline constexpr std::size_t mutation_size = 8;
+inline constexpr std::size_t replay_size = mutation_size + 14;
 inline constexpr uint32_t currency_entry_rva = 0x13ce4c0;
 inline constexpr uint32_t currency_seam_rva = 0x13ce4df;
 inline constexpr uint32_t currency_continuation_rva = 0x13ce53a;
@@ -41,11 +40,18 @@ inline constexpr uint8_t adapter_template[adapter_size] = {
 // The predicate is bool(uintptr_t player, uint32_t currency, int32_t delta,
 // uint8_t notify, uintptr_t return_site) and is called with RCX/EDX/R8D/R9B
 // plus the documented return site from [S+0x38] as the fifth argument.
-inline void write_adapter(uint8_t* code, uintptr_t predicate, uintptr_t trampoline,
+inline void write_adapter(uint8_t* code, uintptr_t predicate, uintptr_t replay,
                           uintptr_t continuation) {
     std::memcpy(code, adapter_template, adapter_size);
     std::memcpy(code + predicate_slot, &predicate, sizeof(predicate));
-    std::memcpy(code + trampoline_slot, &trampoline, sizeof(trampoline));
+    std::memcpy(code + replay_slot, &replay, sizeof(replay));
     std::memcpy(code + continuation_slot, &continuation, sizeof(continuation));
+}
+inline void write_replay(uint8_t* code, uintptr_t continuation) {
+    // the seam tail must not depend on MinHook's removable trampoline.
+    constexpr uint8_t bytes[]{0x44,0x01,0x84,0xb1,0x6c,0xcd,0x04,0x00,0xff,0x25,0,0,0,0};
+    static_assert(sizeof(bytes) + sizeof(continuation) == replay_size);
+    std::memcpy(code, bytes, sizeof(bytes));
+    std::memcpy(code + sizeof(bytes), &continuation, sizeof(continuation));
 }
 }

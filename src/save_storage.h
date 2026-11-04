@@ -61,12 +61,42 @@ struct TransportMetadata {
     uint32_t process_id = 0;
     uint64_t process_created = 0, operation_id = 0;
     std::vector<TransportFile> files;
-    // Optional extension of the existing v1 archive. Legacy archives remain
-    // inspectable, but cannot authorize recovery without these ownership facts.
     uint64_t steam_user = 0;
     std::string provider, contract, checkpoint;
     bool quarantine = false;
+    bool automatic = false;
 };
+enum class CheckpointState { missing, confirmed, interrupted, receipt_ready, conflict, invalid, identity_mismatch, unsupported };
+enum class CheckpointRecovery { none, pending, restored, promoted };
+struct CheckpointRecord {
+    uint64_t number = 0;
+    uint32_t subtype = 1;
+    std::string map;
+    std::vector<TransportFile> files;
+};
+struct CheckpointPlan {
+    CheckpointState state = CheckpointState::missing;
+    bool ab = false;
+    char side = 0;
+    uint64_t checkpoint = 0;
+    std::string archive;
+    std::string text, commit_hash, pending_hash, receipt_hash;
+    uint64_t steam_user = 0;
+    char previous_side = 0;
+    std::string previous_archive;
+    bool committed = false;
+    bool interrupted_write = false;
+    CheckpointRecovery recovery = CheckpointRecovery::none;
+    std::string recovery_id;
+};
+struct CheckpointWrite {
+    char side = 0;
+    uint64_t number = 0;
+    std::string prefix, pending_hash, receipt_hash;
+};
+const char* checkpoint_state_name(CheckpointState);
+std::string checkpoint_contract(const Descriptor&, const std::string& namespace_id);
+Result parse_checkpoint(std::string_view text, std::string_view contract, std::string_view directory, CheckpointRecord&);
 // The native adapter owns the immutable streams for the entire synchronous call.
 // Storage verifies the written bytes; native completion proof belongs to the adapter.
 using ReadTransport = bool (*)(void*, size_t file, uint32_t offset, char*, uint32_t count);
@@ -107,8 +137,7 @@ public:
     // Root-level backup.receipt names (case-insensitive, file or directory) are
     // rejected from source payload before output creation; they cannot be imported.
     Result backup_offline(Backup& backup);
-    // Explicit checkpoint of one campaign write. No automatic retention/purge.
-    // Flat payload filenames are generated here; manifest publication is last.
+    // automatic archives are registered for pruning after commit; the manifest is written last
     Result backup_transport(const TransportMetadata&, ReadTransport, void* source, Backup&);
     // Exact, bounded complete manifest and payload hashes; pins directories and
     // payload handles through later reads. Accepts only a generated basename.
@@ -118,8 +147,18 @@ public:
     // reopen. This is continuity metadata, never native payload or an archive.
     Result campaign_record(bool checkpoint, std::string& text) const;
     Result publish_campaign_record(bool checkpoint, std::string_view text, bool create);
+    Result checkpoint_plan(const Descriptor&, CheckpointPlan&);
+    Result begin_checkpoint(const Descriptor&, uint64_t steam_user, CheckpointWrite&);
+    Result stage_checkpoint(CheckpointWrite&, std::wstring_view archive);
+    Result receipt_checkpoint(CheckpointWrite&);
+    Result commit_checkpoint(const CheckpointWrite&);
+    Result activate_checkpoints(std::string_view legacy = {});
+    Result checkpoint_record(char side, const wchar_t* suffix, std::string&) const;
+    Result write_checkpoint_record(char side, const wchar_t* suffix, std::string_view);
+    Result discard_checkpoint(char side);
+    Result prune_checkpoints();
     Result recovery_record(bool complete, std::string& text) const;
-    Result publish_recovery_record(bool complete, std::string_view text);
+    Result publish_recovery_record(bool complete, std::string_view text, bool replace = false);
 private:
     struct Impl;
     explicit Namespace(std::unique_ptr<Impl> impl);

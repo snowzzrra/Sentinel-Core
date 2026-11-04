@@ -319,6 +319,14 @@ std::shared_ptr<BackupJob> NativeWrites::backup(uint64_t id) const {
     for (const auto& value : operations_) if (value.id == id) return value.backup;
     return {};
 }
+bool NativeWrites::ensure_archive(uint64_t id, const std::shared_ptr<BackupJob>& job) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto* value = operation(id);
+    if (!value || !value->readback_required || value->readback_hashes || value->readback_terminal) return false;
+    if (value->backup) return true;
+    if (!job || !job->bind(id)) return false;
+    value->backup = job; return true;
+}
 bool NativeWrites::attach_files(uint64_t id, uintptr_t files, uint64_t count) {
     std::lock_guard<std::mutex> guard(mutex_);
     BIoTrace trace{diagnostics_, BStage::sdk_prepare, id, files};

@@ -1,13 +1,16 @@
+#include "engine/builds/build_descriptor.h"
 #include "deathlink.h"
 #include "native_target.h"
 #include "save_session.h"
 #include "MinHook.h"
+#include "engine/hooks/hook_set.h"
 #include <atomic>
 #include <cstring>
 #include <algorithm>
 
 namespace sentinel::deathlink {
 namespace {
+hooks::HookSet hook_set("deathlink");
 
 std::atomic<bool> ready{false};
 uintptr_t image_base = 0, engine_root = 0;
@@ -178,6 +181,22 @@ uint32_t force_death(void*, uintptr_t p, ApplicationOutcome& outcome) {
     return error;
 }
 
+void player_death_detour_entry(uintptr_t self) {
+    const auto lease = hook_set.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_player_death)>(lease.original)(self);
+        return player_death_detour(self);
+    } __finally { hook_set.leave(lease); }
+}
+
+char extra_life_detour_entry(uintptr_t entity, uintptr_t parm) {
+    const auto lease = hook_set.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_extra_life)>(lease.original)(entity, parm);
+        return extra_life_detour(entity, parm);
+    } __finally { hook_set.leave(lease); }
+}
+
 native::Target target(uintptr_t base, uint32_t offset, const char* hex) {
     native::Target out{}; out.address = base + offset;
     const auto digit = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
@@ -234,9 +253,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
 
     engine::LocalMemory memory;
     const native::Target required[] = {
-        target(image_base, rva_find_decl, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448"),
-        target(image_base, rva_player, "488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc"),
-        target(image_base, rva_damage_typeinfo, "488d05e9660603c3cccccccccccccccc488d0549f00603c3cccccccccccccccc"),
+        target(image_base, builds::steam_20260818().deathlink[0].rva, builds::steam_20260818().deathlink[0].prefix),
+        target(image_base, builds::steam_20260818().deathlink[1].rva, builds::steam_20260818().deathlink[1].prefix),
+        target(image_base, builds::steam_20260818().deathlink[2].rva, builds::steam_20260818().deathlink[2].prefix),
     };
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets())
@@ -245,23 +264,19 @@ void install(const engine::Binding& binding, HANDLE stop) {
 
     const auto deadline = GetTickCount64() + 10000;
     const native::Target hooks[] = {
-        target(image_base, rva_player_killed, "4c8bdc53564881ec88000000488b05f50bdc024833c4488944244849896be848"),
-        target(image_base, rva_player_is_dead, "48895c2408574883ec20488bf94881c118720300488b01ff9028010000488b0d"),
-        target(image_base, rva_player_death, "40574883ec50488b0543744503488bf9837808007413488d153bf0b501488d0d"),
-        target(image_base, rva_extra_life, "40534883ec20488bda4885c9742f488b01ff90b804000084c07422488b0d1eb1"),
-        target(image_base, rva_protection, "4883ec28e897fcffff4885c07424f30f1080140100000f57c90f2fc1770df30f"),
-        target(image_base, rva_damage_immunity, "40534883ec2080b9ac01000000488bd97433488b0d7773fb02488d5424304881"),
+        target(image_base, builds::steam_20260818().deathlink[3].rva, builds::steam_20260818().deathlink[3].prefix),
+        target(image_base, builds::steam_20260818().deathlink[4].rva, builds::steam_20260818().deathlink[4].prefix),
+        target(image_base, builds::steam_20260818().deathlink[5].rva, builds::steam_20260818().deathlink[5].prefix),
+        target(image_base, builds::steam_20260818().deathlink[6].rva, builds::steam_20260818().deathlink[6].prefix),
+        target(image_base, builds::steam_20260818().deathlink[7].rva, builds::steam_20260818().deathlink[7].prefix),
+        target(image_base, builds::steam_20260818().deathlink[8].rva, builds::steam_20260818().deathlink[8].prefix),
     };
     for (const auto& t : hooks) if (native::validate_target(memory, binding.image, t, stop, deadline)) return;
 
-    if (MH_CreateHook(reinterpret_cast<void*>(image_base + rva_player_death),
-                      reinterpret_cast<void*>(player_death_detour),
-                      reinterpret_cast<void**>(&original_player_death)) != MH_OK) return;
-    if (MH_CreateHook(reinterpret_cast<void*>(image_base + rva_extra_life),
-                      reinterpret_cast<void*>(extra_life_detour),
-                      reinterpret_cast<void**>(&original_extra_life)) != MH_OK) return;
-    if (MH_EnableHook(reinterpret_cast<void*>(image_base + rva_player_death)) != MH_OK) return;
-    if (MH_EnableHook(reinterpret_cast<void*>(image_base + rva_extra_life)) != MH_OK) return;
+    const hooks::HookSpec specs[]{
+        hooks::bind(image_base + rva_player_death, player_death_detour_entry, original_player_death),
+        hooks::bind(image_base + rva_extra_life, extra_life_detour_entry, original_extra_life)};
+    if (!hook_set.install(specs, stop)) return;
     ready.store(true, std::memory_order_release);
 }
 

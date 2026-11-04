@@ -59,6 +59,45 @@ bool steam_name_equal(std::string_view a, std::string_view b) {
     for (size_t i = 0; i < a.size(); ++i) if (fold(a[i]) != fold(b[i])) return false;
     return true;
 }
+bool Session::check_recovery_record(const storage::CheckpointPlan& plan) {
+    if (!recovery_clear(*lease_)) {
+        std::string pending;
+        lease_->recovery_record(false, pending);
+        if (!plan.ab || pending.substr(0, 21) == "sentinel-recovery-v1\n") {
+            reject(SessionFault::native_campaign);
+            return false;
+        }
+    }
+    return true;
+}
+bool checkpoint_migration(const storage::Descriptor& descriptor, const storage::CheckpointPlan& plan,
+                          const std::string& stored) {
+    const bool migration = descriptor.campaign.intent == storage::CampaignIntent::resume && !plan.ab &&
+                           plan.state == storage::CheckpointState::confirmed && plan.text != stored;
+    return migration;
+}
+storage::Result Session::configure_campaign(const storage::Descriptor& descriptor) {
+    storage::CheckpointPlan plan;
+    if (descriptor.campaign.intent == storage::CampaignIntent::resume &&
+        !lease_->checkpoint_plan(descriptor, plan).ok())
+        return {storage::Outcome::interrupted_preparation, 0};
+    if (!check_recovery_record(plan)) return {storage::Outcome::interrupted_preparation, 0};
+    if (descriptor.campaign.intent == storage::CampaignIntent::recover)
+        recovery_descriptor_ = descriptor;
+    else {
+        if (descriptor.campaign.intent == storage::CampaignIntent::resume) recovery_descriptor_ = descriptor;
+        std::string stored;
+        lease_->campaign_record(true, stored);
+        const bool migration = checkpoint_migration(descriptor, plan, stored);
+        if (!migration && (!plan.ab || plan.state == storage::CheckpointState::confirmed) &&
+            !campaign_run.configure(*this, descriptor, *lease_))
+            return {storage::Outcome::invalid_descriptor, 0};
+        if (plan.ab && (plan.state == storage::CheckpointState::identity_mismatch ||
+                        plan.state == storage::CheckpointState::conflict))
+            return {storage::Outcome::identity_mismatch, 0};
+    }
+    return {storage::Outcome::ok, 0};
+}
 storage::Result Session::configure(const storage::Descriptor& descriptor,
                                   std::unique_ptr<storage::Namespace> lease) {
     std::unique_lock<std::mutex> guard(mutex_);
@@ -86,9 +125,8 @@ storage::Result Session::configure(const storage::Descriptor& descriptor,
         "\nprovenance=synthetic-fixture\n";
     lease_ = std::move(lease);
     guard.unlock(); // campaign refusal records a session fault through its own lock
-    if (!recovery_clear(*lease_)) { reject(SessionFault::native_campaign); return {storage::Outcome::interrupted_preparation, 0}; }
-    if (descriptor.campaign.intent == storage::CampaignIntent::recover) recovery_descriptor_ = descriptor;
-    else if (!campaign_run.configure(*this, descriptor, *lease_)) return {storage::Outcome::invalid_descriptor, 0};
+    result = configure_campaign(descriptor);
+    if (!result.ok()) return result;
     state_.store(SessionState::prepared, std::memory_order_release);
     return {storage::Outcome::ok, 0};
 }

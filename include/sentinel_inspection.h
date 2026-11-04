@@ -8,6 +8,7 @@
 #include "sentinel_save_request.h"
 #include "sentinel_save_installation.h"
 #include "sentinel_weapon_points.h"
+#include "sentinel_evidence.h"
 #include "sentinel_campaign_menu.h"
 #include "sentinel_inventory.h"
 #include "sentinel_arsenal.h"
@@ -24,17 +25,16 @@
 
 // native client value types, not wire layouts or a dll abi
 namespace sentinel {
-constexpr uint16_t wire_version = 1;
+constexpr uint16_t wire_version = 2;
 constexpr uint16_t inspect_operation = 1;
 constexpr uint64_t inspect_capability = 1;
 constexpr uint16_t engine_operation = 2;
-constexpr uint64_t engine_capability = 2; // operation 2 only; basic op 1 is unchanged
+constexpr uint64_t engine_capability = 2;
 constexpr uint16_t context_operation = 3;
 constexpr uint64_t context_capability = 4;
 constexpr uint16_t native_operation = 4, diagnostic_submit_operation = 5,
     diagnostic_result_operation = 6, diagnostic_cancel_operation = 7;
 constexpr uint64_t native_capability = 8, diagnostic_capability = 16;
-// detail revision 1 has separate operations; keep the base payload bytes the same
 constexpr uint16_t diagnostic_detail_submit_operation = 8,
     diagnostic_detail_result_operation = 9, diagnostic_detail_cancel_operation = 10;
 constexpr uint64_t diagnostic_detail_capability = 32;
@@ -190,12 +190,14 @@ public:
     V2Response exchange(uint16_t operation, const std::vector<uint8_t>& body, uint32_t timeout_ms);
     void close();
     const sc_native_scope& identity() const { return identity_; }
+    uint32_t win32_error() const { return error_; }
 private:
     ProbeResult accept_hello(const std::vector<uint8_t>&, uint16_t, uint64_t, uint32_t, const std::array<uint8_t, 16>*);
     void* pipe_ = nullptr;
     void* process_ = nullptr;
     sc_native_scope identity_{};
     uint64_t correlation_ = 0;
+    uint32_t error_ = 0;
 };
 bool v2_reference(const generated::submission&, const std::vector<uint8_t>& payload, generated::command_reference&);
 }

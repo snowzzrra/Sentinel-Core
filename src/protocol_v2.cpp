@@ -39,6 +39,25 @@ NativeRequest points(const Bytes& bytes, const submission& input) {
     }
     return out;
 }
+NativeRequest mission_access(const Bytes& bytes, const submission& input) {
+    mission_access_payload payload; decode(bytes, payload);
+    auto out = request<::sc_mission_access_request>(input, 0);
+    out.stage_id = std::get<0>(payload).stage_id;
+    std::copy(input.save_binding.begin(), input.save_binding.end(), out.save_binding);
+    return out;
+}
+NativeRequest progression(const Bytes&, const submission& input) {
+    return request<::sc_progression_request>(input, 0);
+}
+NativeRequest currencies(const Bytes& bytes, const submission& input) {
+    currencies_payload payload; decode(bytes, payload);
+    auto out = request<::sc_currency_request>(input, static_cast<uint32_t>(payload.index()));
+    std::visit([&](const auto& value) { out.currency = value.currency; }, payload);
+    if (const auto* value = std::get_if<currencies_grant_payload>(&payload)) {
+        out.amount = value->amount; out.expected_gained = value->expected_gained;
+    }
+    return out;
+}
 NativeRequest inventory(const Bytes& bytes, const submission& input) {
     inventory_payload payload; decode(bytes, payload);
     auto out = request<::sc_inventory_request>(input, static_cast<uint32_t>(payload.index()));
@@ -207,8 +226,24 @@ template<class V> void campaign_row(const V& v, NativeCampaign& out) {
     out.request.revision = v.revision; out.request.index = v.index; out.request.count = v.count;
     out.request.row = from_wire(v.row);
 }
+template<class V> void campaign_rewards(const V& v, NativeCampaign& out, uint32_t known) {
+    campaign_row(v, out); out.summary = from_wire(v.summary);
+    out.request.reward_presentation = 1; out.rewards.known = known;
+    out.rewards.count = static_cast<uint32_t>(v.rewards.size());
+    for (size_t i = 0; i < v.rewards.size(); ++i) {
+        const auto& row = v.rewards[i]; auto& to = out.rewards.entries[i];
+        to.location_id = row.location_id; to.kind = row.kind; to.checked = row.checked;
+        std::copy(row.unlockable.begin(), row.unlockable.end(), to.unlockable);
+        std::copy(row.name.begin(), row.name.end(), to.name); std::copy(row.text.begin(), row.text.end(), to.text);
+    }
+}
 NativeRequest campaign(const Bytes& bytes, const submission& input) {
     NativeCampaign out{}; out.request.execution = execution(input); namespace_copy(out.request, input);
+    if (input.reference.command_type == 23 && input.reference.payload_revision == 4) {
+        campaign_commit_payload payload; decode(bytes, payload); const auto& v = std::get<0>(payload);
+        out.request.revision = v.revision; out.request.count = v.count; out.request.row.id = v.selected_id;
+        return out;
+    }
     if (input.reference.command_type != 22) {
         campaign_payload payload; decode(bytes, payload); out.request.revision = std::get<0>(payload).revision; return out;
     }
@@ -217,16 +252,12 @@ NativeRequest campaign(const Bytes& bytes, const submission& input) {
     } else if (input.reference.payload_revision == 2) {
         campaign_row_payload_revision2 payload; decode(bytes, payload); const auto& v = std::get<0>(payload);
         campaign_row(v, out); out.summary = from_wire(v.summary);
+    } else if (input.reference.payload_revision == 3) {
+        campaign_row_payload_revision3 payload; decode(bytes, payload);
+        campaign_rewards(std::get<0>(payload), out, 1);
     } else {
         campaign_row_payload payload; decode(bytes, payload); const auto& v = std::get<0>(payload);
-        campaign_row(v, out); out.summary = from_wire(v.summary); out.request.reward_presentation = 1; out.rewards.known = 1;
-        out.rewards.count = static_cast<uint32_t>(v.rewards.size());
-        for (size_t i = 0; i < v.rewards.size(); ++i) {
-            const auto& row = v.rewards[i]; auto& to = out.rewards.entries[i];
-            to.location_id = row.location_id; to.kind = row.kind; to.checked = row.checked;
-            std::copy(row.unlockable.begin(), row.unlockable.end(), to.unlockable);
-            std::copy(row.name.begin(), row.name.end(), to.name); std::copy(row.text.begin(), row.text.end(), to.text);
-        }
+        campaign_rewards(v, out, v.rewards_known);
     }
     return out;
 }
@@ -245,7 +276,7 @@ using Adapter = NativeRequest (*)(const Bytes&, const submission&);
 struct PayloadAdapter { uint16_t id; Adapter convert; };
 const PayloadAdapter adapters[] = {{14, backup}, {18, points}, {22, campaign}, {23, campaign}, {24, campaign},
     {25, inventory}, {29, arsenal}, {33, runes}, {37, special}, {41, deathlink}, {45, automap}, {46, command},
-    {50, combat}, {51, presentation}, {52, command}};
+    {50, combat}, {51, presentation}, {52, command}, {53, currencies}, {54, progression}, {55, mission_access}};
 }
 bool native_payload(const Descriptor& descriptor, const Bytes& bytes, const submission& input, NativeRequest& out, Operation operation) {
     Payload payload;

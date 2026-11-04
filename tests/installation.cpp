@@ -4,7 +4,7 @@
 #include "save_campaign_native.h"
 #include "campaign_menu_native.h"
 #include "MinHook.h"
-#include "protocol.h"
+#include "sentinel_protocol_generated.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
@@ -90,15 +90,6 @@ void contract() {
  CHECK(startup.inspect().startup_observation==2 && startup.inspect().primary_failure.stage==SC_INSTALL_STARTUP);
  save::Session owner; CHECK(owner.state()==save::SessionState::disabled && !owner.native_io());
  owner.install(1,2,save::required_routes); CHECK(!owner.native_io()); // record/readiness never admits
- Snapshot identity{}; identity.core.abi_version=1; strcpy_s(identity.core.version,"0.7.0"); strcpy_s(identity.core.build_id,"fixture");
- identity.pid=123; identity.process_created=456; identity.instance[0]=1;
- Message wire{}; const auto size=encode_installation_response(wire,WireResult::ok,identity,retained);
- Snapshot decoded; sc_save_installation_snapshot result{}; WireResult status;
- CHECK(size && size<=max_message && decode_installation_response(wire,size,status,decoded,result));
- CHECK(result.primary_failure.sequence==first.sequence && result.cleanup_failure.minhook_status==10 && decoded.pid==123);
- CHECK(!decode_installation_response(wire,size-1,status,decoded,result));
- uint16_t operation=0; const auto request=encode_request(wire,save_installation_capability,wire_version,save_installation_operation);
- CHECK(decode_request(wire,request,&operation)==WireResult::ok && operation==save_installation_operation);
  CHECK(RtlDeleteFunctionTable(table)); CloseHandle(stop); CHECK(VirtualFree(bytes,0,MEM_RELEASE));
  std::puts("PASS chained ownership, foreign fragment/cycle/duplicate/interior refusal, first target/read/API statuses, cleanup retention, startup, additive wire; controlled host only");
 }
@@ -123,21 +114,6 @@ int wmain(int argc,wchar_t** argv) {
   save::Installation baseline;
   CHECK(native::validate_recorded(baseline,memory,image,old_prefix,stop,GetTickCount64()+3000,6,8)==SC_NATIVE_TARGET_NOT_UNIQUE);
   std::puts("REPRODUCED menu target8: correct callee with shared prologue refused by production validator");
-  Snapshot identity{}, decoded{}; identity.core.abi_version=SC_ABI_VERSION;
-  strcpy_s(identity.core.version,"0.8.0"); strcpy_s(identity.core.build_id,"diagnostics-fixture");
-  identity.pid=123; identity.process_created=456; identity.instance[0]=1;
-  Message wire{}; WireResult status{}; sc_save_installation_snapshot installation{};
-  auto size=encode_installation_response(wire,WireResult::ok,identity,baseline.inspect());
-  CHECK(decode_installation_response(wire,size,status,decoded,installation));
-  CHECK(installation.primary_failure.target_group==6 && installation.primary_failure.target_index==8);
-  sc_save_admission_snapshot admission{}, roundtrip{};
-  admission.abi_version=SC_SAVE_ADMISSION_ABI_VERSION; admission.state=SC_SAVE_SESSION_REJECTED;
-  admission.fault=17; admission.required_routes=63; admission.prepared_routes=63;
-  size=encode_save_admission_response(wire,WireResult::ok,identity,admission);
-  CHECK(decode_save_admission_response(wire,size,status,decoded,roundtrip) && roundtrip.fault==17);
-  admission.fault=18; size=encode_save_admission_response(wire,WireResult::ok,identity,admission);
-  CHECK(!decode_save_admission_response(wire,size,status,decoded,roundtrip));
-  std::puts("PASS installation group6 and campaign fault17 diagnostics decode");
   save::Installation menu;
   CHECK(campaign_menu::validate_native_targets(menu,memory,image,stop,targets));
   CHECK(!menu.inspect().primary_failure.sequence && !menu.inspect().created && !menu.inspect().enabled);

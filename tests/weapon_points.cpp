@@ -4,7 +4,7 @@
 namespace sentinel::runes { Calls calls{}; }
 namespace sentinel::special { Calls calls{}; }
 #include "native_model.h"
-#include "protocol.h"
+#include "sentinel_protocol_generated.h"
 #include <cassert>
 #include <cstring>
 #include <cstdio>
@@ -26,10 +26,6 @@ int main() {
     r.execution.expected.instance_id[0]=14; r.execution.expected.lifecycle_generation=15;
     r.execution.request_id=16; r.execution.nonce[0]=17; r.execution.deadline_ms=2000;
     std::memset(r.namespace_id,'a',64); r.kind=SC_WUP_GRANT; r.amount=3;
-    Message wire{}; const auto size=encode_weapon_points_request(wire,weapon_points_submit_operation,r);
-    assert(size == 165); sc_weapon_points_request decoded{}; uint16_t op=0;
-    assert(decode_request(wire,size,&op,nullptr,nullptr,nullptr,nullptr,&decoded) == WireResult::ok);
-    assert(weapon_points::same(r,decoded));
     native::Diagnostics queue;
     assert(queue.submit(r.execution,0,100,nullptr,nullptr,&r).state == SC_DIAGNOSTIC_QUEUED);
     auto mismatch=r; mismatch.amount=6;

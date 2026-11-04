@@ -36,6 +36,8 @@ struct CampaignSnapshot {
     uint64_t failure_at_ms=0;
     bool save_ready=false;
     uint32_t native_subtype=1;
+    bool archive_complete=false;
+    uint64_t archive_bytes=0, archive_copy_us=0;
 };
 // One deliberate native UI operation in one fresh process. No inspection API
 // initiates gameplay. Durable ownership/options and payload hashes survive PID
@@ -43,6 +45,7 @@ struct CampaignSnapshot {
 class Campaign final {
 public:
     bool configure(Session&, const storage::Descriptor&, storage::Namespace&);
+    bool refresh_checkpoint();
     bool enabled() const;
     bool begin_create(bool clean_native_history, const std::string& slot, int32_t index, bool prospective);
     bool begin_resume(const std::string& mission_destination = {});
@@ -52,7 +55,7 @@ public:
     bool start_internal(uint32_t difficulty, bool extra_life);
     bool allow_difficulty(uint32_t difficulty);
     bool allow_access(uintptr_t data, const std::string& directory, bool write, bool erase);
-    bool write_started(uint64_t operation, const std::string& directory, bool native_factory_matched);
+    bool write_started(uint64_t operation, const std::string& directory, bool native_factory_matched, uint64_t steam_user);
     std::vector<SdkFileWrite> readback_baseline(uint64_t operation) const;
     void write_observed(uint64_t operation, bool terminal, bool successful, engine::Memory&);
     ProfilePublication finish_profile_write(Session&, const ProfileWrite&, engine::Memory&);
@@ -68,9 +71,10 @@ public:
     CampaignSnapshot snapshot() const;
     bool backup_continuity(const SdkWriteObservation&, storage::TransportMetadata&) const;
 private:
+    bool configure_resume(std::string record, storage::Result);
+    void observe_receipt(const sc_save_write_snapshot&, uint64_t operation, bool terminal, bool successful);
     enum class MenuSaveSource { none, cold_catalog, persisted_gameplay, active_fortress };
     bool reject(const char*,std::initializer_list<BFact> facts={});
-    bool save_record(const std::string&, bool create);
     void persist_checkpoint(const SdkWriteObservation&,engine::Memory&);
     void complete_map();
     bool parse_checkpoint(std::string_view);
@@ -78,6 +82,8 @@ private:
     mutable std::recursive_mutex mutex_;
     Session* owner_ = nullptr; storage::Namespace* lease_ = nullptr;
     storage::CampaignOptions options_;
+    storage::Descriptor descriptor_;
+    storage::CheckpointWrite checkpoint_write_;
     CampaignSnapshot state_;
     BStage diagnostic_stage_=BStage::creation;
     std::string contract_, directory_, mission_destination_, prior_map_;

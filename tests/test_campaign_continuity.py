@@ -9,7 +9,17 @@ import subprocess
 import tempfile
 import unittest
 
-EXE = Path(__file__).resolve().parents[1] / '.tmp/build/bin/sentinel_campaign_tests.exe'
+EXE = Path(os.environ.get('SC_BUILD_DIR', Path(__file__).resolve().parents[1] / 'build')) / 'bin/sentinel_campaign_tests.exe'
+
+
+def checkpoint_text(path):
+    records = []
+    for pending in path.parent.glob('checkpoint-*.pending'):
+        text = pending.read_text()
+        if '\ncheckpoint_hex=' in text and pending.with_suffix('.commit').exists():
+            record = bytes.fromhex(text.split('checkpoint_hex=')[1].splitlines()[0]).decode()
+            records.append((int(record.split('\ncheckpoint=')[1].splitlines()[0]), record))
+    return max(records)[1] if records else path.read_text()
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows native contracts')
@@ -85,13 +95,13 @@ class CampaignContinuity(unittest.TestCase):
             created = self.stage('create', root, 3, 'profile_lifecycle')
             self.assertIn('checkpoint=2 profile_writes=4', created)
             checkpoint, = Path(root).rglob('campaign.checkpoint')
-            second = checkpoint.read_text()
+            second = checkpoint_text(checkpoint)
             self.assertIn('checkpoint=2\n', second)
             self.assertIn('state=native_saved_readback_verified\n', second)
             resumed = self.stage('resume', root, 3, 'profile_lifecycle')
             self.assertIn('separate-process checkpoint=3 source_checkpoint=2 profile_writes=2', resumed)
             self.assertNotEqual(created.split('pid=')[1], resumed.split('pid=')[1])
-            third = checkpoint.read_text()
+            third = checkpoint_text(checkpoint)
             self.assertIn('checkpoint=3\n', third)
             self.assertNotEqual(second, third)
             self.stage('resume', root, 2, 'refuse_configuration')
@@ -106,10 +116,10 @@ class CampaignContinuity(unittest.TestCase):
             with self.subTest(selected=selected), tempfile.TemporaryDirectory(prefix='sentinel-native-read-') as root:
                 self.stage('create', root, 3, 'native_read')
                 checkpoint, = Path(root).rglob('campaign.checkpoint')
-                self.assertIn('files=4\n', checkpoint.read_text())
+                self.assertIn('files=4\n', checkpoint_text(checkpoint))
                 result = self.stage('resume', root, 3, selected)
                 self.assertIn('menu/read/parser/Continue/save checkpoint=2 files=4', result)
-                self.assertIn('checkpoint=2\n', checkpoint.read_text())
+                self.assertIn('checkpoint=2\n', checkpoint_text(checkpoint))
 
     def test_saved_session_rehydrates_menu_then_continues_again(self):
         for defect in ('native_read_menu_cycle', 'native_read_menu_cycle_hash'):
@@ -140,17 +150,15 @@ class CampaignContinuity(unittest.TestCase):
                 else:
                     self.assertIn('complete inventory/readback/catalog/Continue/backup', result)
                     checkpoint, = Path(root).rglob('campaign.checkpoint')
-                    self.assertIn('files=2', checkpoint.read_text())
+                    self.assertIn('files=2', checkpoint_text(checkpoint))
                     resumed = self.stage('resume', root, 2, 'native_read_delta_resume')
                     self.assertIn('separate-process partial-save catalog/parser/resume', resumed)
 
-    def test_owned_provider_rollback_opens_then_partial_save_reopens_in_new_process(self):
+    def test_owned_provider_rollback_requires_confirmed_hashes(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-provider-rollback-') as root:
             self.stage('create', root, 2, 'native_read_c_rollback')
             result = self.stage('resume', root, 2, 'native_read_c_rollback')
-            self.assertIn('complete inventory/readback/catalog/Continue/backup', result)
-            self.assertIn('separate-process partial-save catalog/parser/resume',
-                          self.stage('resume', root, 2, 'native_read_delta_resume'))
+            self.assertIn('provider rollback without confirmed hashes is refused', result)
 
 
 

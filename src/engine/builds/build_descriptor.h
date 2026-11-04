@@ -1,0 +1,91 @@
+// Build facts for native readers and adapters.
+#pragma once
+#include "native_target.h"
+
+namespace sentinel::builds {
+struct Site { uint32_t rva; const char* prefix; size_t leaf = 0; };
+struct OffsetSite { uint32_t offset; const char* bytes; };
+struct HandsSite { uint32_t rva; const char* bytes; uint32_t owner, call_length; };
+enum class RouteSiteKind : uint32_t { function_entry = 1, exact_leaf = 2, call_window = 3 };
+struct RouteSite { uint32_t offset; const char* bytes; RouteSiteKind kind; uint32_t owner; size_t length; };
+struct SpecialLayout {
+    uint32_t rva_inventory_typeinfo;
+    uint32_t rva_find_decl;
+    uint32_t rva_find_item;
+    uint32_t rva_give_item;
+    uint32_t rva_item_count;
+    uint32_t rva_item_at;
+    uint32_t rva_meter_set;
+    uint32_t rva_judgement_meter_vtable;
+    uintptr_t judgement_meter_offset;
+    uint32_t rva_unlock_perk;
+    uint32_t rva_activate_perk;
+    uint32_t rva_active_perk;
+    uint32_t rva_loot_spawn_amount;
+    uint32_t rva_perk_typeinfo;
+    uint32_t rva_current_weapon;
+    uint32_t rva_hud_earnings;
+    uint32_t rva_hud_element_setup;
+    uint32_t rva_mission_challenge_vtable;
+    uint32_t rva_weapon_info_vtable;
+    uint32_t rva_fast_travel_checkpoint_render;
+    uint32_t rva_fast_travel_widget_resolve;
+    uint32_t rva_player;
+    uint32_t rva_crucible_resolver;
+    uint32_t rva_input_down;
+    uint32_t rva_hammer_input_return;
+    uint32_t rva_weapon_cast;
+    uint32_t rva_best_weapon;
+    uint32_t rva_weapon_mode_decl;
+    uint32_t rva_hands_reset_return;
+    uint32_t rva_hands_refresh_return;
+    uint32_t rva_hands_init_return;
+    uint32_t rva_equipment_upgrade_vtable;
+    uintptr_t perk_component_offset;
+    uintptr_t equipment_upgrade_offset;
+    uintptr_t hammer_loot_modifier_offset;
+};
+struct BuildDescriptor {
+    static const SpecialLayout special;
+    static const std::array<Site,15> arsenal;
+    static const std::array<Site,8> weapon_points;
+    static const std::array<Site,27> controls;
+    static const std::array<Site,3> combat;
+    static const std::array<Site,9> deathlink;
+    static const std::array<HandsSite,6> hands;
+    static const std::array<OffsetSite,12> special_required;
+    static const std::array<OffsetSite,3> special_upgrade;
+    static const std::array<RouteSite,10> special_routes;
+    static const std::array<HandsSite,2> fast_travel;
+    static const std::array<HandsSite,3> presentation;
+    static const std::array<Site,12> inventory;
+    static const std::array<Site,11> runes;
+    static const std::array<Site,3> arsenal_fire;
+    static const std::array<Site,6> arsenal_mastery;
+    static const std::array<native::Target,3> commands;
+    uint32_t profile, machine, image_size, timestamp, entry;
+    const char* hash;
+    std::array<uint8_t,24> signature, locator_bytes;
+    const char* mask;
+    uint32_t locator_rva, root_rva;
+    std::array<uint32_t,3> globals;
+    uint32_t root_vtable, map_vtable;
+    size_t state_offset, map_offset, name_offset, player_offset;
+    uint32_t thread_context, common, frame_caller;
+    size_t thread_id_offset;
+    uint32_t common_pointer, common_vtable;
+    size_t frame_slot;
+    native::Target profile_target(uintptr_t base, unsigned index) const;
+    native::Target save_target(uintptr_t base, unsigned index) const;
+    std::array<native::Target,46> menu_targets(uintptr_t base) const;
+    static const std::array<uint32_t,51> recipes_rvas;
+    static const std::array<const char*,51> recipes_bytes;
+    static const std::array<uint32_t,6> checkpoint_rvas;
+    static const std::array<const char*,6> checkpoint_bytes;
+    static const std::array<uint32_t,14> campaign_save_rvas;
+    static const std::array<const char*,14> campaign_save_bytes;
+    static const std::array<native::Target,23> expanded;
+};
+const BuildDescriptor& steam_20260818();
+native::Target resolve(uintptr_t base, native::Target relative);
+}

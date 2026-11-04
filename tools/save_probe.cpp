@@ -88,6 +88,7 @@ int save_storage_command(int argc, wchar_t** argv) {
         std::wcscmp(mode, L"--save-session-prepare") == 0 ? "save_session_prepare" :
         std::wcscmp(mode, L"--save-session-backup") == 0 ? "save_session_backup" :
         std::wcscmp(mode, L"--save-session-reopen") == 0 ? "save_session_reopen" :
+        std::wcscmp(mode, L"--save-session-checkpoint-plan") == 0 ? "save_session_checkpoint_plan" :
         std::wcscmp(mode, L"--save-session-verify-backup") == 0 ? "save_session_verify_backup" : nullptr;
     const bool verify=std::wcscmp(mode,L"--save-session-verify-backup")==0;
     sentinel::storage::Metadata metadata;
@@ -115,6 +116,21 @@ int save_storage_command(int argc, wchar_t** argv) {
             sentinel::storage::prepare(descriptor, storage) : sentinel::storage::reopen(descriptor, storage);
         if (result.ok()) {
             metadata = storage->metadata();
+            if (std::wcscmp(mode, L"--save-session-checkpoint-plan") == 0) {
+                sentinel::storage::CheckpointPlan plan;
+                result = storage->checkpoint_plan(descriptor, plan);
+                if (!result.ok()) return print_result(operation, result, metadata, backup, true);
+                const bool resume = plan.state == sentinel::storage::CheckpointState::confirmed && plan.recovery != sentinel::storage::CheckpointRecovery::pending;
+                const char* recovery_states[]={"none","recovering","previous_checkpoint_restored","interrupted_save_recovered"};
+                std::printf("{\"operation\":\"save_session_checkpoint_plan\",\"schema\":1,\"checkpoint_state\":\"%s\","
+                    "\"format\":\"%s\",\"checkpoint\":%llu,\"side\":%s,\"archive\":%s,"
+                    "\"resume_allowed\":%s,\"preservation_required\":%s,\"native_admitted\":false,\"recovery_performed\":false,\"recovery_state\":\"%s\",\"recovery_id\":%s}\n",
+                    sentinel::storage::checkpoint_state_name(plan.state), plan.ab ? "ab-v1" : "legacy-v2", plan.checkpoint,
+                    nullable(plan.side ? std::string(1, plan.side) : std::string{}).c_str(), nullable(plan.archive).c_str(),
+                    resume ? "true" : "false", resume || plan.state == sentinel::storage::CheckpointState::missing ? "false" : "true",
+                    recovery_states[static_cast<unsigned>(plan.recovery)],nullable(plan.recovery_id).c_str());
+                return 0;
+            }
             if(verify) {
                 std::unique_ptr<sentinel::storage::TransportArchive> archive;
                 result=storage->reopen_transport(argv[3],archive);

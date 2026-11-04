@@ -1,4 +1,4 @@
-// Generated from protocol/schema.json; regenerate: python -B tools/generate_protocol.py; schema-sha256: 6d1dd65bd4d2c3b57cc546d218544141143eb3797461a64e7b829556e0480a0c; generator-format: 1. DO NOT EDIT.
+// Generated from protocol/schema.json; regenerate: python -B tools/generate_protocol.py; schema-sha256: 66a34aae75c217461b96c927e8d182027d9c237d88fd31b91c74490418d5b177; generator-format: 1. DO NOT EDIT.
 #include "sentinel_protocol_generated.h"
 #include <algorithm>
 #include <cstring>
@@ -6,17 +6,7 @@
 #include <utility>
 namespace sentinel::generated {
 namespace {
-template<class C> bool transfer(C&, v1_command_submit&);
-template<class C> bool transfer(C&, v1_command_result&);
-template<class C> bool transfer(C&, v1_inventory_result&);
-template<class C> bool transfer(C&, v1_inspect_request&);
-template<class C> bool transfer(C&, v1_diagnostic_detail_submit&);
 template<class C> bool transfer(C&, campaign_reward&);
-template<class C> bool transfer(C&, v1_campaign_rewards_row&);
-template<class C> bool transfer(C&, v1_automap_publish&);
-template<class C> bool transfer(C&, v1_campaign_base&);
-template<class C> bool transfer(C&, v1_campaign_presentation&);
-template<class C> bool transfer(C&, v1_runes_request&);
 template<class C> bool transfer(C&, scope&);
 template<class C> bool transfer(C&, command_reference&);
 template<class C> bool transfer(C&, submission_identity&);
@@ -122,7 +112,16 @@ template<class C> bool transfer(C&, supported_command&);
 template<class C> bool transfer(C&, hello_result&);
 template<class C> bool transfer(C&, immutable_submission&);
 template<class C> bool transfer(C&, command_response&);
-template<class C> bool transfer(C&, wire_header_1&);
+template<class C> bool transfer(C&, sc_evidence_scope&);
+template<class C> bool transfer(C&, sc_currency_result&);
+template<class C> bool transfer(C&, currencies_observe_payload&);
+template<class C> bool transfer(C&, currencies_grant_payload&);
+template<class C> bool transfer(C&, progression_observe_payload&);
+template<class C> bool transfer(C&, sc_progression_result&);
+template<class C> bool transfer(C&, mission_access_observe_payload&);
+template<class C> bool transfer(C&, sc_mission_access_result&);
+template<class C> bool transfer(C&, campaign_row_known_rewards_payload&);
+template<class C> bool transfer(C&, campaign_commit_selection_payload&);
 template<class C> bool transfer(C&, wire_header_2&);
 template<class C> bool transfer(C&, inspect_payload&);
 template<class C> bool transfer(C&, engine_payload&);
@@ -149,8 +148,13 @@ template<class C> bool transfer(C&, command_payload&);
 template<class C> bool transfer(C&, combat_payload&);
 template<class C> bool transfer(C&, combat_presentation_payload&);
 template<class C> bool transfer(C&, support_dump_payload&);
+template<class C> bool transfer(C&, currencies_payload&);
+template<class C> bool transfer(C&, progression_payload&);
+template<class C> bool transfer(C&, mission_access_payload&);
 template<class C> bool transfer(C&, campaign_row_payload_revision1&);
 template<class C> bool transfer(C&, campaign_row_payload_revision2&);
+template<class C> bool transfer(C&, campaign_row_payload_revision3&);
+template<class C> bool transfer(C&, campaign_commit_payload_revision1&);
 }
 
 namespace {
@@ -253,174 +257,6 @@ struct Reader {
 }
 
 namespace {
-template<class C> bool transfer(C& c, v1_command_submit& v) {
-    (void)c; (void)v;
-    return c.item(v.capability) &&
-        v.capability == 2097152ULL &&
-        c.item(v.expected_pid) &&
-        v.expected_pid >= 1ULL &&
-        c.item(v.expected_process_created) &&
-        v.expected_process_created >= 1ULL &&
-        c.sequence(v.expected_instance_id) && std::any_of(v.expected_instance_id.begin(), v.expected_instance_id.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.expected_generation) &&
-        v.expected_generation >= 1ULL &&
-        c.item(v.request_id) &&
-        v.request_id >= 1ULL &&
-        c.sequence(v.nonce) && std::any_of(v.nonce.begin(), v.nonce.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.deadline_ms) &&
-        v.deadline_ms >= 1ULL &&
-        v.deadline_ms <= 5000ULL &&
-        c.item(v.command_abi) &&
-        v.command_abi == 1ULL &&
-        c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
-        c.item(v.kind) &&
-        c.sequence(v.text);
-}
-template<class C> bool transfer(C& c, v1_command_result& v) {
-    (void)c; (void)v;
-    return c.item(v.capability) &&
-        v.capability == 2097152ULL &&
-        c.item(v.identity_pid) &&
-        c.item(v.identity_created) &&
-        c.sequence(v.identity_instance) &&
-        c.item(v.core_abi) &&
-        v.core_abi == 1ULL &&
-        c.text(v.product_version, 1, 64, SIZE_MAX) &&
-        c.text(v.build_id, 1, 64, SIZE_MAX) &&
-        c.item(v.domain_abi) &&
-        v.domain_abi == 1ULL &&
-        c.item(v.execution_state) &&
-        c.item(v.execution_reason) &&
-        c.item(v.execution_cancel_requested) &&
-        c.item(v.execution_retrieved) &&
-        c.item(v.execution_scope_pid) &&
-        c.item(v.execution_scope_process_created) &&
-        c.sequence(v.execution_scope_instance_id) &&
-        c.item(v.execution_scope_generation) &&
-        c.item(v.execution_request_id) &&
-        c.sequence(v.execution_nonce) &&
-        c.item(v.execution_admitted_ms) &&
-        c.item(v.execution_deadline_ms) &&
-        c.item(v.execution_claimed_ms) &&
-        c.item(v.execution_observed_ms) &&
-        c.item(v.execution_executed_ms) &&
-        c.item(v.execution_completed_ms) &&
-        c.item(v.execution_retrieved_ms) &&
-        c.item(v.execution_thread) &&
-        c.item(v.execution_site_revision) &&
-        c.item(v.execution_phase) &&
-        c.item(v.execution_lifecycle) &&
-        c.item(v.execution_game_state) &&
-        c.item(v.execution_map_validity) &&
-        c.item(v.execution_map_reason) &&
-        c.item(v.execution_map_error) &&
-        c.item(v.execution_map_length) &&
-        c.text(v.execution_map, 0, 255, v.execution_map_length) &&
-        c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
-        c.item(v.kind) &&
-        c.item(v.outcome) &&
-        c.item(v.native_exception);
-}
-template<class C> bool transfer(C& c, v1_inventory_result& v) {
-    (void)c; (void)v;
-    return c.item(v.capability) &&
-        v.capability == 8192ULL &&
-        c.item(v.identity_pid) &&
-        c.item(v.identity_created) &&
-        c.sequence(v.identity_instance) &&
-        c.item(v.core_abi) &&
-        v.core_abi == 1ULL &&
-        c.text(v.product_version, 1, 64, SIZE_MAX) &&
-        c.text(v.build_id, 1, 64, SIZE_MAX) &&
-        c.item(v.domain_abi) &&
-        v.domain_abi == 8ULL &&
-        c.item(v.execution_state) &&
-        c.item(v.execution_reason) &&
-        c.item(v.execution_cancel_requested) &&
-        c.item(v.execution_retrieved) &&
-        c.item(v.execution_scope_pid) &&
-        c.item(v.execution_scope_process_created) &&
-        c.sequence(v.execution_scope_instance_id) &&
-        c.item(v.execution_scope_generation) &&
-        c.item(v.execution_request_id) &&
-        c.sequence(v.execution_nonce) &&
-        c.item(v.execution_admitted_ms) &&
-        c.item(v.execution_deadline_ms) &&
-        c.item(v.execution_claimed_ms) &&
-        c.item(v.execution_observed_ms) &&
-        c.item(v.execution_executed_ms) &&
-        c.item(v.execution_completed_ms) &&
-        c.item(v.execution_retrieved_ms) &&
-        c.item(v.execution_thread) &&
-        c.item(v.execution_site_revision) &&
-        c.item(v.execution_phase) &&
-        c.item(v.execution_lifecycle) &&
-        c.item(v.execution_game_state) &&
-        c.item(v.execution_map_validity) &&
-        c.item(v.execution_map_reason) &&
-        c.item(v.execution_map_error) &&
-        c.item(v.execution_map_length) &&
-        c.text(v.execution_map, 0, 255, v.execution_map_length) &&
-        c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
-        c.item(v.kind) &&
-        c.item(v.outcome) &&
-        c.item(v.flags) &&
-        c.item(v.native_exception) &&
-        c.item(v.weapons_before) &&
-        c.item(v.weapons_after) &&
-        c.item(v.equipment_before) &&
-        c.item(v.equipment_after) &&
-        c.item(v.special_before) &&
-        c.item(v.special_after) &&
-        c.item(v.upgrades_before) &&
-        c.item(v.upgrades_after) &&
-        c.item(v.health_before) &&
-        c.item(v.health_after) &&
-        c.item(v.armor_before) &&
-        c.item(v.armor_after) &&
-        c.item(v.ammo_before) &&
-        c.item(v.ammo_after) &&
-        c.item(v.reserved_before) &&
-        c.item(v.reserved_after) &&
-        c.item(v.operations_applied) &&
-        c.item(v.ice_before) &&
-        c.item(v.ice_after) &&
-        c.item(v.dash_before) &&
-        c.item(v.dash_after) &&
-        c.item(v.key_before) &&
-        c.item(v.key_after) &&
-        c.item(v.frag_before) &&
-        c.item(v.frag_after) &&
-        c.item(v.flame_before) &&
-        c.item(v.flame_after) &&
-        c.item(v.punch_before) &&
-        c.item(v.punch_after) &&
-        c.item(v.perks_known) &&
-        c.item(v.perks_owned);
-}
-template<class C> bool transfer(C& c, v1_inspect_request& v) {
-    (void)c; (void)v;
-    return c.item(v.capability) &&
-        (uint64_t(v.capability) & ~1ULL) == 0;
-}
-template<class C> bool transfer(C& c, v1_diagnostic_detail_submit& v) {
-    (void)c; (void)v;
-    return c.item(v.capability) &&
-        v.capability == 32ULL &&
-        c.item(v.expected_pid) &&
-        v.expected_pid >= 1ULL &&
-        c.item(v.expected_process_created) &&
-        v.expected_process_created >= 1ULL &&
-        c.sequence(v.expected_instance_id) && std::any_of(v.expected_instance_id.begin(), v.expected_instance_id.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.expected_generation) &&
-        v.expected_generation >= 1ULL &&
-        c.item(v.request_id) &&
-        v.request_id >= 1ULL &&
-        c.sequence(v.nonce) && std::any_of(v.nonce.begin(), v.nonce.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.deadline_ms) &&
-        v.deadline_ms >= 1ULL &&
-        v.deadline_ms <= 5000ULL;
-}
 template<class C> bool transfer(C& c, campaign_reward& v) {
     (void)c; (void)v;
     return c.item(v.location_id) &&
@@ -429,185 +265,6 @@ template<class C> bool transfer(C& c, campaign_reward& v) {
         c.sequence(v.unlockable) &&
         c.sequence(v.name) &&
         c.sequence(v.text);
-}
-template<class C> bool transfer(C& c, v1_campaign_rewards_row& v) {
-    (void)c; (void)v;
-    return c.item(v.capability) &&
-        v.capability == 1048576ULL &&
-        c.item(v.expected_pid) &&
-        v.expected_pid >= 1ULL &&
-        c.item(v.expected_process_created) &&
-        v.expected_process_created >= 1ULL &&
-        c.sequence(v.expected_instance_id) && std::any_of(v.expected_instance_id.begin(), v.expected_instance_id.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.expected_generation) &&
-        v.expected_generation >= 0ULL &&
-        c.item(v.request_id) &&
-        v.request_id >= 1ULL &&
-        c.sequence(v.nonce) && std::any_of(v.nonce.begin(), v.nonce.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.deadline_ms) &&
-        v.deadline_ms >= 1ULL &&
-        v.deadline_ms <= 5000ULL &&
-        c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
-        c.item(v.revision) &&
-        c.item(v.index) &&
-        c.item(v.count) &&
-        c.item(v.row_id) &&
-        c.item(v.row_flags) &&
-        c.item(v.native_index) &&
-        c.sequence(v.map) &&
-        c.sequence(v.title) &&
-        c.item(v.known) &&
-        c.item(v.found) &&
-        c.item(v.total) &&
-        c.item(v.band) &&
-        c.sequence(v.challenge_0_unlockable) &&
-        c.item(v.challenge_0_found) &&
-        c.item(v.challenge_0_required) &&
-        c.item(v.challenge_0_checked) &&
-        c.sequence(v.challenge_1_unlockable) &&
-        c.item(v.challenge_1_found) &&
-        c.item(v.challenge_1_required) &&
-        c.item(v.challenge_1_checked) &&
-        c.sequence(v.challenge_2_unlockable) &&
-        c.item(v.challenge_2_found) &&
-        c.item(v.challenge_2_required) &&
-        c.item(v.challenge_2_checked) &&
-        c.item(v.rewards_known) &&
-        c.sequence(v.rewards, 17) &&
-        unique_by(v.rewards, [](const auto& item) { return item.location_id; }) &&
-        unique_by(v.rewards, [](const auto& item) { return item.unlockable; });
-}
-template<class C> bool transfer(C& c, v1_automap_publish& v) {
-    (void)c; (void)v;
-    return c.item(v.capability) &&
-        v.capability == 262144ULL &&
-        c.item(v.expected_pid) &&
-        v.expected_pid >= 1ULL &&
-        c.item(v.expected_process_created) &&
-        v.expected_process_created >= 1ULL &&
-        c.sequence(v.expected_instance_id) && std::any_of(v.expected_instance_id.begin(), v.expected_instance_id.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.expected_generation) &&
-        v.expected_generation >= 1ULL &&
-        c.item(v.request_id) &&
-        v.request_id >= 1ULL &&
-        c.sequence(v.nonce) && std::any_of(v.nonce.begin(), v.nonce.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.deadline_ms) &&
-        v.deadline_ms >= 1ULL &&
-        v.deadline_ms <= 5000ULL &&
-        c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
-        c.item(v.kind) &&
-        c.item(v.known) &&
-        c.item(v.revision) &&
-        c.item(v.checked_0) &&
-        c.item(v.checked_1) &&
-        c.item(v.checked_2) &&
-        c.item(v.checked_3) &&
-        c.item(v.checked_4) &&
-        c.item(v.checked_5) &&
-        c.item(v.checked_6) &&
-        c.item(v.checked_7) &&
-        c.item(v.checked_8);
-}
-template<class C> bool transfer(C& c, v1_campaign_base& v) {
-    (void)c; (void)v;
-    return c.item(v.capability) &&
-        v.capability == 4096ULL &&
-        c.item(v.expected_pid) &&
-        v.expected_pid >= 1ULL &&
-        c.item(v.expected_process_created) &&
-        v.expected_process_created >= 1ULL &&
-        c.sequence(v.expected_instance_id) && std::any_of(v.expected_instance_id.begin(), v.expected_instance_id.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.expected_generation) &&
-        v.expected_generation >= 0ULL &&
-        c.item(v.request_id) &&
-        v.request_id >= 1ULL &&
-        c.sequence(v.nonce) && std::any_of(v.nonce.begin(), v.nonce.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.deadline_ms) &&
-        v.deadline_ms >= 1ULL &&
-        v.deadline_ms <= 5000ULL &&
-        c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
-        c.item(v.revision) &&
-        c.item(v.index) &&
-        c.item(v.count) &&
-        c.item(v.row_id) &&
-        c.item(v.row_flags) &&
-        c.item(v.native_index) &&
-        c.sequence(v.map) &&
-        c.sequence(v.title);
-}
-template<class C> bool transfer(C& c, v1_campaign_presentation& v) {
-    (void)c; (void)v;
-    return c.item(v.capability) &&
-        v.capability == 524288ULL &&
-        c.item(v.expected_pid) &&
-        v.expected_pid >= 1ULL &&
-        c.item(v.expected_process_created) &&
-        v.expected_process_created >= 1ULL &&
-        c.sequence(v.expected_instance_id) && std::any_of(v.expected_instance_id.begin(), v.expected_instance_id.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.expected_generation) &&
-        v.expected_generation >= 0ULL &&
-        c.item(v.request_id) &&
-        v.request_id >= 1ULL &&
-        c.sequence(v.nonce) && std::any_of(v.nonce.begin(), v.nonce.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.deadline_ms) &&
-        v.deadline_ms >= 1ULL &&
-        v.deadline_ms <= 5000ULL &&
-        c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
-        c.item(v.revision) &&
-        c.item(v.index) &&
-        c.item(v.count) &&
-        c.item(v.row_id) &&
-        c.item(v.row_flags) &&
-        c.item(v.native_index) &&
-        c.sequence(v.map) &&
-        c.sequence(v.title) &&
-        c.item(v.known) &&
-        c.item(v.found) &&
-        c.item(v.total) &&
-        c.item(v.band) &&
-        c.sequence(v.challenge_0_unlockable) &&
-        c.item(v.challenge_0_found) &&
-        c.item(v.challenge_0_required) &&
-        c.item(v.challenge_0_checked) &&
-        c.sequence(v.challenge_1_unlockable) &&
-        c.item(v.challenge_1_found) &&
-        c.item(v.challenge_1_required) &&
-        c.item(v.challenge_1_checked) &&
-        c.sequence(v.challenge_2_unlockable) &&
-        c.item(v.challenge_2_found) &&
-        c.item(v.challenge_2_required) &&
-        c.item(v.challenge_2_checked);
-}
-template<class C> bool transfer(C& c, v1_runes_request& v) {
-    (void)c; (void)v;
-    return c.item(v.capability) &&
-        v.capability == 32768ULL &&
-        c.item(v.expected_pid) &&
-        v.expected_pid >= 1ULL &&
-        c.item(v.expected_process_created) &&
-        v.expected_process_created >= 1ULL &&
-        c.sequence(v.expected_instance_id) && std::any_of(v.expected_instance_id.begin(), v.expected_instance_id.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.expected_generation) &&
-        v.expected_generation >= 1ULL &&
-        c.item(v.request_id) &&
-        v.request_id >= 1ULL &&
-        c.sequence(v.nonce) && std::any_of(v.nonce.begin(), v.nonce.end(), [](auto item) { return item != 0; }) &&
-        c.item(v.deadline_ms) &&
-        v.deadline_ms >= 1ULL &&
-        v.deadline_ms <= 5000ULL &&
-        c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
-        c.item(v.kind) &&
-        (v.kind == 0 || v.kind == 1 || v.kind == 2 || v.kind == 3 || v.kind == 4) &&
-        c.item(v.normal_runes) &&
-        (uint64_t(v.normal_runes) & ~511ULL) == 0 &&
-        c.item(v.support_runes) &&
-        (uint64_t(v.support_runes) & ~7ULL) == 0 &&
-        c.item(v.select_slot) &&
-        v.select_slot <= 3ULL &&
-        c.item(v.select_rune) &&
-        v.select_rune >= -1 &&
-        v.select_rune <= 8 &&
-        c.sequence(v.reserved) && std::all_of(v.reserved.begin(), v.reserved.end(), [](auto item) { return item == 0ULL; });
 }
 template<class C> bool transfer(C& c, scope& v) {
     (void)c; (void)v;
@@ -1200,7 +857,7 @@ template<class C> bool transfer(C& c, save_admission_save_admission_payload& v) 
 template<class C> bool transfer(C& c, save_write_save_write_payload& v) {
     (void)c; (void)v;
     return c.item(v.operation_id) &&
-        v.operation_id >= 1ULL;
+        v.operation_id >= 0ULL;
 }
 template<class C> bool transfer(C& c, save_backup_save_backup_payload& v) {
     (void)c; (void)v;
@@ -1605,17 +1262,110 @@ template<class C> bool transfer(C& c, command_response& v) {
         (v.error == 0 || v.error == 1 || v.error == 2 || v.error == 3 || v.error == 4 || v.error == 5 || v.error == 6 || v.error == 7 || v.error == 8) &&
         c.item(v.execution);
 }
-template<class C> bool transfer(C& c, wire_header_1& v) {
+template<class C> bool transfer(C& c, sc_evidence_scope& v) {
     (void)c; (void)v;
-    return c.item(v.magic) &&
-        v.magic == 1346978643ULL &&
-        c.item(v.version) &&
-        v.version == 1ULL &&
-        c.item(v.operation) &&
-        c.item(v.payload_length) &&
-        v.payload_length <= 16368ULL &&
-        c.item(v.result) &&
-        (v.result == 0 || v.result == 1 || v.result == 2 || v.result == 3 || v.result == 4);
+    return c.item(v.process) &&
+        c.sequence(v.namespace_id) &&
+        c.sequence(v.save_binding) &&
+        c.sequence(v.map_name) &&
+        c.item(v.readiness) &&
+        (v.readiness == 0 || v.readiness == 1);
+}
+template<class C> bool transfer(C& c, sc_currency_result& v) {
+    (void)c; (void)v;
+    return c.item(v.execution) &&
+        c.item(v.before_scope) &&
+        c.item(v.after_scope) &&
+        c.item(v.kind) &&
+        c.item(v.currency) &&
+        c.item(v.amount) &&
+        c.item(v.expected_gained) &&
+        c.item(v.outcome) &&
+        c.item(v.flags) &&
+        c.item(v.native_exception) &&
+        c.item(v.balance_before) &&
+        c.item(v.gained_before) &&
+        c.item(v.balance_after) &&
+        c.item(v.gained_after);
+}
+template<class C> bool transfer(C& c, currencies_observe_payload& v) {
+    (void)c; (void)v;
+    return c.item(v.currency) &&
+        (v.currency == 0 || v.currency == 1 || v.currency == 2 || v.currency == 4);
+}
+template<class C> bool transfer(C& c, currencies_grant_payload& v) {
+    (void)c; (void)v;
+    return c.item(v.currency) &&
+        v.currency == 4ULL &&
+        c.item(v.amount) &&
+        v.amount >= 1ULL &&
+        v.amount <= 2ULL &&
+        c.item(v.expected_gained) &&
+        v.expected_gained <= 2147483647ULL &&
+        sum_fits(2147483647ULL, {uint64_t(v.amount), uint64_t(v.expected_gained)});
+}
+template<class C> bool transfer(C& c, progression_observe_payload& v) {
+    (void)c; (void)v;
+    return true;
+}
+template<class C> bool transfer(C& c, sc_progression_result& v) {
+    (void)c; (void)v;
+    return c.item(v.execution) &&
+        c.item(v.before_scope) &&
+        c.item(v.after_scope) &&
+        c.item(v.suit_known) &&
+        (uint64_t(v.suit_known) & ~63ULL) == 0 &&
+        c.item(v.suit_owned) &&
+        (uint64_t(v.suit_owned) & ~63ULL) == 0 &&
+        c.item(v.slayer_key_quantity) &&
+        v.slayer_key_quantity >= -1 &&
+        c.item(v.meat_hook) &&
+        (v.meat_hook == 0 || v.meat_hook == 1 || v.meat_hook == 2) &&
+        c.sequence(v.mastery_proof) && std::all_of(v.mastery_proof.begin(), v.mastery_proof.end(), [](auto item) { return (item == 0); });
+}
+template<class C> bool transfer(C& c, mission_access_observe_payload& v) {
+    (void)c; (void)v;
+    return c.item(v.stage_id) &&
+        v.stage_id >= 1ULL;
+}
+template<class C> bool transfer(C& c, sc_mission_access_result& v) {
+    (void)c; (void)v;
+    return c.item(v.execution) &&
+        c.item(v.menu_scope) &&
+        c.item(v.destination_scope) &&
+        c.item(v.revision) &&
+        c.item(v.destination_revision) &&
+        c.item(v.stage_id) &&
+        c.item(v.destination_stage_id) &&
+        c.sequence(v.map_name) &&
+        c.item(v.entry_usable) &&
+        (v.entry_usable == 0 || v.entry_usable == 1) &&
+        c.item(v.destination_ready) &&
+        (v.destination_ready == 0 || v.destination_ready == 1);
+}
+template<class C> bool transfer(C& c, campaign_row_known_rewards_payload& v) {
+    (void)c; (void)v;
+    return c.item(v.revision) &&
+        c.item(v.index) &&
+        v.index <= 20ULL &&
+        c.item(v.count) &&
+        v.count >= 1ULL &&
+        v.count <= 21ULL &&
+        c.item(v.row) &&
+        c.item(v.summary) &&
+        c.item(v.rewards_known) &&
+        (v.rewards_known == 0 || v.rewards_known == 1) &&
+        c.sequence(v.rewards, 17) &&
+        unique_by(v.rewards, [](const auto& item) { return item.location_id; }) &&
+        unique_by(v.rewards, [](const auto& item) { return item.unlockable; });
+}
+template<class C> bool transfer(C& c, campaign_commit_selection_payload& v) {
+    (void)c; (void)v;
+    return c.item(v.revision) &&
+        c.item(v.count) &&
+        v.count >= 1ULL &&
+        v.count <= 21ULL &&
+        c.item(v.selected_id);
 }
 template<class C> bool transfer(C& c, wire_header_2& v) {
     (void)c; (void)v;
@@ -1816,8 +1566,8 @@ template<class C> bool transfer(C& c, campaign_row_payload& v) {
     if (!c.item(tag)) return false;
     switch (tag) {
     case 0: {
-        campaign_row_campaign_row_payload value{};
-        if constexpr (!C::reading) value = std::get<campaign_row_campaign_row_payload>(v);
+        campaign_row_known_rewards_payload value{};
+        if constexpr (!C::reading) value = std::get<campaign_row_known_rewards_payload>(v);
         if (!transfer(c, value)) return false;
         v = std::move(value); return true;
     }
@@ -1830,8 +1580,8 @@ template<class C> bool transfer(C& c, campaign_commit_payload& v) {
     if (!c.item(tag)) return false;
     switch (tag) {
     case 0: {
-        campaign_commit_campaign_commit_payload value{};
-        if constexpr (!C::reading) value = std::get<campaign_commit_campaign_commit_payload>(v);
+        campaign_commit_selection_payload value{};
+        if constexpr (!C::reading) value = std::get<campaign_commit_selection_payload>(v);
         if (!transfer(c, value)) return false;
         v = std::move(value); return true;
     }
@@ -2188,6 +1938,55 @@ template<class C> bool transfer(C& c, support_dump_payload& v) {
     default: return false;
     }
 }
+template<class C> bool transfer(C& c, currencies_payload& v) {
+    uint32_t tag = 0;
+    if (v.index() == 0) tag = 0;
+    if (v.index() == 1) tag = 1;
+    if (!c.item(tag)) return false;
+    switch (tag) {
+    case 0: {
+        currencies_observe_payload value{};
+        if constexpr (!C::reading) value = std::get<currencies_observe_payload>(v);
+        if (!transfer(c, value)) return false;
+        v = std::move(value); return true;
+    }
+    case 1: {
+        currencies_grant_payload value{};
+        if constexpr (!C::reading) value = std::get<currencies_grant_payload>(v);
+        if (!transfer(c, value)) return false;
+        v = std::move(value); return true;
+    }
+    default: return false;
+    }
+}
+template<class C> bool transfer(C& c, progression_payload& v) {
+    uint32_t tag = 0;
+    if (v.index() == 0) tag = 0;
+    if (!c.item(tag)) return false;
+    switch (tag) {
+    case 0: {
+        progression_observe_payload value{};
+        if constexpr (!C::reading) value = std::get<progression_observe_payload>(v);
+        if (!transfer(c, value)) return false;
+        v = std::move(value); return true;
+    }
+    default: return false;
+    }
+}
+template<class C> bool transfer(C& c, mission_access_payload& v) {
+    uint32_t tag = 0;
+    if (v.index() == 0) tag = 0;
+    if (!c.item(tag)) return false;
+    switch (tag) {
+    case 0: {
+        mission_access_observe_payload value{};
+        if constexpr (!C::reading) value = std::get<mission_access_observe_payload>(v);
+        if (!transfer(c, value)) return false;
+        v = std::move(value); return true;
+    }
+    default: return false;
+    }
+}
 template<class C> bool transfer(C& c, campaign_row_payload_revision1& v) {
     uint32_t tag = 0;
     if (v.index() == 0) tag = 0;
@@ -2216,61 +2015,34 @@ template<class C> bool transfer(C& c, campaign_row_payload_revision2& v) {
     default: return false;
     }
 }
+template<class C> bool transfer(C& c, campaign_row_payload_revision3& v) {
+    uint32_t tag = 0;
+    if (v.index() == 0) tag = 0;
+    if (!c.item(tag)) return false;
+    switch (tag) {
+    case 0: {
+        campaign_row_campaign_row_payload value{};
+        if constexpr (!C::reading) value = std::get<campaign_row_campaign_row_payload>(v);
+        if (!transfer(c, value)) return false;
+        v = std::move(value); return true;
+    }
+    default: return false;
+    }
 }
-bool encode(const v1_command_submit& source, Bytes& out) {
-    Writer c; auto value = source;
-    if (!transfer(c, value)) return false;
-    out = std::move(c.data); return true;
+template<class C> bool transfer(C& c, campaign_commit_payload_revision1& v) {
+    uint32_t tag = 0;
+    if (v.index() == 0) tag = 0;
+    if (!c.item(tag)) return false;
+    switch (tag) {
+    case 0: {
+        campaign_commit_campaign_commit_payload value{};
+        if constexpr (!C::reading) value = std::get<campaign_commit_campaign_commit_payload>(v);
+        if (!transfer(c, value)) return false;
+        v = std::move(value); return true;
+    }
+    default: return false;
+    }
 }
-bool decode(const Bytes& in, v1_command_submit& out) {
-    if (in.size() > max_frame) return false;
-    Reader c{in}; v1_command_submit value{};
-    if (!transfer(c, value) || c.pos != in.size()) return false;
-    out = std::move(value); return true;
-}
-bool encode(const v1_command_result& source, Bytes& out) {
-    Writer c; auto value = source;
-    if (!transfer(c, value)) return false;
-    out = std::move(c.data); return true;
-}
-bool decode(const Bytes& in, v1_command_result& out) {
-    if (in.size() > max_frame) return false;
-    Reader c{in}; v1_command_result value{};
-    if (!transfer(c, value) || c.pos != in.size()) return false;
-    out = std::move(value); return true;
-}
-bool encode(const v1_inventory_result& source, Bytes& out) {
-    Writer c; auto value = source;
-    if (!transfer(c, value)) return false;
-    out = std::move(c.data); return true;
-}
-bool decode(const Bytes& in, v1_inventory_result& out) {
-    if (in.size() > max_frame) return false;
-    Reader c{in}; v1_inventory_result value{};
-    if (!transfer(c, value) || c.pos != in.size()) return false;
-    out = std::move(value); return true;
-}
-bool encode(const v1_inspect_request& source, Bytes& out) {
-    Writer c; auto value = source;
-    if (!transfer(c, value)) return false;
-    out = std::move(c.data); return true;
-}
-bool decode(const Bytes& in, v1_inspect_request& out) {
-    if (in.size() > max_frame) return false;
-    Reader c{in}; v1_inspect_request value{};
-    if (!transfer(c, value) || c.pos != in.size()) return false;
-    out = std::move(value); return true;
-}
-bool encode(const v1_diagnostic_detail_submit& source, Bytes& out) {
-    Writer c; auto value = source;
-    if (!transfer(c, value)) return false;
-    out = std::move(c.data); return true;
-}
-bool decode(const Bytes& in, v1_diagnostic_detail_submit& out) {
-    if (in.size() > max_frame) return false;
-    Reader c{in}; v1_diagnostic_detail_submit value{};
-    if (!transfer(c, value) || c.pos != in.size()) return false;
-    out = std::move(value); return true;
 }
 bool encode(const campaign_reward& source, Bytes& out) {
     Writer c; auto value = source;
@@ -2280,61 +2052,6 @@ bool encode(const campaign_reward& source, Bytes& out) {
 bool decode(const Bytes& in, campaign_reward& out) {
     if (in.size() > max_frame) return false;
     Reader c{in}; campaign_reward value{};
-    if (!transfer(c, value) || c.pos != in.size()) return false;
-    out = std::move(value); return true;
-}
-bool encode(const v1_campaign_rewards_row& source, Bytes& out) {
-    Writer c; auto value = source;
-    if (!transfer(c, value)) return false;
-    out = std::move(c.data); return true;
-}
-bool decode(const Bytes& in, v1_campaign_rewards_row& out) {
-    if (in.size() > max_frame) return false;
-    Reader c{in}; v1_campaign_rewards_row value{};
-    if (!transfer(c, value) || c.pos != in.size()) return false;
-    out = std::move(value); return true;
-}
-bool encode(const v1_automap_publish& source, Bytes& out) {
-    Writer c; auto value = source;
-    if (!transfer(c, value)) return false;
-    out = std::move(c.data); return true;
-}
-bool decode(const Bytes& in, v1_automap_publish& out) {
-    if (in.size() > max_frame) return false;
-    Reader c{in}; v1_automap_publish value{};
-    if (!transfer(c, value) || c.pos != in.size()) return false;
-    out = std::move(value); return true;
-}
-bool encode(const v1_campaign_base& source, Bytes& out) {
-    Writer c; auto value = source;
-    if (!transfer(c, value)) return false;
-    out = std::move(c.data); return true;
-}
-bool decode(const Bytes& in, v1_campaign_base& out) {
-    if (in.size() > max_frame) return false;
-    Reader c{in}; v1_campaign_base value{};
-    if (!transfer(c, value) || c.pos != in.size()) return false;
-    out = std::move(value); return true;
-}
-bool encode(const v1_campaign_presentation& source, Bytes& out) {
-    Writer c; auto value = source;
-    if (!transfer(c, value)) return false;
-    out = std::move(c.data); return true;
-}
-bool decode(const Bytes& in, v1_campaign_presentation& out) {
-    if (in.size() > max_frame) return false;
-    Reader c{in}; v1_campaign_presentation value{};
-    if (!transfer(c, value) || c.pos != in.size()) return false;
-    out = std::move(value); return true;
-}
-bool encode(const v1_runes_request& source, Bytes& out) {
-    Writer c; auto value = source;
-    if (!transfer(c, value)) return false;
-    out = std::move(c.data); return true;
-}
-bool decode(const Bytes& in, v1_runes_request& out) {
-    if (in.size() > max_frame) return false;
-    Reader c{in}; v1_runes_request value{};
     if (!transfer(c, value) || c.pos != in.size()) return false;
     out = std::move(value); return true;
 }
@@ -3493,14 +3210,113 @@ bool decode(const Bytes& in, command_response& out) {
     if (!transfer(c, value) || c.pos != in.size()) return false;
     out = std::move(value); return true;
 }
-bool encode(const wire_header_1& source, Bytes& out) {
+bool encode(const sc_evidence_scope& source, Bytes& out) {
     Writer c; auto value = source;
     if (!transfer(c, value)) return false;
     out = std::move(c.data); return true;
 }
-bool decode(const Bytes& in, wire_header_1& out) {
+bool decode(const Bytes& in, sc_evidence_scope& out) {
     if (in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 value{};
+    Reader c{in}; sc_evidence_scope value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const sc_currency_result& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, sc_currency_result& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; sc_currency_result value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const currencies_observe_payload& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, currencies_observe_payload& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; currencies_observe_payload value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const currencies_grant_payload& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, currencies_grant_payload& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; currencies_grant_payload value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const progression_observe_payload& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, progression_observe_payload& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; progression_observe_payload value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const sc_progression_result& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, sc_progression_result& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; sc_progression_result value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const mission_access_observe_payload& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, mission_access_observe_payload& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; mission_access_observe_payload value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const sc_mission_access_result& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, sc_mission_access_result& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; sc_mission_access_result value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const campaign_row_known_rewards_payload& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, campaign_row_known_rewards_payload& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; campaign_row_known_rewards_payload value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const campaign_commit_selection_payload& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, campaign_commit_selection_payload& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; campaign_commit_selection_payload value{};
     if (!transfer(c, value) || c.pos != in.size()) return false;
     out = std::move(value); return true;
 }
@@ -3790,6 +3606,39 @@ bool decode(const Bytes& in, support_dump_payload& out) {
     if (!transfer(c, value) || c.pos != in.size()) return false;
     out = std::move(value); return true;
 }
+bool encode(const currencies_payload& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, currencies_payload& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; currencies_payload value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const progression_payload& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, progression_payload& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; progression_payload value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
+bool encode(const mission_access_payload& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
+}
+bool decode(const Bytes& in, mission_access_payload& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; mission_access_payload value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
+}
 bool encode(const campaign_row_payload_revision1& source, Bytes& out) {
     Writer c; auto value = source;
     if (!transfer(c, value)) return false;
@@ -3812,195 +3661,27 @@ bool decode(const Bytes& in, campaign_row_payload_revision2& out) {
     if (!transfer(c, value) || c.pos != in.size()) return false;
     out = std::move(value); return true;
 }
-bool encode_command_submit(const v1_command_submit& value, Bytes& out, uint32_t result) {
-    if (result > 4 || (!false && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{}; header.magic = 1346978643; header.version = 1;
-    header.operation = 46; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
+bool encode(const campaign_row_payload_revision3& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
 }
-bool decode_command_submit(const Bytes& in, v1_command_submit& out, uint32_t& result) {
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 header{};
-    if (!transfer(c, header)) return false;
-    if (header.operation != 46 || header.payload_length != in.size() - header_size_1 || (!false && header.result)) return false;
-    if (header.result) { if (header.payload_length) return false; out = {}; result = header.result; return true; }
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
+bool decode(const Bytes& in, campaign_row_payload_revision3& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; campaign_row_payload_revision3 value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
 }
-bool encode_command_result(const v1_command_result& value, Bytes& out, uint32_t result) {
-    if (result > 4 || (!true && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{}; header.magic = 1346978643; header.version = 1;
-    header.operation = 47; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
+bool encode(const campaign_commit_payload_revision1& source, Bytes& out) {
+    Writer c; auto value = source;
+    if (!transfer(c, value)) return false;
+    out = std::move(c.data); return true;
 }
-bool decode_command_result(const Bytes& in, v1_command_result& out, uint32_t& result) {
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 header{};
-    if (!transfer(c, header)) return false;
-    if (header.operation != 47 || header.payload_length != in.size() - header_size_1 || (!true && header.result)) return false;
-    if (header.result) { if (header.payload_length) return false; out = {}; result = header.result; return true; }
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
-}
-bool encode_inventory_result(const v1_inventory_result& value, Bytes& out, uint32_t result) {
-    if (result > 4 || (!true && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{}; header.magic = 1346978643; header.version = 1;
-    header.operation = 26; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
-}
-bool decode_inventory_result(const Bytes& in, v1_inventory_result& out, uint32_t& result) {
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 header{};
-    if (!transfer(c, header)) return false;
-    if (header.operation != 26 || header.payload_length != in.size() - header_size_1 || (!true && header.result)) return false;
-    if (header.result) { if (header.payload_length) return false; out = {}; result = header.result; return true; }
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
-}
-bool encode_inspect_request(const v1_inspect_request& value, Bytes& out, uint32_t result) {
-    if (result > 4 || (!false && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{}; header.magic = 1346978643; header.version = 1;
-    header.operation = 1; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
-}
-bool decode_inspect_request(const Bytes& in, v1_inspect_request& out, uint32_t& result) {
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 header{};
-    if (!transfer(c, header)) return false;
-    if (header.operation != 1 || header.payload_length != in.size() - header_size_1 || (!false && header.result)) return false;
-    if (header.result) { if (header.payload_length) return false; out = {}; result = header.result; return true; }
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
-}
-bool encode_diagnostic_detail_submit(const v1_diagnostic_detail_submit& value, Bytes& out, uint32_t result) {
-    if (result > 4 || (!false && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{}; header.magic = 1346978643; header.version = 1;
-    header.operation = 8; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
-}
-bool decode_diagnostic_detail_submit(const Bytes& in, v1_diagnostic_detail_submit& out, uint32_t& result) {
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 header{};
-    if (!transfer(c, header)) return false;
-    if (header.operation != 8 || header.payload_length != in.size() - header_size_1 || (!false && header.result)) return false;
-    if (header.result) { if (header.payload_length) return false; out = {}; result = header.result; return true; }
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
-}
-bool encode_campaign_rewards_row(const v1_campaign_rewards_row& value, Bytes& out, uint32_t result) {
-    if (result > 4 || (!false && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{}; header.magic = 1346978643; header.version = 1;
-    header.operation = 22; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
-}
-bool decode_campaign_rewards_row(const Bytes& in, v1_campaign_rewards_row& out, uint32_t& result) {
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 header{};
-    if (!transfer(c, header)) return false;
-    if (header.operation != 22 || header.payload_length != in.size() - header_size_1 || (!false && header.result)) return false;
-    if (header.result) { if (header.payload_length) return false; out = {}; result = header.result; return true; }
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
-}
-bool encode_automap_publish(const v1_automap_publish& value, Bytes& out, uint32_t result) {
-    if (result > 4 || (!false && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{}; header.magic = 1346978643; header.version = 1;
-    header.operation = 45; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
-}
-bool decode_automap_publish(const Bytes& in, v1_automap_publish& out, uint32_t& result) {
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 header{};
-    if (!transfer(c, header)) return false;
-    if (header.operation != 45 || header.payload_length != in.size() - header_size_1 || (!false && header.result)) return false;
-    if (header.result) { if (header.payload_length) return false; out = {}; result = header.result; return true; }
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
-}
-bool encode_campaign_base(const v1_campaign_base& value, Bytes& out, uint32_t result) {
-    if (result > 4 || (!false && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{}; header.magic = 1346978643; header.version = 1;
-    header.operation = 22; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
-}
-bool decode_campaign_base(const Bytes& in, v1_campaign_base& out, uint32_t& result) {
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 header{};
-    if (!transfer(c, header)) return false;
-    if (header.operation != 22 || header.payload_length != in.size() - header_size_1 || (!false && header.result)) return false;
-    if (header.result) { if (header.payload_length) return false; out = {}; result = header.result; return true; }
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
-}
-bool encode_campaign_presentation(const v1_campaign_presentation& value, Bytes& out, uint32_t result) {
-    if (result > 4 || (!false && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{}; header.magic = 1346978643; header.version = 1;
-    header.operation = 22; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
-}
-bool decode_campaign_presentation(const Bytes& in, v1_campaign_presentation& out, uint32_t& result) {
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 header{};
-    if (!transfer(c, header)) return false;
-    if (header.operation != 22 || header.payload_length != in.size() - header_size_1 || (!false && header.result)) return false;
-    if (header.result) { if (header.payload_length) return false; out = {}; result = header.result; return true; }
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
-}
-bool encode_runes_request(const v1_runes_request& value, Bytes& out, uint32_t result) {
-    if (result > 4 || (!false && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{}; header.magic = 1346978643; header.version = 1;
-    header.operation = 33; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
-}
-bool decode_runes_request(const Bytes& in, v1_runes_request& out, uint32_t& result) {
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{in}; wire_header_1 header{};
-    if (!transfer(c, header)) return false;
-    if (header.operation != 33 || header.payload_length != in.size() - header_size_1 || (!false && header.result)) return false;
-    if (header.result) { if (header.payload_length) return false; out = {}; result = header.result; return true; }
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
+bool decode(const Bytes& in, campaign_commit_payload_revision1& out) {
+    if (in.size() > max_frame) return false;
+    Reader c{in}; campaign_commit_payload_revision1 value{};
+    if (!transfer(c, value) || c.pos != in.size()) return false;
+    out = std::move(value); return true;
 }
 namespace {
 template<class T> bool native_matches(const NativeRequest& request) { return std::holds_alternative<T>(request); }
@@ -4110,39 +3791,55 @@ const VariantPolicy policies_combat_presentation[] = {
 const VariantPolicy policies_support_dump[] = {
     {0, Operation::submit, Admission::P, Execution::native_frame, "dispatch_only", "support_dump"},
 };
+const VariantPolicy policies_currencies[] = {
+    {0, Operation::read, Admission::G, Execution::native_frame, "observation", "currencies"},
+    {1, Operation::submit, Admission::G, Execution::native_frame, "feature_readback", "currencies"},
+};
+const VariantPolicy policies_progression[] = {
+    {0, Operation::read, Admission::G, Execution::native_frame, "observation", "inventory"},
+};
+const VariantPolicy policies_mission_access[] = {
+    {0, Operation::read, Admission::S, Execution::snapshot, "observation", "campaign"},
+};
 }
 const Descriptor descriptors[] = {
-    {1, 1, "inspect", "{\"id\":1,\"name\":\"inspect\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"inspect\",\"type\":\"inspect_inspect_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"inspect\"}]},\"result\":\"sc_status\",\"admission\":\"P\",\"availability\":\"inspect\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[1],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"inspect_inspect_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_inspect, std::size(policies_inspect), &decode_variant<inspect_payload, Payload>, &encode_variant<inspect_payload, Payload>, &decode_variant<sc_status, Result>, &encode_variant<sc_status, Result>, &native_matches<NativeRead>},
-    {2, 1, "engine", "{\"id\":2,\"name\":\"engine\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"engine\",\"type\":\"engine_engine_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"engine\"}]},\"result\":\"sc_engine_snapshot\",\"admission\":\"P\",\"availability\":\"engine\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[2],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"engine_engine_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_engine, std::size(policies_engine), &decode_variant<engine_payload, Payload>, &encode_variant<engine_payload, Payload>, &decode_variant<sc_engine_snapshot, Result>, &encode_variant<sc_engine_snapshot, Result>, &native_matches<NativeRead>},
-    {3, 1, "context", "{\"id\":3,\"name\":\"context\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"context\",\"type\":\"context_context_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"context\"}]},\"result\":\"sc_context_snapshot\",\"admission\":\"P\",\"availability\":\"context\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[3],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"context_context_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_context, std::size(policies_context), &decode_variant<context_payload, Payload>, &encode_variant<context_payload, Payload>, &decode_variant<sc_context_snapshot, Result>, &encode_variant<sc_context_snapshot, Result>, &native_matches<NativeRead>},
-    {4, 1, "native", "{\"id\":4,\"name\":\"native\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"native\",\"type\":\"native_native_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"native\"}]},\"result\":\"sc_native_snapshot\",\"admission\":\"P\",\"availability\":\"native\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[4],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"native_native_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_native, std::size(policies_native), &decode_variant<native_payload, Payload>, &encode_variant<native_payload, Payload>, &decode_variant<sc_native_snapshot, Result>, &encode_variant<sc_native_snapshot, Result>, &native_matches<NativeRead>},
-    {5, 1, "diagnostic", "{\"id\":5,\"name\":\"diagnostic\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"diagnostic\",\"type\":\"diagnostic_diagnostic_payload\",\"operation\":\"submit\",\"admission\":\"D\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"diagnostic\"}]},\"result\":\"sc_diagnostic_result\",\"admission\":\"D\",\"availability\":\"diagnostic\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[5,6,7],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"diagnostic_diagnostic_payload\"]}]}", Admission::D, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_diagnostic, std::size(policies_diagnostic), &decode_variant<diagnostic_payload, Payload>, &encode_variant<diagnostic_payload, Payload>, &decode_variant<sc_diagnostic_result, Result>, &encode_variant<sc_diagnostic_result, Result>, &native_matches<::sc_diagnostic_request>},
-    {8, 1, "diagnostic_detail", "{\"id\":8,\"name\":\"diagnostic_detail\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"diagnostic_detail\",\"type\":\"diagnostic_detail_diagnostic_detail_payload\",\"operation\":\"submit\",\"admission\":\"D\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"diagnostic_detail\"}]},\"result\":\"diagnostic_detail_result\",\"admission\":\"D\",\"availability\":\"diagnostic_detail\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[8,9,10],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"diagnostic_detail_diagnostic_detail_payload\"]}]}", Admission::D, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_diagnostic_detail, std::size(policies_diagnostic_detail), &decode_variant<diagnostic_detail_payload, Payload>, &encode_variant<diagnostic_detail_payload, Payload>, &decode_variant<diagnostic_detail_result, Result>, &encode_variant<diagnostic_detail_result, Result>, &native_matches<::sc_diagnostic_request>},
-    {11, 1, "save", "{\"id\":11,\"name\":\"save\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"save\",\"type\":\"save_save_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"save\"}]},\"result\":\"sc_save_snapshot\",\"admission\":\"P\",\"availability\":\"save\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[11],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"save_save_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_save, std::size(policies_save), &decode_variant<save_payload, Payload>, &encode_variant<save_payload, Payload>, &decode_variant<sc_save_snapshot, Result>, &encode_variant<sc_save_snapshot, Result>, &native_matches<NativeRead>},
-    {12, 1, "save_admission", "{\"id\":12,\"name\":\"save_admission\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"save_admission\",\"type\":\"save_admission_save_admission_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"save_admission\"}]},\"result\":\"save_admission_result\",\"admission\":\"P\",\"availability\":\"save_admission\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[12],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"save_admission_save_admission_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_save_admission, std::size(policies_save_admission), &decode_variant<save_admission_payload, Payload>, &encode_variant<save_admission_payload, Payload>, &decode_variant<save_admission_result, Result>, &encode_variant<save_admission_result, Result>, &native_matches<NativeRead>},
-    {13, 1, "save_write", "{\"id\":13,\"name\":\"save_write\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"save_write\",\"type\":\"save_write_save_write_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"save_write\"}]},\"result\":\"sc_save_write_snapshot\",\"admission\":\"P\",\"availability\":\"save_write\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[13],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"save_write_save_write_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_save_write, std::size(policies_save_write), &decode_variant<save_write_payload, Payload>, &encode_variant<save_write_payload, Payload>, &decode_variant<sc_save_write_snapshot, Result>, &encode_variant<sc_save_write_snapshot, Result>, &native_matches<NativeRead>},
-    {14, 1, "save_backup", "{\"id\":14,\"name\":\"save_backup\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"save_backup\",\"type\":\"save_backup_save_backup_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame_async\",\"availability\":\"save_backup\"}]},\"result\":\"sc_save_backup_snapshot\",\"admission\":\"G\",\"availability\":\"save_backup\",\"execution\":\"native_frame_async\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[14,15,16],\"release\":\"none\"},\"owned_slot_required\":true,\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"save_backup_save_backup_payload\"]}]}", Admission::G, Execution::native_frame_async, Evidence::feature_result, Ack::terminal_consumed, policies_save_backup, std::size(policies_save_backup), &decode_variant<save_backup_payload, Payload>, &encode_variant<save_backup_payload, Payload>, &decode_variant<sc_save_backup_snapshot, Result>, &encode_variant<sc_save_backup_snapshot, Result>, &native_matches<::sc_save_backup_request>},
-    {17, 1, "save_installation", "{\"id\":17,\"name\":\"save_installation\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"save_installation\",\"type\":\"save_installation_save_installation_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"save_installation\"}]},\"result\":\"sc_save_installation_snapshot\",\"admission\":\"P\",\"availability\":\"save_installation\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[17],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"save_installation_save_installation_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_save_installation, std::size(policies_save_installation), &decode_variant<save_installation_payload, Payload>, &encode_variant<save_installation_payload, Payload>, &decode_variant<sc_save_installation_snapshot, Result>, &encode_variant<sc_save_installation_snapshot, Result>, &native_matches<NativeRead>},
-    {18, 1, "weapon_points", "{\"id\":18,\"name\":\"weapon_points\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"weapon_points_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"weapon_points\"},{\"tag\":1,\"name\":\"grant\",\"type\":\"weapon_points_grant_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"weapon_points\"}]},\"result\":\"sc_weapon_points_result\",\"admission\":\"G\",\"availability\":\"weapon_points\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[18,19,20,21],\"release\":\"legacy_release\"},\"constraints\":[{\"kind\":\"checked_arithmetic\",\"fields\":[\"amount\",\"expected_gained\"],\"max\":2147483647}],\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"weapon_points_observe_payload\",\"weapon_points_grant_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_weapon_points, std::size(policies_weapon_points), &decode_variant<weapon_points_payload, Payload>, &encode_variant<weapon_points_payload, Payload>, &decode_variant<sc_weapon_points_result, Result>, &encode_variant<sc_weapon_points_result, Result>, &native_matches<::sc_weapon_points_request>},
-    {22, 1, "campaign_row", "{\"id\":22,\"name\":\"campaign_row\",\"payload_revisions\":[1,2,3],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_row\",\"type\":\"campaign_row_campaign_row_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_row\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_row\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[22],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_row_base_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_row_presentation_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_row_campaign_row_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_row, std::size(policies_campaign_row), &decode_variant<campaign_row_payload_revision1, Payload>, &encode_variant<campaign_row_payload_revision1, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
-    {22, 2, "campaign_row", "{\"id\":22,\"name\":\"campaign_row\",\"payload_revisions\":[1,2,3],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_row\",\"type\":\"campaign_row_campaign_row_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_row\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_row\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[22],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_row_base_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_row_presentation_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_row_campaign_row_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_row, std::size(policies_campaign_row), &decode_variant<campaign_row_payload_revision2, Payload>, &encode_variant<campaign_row_payload_revision2, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
-    {22, 3, "campaign_row", "{\"id\":22,\"name\":\"campaign_row\",\"payload_revisions\":[1,2,3],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_row\",\"type\":\"campaign_row_campaign_row_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_row\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_row\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[22],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_row_base_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_row_presentation_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_row_campaign_row_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_row, std::size(policies_campaign_row), &decode_variant<campaign_row_payload, Payload>, &encode_variant<campaign_row_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
-    {23, 1, "campaign_commit", "{\"id\":23,\"name\":\"campaign_commit\",\"payload_revisions\":[1,2,3],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_commit\",\"type\":\"campaign_commit_campaign_commit_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_commit\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_commit\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[23],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_commit, std::size(policies_campaign_commit), &decode_variant<campaign_commit_payload, Payload>, &encode_variant<campaign_commit_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
-    {23, 2, "campaign_commit", "{\"id\":23,\"name\":\"campaign_commit\",\"payload_revisions\":[1,2,3],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_commit\",\"type\":\"campaign_commit_campaign_commit_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_commit\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_commit\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[23],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_commit, std::size(policies_campaign_commit), &decode_variant<campaign_commit_payload, Payload>, &encode_variant<campaign_commit_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
-    {23, 3, "campaign_commit", "{\"id\":23,\"name\":\"campaign_commit\",\"payload_revisions\":[1,2,3],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_commit\",\"type\":\"campaign_commit_campaign_commit_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_commit\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_commit\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[23],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_commit, std::size(policies_campaign_commit), &decode_variant<campaign_commit_payload, Payload>, &encode_variant<campaign_commit_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
-    {24, 1, "campaign", "{\"id\":24,\"name\":\"campaign\",\"payload_revisions\":[1,2,3],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign\",\"type\":\"campaign_campaign_payload\",\"operation\":\"read\",\"admission\":\"S\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"campaign\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[24],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_campaign_payload\"]}]}", Admission::S, Execution::snapshot, Evidence::feature_result, Ack::none, policies_campaign, std::size(policies_campaign), &decode_variant<campaign_payload, Payload>, &encode_variant<campaign_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
-    {24, 2, "campaign", "{\"id\":24,\"name\":\"campaign\",\"payload_revisions\":[1,2,3],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign\",\"type\":\"campaign_campaign_payload\",\"operation\":\"read\",\"admission\":\"S\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"campaign\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[24],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_campaign_payload\"]}]}", Admission::S, Execution::snapshot, Evidence::feature_result, Ack::none, policies_campaign, std::size(policies_campaign), &decode_variant<campaign_payload, Payload>, &encode_variant<campaign_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
-    {24, 3, "campaign", "{\"id\":24,\"name\":\"campaign\",\"payload_revisions\":[1,2,3],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign\",\"type\":\"campaign_campaign_payload\",\"operation\":\"read\",\"admission\":\"S\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"campaign\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[24],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_campaign_payload\"]}]}", Admission::S, Execution::snapshot, Evidence::feature_result, Ack::none, policies_campaign, std::size(policies_campaign), &decode_variant<campaign_payload, Payload>, &encode_variant<campaign_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
-    {25, 1, "inventory", "{\"id\":25,\"name\":\"inventory\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"inventory_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"inventory\"},{\"tag\":1,\"name\":\"ensure\",\"type\":\"inventory_ensure_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"inventory\"},{\"tag\":2,\"name\":\"set_capacity\",\"type\":\"inventory_set_capacity_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"inventory\"}]},\"result\":\"sc_inventory_result\",\"admission\":\"G\",\"availability\":\"inventory\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[25,26,27,28],\"release\":\"legacy_release\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"inventory_observe_payload\",\"inventory_ensure_payload\",\"inventory_set_capacity_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_inventory, std::size(policies_inventory), &decode_variant<inventory_payload, Payload>, &encode_variant<inventory_payload, Payload>, &decode_variant<sc_inventory_result, Result>, &encode_variant<sc_inventory_result, Result>, &native_matches<::sc_inventory_request>},
-    {29, 1, "arsenal", "{\"id\":29,\"name\":\"arsenal\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"arsenal_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"arsenal\"},{\"tag\":1,\"name\":\"ensure_mods\",\"type\":\"arsenal_ensure_mods_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"arsenal\"},{\"tag\":2,\"name\":\"select_mod\",\"type\":\"arsenal_select_mod_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"arsenal\"},{\"tag\":4,\"name\":\"project_mastery\",\"type\":\"arsenal_project_mastery_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"arsenal\"}]},\"result\":\"sc_arsenal_result\",\"admission\":\"G\",\"availability\":\"arsenal\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[29,30,31,32],\"release\":\"legacy_release\"},\"refused_tags\":[3,5],\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"arsenal_observe_payload\",\"arsenal_ensure_mods_payload\",\"arsenal_select_mod_payload\",\"arsenal_project_mastery_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_arsenal, std::size(policies_arsenal), &decode_variant<arsenal_payload, Payload>, &encode_variant<arsenal_payload, Payload>, &decode_variant<sc_arsenal_result, Result>, &encode_variant<sc_arsenal_result, Result>, &native_matches<::sc_arsenal_request>},
-    {33, 1, "runes", "{\"id\":33,\"name\":\"runes\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"runes_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"runes\"},{\"tag\":1,\"name\":\"ensure_normal\",\"type\":\"runes_ensure_normal_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"runes\"},{\"tag\":2,\"name\":\"ensure_support\",\"type\":\"runes_ensure_support_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"runes\"},{\"tag\":3,\"name\":\"select_normal\",\"type\":\"runes_select_normal_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"runes\"},{\"tag\":4,\"name\":\"select_support\",\"type\":\"runes_select_support_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"runes\"}]},\"result\":\"sc_runes_result\",\"admission\":\"G\",\"availability\":\"runes\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[33,34,35,36],\"release\":\"legacy_release\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"runes_observe_payload\",\"runes_ensure_normal_payload\",\"runes_ensure_support_payload\",\"runes_select_normal_payload\",\"runes_select_support_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_runes, std::size(policies_runes), &decode_variant<runes_payload, Payload>, &encode_variant<runes_payload, Payload>, &decode_variant<sc_runes_result, Result>, &encode_variant<sc_runes_result, Result>, &native_matches<::sc_runes_request>},
-    {37, 1, "special", "{\"id\":37,\"name\":\"special\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"special_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":1,\"name\":\"ensure_ownership\",\"type\":\"special_ensure_ownership_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":2,\"name\":\"select\",\"type\":\"special_select_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":3,\"name\":\"refill_status\",\"type\":\"special_refill_status_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":4,\"name\":\"refill_publish\",\"type\":\"special_refill_publish_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":5,\"name\":\"refill_take\",\"type\":\"special_refill_take_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":6,\"name\":\"refill_execute\",\"type\":\"special_refill_execute_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"special\"}]},\"result\":\"sc_special_result\",\"admission\":\"G\",\"availability\":\"special\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[37,38,39,40],\"release\":\"legacy_release\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"special_observe_payload\",\"special_ensure_ownership_payload\",\"special_select_payload\",\"special_refill_status_payload\",\"special_refill_publish_payload\",\"special_refill_take_payload\",\"special_refill_execute_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_special, std::size(policies_special), &decode_variant<special_payload, Payload>, &encode_variant<special_payload, Payload>, &decode_variant<sc_special_result, Result>, &encode_variant<sc_special_result, Result>, &native_matches<::sc_special_request>},
-    {41, 1, "deathlink", "{\"id\":41,\"name\":\"deathlink\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"deathlink_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"},{\"tag\":1,\"name\":\"configure\",\"type\":\"deathlink_configure_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"},{\"tag\":2,\"name\":\"apply_remote\",\"type\":\"deathlink_apply_remote_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"},{\"tag\":3,\"name\":\"poll_local\",\"type\":\"deathlink_poll_local_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"},{\"tag\":4,\"name\":\"ack_local\",\"type\":\"deathlink_ack_local_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"},{\"tag\":5,\"name\":\"cancel_remote\",\"type\":\"deathlink_cancel_remote_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"}]},\"result\":\"sc_deathlink_result\",\"admission\":\"G\",\"availability\":\"deathlink\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[41,42,43,44],\"release\":\"legacy_release\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"deathlink_observe_payload\",\"deathlink_configure_payload\",\"deathlink_apply_remote_payload\",\"deathlink_poll_local_payload\",\"deathlink_ack_local_payload\",\"deathlink_cancel_remote_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_deathlink, std::size(policies_deathlink), &decode_variant<deathlink_payload, Payload>, &encode_variant<deathlink_payload, Payload>, &decode_variant<sc_deathlink_result, Result>, &encode_variant<sc_deathlink_result, Result>, &native_matches<::sc_deathlink_request>},
-    {45, 1, "automap", "{\"id\":45,\"name\":\"automap\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":1,\"name\":\"publish\",\"type\":\"automap_publish_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"automap\"},{\"tag\":2,\"name\":\"observe\",\"type\":\"automap_observe_payload\",\"operation\":\"read\",\"admission\":\"S\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"automap\"}]},\"result\":\"sc_automap_result\",\"admission\":\"S\",\"availability\":\"automap\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[45],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"automap_publish_payload\",\"automap_observe_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_automap, std::size(policies_automap), &decode_variant<automap_payload, Payload>, &encode_variant<automap_payload, Payload>, &decode_variant<sc_automap_result, Result>, &encode_variant<sc_automap_result, Result>, &native_matches<::sc_automap_request>},
-    {46, 1, "command", "{\"id\":46,\"name\":\"command\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":1,\"name\":\"activate\",\"type\":\"command_activate_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":2,\"name\":\"player_perk\",\"type\":\"command_player_perk_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":3,\"name\":\"ammo_refill\",\"type\":\"command_ammo_refill_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":4,\"name\":\"crucible_refill\",\"type\":\"command_crucible_refill_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":5,\"name\":\"echo\",\"type\":\"command_echo_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":6,\"name\":\"condump\",\"type\":\"command_condump_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":7,\"name\":\"list_inventory\",\"type\":\"command_list_inventory_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":8,\"name\":\"transient_policy\",\"type\":\"command_transient_policy_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"}]},\"result\":\"sc_command_result\",\"admission\":\"G\",\"availability\":\"command\",\"execution\":\"native_frame\",\"evidence\":\"dispatch_only\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[46,47,48,49],\"release\":\"legacy_release\"},\"adapter\":\"bounded_existing_console_allowlist\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"command_activate_payload\",\"command_player_perk_payload\",\"command_ammo_refill_payload\",\"command_crucible_refill_payload\",\"command_echo_payload\",\"command_condump_payload\",\"command_list_inventory_payload\",\"command_transient_policy_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::dispatch_only, Ack::terminal_consumed, policies_command, std::size(policies_command), &decode_variant<command_payload, Payload>, &encode_variant<command_payload, Payload>, &decode_variant<sc_command_result, Result>, &encode_variant<sc_command_result, Result>, &native_matches<::sc_command_request>},
-    {50, 1, "combat", "{\"id\":50,\"name\":\"combat\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"combat\",\"type\":\"combat_combat_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"combat\"}]},\"result\":\"sc_combat_snapshot\",\"admission\":\"P\",\"availability\":\"combat\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"v1\":{\"opcodes\":[50],\"release\":\"none\"},\"namespace_filter_required\":true,\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"combat_combat_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_combat, std::size(policies_combat), &decode_variant<combat_payload, Payload>, &encode_variant<combat_payload, Payload>, &decode_variant<sc_combat_snapshot, Result>, &encode_variant<sc_combat_snapshot, Result>, &native_matches<::sc_combat_query>},
-    {51, 1, "combat_presentation", "{\"id\":51,\"name\":\"combat_presentation\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"combat_presentation\",\"type\":\"combat_presentation_combat_presentation_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"combat_presentation\"}]},\"result\":\"sc_combat_presentation_result\",\"admission\":\"S\",\"availability\":\"combat_presentation\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[51],\"release\":\"none\"},\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"combat_presentation_combat_presentation_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_combat_presentation, std::size(policies_combat_presentation), &decode_variant<combat_presentation_payload, Payload>, &encode_variant<combat_presentation_payload, Payload>, &decode_variant<sc_combat_presentation_result, Result>, &encode_variant<sc_combat_presentation_result, Result>, &native_matches<::sc_combat_presentation_request>},
-    {52, 1, "support_dump", "{\"id\":52,\"name\":\"support_dump\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"support_dump\",\"type\":\"support_dump_support_dump_payload\",\"operation\":\"submit\",\"admission\":\"P\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"support_dump\"}]},\"result\":\"sc_command_result\",\"admission\":\"P\",\"availability\":\"support_dump\",\"execution\":\"native_frame\",\"evidence\":\"dispatch_only\",\"ack\":\"terminal_consumed\",\"v1\":{\"opcodes\":[46,47,48,49],\"release\":\"legacy_release\"},\"render\":\"condump AP_SUPPORT_FILE.txt\",\"filename_argument\":false,\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"support_dump_support_dump_payload\"]}]}", Admission::P, Execution::native_frame, Evidence::dispatch_only, Ack::terminal_consumed, policies_support_dump, std::size(policies_support_dump), &decode_variant<support_dump_payload, Payload>, &encode_variant<support_dump_payload, Payload>, &decode_variant<sc_command_result, Result>, &encode_variant<sc_command_result, Result>, &native_matches<::sc_command_request>},
+    {1, 1, "inspect", "{\"id\":1,\"name\":\"inspect\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"inspect\",\"type\":\"inspect_inspect_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"inspect\"}]},\"result\":\"sc_status\",\"admission\":\"P\",\"availability\":\"inspect\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"inspect_inspect_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_inspect, std::size(policies_inspect), &decode_variant<inspect_payload, Payload>, &encode_variant<inspect_payload, Payload>, &decode_variant<sc_status, Result>, &encode_variant<sc_status, Result>, &native_matches<NativeRead>},
+    {2, 1, "engine", "{\"id\":2,\"name\":\"engine\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"engine\",\"type\":\"engine_engine_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"engine\"}]},\"result\":\"sc_engine_snapshot\",\"admission\":\"P\",\"availability\":\"engine\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"engine_engine_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_engine, std::size(policies_engine), &decode_variant<engine_payload, Payload>, &encode_variant<engine_payload, Payload>, &decode_variant<sc_engine_snapshot, Result>, &encode_variant<sc_engine_snapshot, Result>, &native_matches<NativeRead>},
+    {3, 1, "context", "{\"id\":3,\"name\":\"context\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"context\",\"type\":\"context_context_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"context\"}]},\"result\":\"sc_context_snapshot\",\"admission\":\"P\",\"availability\":\"context\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"context_context_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_context, std::size(policies_context), &decode_variant<context_payload, Payload>, &encode_variant<context_payload, Payload>, &decode_variant<sc_context_snapshot, Result>, &encode_variant<sc_context_snapshot, Result>, &native_matches<NativeRead>},
+    {4, 1, "native", "{\"id\":4,\"name\":\"native\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"native\",\"type\":\"native_native_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"native\"}]},\"result\":\"sc_native_snapshot\",\"admission\":\"P\",\"availability\":\"native\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"native_native_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_native, std::size(policies_native), &decode_variant<native_payload, Payload>, &encode_variant<native_payload, Payload>, &decode_variant<sc_native_snapshot, Result>, &encode_variant<sc_native_snapshot, Result>, &native_matches<NativeRead>},
+    {5, 1, "diagnostic", "{\"id\":5,\"name\":\"diagnostic\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"diagnostic\",\"type\":\"diagnostic_diagnostic_payload\",\"operation\":\"submit\",\"admission\":\"D\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"diagnostic\"}]},\"result\":\"sc_diagnostic_result\",\"admission\":\"D\",\"availability\":\"diagnostic\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"diagnostic_diagnostic_payload\"]}]}", Admission::D, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_diagnostic, std::size(policies_diagnostic), &decode_variant<diagnostic_payload, Payload>, &encode_variant<diagnostic_payload, Payload>, &decode_variant<sc_diagnostic_result, Result>, &encode_variant<sc_diagnostic_result, Result>, &native_matches<::sc_diagnostic_request>},
+    {8, 1, "diagnostic_detail", "{\"id\":8,\"name\":\"diagnostic_detail\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"diagnostic_detail\",\"type\":\"diagnostic_detail_diagnostic_detail_payload\",\"operation\":\"submit\",\"admission\":\"D\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"diagnostic_detail\"}]},\"result\":\"diagnostic_detail_result\",\"admission\":\"D\",\"availability\":\"diagnostic_detail\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"diagnostic_detail_diagnostic_detail_payload\"]}]}", Admission::D, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_diagnostic_detail, std::size(policies_diagnostic_detail), &decode_variant<diagnostic_detail_payload, Payload>, &encode_variant<diagnostic_detail_payload, Payload>, &decode_variant<diagnostic_detail_result, Result>, &encode_variant<diagnostic_detail_result, Result>, &native_matches<::sc_diagnostic_request>},
+    {11, 1, "save", "{\"id\":11,\"name\":\"save\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"save\",\"type\":\"save_save_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"save\"}]},\"result\":\"sc_save_snapshot\",\"admission\":\"P\",\"availability\":\"save\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"save_save_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_save, std::size(policies_save), &decode_variant<save_payload, Payload>, &encode_variant<save_payload, Payload>, &decode_variant<sc_save_snapshot, Result>, &encode_variant<sc_save_snapshot, Result>, &native_matches<NativeRead>},
+    {12, 1, "save_admission", "{\"id\":12,\"name\":\"save_admission\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"save_admission\",\"type\":\"save_admission_save_admission_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"save_admission\"}]},\"result\":\"save_admission_result\",\"admission\":\"P\",\"availability\":\"save_admission\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"save_admission_save_admission_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_save_admission, std::size(policies_save_admission), &decode_variant<save_admission_payload, Payload>, &encode_variant<save_admission_payload, Payload>, &decode_variant<save_admission_result, Result>, &encode_variant<save_admission_result, Result>, &native_matches<NativeRead>},
+    {13, 1, "save_write", "{\"id\":13,\"name\":\"save_write\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"save_write\",\"type\":\"save_write_save_write_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"save_write\"}]},\"result\":\"sc_save_write_snapshot\",\"admission\":\"P\",\"availability\":\"save_write\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"save_write_save_write_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_save_write, std::size(policies_save_write), &decode_variant<save_write_payload, Payload>, &encode_variant<save_write_payload, Payload>, &decode_variant<sc_save_write_snapshot, Result>, &encode_variant<sc_save_write_snapshot, Result>, &native_matches<NativeRead>},
+    {14, 1, "save_backup", "{\"id\":14,\"name\":\"save_backup\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"save_backup\",\"type\":\"save_backup_save_backup_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame_async\",\"availability\":\"save_backup\"}]},\"result\":\"sc_save_backup_snapshot\",\"admission\":\"G\",\"availability\":\"save_backup\",\"execution\":\"native_frame_async\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"owned_slot_required\":true,\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"save_backup_save_backup_payload\"]}]}", Admission::G, Execution::native_frame_async, Evidence::feature_result, Ack::terminal_consumed, policies_save_backup, std::size(policies_save_backup), &decode_variant<save_backup_payload, Payload>, &encode_variant<save_backup_payload, Payload>, &decode_variant<sc_save_backup_snapshot, Result>, &encode_variant<sc_save_backup_snapshot, Result>, &native_matches<::sc_save_backup_request>},
+    {17, 1, "save_installation", "{\"id\":17,\"name\":\"save_installation\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"save_installation\",\"type\":\"save_installation_save_installation_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"save_installation\"}]},\"result\":\"sc_save_installation_snapshot\",\"admission\":\"P\",\"availability\":\"save_installation\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"save_installation_save_installation_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_save_installation, std::size(policies_save_installation), &decode_variant<save_installation_payload, Payload>, &encode_variant<save_installation_payload, Payload>, &decode_variant<sc_save_installation_snapshot, Result>, &encode_variant<sc_save_installation_snapshot, Result>, &native_matches<NativeRead>},
+    {18, 1, "weapon_points", "{\"id\":18,\"name\":\"weapon_points\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"weapon_points_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"weapon_points\"},{\"tag\":1,\"name\":\"grant\",\"type\":\"weapon_points_grant_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"weapon_points\"}]},\"result\":\"sc_weapon_points_result\",\"admission\":\"G\",\"availability\":\"weapon_points\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"constraints\":[{\"kind\":\"checked_arithmetic\",\"fields\":[\"amount\",\"expected_gained\"],\"max\":2147483647}],\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"weapon_points_observe_payload\",\"weapon_points_grant_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_weapon_points, std::size(policies_weapon_points), &decode_variant<weapon_points_payload, Payload>, &encode_variant<weapon_points_payload, Payload>, &decode_variant<sc_weapon_points_result, Result>, &encode_variant<sc_weapon_points_result, Result>, &native_matches<::sc_weapon_points_request>},
+    {22, 1, "campaign_row", "{\"id\":22,\"name\":\"campaign_row\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_row\",\"type\":\"campaign_row_known_rewards_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_row\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_row\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_row_base_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_row_presentation_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_row_campaign_row_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_row_known_rewards_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_row, std::size(policies_campaign_row), &decode_variant<campaign_row_payload_revision1, Payload>, &encode_variant<campaign_row_payload_revision1, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {22, 2, "campaign_row", "{\"id\":22,\"name\":\"campaign_row\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_row\",\"type\":\"campaign_row_known_rewards_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_row\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_row\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_row_base_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_row_presentation_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_row_campaign_row_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_row_known_rewards_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_row, std::size(policies_campaign_row), &decode_variant<campaign_row_payload_revision2, Payload>, &encode_variant<campaign_row_payload_revision2, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {22, 3, "campaign_row", "{\"id\":22,\"name\":\"campaign_row\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_row\",\"type\":\"campaign_row_known_rewards_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_row\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_row\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_row_base_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_row_presentation_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_row_campaign_row_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_row_known_rewards_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_row, std::size(policies_campaign_row), &decode_variant<campaign_row_payload_revision3, Payload>, &encode_variant<campaign_row_payload_revision3, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {22, 4, "campaign_row", "{\"id\":22,\"name\":\"campaign_row\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_row\",\"type\":\"campaign_row_known_rewards_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_row\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_row\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_row_base_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_row_presentation_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_row_campaign_row_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_row_known_rewards_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_row, std::size(policies_campaign_row), &decode_variant<campaign_row_payload, Payload>, &encode_variant<campaign_row_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {23, 1, "campaign_commit", "{\"id\":23,\"name\":\"campaign_commit\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_commit\",\"type\":\"campaign_commit_selection_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_commit\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_commit\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_commit_selection_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_commit, std::size(policies_campaign_commit), &decode_variant<campaign_commit_payload_revision1, Payload>, &encode_variant<campaign_commit_payload_revision1, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {23, 2, "campaign_commit", "{\"id\":23,\"name\":\"campaign_commit\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_commit\",\"type\":\"campaign_commit_selection_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_commit\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_commit\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_commit_selection_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_commit, std::size(policies_campaign_commit), &decode_variant<campaign_commit_payload_revision1, Payload>, &encode_variant<campaign_commit_payload_revision1, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {23, 3, "campaign_commit", "{\"id\":23,\"name\":\"campaign_commit\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_commit\",\"type\":\"campaign_commit_selection_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_commit\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_commit\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_commit_selection_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_commit, std::size(policies_campaign_commit), &decode_variant<campaign_commit_payload_revision1, Payload>, &encode_variant<campaign_commit_payload_revision1, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {23, 4, "campaign_commit", "{\"id\":23,\"name\":\"campaign_commit\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign_commit\",\"type\":\"campaign_commit_selection_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"campaign_commit\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign_commit\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_commit_campaign_commit_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_commit_selection_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_campaign_commit, std::size(policies_campaign_commit), &decode_variant<campaign_commit_payload, Payload>, &encode_variant<campaign_commit_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {24, 1, "campaign", "{\"id\":24,\"name\":\"campaign\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign\",\"type\":\"campaign_campaign_payload\",\"operation\":\"read\",\"admission\":\"S\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"campaign\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_campaign_payload\"]}]}", Admission::S, Execution::snapshot, Evidence::feature_result, Ack::none, policies_campaign, std::size(policies_campaign), &decode_variant<campaign_payload, Payload>, &encode_variant<campaign_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {24, 2, "campaign", "{\"id\":24,\"name\":\"campaign\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign\",\"type\":\"campaign_campaign_payload\",\"operation\":\"read\",\"admission\":\"S\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"campaign\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_campaign_payload\"]}]}", Admission::S, Execution::snapshot, Evidence::feature_result, Ack::none, policies_campaign, std::size(policies_campaign), &decode_variant<campaign_payload, Payload>, &encode_variant<campaign_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {24, 3, "campaign", "{\"id\":24,\"name\":\"campaign\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign\",\"type\":\"campaign_campaign_payload\",\"operation\":\"read\",\"admission\":\"S\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"campaign\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_campaign_payload\"]}]}", Admission::S, Execution::snapshot, Evidence::feature_result, Ack::none, policies_campaign, std::size(policies_campaign), &decode_variant<campaign_payload, Payload>, &encode_variant<campaign_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {24, 4, "campaign", "{\"id\":24,\"name\":\"campaign\",\"payload_revisions\":[1,2,3,4],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"campaign\",\"type\":\"campaign_campaign_payload\",\"operation\":\"read\",\"admission\":\"S\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"campaign\"}]},\"result\":\"sc_campaign_result\",\"admission\":\"S\",\"availability\":\"campaign\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":2,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":3,\"payload_variants\":[\"campaign_campaign_payload\"]},{\"revision\":4,\"payload_variants\":[\"campaign_campaign_payload\"]}]}", Admission::S, Execution::snapshot, Evidence::feature_result, Ack::none, policies_campaign, std::size(policies_campaign), &decode_variant<campaign_payload, Payload>, &encode_variant<campaign_payload, Payload>, &decode_variant<sc_campaign_result, Result>, &encode_variant<sc_campaign_result, Result>, &native_matches<NativeCampaign>},
+    {25, 1, "inventory", "{\"id\":25,\"name\":\"inventory\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"inventory_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"inventory\"},{\"tag\":1,\"name\":\"ensure\",\"type\":\"inventory_ensure_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"inventory\"},{\"tag\":2,\"name\":\"set_capacity\",\"type\":\"inventory_set_capacity_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"inventory\"}]},\"result\":\"sc_inventory_result\",\"admission\":\"G\",\"availability\":\"inventory\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"inventory_observe_payload\",\"inventory_ensure_payload\",\"inventory_set_capacity_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_inventory, std::size(policies_inventory), &decode_variant<inventory_payload, Payload>, &encode_variant<inventory_payload, Payload>, &decode_variant<sc_inventory_result, Result>, &encode_variant<sc_inventory_result, Result>, &native_matches<::sc_inventory_request>},
+    {29, 1, "arsenal", "{\"id\":29,\"name\":\"arsenal\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"arsenal_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"arsenal\"},{\"tag\":1,\"name\":\"ensure_mods\",\"type\":\"arsenal_ensure_mods_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"arsenal\"},{\"tag\":2,\"name\":\"select_mod\",\"type\":\"arsenal_select_mod_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"arsenal\"},{\"tag\":4,\"name\":\"project_mastery\",\"type\":\"arsenal_project_mastery_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"arsenal\"}]},\"result\":\"sc_arsenal_result\",\"admission\":\"G\",\"availability\":\"arsenal\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"refused_tags\":[3,5],\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"arsenal_observe_payload\",\"arsenal_ensure_mods_payload\",\"arsenal_select_mod_payload\",\"arsenal_project_mastery_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_arsenal, std::size(policies_arsenal), &decode_variant<arsenal_payload, Payload>, &encode_variant<arsenal_payload, Payload>, &decode_variant<sc_arsenal_result, Result>, &encode_variant<sc_arsenal_result, Result>, &native_matches<::sc_arsenal_request>},
+    {33, 1, "runes", "{\"id\":33,\"name\":\"runes\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"runes_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"runes\"},{\"tag\":1,\"name\":\"ensure_normal\",\"type\":\"runes_ensure_normal_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"runes\"},{\"tag\":2,\"name\":\"ensure_support\",\"type\":\"runes_ensure_support_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"runes\"},{\"tag\":3,\"name\":\"select_normal\",\"type\":\"runes_select_normal_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"runes\"},{\"tag\":4,\"name\":\"select_support\",\"type\":\"runes_select_support_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"runes\"}]},\"result\":\"sc_runes_result\",\"admission\":\"G\",\"availability\":\"runes\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"runes_observe_payload\",\"runes_ensure_normal_payload\",\"runes_ensure_support_payload\",\"runes_select_normal_payload\",\"runes_select_support_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_runes, std::size(policies_runes), &decode_variant<runes_payload, Payload>, &encode_variant<runes_payload, Payload>, &decode_variant<sc_runes_result, Result>, &encode_variant<sc_runes_result, Result>, &native_matches<::sc_runes_request>},
+    {37, 1, "special", "{\"id\":37,\"name\":\"special\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"special_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":1,\"name\":\"ensure_ownership\",\"type\":\"special_ensure_ownership_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":2,\"name\":\"select\",\"type\":\"special_select_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":3,\"name\":\"refill_status\",\"type\":\"special_refill_status_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":4,\"name\":\"refill_publish\",\"type\":\"special_refill_publish_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":5,\"name\":\"refill_take\",\"type\":\"special_refill_take_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"special\"},{\"tag\":6,\"name\":\"refill_execute\",\"type\":\"special_refill_execute_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"special\"}]},\"result\":\"sc_special_result\",\"admission\":\"G\",\"availability\":\"special\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"special_observe_payload\",\"special_ensure_ownership_payload\",\"special_select_payload\",\"special_refill_status_payload\",\"special_refill_publish_payload\",\"special_refill_take_payload\",\"special_refill_execute_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_special, std::size(policies_special), &decode_variant<special_payload, Payload>, &encode_variant<special_payload, Payload>, &decode_variant<sc_special_result, Result>, &encode_variant<sc_special_result, Result>, &native_matches<::sc_special_request>},
+    {41, 1, "deathlink", "{\"id\":41,\"name\":\"deathlink\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"deathlink_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"},{\"tag\":1,\"name\":\"configure\",\"type\":\"deathlink_configure_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"},{\"tag\":2,\"name\":\"apply_remote\",\"type\":\"deathlink_apply_remote_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"},{\"tag\":3,\"name\":\"poll_local\",\"type\":\"deathlink_poll_local_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"},{\"tag\":4,\"name\":\"ack_local\",\"type\":\"deathlink_ack_local_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"},{\"tag\":5,\"name\":\"cancel_remote\",\"type\":\"deathlink_cancel_remote_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"deathlink\"}]},\"result\":\"sc_deathlink_result\",\"admission\":\"G\",\"availability\":\"deathlink\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"deathlink_observe_payload\",\"deathlink_configure_payload\",\"deathlink_apply_remote_payload\",\"deathlink_poll_local_payload\",\"deathlink_ack_local_payload\",\"deathlink_cancel_remote_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_deathlink, std::size(policies_deathlink), &decode_variant<deathlink_payload, Payload>, &encode_variant<deathlink_payload, Payload>, &decode_variant<sc_deathlink_result, Result>, &encode_variant<sc_deathlink_result, Result>, &native_matches<::sc_deathlink_request>},
+    {45, 1, "automap", "{\"id\":45,\"name\":\"automap\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":1,\"name\":\"publish\",\"type\":\"automap_publish_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"automap\"},{\"tag\":2,\"name\":\"observe\",\"type\":\"automap_observe_payload\",\"operation\":\"read\",\"admission\":\"S\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"automap\"}]},\"result\":\"sc_automap_result\",\"admission\":\"S\",\"availability\":\"automap\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"automap_publish_payload\",\"automap_observe_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_automap, std::size(policies_automap), &decode_variant<automap_payload, Payload>, &encode_variant<automap_payload, Payload>, &decode_variant<sc_automap_result, Result>, &encode_variant<sc_automap_result, Result>, &native_matches<::sc_automap_request>},
+    {46, 1, "command", "{\"id\":46,\"name\":\"command\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":1,\"name\":\"activate\",\"type\":\"command_activate_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":2,\"name\":\"player_perk\",\"type\":\"command_player_perk_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":3,\"name\":\"ammo_refill\",\"type\":\"command_ammo_refill_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":4,\"name\":\"crucible_refill\",\"type\":\"command_crucible_refill_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":5,\"name\":\"echo\",\"type\":\"command_echo_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":6,\"name\":\"condump\",\"type\":\"command_condump_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":7,\"name\":\"list_inventory\",\"type\":\"command_list_inventory_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"},{\"tag\":8,\"name\":\"transient_policy\",\"type\":\"command_transient_policy_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"command\"}]},\"result\":\"sc_command_result\",\"admission\":\"G\",\"availability\":\"command\",\"execution\":\"native_frame\",\"evidence\":\"dispatch_only\",\"ack\":\"terminal_consumed\",\"adapter\":\"bounded_existing_console_allowlist\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"command_activate_payload\",\"command_player_perk_payload\",\"command_ammo_refill_payload\",\"command_crucible_refill_payload\",\"command_echo_payload\",\"command_condump_payload\",\"command_list_inventory_payload\",\"command_transient_policy_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::dispatch_only, Ack::terminal_consumed, policies_command, std::size(policies_command), &decode_variant<command_payload, Payload>, &encode_variant<command_payload, Payload>, &decode_variant<sc_command_result, Result>, &encode_variant<sc_command_result, Result>, &native_matches<::sc_command_request>},
+    {50, 1, "combat", "{\"id\":50,\"name\":\"combat\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"combat\",\"type\":\"combat_combat_payload\",\"operation\":\"read\",\"admission\":\"P\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"combat\"}]},\"result\":\"sc_combat_snapshot\",\"admission\":\"P\",\"availability\":\"combat\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"namespace_filter_required\":true,\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"combat_combat_payload\"]}]}", Admission::P, Execution::snapshot, Evidence::feature_result, Ack::none, policies_combat, std::size(policies_combat), &decode_variant<combat_payload, Payload>, &encode_variant<combat_payload, Payload>, &decode_variant<sc_combat_snapshot, Result>, &encode_variant<sc_combat_snapshot, Result>, &native_matches<::sc_combat_query>},
+    {51, 1, "combat_presentation", "{\"id\":51,\"name\":\"combat_presentation\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"combat_presentation\",\"type\":\"combat_presentation_combat_presentation_payload\",\"operation\":\"submit\",\"admission\":\"S\",\"effect\":\"accepted_publication\",\"execution\":\"publication\",\"availability\":\"combat_presentation\"}]},\"result\":\"sc_combat_presentation_result\",\"admission\":\"S\",\"availability\":\"combat_presentation\",\"execution\":\"publication\",\"evidence\":\"accepted_publication\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"combat_presentation_combat_presentation_payload\"]}]}", Admission::S, Execution::publication, Evidence::accepted_publication, Ack::terminal_consumed, policies_combat_presentation, std::size(policies_combat_presentation), &decode_variant<combat_presentation_payload, Payload>, &encode_variant<combat_presentation_payload, Payload>, &decode_variant<sc_combat_presentation_result, Result>, &encode_variant<sc_combat_presentation_result, Result>, &native_matches<::sc_combat_presentation_request>},
+    {52, 1, "support_dump", "{\"id\":52,\"name\":\"support_dump\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"support_dump\",\"type\":\"support_dump_support_dump_payload\",\"operation\":\"submit\",\"admission\":\"P\",\"effect\":\"dispatch_only\",\"execution\":\"native_frame\",\"availability\":\"support_dump\"}]},\"result\":\"sc_command_result\",\"admission\":\"P\",\"availability\":\"support_dump\",\"execution\":\"native_frame\",\"evidence\":\"dispatch_only\",\"ack\":\"terminal_consumed\",\"render\":\"condump AP_SUPPORT_FILE.txt\",\"filename_argument\":false,\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"support_dump_support_dump_payload\"]}]}", Admission::P, Execution::native_frame, Evidence::dispatch_only, Ack::terminal_consumed, policies_support_dump, std::size(policies_support_dump), &decode_variant<support_dump_payload, Payload>, &encode_variant<support_dump_payload, Payload>, &decode_variant<sc_command_result, Result>, &encode_variant<sc_command_result, Result>, &native_matches<::sc_command_request>},
+    {53, 1, "currencies", "{\"id\":53,\"name\":\"currencies\",\"payload_revisions\":[1],\"operations\":[\"ack\",\"cancel\",\"query\",\"read\",\"submit\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"currencies_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"currencies\"},{\"tag\":1,\"name\":\"grant\",\"type\":\"currencies_grant_payload\",\"operation\":\"submit\",\"admission\":\"G\",\"effect\":\"feature_readback\",\"execution\":\"native_frame\",\"availability\":\"currencies\"}]},\"result\":\"sc_currency_result\",\"admission\":\"G\",\"availability\":\"currencies\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"terminal_consumed\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"currencies_observe_payload\",\"currencies_grant_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::terminal_consumed, policies_currencies, std::size(policies_currencies), &decode_variant<currencies_payload, Payload>, &encode_variant<currencies_payload, Payload>, &decode_variant<sc_currency_result, Result>, &encode_variant<sc_currency_result, Result>, &native_matches<::sc_currency_request>},
+    {54, 1, "progression", "{\"id\":54,\"name\":\"progression\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"progression_observe_payload\",\"operation\":\"read\",\"admission\":\"G\",\"effect\":\"observation\",\"execution\":\"native_frame\",\"availability\":\"inventory\"}]},\"result\":\"sc_progression_result\",\"admission\":\"G\",\"availability\":\"inventory\",\"execution\":\"native_frame\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"progression_observe_payload\"]}]}", Admission::G, Execution::native_frame, Evidence::feature_result, Ack::none, policies_progression, std::size(policies_progression), &decode_variant<progression_payload, Payload>, &encode_variant<progression_payload, Payload>, &decode_variant<sc_progression_result, Result>, &encode_variant<sc_progression_result, Result>, &native_matches<::sc_progression_request>},
+    {55, 1, "mission_access", "{\"id\":55,\"name\":\"mission_access\",\"payload_revisions\":[1],\"operations\":[\"read\"],\"payload\":{\"tag_type\":\"u32\",\"variants\":[{\"tag\":0,\"name\":\"observe\",\"type\":\"mission_access_observe_payload\",\"operation\":\"read\",\"admission\":\"S\",\"effect\":\"observation\",\"execution\":\"snapshot\",\"availability\":\"campaign\"}]},\"result\":\"sc_mission_access_result\",\"admission\":\"S\",\"availability\":\"campaign\",\"execution\":\"snapshot\",\"evidence\":\"feature_result\",\"ack\":\"none\",\"revision_types\":[{\"revision\":1,\"payload_variants\":[\"mission_access_observe_payload\"]}]}", Admission::S, Execution::snapshot, Evidence::feature_result, Ack::none, policies_mission_access, std::size(policies_mission_access), &decode_variant<mission_access_payload, Payload>, &encode_variant<mission_access_payload, Payload>, &decode_variant<sc_mission_access_result, Result>, &encode_variant<sc_mission_access_result, Result>, &native_matches<::sc_mission_access_request>},
 };
 const size_t descriptor_count = std::size(descriptors);
 }

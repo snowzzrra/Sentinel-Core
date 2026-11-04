@@ -25,12 +25,8 @@ def load_projection():
 class GeneratorTests(unittest.TestCase):
     def setUp(self):
         self.source = generator.SCHEMA.read_bytes()
-        self.schema = generator.projection_schema(json.loads(self.source))
+        self.schema = json.loads(self.source)
 
-    def fixture(self, name):
-        fixtures = json.loads((ROOT / "tests/fixtures/wire/v1.json").read_bytes())["fixtures"]
-        entry = next(item for item in fixtures if item["name"] == name)
-        return b"".join(bytes.fromhex(field["hex"]) for field in entry["fields"])
 
     def test_deterministic_and_checked_in(self):
         first = generator.render(self.source)
@@ -48,7 +44,6 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual(json.loads(formatted), schema)
         self.assertEqual(formatted, (generator.format_schema(json.loads(formatted)) + "\n").encode())
         self.assertEqual(generator.render(json.dumps(schema).encode()), generator.render(formatted))
-        self.assertEqual(set(schema["v1"]), {"v1_transfers", "compatibility", "v1_layouts"})
 
     def test_duplicate_ids_and_revisions_refused(self):
         duplicate = copy.deepcopy(self.schema)
@@ -97,18 +92,12 @@ class GeneratorTests(unittest.TestCase):
         codec = load_projection()
         command = codec.COMMANDS[22]
         variants = [r["payload_variants"][0] for r in command["revision_types"]]
-        self.assertEqual(len(set(variants)), 3)
+        self.assertEqual(len(set(variants)), 4)
         fields = [{f["name"] for f in codec.TYPES[name]["fields"]} for name in variants]
         self.assertEqual(fields[1] - fields[0], {"summary"})
         self.assertEqual(fields[2] - fields[1], {"rewards"})
+        self.assertEqual(fields[3] - fields[2], {"rewards_known"})
 
-    def test_campaign_duplicate_rewards_refused(self):
-        codec = load_projection()
-        data = self.fixture("campaign_rewards_row")
-        value, _ = codec.decode_frame("campaign_rewards_row", data)
-        value["rewards"].append(copy.deepcopy(value["rewards"][0]))
-        with self.assertRaisesRegex(ValueError, "duplicate"):
-            codec.encode_frame("campaign_rewards_row", value)
 
     def test_check_reports_drift_without_writing(self):
         with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
@@ -124,17 +113,6 @@ class GeneratorTests(unittest.TestCase):
             after = {p.relative_to(root): (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
             self.assertEqual(before, after)
 
-    def test_python_fixture_codecs(self):
-        codec = load_projection()
-        fixtures = json.loads((ROOT / "tests/fixtures/wire/v1.json").read_bytes())["fixtures"]
-        for entry in fixtures:
-            if "layout" not in entry:
-                continue
-            with self.subTest(name=entry["name"]):
-                data = self.fixture(entry["name"])
-                self.assertEqual(hashlib.sha256(data).hexdigest(), entry["sha256"])
-                value, status = codec.decode_frame(entry["layout"], data)
-                self.assertEqual(codec.encode_frame(entry["layout"], value, status), data)
 
     def test_closed_variants_signed_selection_and_bounds(self):
         codec = load_projection()
@@ -147,46 +125,8 @@ class GeneratorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             codec.decode_variant(33, 1, b"\xff\xff\xff\xff")
 
-    def test_generated_headers_refuse_corruption(self):
-        codec = load_projection()
-        data = self.fixture("inspect_request")
-        for offset in (0, 4, 6, 8, 12, 16):
-            bad = bytearray(data)
-            bad[offset] = 255
-            with self.subTest(offset=offset), self.assertRaises(ValueError):
-                codec.decode_frame("inspect_request", bad)
 
-    def test_v1_fixture_bytes_and_family_coverage(self):
-        fixtures = json.loads((ROOT / "tests/fixtures/wire/v1.json").read_bytes())["fixtures"]
-        self.assertEqual(len({entry["name"] for entry in fixtures}), len(fixtures))
-        self.assertEqual({entry["family"] for entry in fixtures}, set(self.schema["compatibility"]["families"]))
-        for family in self.schema["compatibility"]["families"]:
-            self.assertEqual(sorted(entry["response"] for entry in fixtures if entry["family"] == family), [False, True])
-        for entry in fixtures:
-            with self.subTest(name=entry["name"]):
-                data = self.fixture(entry["name"])
-                self.assertEqual(len(data), entry["size"])
-                self.assertEqual(hashlib.sha256(data).hexdigest(), entry["sha256"])
-                self.assertTrue(entry["description"])
-                offset = 0
-                for field in entry["fields"]:
-                    raw = bytes.fromhex(field["hex"])
-                    self.assertEqual(field["offset"], offset)
-                    self.assertTrue(field["field"])
-                    if isinstance(field["value"], int):
-                        self.assertEqual(int.from_bytes(raw, "little", signed=field["type"].startswith("i")), field["value"])
-                    offset += len(raw)
-                self.assertEqual(offset, len(data))
 
-    def test_invalid_v1_members_and_descriptors_refused(self):
-        for change in (dict(member="value();"), dict(type="u64", count=20000)):
-            schema = copy.deepcopy(self.schema)
-            schema["v1_transfers"][0]["fields"][0].update(change)
-            with self.subTest(change=change), self.assertRaises(ValueError):
-                generator.validate(schema)
-        self.schema["compatibility"]["operations"][0]["family"] = "unknown"
-        with self.assertRaisesRegex(ValueError, "unknown v1 family"):
-            generator.validate(self.schema)
 
 
 if __name__ == "__main__":

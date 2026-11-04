@@ -1,14 +1,18 @@
+#include "engine/builds/build_descriptor.h"
 #include "ap_controls_native.h"
+#include "player_strings_generated.h"
 #include "local_controls.h"
 #include "native_target.h"
 #include "save_session.h"
 #include <MinHook.h>
+#include "engine/hooks/hook_set.h"
 #include <atomic>
 #include <cstdio>
 #include <cstring>
 
 namespace sentinel::ap_controls {
 namespace {
+hooks::HookSet hook_set("ap_controls");
 using Update = void(*)(uintptr_t);
 using Show = void(*)(uintptr_t, int);
 using Destroy = uintptr_t(*)(uintptr_t, uint32_t);
@@ -58,11 +62,11 @@ controls::Bindings cached{};
 uint64_t next_read = 0;
 unsigned errors[2]{};
 constexpr const char* commands[] = {"__ap_ammo_refill", "__ap_special_toggle"};
-constexpr const char* labels[] = {"Ammo Refill", "Toggle Special Weapon"};
+constexpr const char* labels[] = {player_strings::controls_ammo_refill, player_strings::controls_toggle_special_weapon};
 constexpr const char* messages[] = {
-    "", "Choose one supported key without modifiers.", "This key is assigned to the other AP action.",
-    "This key is assigned in the game.", "The AP key could not be saved.",
-    "The AP keys could not be restored.", "Game input is not ready.", "This AP binding is invalid."
+    "", player_strings::controls_unsupported_key, player_strings::controls_key_conflict,
+    player_strings::controls_game_key_conflict, player_strings::controls_save_failed,
+    player_strings::controls_restore_failed, player_strings::controls_input_not_ready, player_strings::controls_invalid_binding
 };
 
 template<class T> bool read(uintptr_t address, T& value) {
@@ -117,7 +121,7 @@ void render_ap(uintptr_t row) {
     refresh();
     char label[160]{};
     const auto error = errors[index] ? errors[index] : cached.conflict() ? 2u : (cached.invalid & (1u << index)) ? 7u : 0u;
-    if (error) std::snprintf(label, sizeof(label), "%s - %s", labels[index], messages[error]);
+    if (error) std::snprintf(label, sizeof(label), player_strings::controls_binding_error, labels[index], messages[error]);
     else std::snprintf(label, sizeof(label), "%s", labels[index]);
     assign_string(row + 0x188, label);
     if (const auto text = widget_text(row)) assign_text(text, label);
@@ -126,7 +130,7 @@ void render_ap(uintptr_t row) {
     read(row + 0x340, secondary);
     const auto key = controls::token(cached.keys[index]);
     button_label(primary, key.c_str(), !cached.keys[index]);
-    button_label(secondary, "Clear", false);
+    button_label(secondary, player_strings::controls_clear, false);
 }
 void render_detour(uintptr_t row) {
     // keep the native mouse-focus callbacks before replacing AP text.
@@ -227,7 +231,7 @@ void append_rows(uintptr_t popup, uintptr_t list) {
     const auto add = method<Add>(list, 0xd8);
     uintptr_t swf = 0;
     if (!add || !read(popup + 0x10, swf) || !swf) return;
-    add_group(list, 4, "AP Controls");
+    add_group(list, 4, player_strings::controls_group);
     for (int i = 0; i < 2; ++i) {
         const auto storage = allocate(0x358);
         if (!storage) break;
@@ -296,36 +300,96 @@ uintptr_t chat_destroy_detour(uintptr_t chat, uint32_t flags) {
     clear_chat(chat);
     return original_chat_destroy(chat, flags);
 }
-struct Site { uint32_t rva; const char* prefix; };
-constexpr Site sites[] = {
-    {0x1094b20,"40574883ec40488bf90f29742430488b8900010000488b01ff507880bf300100"},
-    {0x158c720,"405556488dac2468bfffffb898410000e86bf62d01482be0488b059922c20248"},
-    {0x11116f0,"40534881ecf0000000488b05d8d209034833c448898424e0000000488bd9e80d"},
-    {0x1093b00,"48895c2420574883ec30488bd9488bfa8b0a83e901747183f90e0f85d2020000"},
-    {0x1093e20,"40555356488d6c24f04881ec10010000488b05a1ab11034833c4488945e083b9"},
-    {0x1096070,"48895c2418574883ec508bda488bf9ba03000000e847701300488bcfe81f7355"},
-    {0x1094250,"40534883ec20ba03000000488bd9e8dd881300488bcbe825b45500488b838800"},
-    {0x1093410,"48895c24084889742410574883ec20488d056a30ca0133f64889018bfa0fb681"},
-    {0x357240,"e9934e3902cccccccccccccccccccccc488b4108c3cccccccccccccccccccccc"},
-    {0x1110f70,"40534883ec20488bd9e802c44600488d052b68c301488d8ba0020000488903e8"},
-    {0x1111590,"48895c24084889742410574883ec20488bf1498bf94881c1a0020000498bd8e8"},
-    {0x158c410,"48896c2410488974241848897c242041564883ec20486381880100004533f649"},
-    {0x1096e20,"4c8bdc5541564883ec58488b8100010000488be9440fb6f24863885001000085"},
-    {0x1094720,"48895c241048896c2418565741564881ec90010000488b059ca211034833c448"},
-    {0x3faff0,"48895c2410488974241848897c242041564883ec304c8bf2488bd94885d20f85"},
-    {0x157d8d0,"40534883ec5080b934020000007472488b81800100004885c074664c8b50184d"},
-    {0x186db50,"40534883ec20488bd9488b0d6840a002e8db30affe488bd0488d4b40e87fd4b8"},
-    {0x17e0870,"48895c24084489442418574883ec30498bd983fa130f878a00000083f9030f87"},
-    {0x185c040,"405355565741564883ec70488b05862995024833c44889442468488b49284c8b"},
-    {0x184e4b0,"40534883ec20833908752b488b59084885db74224c8b03488bcb488b15d75b06"},
-    {0x184e3b0,"4883ec288b0183f8027527488b4908b8fffffffff00fc1413083f80175544885"},
-    {0x17ccc20,"80b9d000000000750c80b90881600000750332c0c3b001c3cccccccccccccccc"},
-    {0x174efc0,"4883ec28488b49704885c97410e86ebfa7ff84c07407b0014883c428c332c048"},
-    {0x11caf40,"488b41484c8bc94885c0740d80b8b8000000000f85a2000000488b41404885c0"},
-    {0x113eae0,"48895c241057b8d0400000e8b0d27201482be0488b05defe06034833c4488984"},
-    {0x113e2a0,"40534883ec20488bd9e8020100004885c074548b903c01000089938c0100008b"},
-    {0x113dfc0,"48895c240848896c24104889742418574883ec20488d059df1c0018bea488901"}
-};
+void build_detour_entry(uintptr_t popup) {
+    const auto lease = hook_set.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_build)>(lease.original)(popup);
+        return build_detour(popup);
+    } __finally { hook_set.leave(lease); }
+}
+
+void finalize_detour_entry(uintptr_t list) {
+    const auto lease = hook_set.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_finalize)>(lease.original)(list);
+        return finalize_detour(list);
+    } __finally { hook_set.leave(lease); }
+}
+
+void render_detour_entry(uintptr_t row) {
+    const auto lease = hook_set.enter(2);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_render)>(lease.original)(row);
+        return render_detour(row);
+    } __finally { hook_set.leave(lease); }
+}
+
+bool action_detour_entry(uintptr_t popup, const void* action) {
+    const auto lease = hook_set.enter(3);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_action)>(lease.original)(popup, action);
+        return action_detour(popup, action);
+    } __finally { hook_set.leave(lease); }
+}
+
+bool key_detour_entry(uintptr_t popup, const void* event) {
+    const auto lease = hook_set.enter(4);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_key)>(lease.original)(popup, event);
+        return key_detour(popup, event);
+    } __finally { hook_set.leave(lease); }
+}
+
+void show_detour_entry(uintptr_t popup, int mode) {
+    const auto lease = hook_set.enter(5);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_show)>(lease.original)(popup, mode);
+        return show_detour(popup, mode);
+    } __finally { hook_set.leave(lease); }
+}
+
+void hide_detour_entry(uintptr_t popup) {
+    const auto lease = hook_set.enter(6);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_hide)>(lease.original)(popup);
+        return hide_detour(popup);
+    } __finally { hook_set.leave(lease); }
+}
+
+uintptr_t destroy_detour_entry(uintptr_t popup, uint32_t flags) {
+    const auto lease = hook_set.enter(7);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_destroy)>(lease.original)(popup, flags);
+        return destroy_detour(popup, flags);
+    } __finally { hook_set.leave(lease); }
+}
+
+void chat_begin_detour_entry(uintptr_t chat) {
+    const auto lease = hook_set.enter(8);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_chat_begin)>(lease.original)(chat);
+        return chat_begin_detour(chat);
+    } __finally { hook_set.leave(lease); }
+}
+
+void chat_end_detour_entry(uintptr_t chat) {
+    const auto lease = hook_set.enter(9);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_chat_end)>(lease.original)(chat);
+        return chat_end_detour(chat);
+    } __finally { hook_set.leave(lease); }
+}
+
+uintptr_t chat_destroy_detour_entry(uintptr_t chat, uint32_t flags) {
+    const auto lease = hook_set.enter(10);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_chat_destroy)>(lease.original)(chat, flags);
+        return chat_destroy_detour(chat, flags);
+    } __finally { hook_set.leave(lease); }
+}
+
+using builds::Site;
+const auto& sites = builds::steam_20260818().controls;
 constexpr unsigned hook_sites[]{0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26};
 native::Target target(uintptr_t base, const Site& site) {
     native::Target t{};
@@ -337,13 +401,13 @@ native::Target target(uintptr_t base, const Site& site) {
 }
 }
 bool install(const engine::Binding& binding, HANDLE stop_event) {
-    if (!save::session().campaign_run.enabled()) return true;
+    if (!save::session().campaign_requested()) return true;
     engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 10000;
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets())
 #endif
-    for (size_t i = 0; i < sizeof(sites) / sizeof(sites[0]); ++i) {
+    for (size_t i = 0; i < std::size(sites); ++i) {
         const auto expected = target(binding.image.base, sites[i]);
         if (i < 8 || i >= 24) {
             if (native::validate_target(memory, binding.image, expected, stop_event, deadline)) return false;
@@ -373,27 +437,22 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
     console_object = binding.image.base + 0x47e3800;
     menu_pointer = binding.image.base + 0x46ae140;
     menu_active = reinterpret_cast<MenuActive>(at(22));
-    void* detours[] = {reinterpret_cast<void*>(build_detour), reinterpret_cast<void*>(finalize_detour),
-        reinterpret_cast<void*>(render_detour), reinterpret_cast<void*>(action_detour),
-        reinterpret_cast<void*>(key_detour), reinterpret_cast<void*>(show_detour),
-        reinterpret_cast<void*>(hide_detour), reinterpret_cast<void*>(destroy_detour),
-        reinterpret_cast<void*>(chat_begin_detour), reinterpret_cast<void*>(chat_end_detour),
-        reinterpret_cast<void*>(chat_destroy_detour)};
+    void* detours[] = {reinterpret_cast<void*>(build_detour_entry), reinterpret_cast<void*>(finalize_detour_entry),
+        reinterpret_cast<void*>(render_detour_entry), reinterpret_cast<void*>(action_detour_entry),
+        reinterpret_cast<void*>(key_detour_entry), reinterpret_cast<void*>(show_detour_entry),
+        reinterpret_cast<void*>(hide_detour_entry), reinterpret_cast<void*>(destroy_detour_entry),
+        reinterpret_cast<void*>(chat_begin_detour_entry), reinterpret_cast<void*>(chat_end_detour_entry),
+        reinterpret_cast<void*>(chat_destroy_detour_entry)};
     void** originals[] = {reinterpret_cast<void**>(&original_build), reinterpret_cast<void**>(&original_finalize),
         reinterpret_cast<void**>(&original_render), reinterpret_cast<void**>(&original_action),
         reinterpret_cast<void**>(&original_key), reinterpret_cast<void**>(&original_show),
         reinterpret_cast<void**>(&original_hide), reinterpret_cast<void**>(&original_destroy),
         reinterpret_cast<void**>(&original_chat_begin), reinterpret_cast<void**>(&original_chat_end),
         reinterpret_cast<void**>(&original_chat_destroy)};
-    unsigned created = 0;
-    for (; created < sizeof(hook_sites) / sizeof(hook_sites[0]); ++created) {
-        if (MH_CreateHook(reinterpret_cast<void*>(at(hook_sites[created])), detours[created], originals[created]) != MH_OK) {
-            for (unsigned i = 0; i < created; ++i) MH_RemoveHook(reinterpret_cast<void*>(at(hook_sites[i])));
-            return false;
-        }
-    }
-    for (auto site : hook_sites)
-        if (MH_EnableHook(reinterpret_cast<void*>(at(site))) != MH_OK) return false;
+    std::vector<hooks::HookSpec> specs;
+    for (size_t i = 0; i < std::size(hook_sites); ++i)
+        specs.push_back({at(hook_sites[i]), detours[i], originals[i]});
+    if (!hook_set.install(specs.data(), specs.size(), stop_event)) return false;
     enabled.store(true, std::memory_order_release);
     return true;
 }

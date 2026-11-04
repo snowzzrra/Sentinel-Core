@@ -1,3 +1,4 @@
+#include "engine/builds/build_descriptor.h"
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #include "save_campaign_native.h"
 #include "fast_travel.h"
@@ -11,12 +12,23 @@
 #include "native_target.h"
 #include "enemy_checkpoint_native.h"
 #include "commands_native.h"
-#include "MinHook.h"
+#include "save_hook_call.h"
+#include "save_native_hooks.h"
 #include <cstring>
 #include <intrin.h>
 
 namespace sentinel::save {
 namespace {
+MH_STATUS WINAPI disable_campaign_hook(void* site) {
+    return drain_native_startup() ? MH_DisableHook(site) : MH_ERROR_MEMORY_PROTECT;
+}
+MH_STATUS WINAPI remove_campaign_hook(void* site) {
+    return drain_native_startup() ? MH_RemoveHook(site) : MH_ERROR_MEMORY_PROTECT;
+}
+hooks::HookSet campaign_hooks("save_campaign",
+                              {MH_CreateHook, MH_EnableHook, disable_campaign_hook, remove_campaign_hook},
+                              &session().installation, 4);
+void* campaign_originals[8]{};
 uintptr_t image=0, root=0;
 bool prior_campaign=false;
 using NewGame=void(*)(uintptr_t,uint32_t,uint8_t);
@@ -389,8 +401,76 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
     }
     session().campaign_run.parser_leave(static_cast<uint32_t>(result),metadata_only); return result;
 }
-uint64_t parse_game(SaveReference* data,uintptr_t files,uintptr_t prepared,uintptr_t request) {
-    return parse_game_at(reinterpret_cast<uintptr_t>(_ReturnAddress()),data,files,prepared,request);
+void new_game_entry(uintptr_t menu, uint32_t requested, uint8_t extra_life) {
+    const auto lease = campaign_hooks.enter(0);
+    __try {
+        return new_game(menu, requested, extra_life);
+    } __finally {
+        campaign_hooks.leave(lease);
+    }
+}
+
+void new_internal_entry(uintptr_t menu, uint32_t difficulty, uint8_t extra_life, uint32_t policy) {
+    const auto lease = campaign_hooks.enter(1);
+    __try {
+        return new_internal(menu, difficulty, extra_life, policy);
+    } __finally {
+        campaign_hooks.leave(lease);
+    }
+}
+
+void load_game_entry(uintptr_t self, uintptr_t request) {
+    const auto lease = campaign_hooks.enter(2);
+    __try {
+        return load_game(self, request);
+    } __finally {
+        campaign_hooks.leave(lease);
+    }
+}
+
+uint64_t parse_game_entry(SaveReference* data, uintptr_t files, uintptr_t prepared, uintptr_t request) {
+    const auto lease = campaign_hooks.enter(3);
+    __try {
+        return parse_game_at(reinterpret_cast<uintptr_t>(_ReturnAddress()), data, files, prepared, request);
+    } __finally {
+        campaign_hooks.leave(lease);
+    }
+}
+
+uint64_t set_cvar_entry(uintptr_t self, const char* value, uint8_t force) {
+    const auto lease = campaign_hooks.enter(4);
+    __try {
+        return set_cvar(self, value, force);
+    } __finally {
+        campaign_hooks.leave(lease);
+    }
+}
+
+uint64_t campaign_action_entry(uintptr_t screen, uintptr_t action) {
+    const auto lease = campaign_hooks.enter(5);
+    __try {
+        return campaign_action(screen, action);
+    } __finally {
+        campaign_hooks.leave(lease);
+    }
+}
+
+void campaign_pump_entry(uintptr_t screen) {
+    const auto lease = campaign_hooks.enter(6);
+    __try {
+        return campaign_pump(screen);
+    } __finally {
+        campaign_hooks.leave(lease);
+    }
+}
+
+void devmenu_command_entry(uintptr_t arguments) {
+    const auto lease = campaign_hooks.enter(7);
+    __try {
+        return devmenu_command(arguments);
+    } __finally {
+        campaign_hooks.leave(lease);
+    }
 }
 }
 bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransition& transition) {
@@ -503,22 +583,8 @@ SaveFuture** campaign_write_provider(uintptr_t caller, engine::Memory& source_me
     return result;
 }
 std::array<native::Target,14> campaign_targets(uintptr_t base) {
-    constexpr uint32_t rvas[]={0x17538a0,0x1753b80,0x66cec0,0x14940b0,0x376020,0x10a6110,0x376250,0x10a5bb0,0x17515c0,0x174ef70,0x10a6fa0,0x1756a20,0x55b8d0,0x17df430};
-    constexpr const char* bytes[]={
-        "48895c2408488974241048897c24184c8974242055488dac2460feffff4881ec",
-        "4055535741554156488dac2460c0ffffb8a0400000e806821101482be0488b05",
-        "4883ec28488b059d0c17044c8b40184d85c07478498b40084885c0746f448b40",
-        "40555356574154415541564157488dac24c8bdffffb838430000e8d17c3d0148",
-        "48895c24104889742418574883ec20488bd9488b09410fb6f0488bfa4885d275",
-        "48895c241848897c242055488dac2400ffffff4881ec00020000488b05a78810",
-        "48895c2418574883ec60488b057787e3034833c44889442450488bf9410fb6d8",
-        "48895c2408574883ec20488b01488bf9bbffffffffff90e00100004885c07434",
-        "4055564156488d6c24a04881ec60010000488b0500d4a5024833c4488945308b",
-        "4883ec28488b05c5f1f5024885c0752d8d5053b9800d0000e8b382c0fe4885c0",
-        "40555357488dac24e0bfffffb820410000e8ea4d7c01482be0488b05187a1003",
-        "40554157488dac2468bfffffb898410000e86a531101482be0488b05987fa502",
-        "40555356574156488d6c24c04881ec40010000488b05ee30c5034833c4488945",
-        "4055535741564157488dac2450c0ffffb8b0400000e856c90801482be0488b05"};
+    const auto& rvas = builds::steam_20260818().campaign_save_rvas;
+    const auto& bytes = builds::steam_20260818().campaign_save_bytes;
     std::array<native::Target,14> targets{};
     for (unsigned i=0;i<targets.size();++i) {
         targets[i].address=base+rvas[i];
@@ -534,28 +600,33 @@ std::array<native::Target,14> campaign_targets(uintptr_t base) {
     return targets;
 }
 bool install_campaign_hooks(const engine::Binding& binding,HANDLE stop) {
-    if (!session().campaign_run.enabled()) return true;
+    if (!session().campaign_requested()) return true;
     image=binding.image.base; root=binding.root;
     const auto targets=campaign_targets(image);
     for (unsigned i=0;i<targets.size();++i)
         if (native::validate_recorded(session().installation,memory,binding.image,targets[i],stop,GetTickCount64()+3000,4,i)) return false;
-    void* detours[]={reinterpret_cast<void*>(new_game),reinterpret_cast<void*>(new_internal),reinterpret_cast<void*>(load_game),reinterpret_cast<void*>(parse_game),reinterpret_cast<void*>(set_cvar),reinterpret_cast<void*>(campaign_action),reinterpret_cast<void*>(campaign_pump),reinterpret_cast<void*>(devmenu_command)};
+    void* detours[] = {reinterpret_cast<void*>(new_game_entry),      reinterpret_cast<void*>(new_internal_entry),
+                       reinterpret_cast<void*>(load_game_entry),     reinterpret_cast<void*>(parse_game_entry),
+                       reinterpret_cast<void*>(set_cvar_entry),      reinterpret_cast<void*>(campaign_action_entry),
+                       reinterpret_cast<void*>(campaign_pump_entry), reinterpret_cast<void*>(devmenu_command_entry)};
     constexpr unsigned hooked[]={0,1,2,3,4,5,10,11};
-    void* originals[8]{};
-    for (unsigned i=0;i<8;++i) if (session().installation.hook(SC_INSTALL_SAVE_CREATE,4,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-image),[&]{
-        return MH_CreateHook(reinterpret_cast<void*>(targets[hooked[i]].address),detours[i],&originals[i]);})!=MH_OK) return false;
-    original_new=reinterpret_cast<NewGame>(originals[0]); original_internal=reinterpret_cast<NewInternal>(originals[1]);
-    original_load=reinterpret_cast<LoadGame>(originals[2]); original_parse=reinterpret_cast<ParseGame>(originals[3]); original_cvar=reinterpret_cast<SetCvar>(originals[4]);
-    original_action=reinterpret_cast<CampaignAction>(originals[5]);
-    original_pump=reinterpret_cast<CampaignPump>(originals[6]);
-    original_devmenu=reinterpret_cast<CampaignDevMenu>(originals[7]);
+    hooks::HookSpec specs[8]{};
+    for (unsigned i = 0; i < 8; ++i)
+        specs[i] = {targets[hooked[i]].address, detours[i], &campaign_originals[i], hooked[i],
+                    static_cast<uint32_t>(targets[hooked[i]].address - image)};
+    original_new = HookOriginal<campaign_hooks, 0, NewGame>::call;
+    original_internal = HookOriginal<campaign_hooks, 1, NewInternal>::call;
+    original_load = HookOriginal<campaign_hooks, 2, LoadGame>::call;
+    original_parse = HookOriginal<campaign_hooks, 3, ParseGame>::call;
+    original_cvar = HookOriginal<campaign_hooks, 4, SetCvar>::call;
+    original_action = HookOriginal<campaign_hooks, 5, CampaignAction>::call;
+    original_pump = HookOriginal<campaign_hooks, 6, CampaignPump>::call;
+    original_devmenu = HookOriginal<campaign_hooks, 7, CampaignDevMenu>::call;
     parser_release=reinterpret_cast<ReleaseSaveReference>(image+0x367770);
     set_integer=reinterpret_cast<SetInteger>(targets[6].address); selected_slot=reinterpret_cast<SelectedSlot>(targets[7].address);
     select_slot=reinterpret_cast<SelectSlot>(targets[8].address); main_menu=reinterpret_cast<Menu>(targets[9].address);
     spawn_read=reinterpret_cast<SpawnRead>(targets[12].address); spawn_serialize=reinterpret_cast<SpawnSerialize>(targets[13].address);
-    for (unsigned i=0;i<8;++i) if (session().installation.hook(SC_INSTALL_SAVE_ENABLE,4,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-image),[&]{
-        return MH_EnableHook(reinterpret_cast<void*>(targets[hooked[i]].address));})!=MH_OK) return false;
-    return true;
+    return campaign_hooks.install(specs, stop);
 }
 #ifdef SC_NATIVE_TESTING
 void test_campaign_spawn(SpawnRead reader,SpawnSerialize serializer,bool(*assign)(uintptr_t,const std::string&)) {

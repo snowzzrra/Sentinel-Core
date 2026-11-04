@@ -1,3 +1,4 @@
+#include "engine/builds/build_descriptor.h"
 #include "inventory.h"
 #include "runes.h"
 #include "special.h"
@@ -156,11 +157,15 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
                 const auto item = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
                     image_base + 0x1690660)(inv, key_decl);
                 const auto quantity = item ? *reinterpret_cast<int*>(item + 0x40) : 0;
-                if (quantity >= 0) facts.slayer_key = quantity > 0 ? 1 : 0;
+                if (quantity >= 0) {
+                    facts.slayer_key = quantity > 0 ? 1 : 0;
+                    facts.slayer_key_quantity = quantity;
+                }
             }
         }
         const auto perk_type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631f90)();
         if (!perk_type) return true;
+        facts.pickup_radius = read_perk(p, perk_type, "perk/player/suit/fundamentals/increase_pickup_radius");
         // availability includes unequipped mods; active-perk state depends on selection
         const struct { uint32_t item; const char* path; } permanent[] = {
             {7770058, "perk/player/weapons/shotgun/pop_rocket"},
@@ -313,6 +318,10 @@ uint8_t grenade_indicator_mask(uintptr_t p) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return SC_INVENTORY_UNKNOWN_ITEM; }
 }
 
+void read_progression(uintptr_t p, sc_progression_result& out) {
+    SnapshotFacts facts{};
+    if (p && calls.read(calls.context, p, facts)) progression_facts(facts, out);
+}
 void execute_native(const sc_inventory_request& request, sc_inventory_result& out) {
     if (!admitted(request.namespace_id)) { out.outcome = SC_INV_UNAVAILABLE; return; }
     if (request.kind != SC_INV_OBSERVE) { out.outcome = SC_INV_UNAVAILABLE; return; }
@@ -334,25 +343,12 @@ void install(const engine::Binding& binding, HANDLE stop) {
     engine_root = binding.root;
     ready.store(false, std::memory_order_release);
     engine::LocalMemory memory;
-    const struct { uint32_t rva; const char* bytes; } sites[] = {
-        {0x763080, "488d81d8350000c3ccccccccccccccccf20f1081b8280000f20f11028b81c028"},
-        {0x69af70, "488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc"},
-        {0x1617cd0, "488d0569210803c3cccccccccccccccc4883ec28ba33000000b9d8000000e84d"},
-        {0x17aa5d0, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448"},
-        {0x1690660, "48895c240848896c2410488974241848897c242041564883ec2033ff488bea4c"},
-        {0x1631f90, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc"},
-        {0x1631d90, "488d05a9d00603c3cccccccccccccccc488d05f9d10603c3cccccccccccccccc"},
-        {0x4a1870, "8b4140c3cccccccccccccccccccccccc40534883ec20488bd9488b4a104883c1"},
-        {0xfe37f0, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
-        {0xfe3830, "4c8bc24885d2742b4863515833c085d27e21488b49504c8bca8bd00f1f440000"},
-        {0x1284720, "48895c24185556574154415541564157488dac2450c0ffffb8b0400000e85e76"},
-        {0xfd8330, "4056574883ec58488b059a661d034833c44889442448488bf24889ac24880000"},
-    };
+    const auto& sites = builds::steam_20260818().inventory;
     for (const auto& site : sites) {
         std::array<uint8_t, 32> expected{}, actual{};
         const auto digit = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
         for (size_t i = 0; i < expected.size(); ++i)
-            expected[i] = static_cast<uint8_t>(digit(site.bytes[2 * i]) * 16 + digit(site.bytes[2 * i + 1]));
+            expected[i] = static_cast<uint8_t>(digit(site.prefix[2 * i]) * 16 + digit(site.prefix[2 * i + 1]));
         if (!binding.image.contains(site.rva, expected.size(), IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0) ||
             memory.copy(image_base + site.rva, actual.data(), actual.size()).reason || actual != expected) return;
     }

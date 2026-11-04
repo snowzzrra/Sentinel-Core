@@ -21,6 +21,7 @@ struct LiveState {
 };
 struct ExecutionContext {
     uintptr_t player = 0;
+    sc_evidence_scope evidence_scope{};
     std::shared_ptr<save::BackupJob> backup;
     const char* backup_directory = nullptr;
     save::SubmissionResult submission{};

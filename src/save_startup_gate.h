@@ -24,7 +24,9 @@ public:
     bool arm() {
         event_=CreateEventW(nullptr,TRUE,FALSE,nullptr);
         if (!event_) return false;
-        begin_ms_=GetTickCount64(); state_.store(State::pending,std::memory_order_release); return true;
+        begin_ms_=GetTickCount64(); state_.store(State::pending,std::memory_order_release);
+        if (cancel_requested_.load(std::memory_order_acquire)) cancel();
+        return true;
     }
     Result wait() {
         const auto state=state_.load(std::memory_order_acquire);
@@ -39,6 +41,11 @@ public:
     }
     uint64_t begin_ms() const { return begin_ms_; }
     uint32_t waiting() const { return waiting_.load(std::memory_order_acquire); }
+    void cancel() {
+        cancel_requested_.store(true, std::memory_order_release);
+        auto expected = State::pending;
+        if (state_.compare_exchange_strong(expected, State::cancelled, std::memory_order_acq_rel)) SetEvent(event_);
+    }
     void observe_arm(const Arm& value) { std::lock_guard<std::mutex> guard(observation_mutex_); arm_=value; }
     void entered(bool root_equal,bool caller_equal,uint64_t caller_rva) {
         std::lock_guard<std::mutex> guard(observation_mutex_);
@@ -67,11 +74,13 @@ public:
         Completion& operator=(const Completion&)=delete;
         ~Completion() {
             if (!active_) return;
+            auto expected = State::pending;
+            if (!gate_.state_.compare_exchange_strong(expected, result_, std::memory_order_acq_rel)) result_ = expected;
             { std::lock_guard<std::mutex> guard(gate_.observation_mutex_); gate_.complete_ms_=GetTickCount64(); }
             if (trace_) gate_.record(*trace_,result_==State::ready?BStatus::succeeded:BStatus::refused,
                 result_==State::ready?"startup_gate_installation_ready":result_==State::cancelled?
                     "startup_gate_installation_cancelled":"startup_gate_installation_failed",result_);
-            gate_.state_.store(result_,std::memory_order_release); SetEvent(gate_.event_);
+            SetEvent(gate_.event_);
         }
         void ready() { result_=State::ready; }
         void cancel() { result_=State::cancelled; }
@@ -82,6 +91,7 @@ public:
 private:
     HANDLE event_=nullptr;
     std::atomic<State> state_{State::unarmed};
+    std::atomic<bool> cancel_requested_{false};
     std::atomic<uint32_t> waiting_{0};
     uint64_t begin_ms_=0;
     std::atomic<uint64_t> first_wait_ms_{0};

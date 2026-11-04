@@ -1,3 +1,5 @@
+#include "engine/builds/build_descriptor.h"
+#include "player_strings_generated.h"
 #include "arsenal.h"
 #include "inventory.h"
 #include "native_target.h"
@@ -6,6 +8,7 @@
 #include "campaign_menu_native.h"
 #include "campaign_menu.h"
 #include "MinHook.h"
+#include "engine/hooks/hook_set.h"
 #include <atomic>
 #include <cstring>
 #include <algorithm>
@@ -13,6 +16,7 @@
 
 namespace sentinel::arsenal {
 namespace {
+hooks::HookSet hook_set("arsenal"), ui_hooks("arsenal_ui"), mastery_hooks("arsenal_mastery");
 
 std::atomic<bool> ready{false};
 save::BTrace installation_trace;
@@ -98,7 +102,11 @@ bool is_ready_hook(uintptr_t self, int32_t fire_mode) {
 
 bool fire_hook(uintptr_t self, uintptr_t fire_mode_def, uintptr_t p3, int32_t* p4, uintptr_t p5) {
     if (active() && fire_mode_def) {
-        const auto mode = *reinterpret_cast<const int32_t*>(fire_mode_def + 0x28c);
+        int32_t mode = 0;
+        engine::LocalMemory memory;
+        if (memory.copy(fire_mode_def + 0x28c, &mode, sizeof(mode)).reason) {
+            ready.store(false, std::memory_order_release); return false;
+        }
         if (mode == 1) {
             const uint32_t mods = native::gameplay_admitted() ? shared_mods() : 0;
             if (!(mods & SC_ARSENAL_ATTACHMENT_MEAT_HOOK)) {
@@ -117,7 +125,7 @@ void update_aim_hook(uintptr_t self) {
                 *reinterpret_cast<uint8_t*>(self + 0x3d9a) = 1;
                 *reinterpret_cast<uint32_t*>(self + 0x3dd0) = 0x1fffffe;
                 *reinterpret_cast<uintptr_t*>(self + 0x3dd8) = 0;
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            } __except(EXCEPTION_EXECUTE_HANDLER) { ready.store(false, std::memory_order_release); }
             return;
         }
     }
@@ -344,7 +352,56 @@ uintptr_t arsenal_ui_hook(uintptr_t out, uintptr_t weapon, uintptr_t family, uin
 }
 
 // arsenal clip corrections keep native ownership and challenge state
+bool is_ready_hook_entry(uintptr_t self, int32_t fire_mode) {
+    const auto lease = hook_set.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_is_ready)>(lease.original)(self, fire_mode);
+        return is_ready_hook(self, fire_mode);
+    } __finally { hook_set.leave(lease); }
+}
+
+bool fire_hook_entry(uintptr_t self, uintptr_t fire_mode_def, uintptr_t p3, int32_t* p4, uintptr_t p5) {
+    const auto lease = hook_set.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_fire)>(lease.original)(self, fire_mode_def, p3, p4, p5);
+        return fire_hook(self, fire_mode_def, p3, p4, p5);
+    } __finally { hook_set.leave(lease); }
+}
+
+void update_aim_hook_entry(uintptr_t self) {
+    const auto lease = hook_set.enter(2);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_update_aim)>(lease.original)(self);
+        return update_aim_hook(self);
+    } __finally { hook_set.leave(lease); }
+}
+
+uintptr_t arsenal_ui_hook_entry(uintptr_t out, uintptr_t weapon, uintptr_t family, uintptr_t p) {
+    const auto lease = ui_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_arsenal_ui)>(lease.original)(out, weapon, family, p);
+        return arsenal_ui_hook(out, weapon, family, p);
+    } __finally { ui_hooks.leave(lease); }
+}
+
+void upgrade_replay_hook_entry(uintptr_t component) {
+    const auto lease = mastery_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_upgrade_replay)>(lease.original)(component);
+        return upgrade_replay_hook(component);
+    } __finally { mastery_hooks.leave(lease); }
+}
+
+void upgrade_activate_hook_entry(uintptr_t component, uintptr_t upgrade, uint8_t a, uint8_t b) {
+    const auto lease = mastery_hooks.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_upgrade_activate)>(lease.original)(component, upgrade, a, b);
+        return upgrade_activate_hook(component, upgrade, a, b);
+    } __finally { mastery_hooks.leave(lease); }
+}
+
 namespace menu {
+hooks::HookSet menu_hooks("arsenal_menu");
 struct Value { uint32_t type, reserved; uintptr_t payload; };
 struct Calls {
     Value* (*lookup)(uintptr_t, Value*, const char*) = nullptr;
@@ -488,8 +545,7 @@ void correct_mastery(uintptr_t widget) {
     const auto index=mastery_index(*reinterpret_cast<const uintptr_t*>(widget+0x2b0));
     const auto reward=campaign_menu::mastery_reward(mastery_families[index].mastery);
     if (reward.location_id) {
-        const std::string instruction=std::string(base)+"\nREWARD: "+
-            (!std::strcmp(reward.text,"REWARD UNKNOWN") ? "UNKNOWN" : reward.text);
+        const auto instruction=player_strings::menu_mastery_reward(base,"\n",reward.text);
         swf.set_text(description,instruction.c_str());
         if (reward.location_id) campaign_menu::reward_scroll(description);
     } else swf.set_text(description,base);
@@ -534,29 +590,69 @@ bool bypass_hook(uintptr_t widget) {
     return original_bypass(widget);
 }
 
+void mod_hook_entry(uintptr_t widget) {
+    const auto lease = menu_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_mod)>(lease.original)(widget);
+        return mod_hook(widget);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void mastery_hook_entry(uintptr_t widget) {
+    const auto lease = menu_hooks.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_mastery)>(lease.original)(widget);
+        return mastery_hook(widget);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+bool bypass_hook_entry(uintptr_t widget) {
+    const auto lease = menu_hooks.enter(2);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_bypass)>(lease.original)(widget);
+        return bypass_hook(widget);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void arsenal_action_entry(uintptr_t screen,uintptr_t widget,uintptr_t action) {
+    const auto lease = menu_hooks.enter(3);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_arsenal_action)>(lease.original)(screen, widget, action);
+        return arsenal_action(screen, widget, action);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void mod_details_entry(uintptr_t screen,uintptr_t widget) {
+    const auto lease = menu_hooks.enter(4);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_mod_details)>(lease.original)(screen, widget);
+        return mod_details(screen, widget);
+    } __finally { menu_hooks.leave(lease); }
+}
+
 void install(const engine::Binding& binding, HANDLE stop) {
     engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 10000;
-    struct Site { uint32_t rva; const char* bytes; size_t leaf; void* hook; void** target; };
+    struct Site : builds::Site { void* hook; void** target; };
     const Site sites[] = {
-        {0xf937a0, "405553488dac2408c0ffffb8f8400000e8eb858d01482be0488b0519b2210348", 0, reinterpret_cast<void*>(mod_hook), reinterpret_cast<void**>(&original_mod)},
-        {0xf94ac0, "4055534155488dac2440c0ffffb8c0400000e8c9728d01482be0488b05f79e21", 0, reinterpret_cast<void*>(mastery_hook), reinterpret_cast<void**>(&original_mastery)},
-        {0xf94590, "8b81e40200003981e80200000f94c0c3488991d8020000448981e0020000c3cc", 16, reinterpret_cast<void*>(bypass_hook), reinterpret_cast<void**>(&original_bypass)},
-        {0xf3b870,"48895c2418574883ec604883791000488bda488bf90f84a701000080b9b80000",0,reinterpret_cast<void*>(arsenal_action),reinterpret_cast<void**>(&original_arsenal_action)},
-        {0xf3dc70,"405541544157488d6c24b94881ecc00000004c8ba2b80200004c8bf9e8af1300",0,reinterpret_cast<void*>(mod_details),reinterpret_cast<void**>(&original_mod_details)},
-        {0x185c150, "40534883ec20488b4928488bda488b01ff5028488bc34883c4205bc3cccccccc", 0, nullptr, reinterpret_cast<void**>(&swf.lookup)},
-        {0x184e470, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b150f5c06", 0, nullptr, reinterpret_cast<void**>(&swf.sprite)},
-        {0x184e4b0, "40534883ec20833908752b488b59084885db74224c8b03488bcb488b15d75b06", 0, nullptr, reinterpret_cast<void**>(&swf.text)},
-        {0x184e3b0, "4883ec288b0183f8027527488b4908b8fffffffff00fc1413083f80175544885", 0, nullptr, reinterpret_cast<void**>(&swf.release)},
-        {0x1865280, "48895c2408574883ec200fb74158bf010000003bd7488bd90f4ffa3bf8742c7d", 0, nullptr, reinterpret_cast<void**>(&swf.frame)},
-        {0x1864430, "440fb6d23851517457807952007551488b41104c6349088851514d03c9488b10", 97, nullptr, reinterpret_cast<void**>(&swf.visible)},
-        {0x186db00, "40534883ec20488bd94883c140e8ded4b8fe488bcb4883c4205be9e1cbffffcc", 0, nullptr, reinterpret_cast<void**>(&swf.set_text)},
-        {0x360bb0, "4883ec58488b150d10f103488d0526c76e0248894424604c8d4c24208b01488d", 0, nullptr, reinterpret_cast<void**>(&swf.localize)},
-        {0x362bc0, "48895424104c894424184c894c2420534883ec204c8bc24c8d4c2440ba004000", 0, nullptr, reinterpret_cast<void**>(&swf.format)},
-        {0x1863b00, "48895c24084889742410574883ec20488bd9418bf0488b4960488bfa483bca0f", 0, nullptr, reinterpret_cast<void**>(&swf.material)},
+        {builds::steam_20260818().arsenal[0], reinterpret_cast<void*>(mod_hook_entry), reinterpret_cast<void**>(&original_mod)},
+        {builds::steam_20260818().arsenal[1], reinterpret_cast<void*>(mastery_hook_entry), reinterpret_cast<void**>(&original_mastery)},
+        {builds::steam_20260818().arsenal[2], reinterpret_cast<void*>(bypass_hook_entry), reinterpret_cast<void**>(&original_bypass)},
+        {builds::steam_20260818().arsenal[3],reinterpret_cast<void*>(arsenal_action_entry),reinterpret_cast<void**>(&original_arsenal_action)},
+        {builds::steam_20260818().arsenal[4],reinterpret_cast<void*>(mod_details_entry),reinterpret_cast<void**>(&original_mod_details)},
+        {builds::steam_20260818().arsenal[5], nullptr, reinterpret_cast<void**>(&swf.lookup)},
+        {builds::steam_20260818().arsenal[6], nullptr, reinterpret_cast<void**>(&swf.sprite)},
+        {builds::steam_20260818().arsenal[7], nullptr, reinterpret_cast<void**>(&swf.text)},
+        {builds::steam_20260818().arsenal[8], nullptr, reinterpret_cast<void**>(&swf.release)},
+        {builds::steam_20260818().arsenal[9], nullptr, reinterpret_cast<void**>(&swf.frame)},
+        {builds::steam_20260818().arsenal[10], nullptr, reinterpret_cast<void**>(&swf.visible)},
+        {builds::steam_20260818().arsenal[11], nullptr, reinterpret_cast<void**>(&swf.set_text)},
+        {builds::steam_20260818().arsenal[12], nullptr, reinterpret_cast<void**>(&swf.localize)},
+        {builds::steam_20260818().arsenal[13], nullptr, reinterpret_cast<void**>(&swf.format)},
+        {builds::steam_20260818().arsenal[14], nullptr, reinterpret_cast<void**>(&swf.material)},
     };
     for (const auto& site : sites) {
-        const auto target = make_target(image_base, site.rva, site.bytes);
+        const auto target = make_target(image_base, site.rva, site.prefix);
         const auto reason = site.leaf ? native::validate_leaf_target(memory, binding.image, target, site.leaf, stop, deadline) :
                                         native::validate_target(memory, binding.image, target, stop, deadline);
         if (reason) {
@@ -565,23 +661,14 @@ void install(const engine::Binding& binding, HANDLE stop) {
             return;
         }
     }
+    std::vector<hooks::HookSpec> specs;
     for (const auto& site : sites) {
-        if (!site.hook) { *site.target = reinterpret_cast<void*>(image_base + site.rva); continue; }
-        const auto status = MH_CreateHook(reinterpret_cast<void*>(image_base + site.rva), site.hook, site.target);
-        if (status != MH_OK) {
-            installation_trace.record(save::BStage::profile_prepare, save::BStatus::refused,
-                "arsenal_menu_hook_refused", 0, {{"rva", site.rva}, {"native_error", status}});
-            return;
-        }
+        if (!site.hook) *site.target = reinterpret_cast<void*>(image_base + site.rva);
+        else specs.push_back({image_base + site.rva, site.hook, site.target});
     }
-    for (const auto& site : sites) {
-        if (!site.hook) continue;
-        const auto status = MH_EnableHook(reinterpret_cast<void*>(image_base + site.rva));
-        if (status != MH_OK) {
-            installation_trace.record(save::BStage::profile_prepare, save::BStatus::refused,
-                "arsenal_menu_enable_refused", 0, {{"rva", site.rva}, {"native_error", status}});
-            return;
-        }
+    if (!menu_hooks.install(specs.data(), specs.size(), stop)) {
+        installation_trace.record(save::BStage::profile_prepare, save::BStatus::refused, "arsenal_menu_hook_refused");
+        return;
     }
     installed.store(true, std::memory_order_release);
     installation_trace.record(save::BStage::profile_prepare, save::BStatus::succeeded,
@@ -620,27 +707,7 @@ Calls calls{nullptr, player, read, ensure_mods, select_mod,
 
 } // namespace
 
-void tick_masteries(uint64_t generation, uintptr_t p) {
-    if (!mastery_ready.load(std::memory_order_acquire) || !p ||
-        !native::gameplay_admitted() || !active() ||
-        std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65)) return;
-    if (mastery_state.generation != generation || mastery_state.player != p) {
-        mastery_state.generation = generation;
-        mastery_state.player = p;
-        mastery_state.applied = 0;
-        mastery_state.target_unavailable = 0;
-        mastery_state.host_missing = 0;
-        mastery_state.mod_missing = 0;
-        mastery_state.apply_failed = 0;
-        mastery_state.projected = 0;
-        mastery_state.needs_rebuild = 0;
-        std::fill_n(mastery_state.components, 13, uintptr_t{0});
-        std::fill_n(mastery_state.upgrades, 13, uintptr_t{0});
-        mastery_state.next_check_ms = 0;
-    }
-    const auto now = GetTickCount64();
-    if (now < mastery_state.next_check_ms) return;
-    mastery_state.next_check_ms = now + 500;
+uint16_t find_selected_masteries(uintptr_t p) {
     uint16_t selected_mask = 0;
     for (unsigned i = 0; i < 13; ++i) {
         const auto bit = static_cast<uint16_t>(1u << i);
@@ -661,14 +728,20 @@ void tick_masteries(uint64_t generation, uintptr_t p) {
         mastery_state.upgrades[i] = upgrade;
         if (selected) selected_mask |= bit;
     }
+    return selected_mask;
+}
+void rebuild_mastery_components(uint16_t selected_mask) {
     for (unsigned i = 0; i < 13; ++i) {
         const auto component = mastery_state.components[i];
-        if (!component || std::find(mastery_state.components, mastery_state.components + i, component) != mastery_state.components + i) continue;
+        if (!component || std::find(mastery_state.components, mastery_state.components + i, component) !=
+                              mastery_state.components + i)
+            continue;
         uint16_t component_mask = 0;
         for (unsigned j = 0; j < 13; ++j)
             if (mastery_state.components[j] == component) component_mask |= static_cast<uint16_t>(1u << j);
         if ((mastery_state.projected & component_mask) == (selected_mask & component_mask) &&
-            !(mastery_state.needs_rebuild & component_mask)) continue;
+            !(mastery_state.needs_rebuild & component_mask))
+            continue;
         // clear AP modifiers, then restore vanilla priorities before the selected mastery
         if (!clear_masteries(component)) {
             mastery_state.applied &= ~(selected_mask & component_mask);
@@ -678,6 +751,37 @@ void tick_masteries(uint64_t generation, uintptr_t p) {
         if (original_upgrade_replay) original_upgrade_replay(component);
         reapply_masteries(component);
     }
+}
+void tick_masteries_body(uint64_t generation, uintptr_t p) {
+    if (!mastery_ready.load(std::memory_order_acquire) || !p ||
+        !native::gameplay_admitted() || !active() ||
+        std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65)) return;
+    if (mastery_state.generation != generation || mastery_state.player != p) {
+        mastery_state.generation = generation;
+        mastery_state.player = p;
+        mastery_state.applied = 0;
+        mastery_state.target_unavailable = 0;
+        mastery_state.host_missing = 0;
+        mastery_state.mod_missing = 0;
+        mastery_state.apply_failed = 0;
+        mastery_state.projected = 0;
+        mastery_state.needs_rebuild = 0;
+        std::fill_n(mastery_state.components, 13, uintptr_t{0});
+        std::fill_n(mastery_state.upgrades, 13, uintptr_t{0});
+        mastery_state.next_check_ms = 0;
+    }
+    const auto now = GetTickCount64();
+    if (now < mastery_state.next_check_ms) return;
+    mastery_state.next_check_ms = now + 500;
+    const auto selected_mask = find_selected_masteries(p);
+    rebuild_mastery_components(selected_mask);
+}
+
+void tick_masteries(uint64_t generation, uintptr_t p) {
+    if (!mastery_ready.load(std::memory_order_acquire)) return;
+    const auto lease = mastery_hooks.enter(0);
+    __try { if (lease.committed) tick_masteries_body(generation, p); }
+    __finally { mastery_hooks.leave(lease); }
 }
 
 bool available() { return ready.load(std::memory_order_acquire); }
@@ -751,7 +855,15 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
 }
 
 #ifdef SC_NATIVE_TESTING
-bool test_mastery_masks() {
+bool test_invalid_fire_mode() {
+    const auto saved_ready = ready.load();
+    const auto saved_fixture = fixture_namespace[0];
+    fixture_namespace[0] = 'a'; ready.store(true);
+    const bool invalid_mode_refused = !fire_hook(0, 1, 0, nullptr, 0) && !ready.load();
+    ready.store(saved_ready); fixture_namespace[0] = saved_fixture;
+    return invalid_mode_refused;
+}
+bool test_mastery_selection() {
     const auto previous_screen=menu::clicked_mod_screen;
     uintptr_t widget[0x2c0/sizeof(uintptr_t)]{},family[6]{},perk[2]{},base[2]{};
     const auto address=reinterpret_cast<uintptr_t>(widget);
@@ -770,6 +882,13 @@ bool test_mastery_masks() {
     family[5]=0; selection&=!menu::clicked_mastery(1,address);
     menu::clicked_mod_screen=previous_screen;
     if (!selection) { std::fprintf(stderr,"mastery canonical selection failed\n"); return false; }
+    return true;
+}
+bool test_mastery_masks() {
+    if (!test_invalid_fire_mode()) return false;
+    if (!test_mastery_selection()) return false;
+    uintptr_t family[6]{}, perk[2]{}, base[2]{};
+    family[0] = reinterpret_cast<uintptr_t>(base);
     const auto saved = mastery_state;
     mastery_state = {};
     std::array<unsigned char,0x20> ui{};
@@ -829,15 +948,15 @@ void install(const engine::Binding& binding, HANDLE stop) {
     engine_root = binding.root;
 
     engine::LocalMemory memory;
-    struct Site { uint32_t offset; const char* bytes; void* detour; void** original; };
+    struct Site : builds::Site { void* detour; void** original; };
     const Site sites[] = {
-        {0x1670850, "4889742410574883ec208bf2488bf983fa01756c80b9a83b000000755648895c", reinterpret_cast<void*>(is_ready_hook), reinterpret_cast<void**>(&original_is_ready)},
-        {0x166e750, "4c8bdc5556498dab48fdffff4881eca8030000488b056e02b4024833c4488985", reinterpret_cast<void*>(fire_hook), reinterpret_cast<void**>(&original_fire)},
-        {0x166f5e0, "48895c2418574881ec00010000488db9a8000000488bd98b07488d57043b0275", reinterpret_cast<void*>(update_aim_hook), reinterpret_cast<void**>(&original_update_aim)},
+        {builds::steam_20260818().arsenal_fire[0], reinterpret_cast<void*>(is_ready_hook_entry), reinterpret_cast<void**>(&original_is_ready)},
+        {builds::steam_20260818().arsenal_fire[1], reinterpret_cast<void*>(fire_hook_entry), reinterpret_cast<void**>(&original_fire)},
+        {builds::steam_20260818().arsenal_fire[2], reinterpret_cast<void*>(update_aim_hook_entry), reinterpret_cast<void**>(&original_update_aim)},
     };
     const auto deadline = GetTickCount64() + 10000;
     for (const auto& s : sites) {
-        const auto target = make_target(image_base, s.offset, s.bytes);
+        const auto target = make_target(image_base, s.rva, s.prefix);
         const auto reason = native::validate_target(memory, binding.image, target, stop, deadline);
         std::array<uint8_t, 32> actual{};
         const auto read = memory.copy(target.address, actual.data(), actual.size());
@@ -846,32 +965,18 @@ void install(const engine::Binding& binding, HANDLE stop) {
         std::memcpy(actual_words, actual.data(), 32);
         installation_trace.record(save::BStage::native_start, reason ? save::BStatus::refused : save::BStatus::entered,
             reason ? "site_refused" : "site_validated", 0,
-            {{"rva", s.offset}, {"reason", reason}, {"read_reason", read.reason}, {"read_error", read.error},
+            {{"rva", s.rva}, {"reason", reason}, {"read_reason", read.reason}, {"read_error", read.error},
              {"expected0", expected_words[0]}, {"expected1", expected_words[1]},
              {"expected2", expected_words[2]}, {"expected3", expected_words[3]},
              {"observed0", actual_words[0]}, {"observed1", actual_words[1]},
              {"observed2", actual_words[2]}, {"observed3", actual_words[3]}});
         if (reason) return;
     }
-    for (const auto& s : sites) {
-        if (s.detour) {
-            const auto status = MH_CreateHook(reinterpret_cast<void*>(image_base + s.offset), s.detour, s.original);
-            if (status != MH_OK) {
-                installation_trace.record(save::BStage::native_start, save::BStatus::refused, "hook_create_failed", 0,
-                    {{"rva", s.offset}, {"native_error", status}});
-                return;
-            }
-        }
-    }
-    for (const auto& s : sites) {
-        if (s.detour) {
-            const auto status = MH_EnableHook(reinterpret_cast<void*>(image_base + s.offset));
-            if (status != MH_OK) {
-                installation_trace.record(save::BStage::native_start, save::BStatus::refused, "hook_enable_failed", 0,
-                    {{"rva", s.offset}, {"native_error", status}});
-                return;
-            }
-        }
+    std::vector<hooks::HookSpec> specs;
+    for (const auto& s : sites) specs.push_back({image_base + s.rva, s.detour, s.original});
+    if (!hook_set.install(specs.data(), specs.size(), stop)) {
+        installation_trace.record(save::BStage::native_start, save::BStatus::refused, "hook_install_failed");
+        return;
     }
     ready.store(true, std::memory_order_release);
     installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "installed", 0, {{"hooks", 3}});
@@ -886,13 +991,11 @@ void install(const engine::Binding& binding, HANDLE stop) {
         heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::refused,
             "heat_blast_ui_site_refused", 0, {{"reason", ui_reason}});
     } else {
-        const auto created = MH_CreateHook(reinterpret_cast<void*>(ui_target.address),
-            reinterpret_cast<void*>(arsenal_ui_hook), reinterpret_cast<void**>(&original_arsenal_ui));
-        const auto enabled = created == MH_OK ? MH_EnableHook(reinterpret_cast<void*>(ui_target.address)) : created;
+        const hooks::HookSpec ui_specs[]{hooks::bind(ui_target.address, arsenal_ui_hook_entry, original_arsenal_ui)};
+        const bool installed = ui_hooks.install(ui_specs, stop);
         heat_blast_ui_trace.record(save::BStage::native_start,
-            enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
-            enabled == MH_OK ? "heat_blast_ui_observer_installed" : "heat_blast_ui_hook_refused", 0,
-            {{"native_error", enabled}});
+            installed ? save::BStatus::succeeded : save::BStatus::refused,
+            installed ? "heat_blast_ui_observer_installed" : "heat_blast_ui_hook_refused");
     }
 
     menu::install(binding, stop);
@@ -901,49 +1004,37 @@ void install(const engine::Binding& binding, HANDLE stop) {
     if (!inventory::available()) return;
     const auto mastery_deadline = GetTickCount64() + 10000;
     const Site mastery_sites[] = {
-        {0x1631f90, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc", nullptr, nullptr},
-        {0xfe3830, "4c8bc24885d2742b4863515833c085d27e21488b49504c8bca8bd00f1f440000", nullptr, nullptr},
-        {0x164fc20, "488bc44889480855488d68a14881ecf000000048895820488970f0488978e84c", nullptr, nullptr},
-        {0x1650d80, "48895c2418564883ec204883792800488bda488bf17516488d0d525c7b01488b", nullptr, nullptr},
-        {0x164e9b0, "488bc44889480855488d68e84881ec10010000488958f0488970e8488978e04c", reinterpret_cast<void*>(upgrade_replay_hook), reinterpret_cast<void**>(&original_upgrade_replay)},
-        {0x1651040, "4885d20f8450030000448844241853415541574883ec4048896c2460450fb6e9", reinterpret_cast<void*>(upgrade_activate_hook), reinterpret_cast<void**>(&original_upgrade_activate)},
+        {builds::steam_20260818().arsenal_mastery[0], nullptr, nullptr},
+        {builds::steam_20260818().arsenal_mastery[1], nullptr, nullptr},
+        {builds::steam_20260818().arsenal_mastery[2], nullptr, nullptr},
+        {builds::steam_20260818().arsenal_mastery[3], nullptr, nullptr},
+        {builds::steam_20260818().arsenal_mastery[4], reinterpret_cast<void*>(upgrade_replay_hook_entry), reinterpret_cast<void**>(&original_upgrade_replay)},
+        {builds::steam_20260818().arsenal_mastery[5], reinterpret_cast<void*>(upgrade_activate_hook_entry), reinterpret_cast<void**>(&original_upgrade_activate)},
     };
     for (const auto& s : mastery_sites) {
-        const auto reason = s.offset == 0x1631f90 || s.offset == 0xfe3830 ?
+        const auto reason = s.rva == 0x1631f90 || s.rva == 0xfe3830 ?
             native::validate_leaf_target(memory, binding.image,
-                make_target(image_base, s.offset, s.bytes),
-                s.offset == 0x1631f90 ? 8 : 63, stop, mastery_deadline) :
+                make_target(image_base, s.rva, s.prefix),
+                s.rva == 0x1631f90 ? 8 : 63, stop, mastery_deadline) :
             native::validate_target(memory, binding.image,
-                make_target(image_base, s.offset, s.bytes), stop, mastery_deadline);
+                make_target(image_base, s.rva, s.prefix), stop, mastery_deadline);
         if (reason) {
-            const char* diagnostic = s.offset == 0x1631f90 ? "mastery_typeinfo_leaf_refused" :
-                s.offset == 0xfe3830 ? "mastery_base_reader_refused" :
-                s.offset == 0x1650d80 ? "mastery_reset_target_refused" :
-                s.offset == 0x164fc20 ? "mastery_apply_target_refused" :
-                s.offset == 0x164e9b0 ? "mastery_replay_hook_refused" : "mastery_activation_hook_refused";
+            const char* diagnostic = s.rva == 0x1631f90 ? "mastery_typeinfo_leaf_refused" :
+                s.rva == 0xfe3830 ? "mastery_base_reader_refused" :
+                s.rva == 0x1650d80 ? "mastery_reset_target_refused" :
+                s.rva == 0x164fc20 ? "mastery_apply_target_refused" :
+                s.rva == 0x164e9b0 ? "mastery_replay_hook_refused" : "mastery_activation_hook_refused";
             installation_trace.record(save::BStage::native_start, save::BStatus::refused,
-                diagnostic, 0, {{"rva", s.offset}, {"reason", reason}});
+                diagnostic, 0, {{"rva", s.rva}, {"reason", reason}});
             return;
         }
     }
-    for (const auto& s : mastery_sites) {
-        if (!s.detour) continue;
-        const auto status = MH_CreateHook(reinterpret_cast<void*>(image_base + s.offset), s.detour, s.original);
-        if (status != MH_OK) {
-            installation_trace.record(save::BStage::native_start, save::BStatus::refused,
-                "mastery_hook_create_failed", 0, {{"rva", s.offset}, {"native_error", status}});
-            return;
-        }
-    }
-    for (const auto& s : mastery_sites) {
-        if (!s.detour) continue;
-        const auto status = MH_EnableHook(reinterpret_cast<void*>(image_base + s.offset));
-        if (status != MH_OK) {
-            MH_DisableHook(reinterpret_cast<void*>(image_base + 0x164e9b0));
-            installation_trace.record(save::BStage::native_start, save::BStatus::refused,
-                "mastery_hook_enable_failed", 0, {{"rva", s.offset}, {"native_error", status}});
-            return;
-        }
+    std::vector<hooks::HookSpec> mastery_specs;
+    for (const auto& s : mastery_sites) if (s.detour)
+        mastery_specs.push_back({image_base + s.rva, s.detour, s.original});
+    if (!mastery_hooks.install(mastery_specs.data(), mastery_specs.size(), stop)) {
+        installation_trace.record(save::BStage::native_start, save::BStatus::refused, "mastery_hook_install_failed");
+        return;
     }
     mastery_ready.store(true, std::memory_order_release);
     installation_trace.record(save::BStage::native_start, save::BStatus::succeeded,

@@ -1,5 +1,5 @@
 #include "sentinel_inspection.h"
-#include "protocol.h"
+#include "probe_v2.h"
 #include <io.h>
 #include <fcntl.h>
 #include "installation_probe.h"
@@ -180,7 +180,7 @@ void print_context(const sentinel::Inspection& r, uint32_t pid, bool json) {
     sprintf_s(timestamp, "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ", utc.wYear, utc.wMonth, utc.wDay,
               utc.wHour, utc.wMinute, utc.wSecond, utc.wMilliseconds);
     if (json) {
-        std::printf("{\"result\":\"ok\",\"operation\":\"context\",\"wire_version\":1,\"context_abi\":%u,"
+        std::printf("{\"result\":\"ok\",\"operation\":\"context\",\"wire_version\":2,\"context_abi\":%u,"
             "\"context_query_capability\":4,\"core_abi\":%u,\"core_version\":%s,\"build_id\":%s,"
             "\"target_pid\":%u,\"server_pid\":%u,\"process_created\":\"%llu\",\"instance_id\":\"%s\",\"host_path\":%s,"
             "\"queried_at_utc\":\"%s\",\"sequence\":\"%llu\",\"sampled_at_ms\":\"%llu\",\"sample_age_ms\":%s,"
@@ -222,7 +222,7 @@ void print_save(const sentinel::Inspection& r, bool json) {
     const auto& v = r.save; const auto& s = r.snapshot;
     const auto now = GetTickCount64();
     const auto age = v.sampled_at_ms && now >= v.sampled_at_ms ? std::to_string(now - v.sampled_at_ms) : "null";
-    if (json) std::printf("{\"result\":\"ok\",\"operation\":\"save_context\",\"wire_version\":1,\"save_abi\":%u,"
+    if (json) std::printf("{\"result\":\"ok\",\"operation\":\"save_context\",\"wire_version\":2,\"save_abi\":%u,"
         "\"save_query_capability\":64,\"core_version\":%s,\"build_id\":%s,\"target_pid\":%u,\"server_pid\":%u,"
         "\"process_created\":\"%llu\",\"instance_id\":\"%s\",\"host_path\":%s,\"sequence\":\"%llu\","
         "\"sampled_at_ms\":\"%llu\",\"sample_age_ms\":%s,\"sample_duration_ms\":%u,\"sample_reason\":\"%s\","
@@ -255,7 +255,7 @@ void print_save(const sentinel::Inspection& r, bool json) {
 }
 int print_admission(const sentinel::Inspection& r, bool json) {
     const auto& v = r.admission; const auto& s = r.snapshot;
-    if (json) std::printf("{\"result\":\"ok\",\"operation\":\"save_admission\",\"wire_version\":1,"
+    if (json) std::printf("{\"result\":\"ok\",\"operation\":\"save_admission\",\"wire_version\":2,"
         "\"admission_abi\":%u,\"core_version\":%s,\"build_id\":%s,\"target_pid\":%u,\"server_pid\":%u,"
         "\"process_created\":\"%llu\",\"instance_id\":\"%s\",\"state\":\"%s\",\"fault\":\"%s\","
         "\"prepared_routes\":%u,\"required_routes\":%u,\"startup_qualified\":%s,\"route_retained\":%s,"
@@ -279,7 +279,7 @@ void print_save_write(const sentinel::Inspection& r, bool json) {
     const auto native_result = v.flags & SC_SAVE_WRITE_PROVIDER_TERMINAL ?
         std::string("{\"state\":") + std::to_string(v.native_state) + ",\"outcome\":" +
         std::to_string(v.native_outcome) + ",\"value\":" + std::to_string(v.native_value) + "}" : "null";
-    if (json) std::printf("{\"result\":\"ok\",\"operation\":\"save_write\",\"wire_version\":1,\"write_abi\":%u,"
+    if (json) std::printf("{\"result\":\"ok\",\"operation\":\"save_write\",\"wire_version\":2,\"write_abi\":%u,"
         "\"core_version\":%s,\"build_id\":%s,\"target_pid\":%u,\"server_pid\":%u,\"process_created\":\"%llu\","
         "\"instance_id\":\"%s\",\"operation_id\":\"%llu\",\"sdk_sequence\":\"%llu\",\"state\":\"%s\","
         "\"directory\":%s,\"flags\":%u,\"file_count\":%u,\"submitted\":%u,\"completed\":%u,"
@@ -318,7 +318,7 @@ int print_result(const sentinel::Inspection& r, uint32_t pid, bool json, bool en
         const auto now = GetTickCount64();
         const auto age = e.sampled_at_ms && now >= e.sampled_at_ms ? now - e.sampled_at_ms : 0;
         if (json) {
-            std::printf("{\"result\":\"ok\",\"operation\":\"engine\",\"wire_version\":1,\"engine_abi\":%u,"
+            std::printf("{\"result\":\"ok\",\"operation\":\"engine\",\"wire_version\":2,\"engine_abi\":%u,"
                 "\"engine_query_capability\":2,\"core_abi\":%u,\"core_version\":%s,\"build_id\":%s,"
                 "\"target_pid\":%u,\"server_pid\":%u,\"process_created\":\"%llu\",\"instance_id\":\"%s\",\"host_path\":%s,"
                 "\"sequence\":\"%llu\",\"sampled_at_ms\":\"%llu\",\"sample_age_ms\":%llu,\"sample_duration_ms\":%u,"
@@ -392,15 +392,8 @@ int special_command(int argc, wchar_t** argv);
 static int automap_command(int argc,wchar_t** argv) {
     if (argc<2 || std::wcscmp(argv[1],L"--automap")) return -1;
     if (argc!=2) { std::puts("--automap reads a typed SCIP Location snapshot/observation request on binary stdin."); return 2; }
-    _setmode(_fileno(stdin),_O_BINARY);
-    sentinel::Message message{};
-    const auto count=std::fread(message.data(),1,message.size(),stdin);
-    sc_automap_request request{}; uint16_t op=0;
-    if (sentinel::decode_request(message,count,&op,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,
-        nullptr,nullptr,nullptr,nullptr,nullptr,&request)!=sentinel::WireResult::ok || op!=sentinel::automap_operation) {
-        std::puts("{\"result\":\"malformed_request\"}"); return 2;
-    }
-    const auto result=sentinel::query_automap(request.execution.expected.pid,1000,request);
+    const auto result = binary_probe(45);
+
     if (result.result!=sentinel::ProbeResult::ok) {
         std::printf("{\"result\":\"%s\"}\n",sentinel::result_name(result.result)); return 1;
     }

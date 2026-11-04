@@ -13,6 +13,9 @@
 #include <cwchar>
 #include <filesystem>
 #include <iterator>
+#include <fstream>
+#include <functional>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -519,14 +522,15 @@ int metadata_child(const wchar_t* root, const wchar_t* number, const wchar_t* st
     CHECK(CloseHandle(entered) && CloseHandle(release));
     return 0;
 }
-void interrupt_metadata(const std::wstring& root, sentinel::testing::FileFault mode) {
+void interrupt_metadata(const std::wstring& root, sentinel::testing::FileFault mode, const wchar_t* archive_file = nullptr) {
     const auto stem = L"Local\\Sentinel-metadata-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(static_cast<unsigned>(mode));
     HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, (stem + L"-entered").c_str());
     HANDLE release = CreateEventW(nullptr, TRUE, FALSE, (stem + L"-release").c_str());
     CHECK(entered && release);
     wchar_t executable[MAX_PATH]{}; CHECK(GetModuleFileNameW(nullptr, executable, MAX_PATH));
-    auto line = L"\"" + std::wstring(executable) + L"\" --metadata-child \"" + root + L"\" " +
+    auto line = L"\"" + std::wstring(executable) + (archive_file ? L"\" --archive-child \"" : L"\" --metadata-child \"") + root + L"\" " +
         std::to_wstring(static_cast<unsigned>(mode)) + L" \"" + stem + L"\"";
+    if (archive_file) line += L" \"" + std::wstring(archive_file) + L"\"";
     STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
     CHECK(CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process));
     const HANDLE waits[]{entered, process.hProcess};
@@ -535,6 +539,8 @@ void interrupt_metadata(const std::wstring& root, sentinel::testing::FileFault m
     if (terminate) CHECK(TerminateProcess(process.hProcess, sentinel::testing::interrupted_exit));
     CHECK(WaitForSingleObject(process.hProcess, 4000) == WAIT_OBJECT_0);
     DWORD code = 0; CHECK(GetExitCodeProcess(process.hProcess, &code));
+    if (code != (terminate ? sentinel::testing::interrupted_exit : 0))
+        std::fprintf(stderr,"child exit=%lu mode=%u suffix=%ls root=%ls\n",code,static_cast<unsigned>(mode),archive_file?archive_file:L"metadata",root.c_str());
     CHECK(code == (terminate ? sentinel::testing::interrupted_exit : 0));
     CHECK(CloseHandle(process.hThread) && CloseHandle(process.hProcess));
     CHECK(CloseHandle(entered) && CloseHandle(release));
@@ -552,22 +558,16 @@ void interrupted_metadata(Fixture& fixture) {
     }
     std::puts("PASS test_interrupted_metadata_blocks_unsafe_resume");
 }
-int previous_checkpoint(Fixture& fixture) {
-    const auto root = fixture.path + L"\\previous";
-    CHECK(CreateDirectoryW(root.c_str(), nullptr));
-    const auto previous = seed_checkpoint(root);
-    CHECK(can_resume(root));
-    interrupt_metadata(root, sentinel::testing::FileFault::after_truncate);
-    std::unique_ptr<Namespace> owner; CHECK(reopen(metadata_descriptor(root), owner).ok());
-    std::string record; CHECK(owner->campaign_record(true, record).ok());
-    if (record == previous) { std::puts("XPASS previous_checkpoint_generation; remove WILL_FAIL after two-generation checkpoint"); return 0; }
-    std::puts("XFAIL in-place pending metadata overwrites the previous checkpoint");
-    return 1;
-}
-
+#include "save_checkpoint.h"
+#include "save_checkpoint_recovery.h"
 void metadata_arguments(int argc, wchar_t** argv) {
+    if (argc==7 && std::wstring_view(argv[1])==L"--protocol-child") std::exit(protocol_child(argv[2],argv[3],argv[4],argv[5],argv[6]));
+    if (argc == 6 && std::wstring_view(argv[1]) == L"--archive-child") std::exit(archive_child(argv[2],argv[3],argv[4],argv[5]));
     if (argc == 5 && std::wstring_view(argv[1]) == L"--metadata-child") std::exit(metadata_child(argv[2], argv[3], argv[4]));
     if (argc != 2) return;
+    if (std::wstring_view(argv[1])==L"--protocol-faults") { { Fixture fixture; protocol_faults(fixture); } std::exit(0); }
+    if (std::wstring_view(argv[1]) == L"--archive-faults") { { Fixture fixture; interrupted_archives(fixture); } std::exit(0); }
+    if (std::wstring_view(argv[1]) == L"--checkpoint-plan") { { Fixture fixture; checkpoint_readers(fixture); } std::exit(0); }
     if (std::wstring_view(argv[1]) == L"--metadata") { { Fixture fixture; interrupted_metadata(fixture); } std::exit(0); }
     if (std::wstring_view(argv[1]) != L"--previous-checkpoint") return;
     int code = 0; { Fixture fixture; code = previous_checkpoint(fixture); } std::exit(code);

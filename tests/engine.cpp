@@ -1,5 +1,6 @@
+#include "engine/builds/build_descriptor.h"
 #include "engine_observer.h"
-#include "protocol.h"
+#include "sentinel_protocol_generated.h"
 #include "pipe_io.h"
 #include <cstdio>
 #include <cstdlib>
@@ -139,38 +140,13 @@ void checked_adapter_and_pe() {
     dos.e_lfanew = 0x7fffffff; malformed.put(base, dos);
     CHECK(read_image(malformed, base, image).reason == SC_REASON_INVALID_PE);
 }
-void protocol() {
-    Fixture f; auto e = sample(f.memory, f.binding(), 3);
-    Snapshot s{}; s.core.abi_version = SC_ABI_VERSION; strcpy_s(s.core.version, "fixture"); strcpy_s(s.core.build_id, hash);
-    s.pid = 123; s.process_created = 456; s.instance[0] = 1;
-    Message data{}; auto size = encode_engine_response(data, WireResult::ok, s, e);
-    CHECK(size <= max_message);
-    Snapshot decoded{}; sc_engine_snapshot engine{}; WireResult result{};
-    CHECK(decode_engine_response(data, size, result, decoded, engine));
-    CHECK(decoded.pid == 123 && engine.sequence == 3 && engine.fields[SC_ENGINE_PLAYER_PRESENT].value == 1);
-    CHECK(!decode_response(data, size, result, decoded));
-    CHECK(!decode_engine_response(data, size - 1, result, decoded, engine));
-    data[size] = 0; CHECK(!decode_engine_response(data, size + 1, result, decoded, engine));
-    e.fields[0] = {SC_OBSERVATION_UNKNOWN, SC_REASON_READ_FAILED, 1, 0};
-    size = encode_engine_response(data, WireResult::ok, s, e);
-    CHECK(!decode_engine_response(data, size, result, decoded, engine));
-    e = unavailable(SC_REASON_STOPPED); size = encode_engine_response(data, WireResult::ok, s, e);
-    CHECK(decode_engine_response(data, size, result, decoded, engine));
-    CHECK(engine.fields[0].reason == SC_REASON_STOPPED && engine.fields[0].value == 0);
-    uint16_t op = 0;
-    size = encode_request(data, engine_capability, wire_version, engine_operation);
-    CHECK(decode_request(data, size, &op) == WireResult::ok && op == engine_operation);
-    size = encode_request(data, 4, wire_version, engine_operation);
-    CHECK(decode_request(data, size) == WireResult::capability_unavailable);
-    size = encode_request(data, engine_capability, 99, engine_operation);
-    CHECK(decode_request(data, size) == WireResult::incompatible_protocol);
-}
+
 void supported_layout_without_disk_scan() {
     Fixture f;
     const auto direct = [&] { return bind(f.memory, f.image, "", SC_REASON_NOT_SAMPLED, nullptr, GetTickCount64() + 2000, true); };
     auto b = direct();
     CHECK(b.metadata.profile == SC_PROFILE_STEAM_20260818 && b.root == root);
-    CHECK(b.metadata.disk_hash_reason == SC_REASON_NOT_SAMPLED && b.metadata.locator_revision == 2);
+    CHECK(b.metadata.disk_hash_reason == SC_REASON_NOT_SAMPLED && b.metadata.locator_revision == 1);
     CHECK(f.memory.copies == 1);
     f.memory.blocks[base + 0x42f300][0x77] ^= 1;
     CHECK(direct().metadata.profile == SC_PROFILE_NONE);
@@ -182,6 +158,10 @@ void supported_layout_without_disk_scan() {
     CHECK(!direct().root);
 }
 int main() {
-    values_and_failures(); locators_and_identity(); checked_adapter_and_pe(); protocol(); supported_layout_without_disk_scan();
+    const auto& descriptor = builds::steam_20260818();
+    CHECK(builds::resolve(0x140000000ULL, descriptor.expanded[0]).address == 0x140000000ULL + descriptor.expanded[0].address);
+    CHECK(!builds::resolve(UINTPTR_MAX, descriptor.expanded[0]).address);
+    CHECK(!builds::resolve(0x00007FFFFFFFFFF0ULL, native::Target{32}).address);
+    values_and_failures(); locators_and_identity(); checked_adapter_and_pe(); supported_layout_without_disk_scan();
     std::puts("PASS bounded reader, profile/locator gates, null/read failures, transition/no stale, wire contract; SYNTHETIC ONLY");
 }

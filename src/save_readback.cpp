@@ -61,14 +61,32 @@ bool populate(ReadbackFuture& future, engine::Memory& memory) {
         {{"count", count}, {"capacity", capacity}});
     return true;
 }
+bool archive_candidate(ReadbackFuture& future) {
+    if (!future.owner.campaign_run.enabled() || future.owner.native_writes.backup(future.operation)) return true;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return false;
+    const uint64_t stamp = (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+    const auto archive = std::make_shared<BackupJob>(GetCurrentProcessId(), stamp, GetTickCount64() + 30000, future.calls.owner, true);
+    return future.owner.native_writes.ensure_archive(future.operation, archive);
+}
 SaveFuture* destroy(SaveFuture* value, uint32_t) { delete static_cast<ReadbackFuture*>(value); return value; }
+void record_readback_poll(ReadbackFuture& future, const SaveResult& result) {
+    future.owner.btrace.record(BStage::readback_verify,
+                               result.state == -1                                      ? BStatus::pending
+                               : !result.state && !result.outcome && result.value == 1 ? BStatus::succeeded
+                                                                                       : BStatus::refused,
+                               "readback_native_poll_result", future.operation,
+                               {{"state", result.state},
+                                {"outcome", result.state == 0 ? result.outcome : 0},
+                                {"value", result.state == 0 ? result.value : 0}});
+}
 SaveResult* poll(SaveFuture* value, SaveResult* out, void* task) {
     auto& future = *static_cast<ReadbackFuture*>(value);
     if (future.terminal) { *out = {1, 0, 0, 0}; return out; }
     bool ready = true;
     engine::LocalMemory memory;
     if (!future.started) {
-        try { ready = populate(future, memory); } catch (const std::bad_alloc&) {
+        try { ready = archive_candidate(future) && populate(future, memory); } catch (const std::bad_alloc&) {
             future.owner.btrace.record(BStage::readback_prepare, BStatus::refused, "readback_populate_allocation_failed", future.operation); ready = false;
         }
         future.started = true;
@@ -77,10 +95,7 @@ SaveResult* poll(SaveFuture* value, SaveResult* out, void* task) {
     if (ready) {
         future.owner.btrace.record(BStage::readback_verify, BStatus::entered, "readback_native_poll_entered", future.operation);
         future.native->vtable->poll(future.native, &result, task);
-        future.owner.btrace.record(BStage::readback_verify, result.state == -1 ? BStatus::pending :
-            !result.state && !result.outcome && result.value == 1 ? BStatus::succeeded : BStatus::refused,
-            "readback_native_poll_result", future.operation, {{"state", result.state}, {"outcome", result.state == 0 ? result.outcome : 0},
-            {"value", result.state == 0 ? result.value : 0}});
+        record_readback_poll(future, result);
         if (result.state == -1) { *out = result; return out; }
     }
     future.terminal = true;

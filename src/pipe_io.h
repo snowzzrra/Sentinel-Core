@@ -11,9 +11,6 @@ struct Handle {
     Handle& operator=(const Handle&) = delete;
     explicit operator bool() const { return value && value != INVALID_HANDLE_VALUE; }
 };
-inline std::wstring pipe_name(DWORD pid) {
-    return L"\\\\.\\pipe\\sentinel_core.inspect.v1." + std::to_wstring(pid);
-}
 inline std::wstring pipe_name_v2(DWORD pid) {
     return L"\\\\.\\pipe\\sentinel_core.inspect.v2." + std::to_wstring(pid);
 }

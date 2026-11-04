@@ -10,13 +10,14 @@
 namespace sentinel::testing {
 void drop_reply(uint16_t operation);
 bool drop_pipe_reply(uint16_t operation);
-enum class FileFault { none, short_write, truncate, flush, after_write, after_truncate, after_flush };
+enum class FileFault { none, short_write, truncate, flush, after_write, after_truncate, after_flush, erase, after_erase };
 constexpr DWORD interrupted_exit = 73;
 void file_fault(FileFault, const std::wstring& suffix, HANDLE entered = nullptr, HANDLE release = nullptr);
 unsigned file_fault_hits();
 BOOL WINAPI write_file(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
 BOOL WINAPI truncate_file(HANDLE);
 BOOL WINAPI flush_file(HANDLE);
+BOOL WINAPI set_file_information(HANDLE, FILE_INFO_BY_HANDLE_CLASS, LPVOID, DWORD);
 void begin_hooks(unsigned create_failure, unsigned enable_failure, bool initialize = true);
 bool hooks_active();
 bool real_hook_targets();
@@ -42,6 +43,7 @@ uint32_t fault_validate_recorded(save::Installation&, engine::Memory&, const eng
 #define WriteFile sentinel::testing::write_file
 #define SetEndOfFile sentinel::testing::truncate_file
 #define FlushFileBuffers sentinel::testing::flush_file
+#define SetFileInformationByHandle sentinel::testing::set_file_information
 #define MH_CreateHook sentinel::testing::create_hook
 #define MH_EnableHook sentinel::testing::enable_hook
 #define MH_QueueEnableHook sentinel::testing::queue_enable_hook

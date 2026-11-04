@@ -1,15 +1,16 @@
 #include "encounter_recovery.h"
+#include "player_strings_generated.h"
 #include <algorithm>
 
 namespace sentinel::recovery {
 const char* message(Outcome outcome) {
     switch (outcome) {
-    case pending: return "Encounter recovery in progress";
-    case finished: return "Encounter finished";
-    case no_active: return "No active encounter";
-    case unsupported: return "Unsupported encounter";
-    case changed: return "Encounter changed; request cancelled";
-    default: return "Recovery outcome unknown";
+    case pending: return player_strings::menu_recovery_pending;
+    case finished: return player_strings::menu_recovery_finished;
+    case no_active: return player_strings::menu_recovery_no_active;
+    case unsupported: return player_strings::menu_recovery_unsupported;
+    case changed: return player_strings::menu_recovery_changed;
+    default: return player_strings::menu_recovery_unknown;
     }
 }
 bool boss_map(const std::string& map) {

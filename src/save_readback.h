@@ -1,11 +1,13 @@
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #pragma once
 #include "save_profile_prerequisite.h"
+#include "save_recovery.h"
 
 namespace sentinel::save {
 struct ReadbackCalls {
     ProfilePrerequisiteCalls native;
     void* (*construct_stream)(void*, const char*, uint32_t);
+    SteamOwner owner = current_steam_owner;
 };
 // Capture the borrowed identity in an unpolled native Load future while the
 // writer's caller still owns it. Streams are populated only after SDK success.

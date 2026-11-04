@@ -1,7 +1,9 @@
+#include "engine/builds/build_descriptor.h"
 #include "fault_injection.h"
 #undef WriteFile
 #undef SetEndOfFile
 #undef FlushFileBuffers
+#undef SetFileInformationByHandle
 #undef MH_CreateHook
 #undef MH_EnableHook
 #undef MH_QueueEnableHook
@@ -18,6 +20,10 @@
 #include <map>
 #include <algorithm>
 #include <atomic>
+#ifdef SC_FAULT_HOOK_RUNNER
+#include "save_native_hooks.h"
+#include <thread>
+#endif
 
 extern "C" int sc_test_hooks_active() { return sentinel::testing::hooks_active(); }
 
@@ -38,6 +44,16 @@ unsigned failed_group = 0;
 uint8_t* pages = nullptr;
 struct Hook { void* site; unsigned group; bool owned = false, foreign = false; };
 std::map<void*, Hook> hooks;
+#ifdef SC_FAULT_HOOK_RUNNER
+std::thread startup_entry;
+void* startup_target = nullptr;
+void wait_for_startup() {
+    if (!startup_entry.joinable()) return;
+    const auto deadline = GetTickCount64() + 2000;
+    while (!save::test_startup_waiting() && GetTickCount64() < deadline) SwitchToThread();
+    if (!save::test_startup_waiting()) std::abort();
+}
+#endif
 unsigned hook_group(uintptr_t key) {
     const auto rva = static_cast<uint32_t>(key - 0x180000000);
     static const std::map<std::wstring, std::vector<std::vector<uint32_t>>> groups{
@@ -64,6 +80,10 @@ bool selected(HANDLE file) {
     const auto length = GetFinalPathNameByHandleW(file, path.data(), static_cast<DWORD>(path.size()), 0);
     require(length && length < path.size());
     const std::wstring_view name(path.data(), length);
+    if (!file_suffix.empty() && file_suffix.back()==L'*') {
+        const auto leaf=name.substr(name.find_last_of(L'\\'));
+        return leaf.substr(0,file_suffix.size()-1)==std::wstring_view(file_suffix).substr(0,file_suffix.size()-1);
+    }
     return name.size() >= file_suffix.size() && name.substr(name.size() - file_suffix.size()) == file_suffix;
 }
 void interrupt() {
@@ -111,6 +131,13 @@ BOOL WINAPI flush_file(HANDLE file) {
     if (ok && match && file_mode == FileFault::after_flush) interrupt();
     return ok;
 }
+BOOL WINAPI set_file_information(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DWORD size) {
+    const bool match=kind==FileDispositionInfo && selected(file);
+    if (match && file_mode==FileFault::erase) { ++file_hits; SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
+    const auto ok=SetFileInformationByHandle(file,kind,info,size);
+    if (ok && match && file_mode==FileFault::after_erase) interrupt();
+    return ok;
+}
 void begin_hooks(unsigned create_failure, unsigned enable_failure, bool initialize) {
     require(!active);
     if (initialize) require(MH_Initialize() == MH_OK);
@@ -125,6 +152,9 @@ unsigned hook_creates() { return creates; }
 unsigned hook_enables() { return enables; }
 MH_STATUS WINAPI create_hook(void* key, void* detour, void** original) {
     if (!active) return MH_CreateHook(key, detour, original);
+#ifdef SC_FAULT_HOOK_RUNNER
+    wait_for_startup();
+#endif
     ++creates;
     if (!hooks.count(key)) {
         require(hooks.size() < 256);
@@ -148,7 +178,15 @@ MH_STATUS WINAPI enable_hook(void* key) {
         failed_group = hooks.at(key).group;
         return MH_ERROR_MEMORY_PROTECT;
     }
-    return MH_EnableHook(active ? mapped(key) : key);
+    const auto status = MH_EnableHook(active ? mapped(key) : key);
+#ifdef SC_FAULT_HOOK_RUNNER
+    if (active && hook_installer == L"save" && enables == 1 && status == MH_OK &&
+        (fail_create > 1 || fail_enable > 1)) {
+        startup_target = key;
+        startup_entry = std::thread([] { save::test_startup_root(0x1845ea6f0); });
+    }
+#endif
+    return status;
 }
 MH_STATUS WINAPI queue_enable_hook(void* key) {
     if (active && ++enables == fail_enable) {
@@ -159,11 +197,20 @@ MH_STATUS WINAPI queue_enable_hook(void* key) {
 }
 MH_STATUS WINAPI disable_hook(void* key) { return MH_DisableHook(active ? mapped(key) : key); }
 MH_STATUS WINAPI remove_hook(void* key) {
+#ifdef SC_FAULT_HOOK_RUNNER
+    if (active && startup_entry.joinable() && key != startup_target) require(save::test_startup_drained());
+#endif
     const auto status = MH_RemoveHook(active ? mapped(key) : key);
     if (active && status == MH_OK) hooks.at(key).owned = false;
     return status;
 }
 bool end_hooks(bool expect_cleanup) {
+#ifdef SC_FAULT_HOOK_RUNNER
+    if (startup_entry.joinable()) {
+        startup_entry.join();
+        require(save::test_startup_drained() && !save::session().native_io() && !save::session().accepts_requests());
+    }
+#endif
     bool clean = true;
     for (const auto& entry : hooks) {
         const auto& hook = entry.second;
@@ -239,6 +286,10 @@ void install_native(const engine::Binding& binding, HANDLE stop) {
     Snapshot identity{}; identity.pid = GetCurrentProcessId(); identity.process_created = 1; identity.instance[0] = 1;
     native::prepare(identity);
     native::test_start(adapter, identity, stop);
+    if (fail_create || fail_enable) {
+        const auto state = native::inspect(0);
+        require(state.availability == SC_NATIVE_DISABLED && !state.coverage);
+    }
     require(VirtualFree(bytes, 0, MEM_RELEASE) != FALSE);
 }
 bool needs_session(const std::wstring& name) {
@@ -253,7 +304,10 @@ void prepare_session() {
                                   {storage::CampaignIntent::create, 1}};
     std::unique_ptr<storage::Namespace> lease;
     require(storage::prepare(descriptor, lease).ok());
+    if (hook_installer == L"save_campaign") descriptor.campaign.intent = storage::CampaignIntent::recover;
     require(save::session().configure(descriptor, std::move(lease)).ok());
+    if (hook_installer == L"save_campaign")
+        require(!save::session().campaign_run.enabled() && save::session().campaign_requested());
 }
 void install_menu(const engine::Binding& binding, HANDLE) {
     std::array<native::Target, 46> targets{};
@@ -272,7 +326,7 @@ void install(const std::wstring& name) {
     binding.image.sections = {{0, 0x4000000, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE},
                               {0x4000000, 0x4000000, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE}};
     binding.root = binding.image.base + 0x45ea6f0;
-    binding.metadata.profile = SC_PROFILE_STEAM_20260818;
+    binding.metadata.profile = SC_PROFILE_STEAM_20260818; binding.descriptor = &builds::steam_20260818();
     const std::map<std::wstring, void (*)(const engine::Binding&, HANDLE)> installers{
         {L"native", install_native}, {L"ap_controls", +[](const auto& b, HANDLE s) { (void)ap_controls::install(b, s); }},
         {L"arsenal", arsenal::install}, {L"challenge", challenge::install}, {L"combat", combat::install},

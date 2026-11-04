@@ -1,5 +1,6 @@
 #pragma once
 #include "weapon_points.h"
+#include "currencies.h"
 #include "inventory.h"
 #include "arsenal.h"
 #include "runes.h"

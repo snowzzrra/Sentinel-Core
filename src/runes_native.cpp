@@ -1,3 +1,4 @@
+#include "engine/builds/build_descriptor.h"
 #include "runes.h"
 #include "native_target.h"
 #include "save_session.h"
@@ -412,25 +413,12 @@ void install(const engine::Binding& binding, HANDLE stop) {
     // Supported image, exact entry bytes and executable section are required
     // for every direct mutation target, before exposing any Rune capability.
     engine::LocalMemory memory;
-    struct Site { uint32_t rva; const char* bytes; };
-    const Site sites[] = {
-        {0x1631f90, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc"},
-        {0x17aa5d0, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448"},
-        {0x357040, "803d1903f203004c8bc9740f448b410c41ffc0418bd0e9650000000fbf491041"},
-        {0xfe2500, "4885d20f84c903000044884c2420448844241848894c24085356415441564883"},
-        {0xfe19b0, "44884c24204488442418488954241048894c2408555357415541564157488d6c"},
-        {0xfe2c20, "4885d20f84e1060000555741554157488bec4883ec588b41304c8bfa488d5134"},
-        {0x1279be0, "48895c241048896c2418565741564883ec60488d99300100004c8bf28b03488d"},
-        {0x127aa30, "85d20f88f501000048896c2418574883ec404863fa410fb6e848895c24504889"},
-        {0x1279eb0, "48895c2410574883ec60488bfa488bd9488b91980000004885d2740f450fb6c8"},
-        {0x13ef6a0, "40534883ec204533c98bda458d4101e8bcebfdff488b05256d26038378080074"},
-        {0x69af70, "488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc"},
-    };
+    const auto& sites = builds::steam_20260818().runes;
     for (const auto& site : sites) {
         std::array<uint8_t, 32> actual{}, expected{};
         const auto digit = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
         for (size_t i = 0; i < expected.size(); ++i)
-            expected[i] = static_cast<uint8_t>(digit(site.bytes[i * 2]) * 16 + digit(site.bytes[i * 2 + 1]));
+            expected[i] = static_cast<uint8_t>(digit(site.prefix[i * 2]) * 16 + digit(site.prefix[i * 2 + 1]));
         if (!binding.image.contains(site.rva, actual.size(), IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0) ||
             memory.copy(image_base + site.rva, actual.data(), actual.size()).reason || actual != expected) return;
     }

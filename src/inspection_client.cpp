@@ -1,7 +1,7 @@
 #include "sentinel_inspection.h"
 #include "pipe_io.h"
 #include "protocol_v2.h"
-#include "protocol.h"
+#include "client_payload.h"
 #include "commands.h"
 #include "combat.h"
 #include <algorithm>
@@ -9,6 +9,8 @@
 #include <type_traits>
 
 namespace sentinel {
+Inspection query_native_client(uint32_t, uint32_t, uint16_t, const sc_diagnostic_request&, uint64_t,
+    generated::NativeRequest, const sc_campaign_summary*, const sc_campaign_rewards*, uint64_t);
 namespace {
 ProbeResult classify(DWORD error) {
     switch (error) {
@@ -25,209 +27,10 @@ struct ClientRequest {
     uint64_t capability;
     sc_diagnostic_request execution{};
     uint64_t cursor = 0;
-    RequestPayload payload{};
+    generated::NativeRequest payload{};
     const sc_campaign_summary* summary = nullptr;
     const sc_campaign_rewards* rewards = nullptr;
 };
-struct ClientCodec {
-    uint16_t operation;
-    size_t (*encode)(Message&, const ClientRequest&);
-    bool (*decode)(const Message&, size_t, WireResult&, uint16_t, Inspection&);
-    bool (*identity)(const ClientRequest&, const Inspection&);
-    bool envelope;
-};
-size_t encode_plain(Message& data, const ClientRequest& request) {
-    return encode_request(data, request.capability, wire_version, request.operation);
-}
-size_t encode_native(Message& data, const ClientRequest& request) {
-    return encode_native_request(data, request.operation, request.execution, request.cursor);
-}
-size_t encode_write(Message& data, const ClientRequest& request) {
-    return encode_save_write_request(data, request.cursor);
-}
-size_t encode_campaign(Message& data, const ClientRequest& request) {
-    const auto& value = std::get<CampaignRequest>(request.payload);
-    return encode_campaign_request(data, request.operation, value.request, request.summary, request.rewards);
-}
-size_t encode_combat(Message& data, const ClientRequest& request) {
-    return encode_combat_request(data, request.execution.expected.pid, std::get<sc_combat_query>(request.payload));
-}
-template<class T, auto Encode> size_t encode_family(Message& data, const ClientRequest& request) {
-    const auto& value = std::get<T>(request.payload);
-    if constexpr (std::is_invocable_v<decltype(Encode), Message&, uint16_t, const T&>)
-        return Encode(data, request.operation, value);
-    else return Encode(data, value);
-}
-bool decode_inspect(const Message& data, size_t size, WireResult& code, uint16_t, Inspection& result) {
-    return decode_response(data, size, code, result.snapshot);
-}
-bool decode_native(const Message& data, size_t size, WireResult& code, uint16_t operation, Inspection& result) {
-    return decode_native_response(data, size, code, operation, result.snapshot, result.native, result.diagnostic, &result.detail);
-}
-template<auto Decode, auto Field>
-bool decode_member(const Message& data, size_t size, WireResult& code, uint16_t operation, Inspection& result) {
-    if constexpr (std::is_invocable_v<decltype(Decode), const Message&, size_t, WireResult&, uint16_t,
-                                     Snapshot&, decltype(result.*Field)>)
-        return Decode(data, size, code, operation, result.snapshot, result.*Field);
-    else return Decode(data, size, code, result.snapshot, result.*Field);
-}
-template<class T> bool correlation(const sc_diagnostic_request& request, const T& result) {
-    return result.request_id == request.request_id && !std::memcmp(result.nonce, request.nonce, sizeof(request.nonce));
-}
-template<class T, class U> bool namespace_scope(const T& request, const U& result) {
-    return result.execution.scope.lifecycle_generation == request.execution.expected.lifecycle_generation &&
-        !std::memcmp(result.namespace_id, request.namespace_id, sizeof(request.namespace_id));
-}
-bool identity_none(const ClientRequest&, const Inspection&) { return true; }
-bool identity_diagnostic(const ClientRequest& request, const Inspection& result) {
-    return correlation(request.execution, result.diagnostic);
-}
-bool identity_write(const ClientRequest& request, const Inspection& result) {
-    return !request.cursor || result.write.operation_id == request.cursor;
-}
-template<class T, auto Field> bool identity_kind(const ClientRequest& request, const Inspection& result) {
-    const auto& value = std::get<T>(request.payload);
-    const auto& response = result.*Field;
-    return correlation(request.execution, response.execution) && namespace_scope(value, response) && response.kind == value.kind;
-}
-bool identity_backup(const ClientRequest& request, const Inspection& result) {
-    const auto& value = std::get<sc_save_backup_request>(request.payload);
-    return correlation(request.execution, result.backup.execution) && namespace_scope(value, result.backup) &&
-        result.backup.campaign == value.campaign && result.backup.slot == value.slot;
-}
-bool identity_points(const ClientRequest& request, const Inspection& result) {
-    const auto& value = std::get<sc_weapon_points_request>(request.payload);
-    return identity_kind<sc_weapon_points_request, &Inspection::weapon_points>(request, result) &&
-        result.weapon_points.amount == value.amount && result.weapon_points.expected_gained == value.expected_gained;
-}
-bool identity_campaign(const ClientRequest& request, const Inspection& result) {
-    const auto& value = std::get<CampaignRequest>(request.payload).request;
-    return correlation(request.execution, result.campaign) &&
-        result.campaign.scope.lifecycle_generation == value.execution.expected.lifecycle_generation &&
-        !std::memcmp(result.campaign.namespace_id, value.namespace_id, sizeof(value.namespace_id));
-}
-bool identity_presentation(const ClientRequest& request, const Inspection& result) {
-    return correlation(request.execution, result.combat_presentation) &&
-        result.combat_presentation.scope.lifecycle_generation == request.execution.expected.lifecycle_generation;
-}
-bool identity_automap(const ClientRequest& request, const Inspection& result) {
-    const auto& value = std::get<sc_automap_request>(request.payload);
-    const auto& response = result.automap;
-    if (!correlation(request.execution, response) || response.scope.lifecycle_generation != value.execution.expected.lifecycle_generation ||
-        response.kind != value.kind || std::memcmp(response.namespace_id, value.namespace_id, sizeof(value.namespace_id))) return false;
-    if (value.kind == SC_AUTOMAP_PUBLISH && response.outcome == SC_AUTOMAP_ACCEPTED)
-        return response.revision == value.revision && response.known == value.known;
-    return true;
-}
-const ClientCodec codecs[] = {
-    {inspect_operation, encode_plain,
-        decode_inspect, identity_none, false},
-    {engine_operation, encode_plain,
-        decode_member<decode_engine_response, &Inspection::engine>, identity_none, false},
-    {context_operation, encode_plain,
-        decode_member<decode_context_response, &Inspection::context>, identity_none, false},
-    {native_operation, encode_native,
-        decode_native, identity_none, false},
-    {diagnostic_submit_operation, encode_native,
-        decode_native, identity_diagnostic, true},
-    {diagnostic_result_operation, encode_native,
-        decode_native, identity_diagnostic, true},
-    {diagnostic_cancel_operation, encode_native,
-        decode_native, identity_diagnostic, true},
-    {diagnostic_detail_submit_operation, encode_native,
-        decode_native, identity_diagnostic, true},
-    {diagnostic_detail_result_operation, encode_native,
-        decode_native, identity_diagnostic, true},
-    {diagnostic_detail_cancel_operation, encode_native,
-        decode_native, identity_diagnostic, true},
-    {save_operation, encode_plain,
-        decode_member<decode_save_response, &Inspection::save>, identity_none, false},
-    {save_admission_operation, encode_plain,
-        decode_member<decode_save_admission_response, &Inspection::admission>, identity_none, false},
-    {save_write_operation, encode_write,
-        decode_member<decode_save_write_response, &Inspection::write>, identity_write, false},
-    {save_backup_submit_operation, encode_family<sc_save_backup_request, encode_backup_request>,
-        decode_member<decode_backup_response, &Inspection::backup>, identity_backup, true},
-    {save_backup_result_operation, encode_family<sc_save_backup_request, encode_backup_request>,
-        decode_member<decode_backup_response, &Inspection::backup>, identity_backup, true},
-    {save_backup_cancel_operation, encode_family<sc_save_backup_request, encode_backup_request>,
-        decode_member<decode_backup_response, &Inspection::backup>, identity_backup, true},
-    {save_installation_operation, encode_plain,
-        decode_member<decode_installation_response, &Inspection::installation>, identity_none, false},
-    {weapon_points_submit_operation, encode_family<sc_weapon_points_request, encode_weapon_points_request>,
-        decode_member<decode_weapon_points_response, &Inspection::weapon_points>, identity_points, true},
-    {weapon_points_result_operation, encode_family<sc_weapon_points_request, encode_weapon_points_request>,
-        decode_member<decode_weapon_points_response, &Inspection::weapon_points>, identity_points, true},
-    {weapon_points_cancel_operation, encode_family<sc_weapon_points_request, encode_weapon_points_request>,
-        decode_member<decode_weapon_points_response, &Inspection::weapon_points>, identity_points, true},
-    {weapon_points_release_operation, encode_family<sc_weapon_points_request, encode_weapon_points_request>,
-        decode_member<decode_weapon_points_response, &Inspection::weapon_points>, identity_points, true},
-    {campaign_row_operation, encode_campaign,
-        decode_member<decode_campaign_response, &Inspection::campaign>, identity_campaign, true},
-    {campaign_commit_operation, encode_campaign,
-        decode_member<decode_campaign_response, &Inspection::campaign>, identity_campaign, true},
-    {campaign_inspect_operation, encode_campaign,
-        decode_member<decode_campaign_response, &Inspection::campaign>, identity_campaign, true},
-    {inventory_submit_operation, encode_family<sc_inventory_request, encode_inventory_request>,
-        decode_member<decode_inventory_response, &Inspection::inventory>, identity_kind<sc_inventory_request, &Inspection::inventory>, true},
-    {inventory_result_operation, encode_family<sc_inventory_request, encode_inventory_request>,
-        decode_member<decode_inventory_response, &Inspection::inventory>, identity_kind<sc_inventory_request, &Inspection::inventory>, true},
-    {inventory_cancel_operation, encode_family<sc_inventory_request, encode_inventory_request>,
-        decode_member<decode_inventory_response, &Inspection::inventory>, identity_kind<sc_inventory_request, &Inspection::inventory>, true},
-    {inventory_release_operation, encode_family<sc_inventory_request, encode_inventory_request>,
-        decode_member<decode_inventory_response, &Inspection::inventory>, identity_kind<sc_inventory_request, &Inspection::inventory>, true},
-    {arsenal_submit_operation, encode_family<sc_arsenal_request, encode_arsenal_request>,
-        decode_member<decode_arsenal_response, &Inspection::arsenal>, identity_kind<sc_arsenal_request, &Inspection::arsenal>, true},
-    {arsenal_result_operation, encode_family<sc_arsenal_request, encode_arsenal_request>,
-        decode_member<decode_arsenal_response, &Inspection::arsenal>, identity_kind<sc_arsenal_request, &Inspection::arsenal>, true},
-    {arsenal_cancel_operation, encode_family<sc_arsenal_request, encode_arsenal_request>,
-        decode_member<decode_arsenal_response, &Inspection::arsenal>, identity_kind<sc_arsenal_request, &Inspection::arsenal>, true},
-    {arsenal_release_operation, encode_family<sc_arsenal_request, encode_arsenal_request>,
-        decode_member<decode_arsenal_response, &Inspection::arsenal>, identity_kind<sc_arsenal_request, &Inspection::arsenal>, true},
-    {runes_submit_operation, encode_family<sc_runes_request, encode_runes_request>,
-        decode_member<decode_runes_response, &Inspection::runes>, identity_kind<sc_runes_request, &Inspection::runes>, true},
-    {runes_result_operation, encode_family<sc_runes_request, encode_runes_request>,
-        decode_member<decode_runes_response, &Inspection::runes>, identity_kind<sc_runes_request, &Inspection::runes>, true},
-    {runes_cancel_operation, encode_family<sc_runes_request, encode_runes_request>,
-        decode_member<decode_runes_response, &Inspection::runes>, identity_kind<sc_runes_request, &Inspection::runes>, true},
-    {runes_release_operation, encode_family<sc_runes_request, encode_runes_request>,
-        decode_member<decode_runes_response, &Inspection::runes>, identity_kind<sc_runes_request, &Inspection::runes>, true},
-    {special_submit_operation, encode_family<sc_special_request, encode_special_request>,
-        decode_member<decode_special_response, &Inspection::special>, identity_kind<sc_special_request, &Inspection::special>, true},
-    {special_result_operation, encode_family<sc_special_request, encode_special_request>,
-        decode_member<decode_special_response, &Inspection::special>, identity_kind<sc_special_request, &Inspection::special>, true},
-    {special_cancel_operation, encode_family<sc_special_request, encode_special_request>,
-        decode_member<decode_special_response, &Inspection::special>, identity_kind<sc_special_request, &Inspection::special>, true},
-    {special_release_operation, encode_family<sc_special_request, encode_special_request>,
-        decode_member<decode_special_response, &Inspection::special>, identity_kind<sc_special_request, &Inspection::special>, true},
-    {deathlink_submit_operation, encode_family<sc_deathlink_request, encode_deathlink_request>,
-        decode_member<decode_deathlink_response, &Inspection::deathlink>, identity_kind<sc_deathlink_request, &Inspection::deathlink>, true},
-    {deathlink_result_operation, encode_family<sc_deathlink_request, encode_deathlink_request>,
-        decode_member<decode_deathlink_response, &Inspection::deathlink>, identity_kind<sc_deathlink_request, &Inspection::deathlink>, true},
-    {deathlink_cancel_operation, encode_family<sc_deathlink_request, encode_deathlink_request>,
-        decode_member<decode_deathlink_response, &Inspection::deathlink>, identity_kind<sc_deathlink_request, &Inspection::deathlink>, true},
-    {deathlink_release_operation, encode_family<sc_deathlink_request, encode_deathlink_request>,
-        decode_member<decode_deathlink_response, &Inspection::deathlink>, identity_kind<sc_deathlink_request, &Inspection::deathlink>, true},
-    {automap_operation, encode_family<sc_automap_request, encode_automap_request>,
-        decode_member<decode_automap_response, &Inspection::automap>, identity_automap, true},
-    {command_submit_operation, encode_family<sc_command_request, encode_command_request>,
-        decode_member<decode_command_response, &Inspection::command>, identity_kind<sc_command_request, &Inspection::command>, true},
-    {command_result_operation, encode_family<sc_command_request, encode_command_request>,
-        decode_member<decode_command_response, &Inspection::command>, identity_kind<sc_command_request, &Inspection::command>, true},
-    {command_cancel_operation, encode_family<sc_command_request, encode_command_request>,
-        decode_member<decode_command_response, &Inspection::command>, identity_kind<sc_command_request, &Inspection::command>, true},
-    {command_release_operation, encode_family<sc_command_request, encode_command_request>,
-        decode_member<decode_command_response, &Inspection::command>, identity_kind<sc_command_request, &Inspection::command>, true},
-    {combat_operation, encode_combat,
-        decode_member<decode_combat_response, &Inspection::combat>, identity_none, false},
-    {combat_presentation_operation, encode_family<sc_combat_presentation_request, encode_combat_presentation_request>,
-        decode_member<decode_combat_presentation_response, &Inspection::combat_presentation>, identity_presentation, true},
-};
-const ClientCodec* find_codec(uint16_t operation) {
-    const auto end = std::end(codecs);
-    const auto it = std::find_if(std::begin(codecs), end, [=](const auto& codec) { return codec.operation == operation; });
-    return it == end ? nullptr : it;
-}
 void io_failure(Inspection& result, HANDLE process, DWORD error) {
     result.win32_error = error;
     result.result = classify(error);
@@ -259,8 +62,8 @@ bool identify_process(uint32_t pid, const sc_diagnostic_request* expected, Handl
     result.host_path.assign(path, path_size);
     return true;
 }
-DWORD open_endpoint(uint32_t pid, uint64_t deadline, Handle& pipe, Inspection& result, bool version2 = false) {
-    const auto name = version2 ? pipe_name_v2(pid) : pipe_name(pid);
+DWORD open_endpoint(uint32_t pid, uint64_t deadline, Handle& pipe, Inspection& result) {
+    const auto name = pipe_name_v2(pid);
     for (;;) {
         result.failure_stage = "pipe_open";
         pipe.value = CreateFileW(name.c_str(), client_access, 0, nullptr, OPEN_EXISTING,
@@ -284,65 +87,16 @@ bool live_process(HANDLE process, Inspection& result) {
     if (wait == WAIT_FAILED) result.target_wait_error = GetLastError();
     return wait == WAIT_TIMEOUT;
 }
-DWORD exchange_bytes(HANDLE pipe, uint64_t deadline, Message& data, DWORD size, DWORD& count, Inspection& result) {
-    result.failure_stage = "pipe_write";
-    const auto error = transfer(pipe, true, data.data(), size, count, nullptr, remaining(deadline));
-    if (error != ERROR_SUCCESS) return error;
-    result.failure_stage = "pipe_read";
-    return transfer(pipe, false, data.data(), static_cast<DWORD>(data.size()), count, nullptr, remaining(deadline));
-}
-ProbeResult wire_failure(WireResult code) {
-    switch (code) {
-    case WireResult::capability_unavailable: case WireResult::unsupported_operation: return ProbeResult::capability_unavailable;
-    case WireResult::incompatible_protocol: return ProbeResult::incompatible_protocol;
-    default: return ProbeResult::invalid_response;
-    }
-}
-bool decode_expected(const ClientCodec& codec, const Message& data, DWORD size, Inspection& result) {
-    result.failure_stage = "decode_response";
-    WireResult code{};
-    bool decoded = codec.decode(data, size, code, codec.operation, result);
-    if (!decoded && codec.operation != inspect_operation && size == header_size)
-        decoded = decode_response(data, size, code, result.snapshot) && code != WireResult::ok;
-    if (!decoded) { result.result = ProbeResult::invalid_response; return false; }
-    if (code != WireResult::ok) { result.result = wire_failure(code); return false; }
-    return true;
-}
-bool verify_response(uint32_t pid, HANDLE process, const ClientRequest& request, const ClientCodec& codec, Inspection& result) {
-    result.failure_stage = "response_identity";
-    if (result.snapshot.pid != pid || result.snapshot.process_created != result.verified_process_created ||
-        (codec.envelope && std::memcmp(request.execution.expected.instance_id, result.snapshot.instance.data(), result.snapshot.instance.size())) ||
-        !live_process(process, result)) {
-        result.result = ProbeResult::process_mismatch; return false;
-    }
-    if (!codec.identity(request, result)) { result.result = ProbeResult::invalid_response; return false; }
-    result.result = ProbeResult::ok;
-    result.failure_stage = "none"; result.target_state = "live";
-    return true;
-}
+
 Inspection query_operation(uint32_t pid, uint32_t timeout_ms, const ClientRequest& request) {
-    Inspection result;
-    const auto* codec = find_codec(request.operation);
-    if (!pid || timeout_ms < min_timeout_ms || timeout_ms > max_timeout_ms || !codec) {
-        result.result = ProbeResult::usage; return result;
-    }
-    const auto deadline = GetTickCount64() + timeout_ms;
-    Handle process, pipe;
-    if (!identify_process(pid, codec->envelope ? &request.execution : nullptr, process, result)) return result;
-    auto error = open_endpoint(pid, deadline, pipe, result);
-    if (error != ERROR_SUCCESS) { io_failure(result, process.value, error); return result; }
-    if (result.server_pid != pid || !live_process(process.value, result)) {
-        result.result = ProbeResult::process_mismatch; return result;
-    }
-    Message data{};
-    const auto size = static_cast<DWORD>(codec->encode(data, request));
-    if (!size) { result.result = ProbeResult::usage; return result; }
-    DWORD count = 0;
-    error = exchange_bytes(pipe.value, deadline, data, size, count, result);
-    if (error != ERROR_SUCCESS) { io_failure(result, process.value, error); return result; }
-    if (decode_expected(*codec, data, count, result)) verify_response(pid, process.value, request, *codec, result);
-    return result;
+    Inspection out;
+    if (!pid || timeout_ms < min_timeout_ms || timeout_ms > max_timeout_ms) { out.result = ProbeResult::usage; return out; }
+    out = query_native_client(pid, timeout_ms, request.operation, request.execution, request.cursor,
+                              request.payload, request.summary, request.rewards, request.capability);
+    if (out.result == ProbeResult::ok) out.failure_stage = "none";
+    return out;
 }
+
 template<class T>
 Inspection query_family(uint32_t pid, uint32_t timeout_ms, uint16_t operation, uint16_t first, uint16_t last,
                         uint64_t capability, const T& request) {
@@ -429,7 +183,7 @@ Inspection query_combat_presentation(uint32_t pid, uint32_t timeout_ms, const sc
 }
 Inspection query_combat(uint32_t pid, uint32_t timeout_ms, const sc_combat_query& request) {
     if (!combat::valid_query(request)) { Inspection result; result.result = ProbeResult::usage; return result; }
-    ClientRequest value{combat_operation, combat_capability}; value.execution.expected.pid = pid; value.payload = request;
+    ClientRequest value{combat_operation, combat_capability}; value.payload = request;
     return query_operation(pid, timeout_ms, value);
 }
 }
@@ -497,12 +251,13 @@ void V2Connection::close() {
 }
 ProbeResult V2Connection::connect(uint32_t pid, uint32_t timeout_ms, const std::array<uint8_t, 16>* expected_instance) {
     close();
+    error_ = 0;
     if (!pid || timeout_ms < min_timeout_ms || timeout_ms > max_timeout_ms) return ProbeResult::usage;
     const auto deadline = GetTickCount64() + timeout_ms;
     Handle process, pipe; Inspection result;
     if (!identify_process(pid, nullptr, process, result)) return result.result;
-    const auto error = open_endpoint(pid, deadline, pipe, result, true);
-    if (error != ERROR_SUCCESS) return classify(error);
+    const auto error = open_endpoint(pid, deadline, pipe, result);
+    if (error != ERROR_SUCCESS) { error_ = error; return classify(error); }
     if (result.server_pid != pid || !live_process(process.value, result)) return ProbeResult::process_mismatch;
     pipe_ = pipe.value; pipe.value = nullptr; process_ = process.value; process.value = nullptr;
     identity_ = {}; identity_.pid = pid; identity_.process_created = result.verified_process_created;
@@ -510,7 +265,7 @@ ProbeResult V2Connection::connect(uint32_t pid, uint32_t timeout_ms, const std::
     if (!v2::frame(header, {}, bytes)) { close(); return ProbeResult::invalid_response; }
     generated::wire_header_2 response{};
     const auto io = v2_exchange_bytes(pipe_, bytes, response, deadline);
-    if (io != ERROR_SUCCESS) { close(); return classify(io); }
+    if (io != ERROR_SUCCESS) { error_ = io; close(); return classify(io); }
     return accept_hello(bytes, response.operation, response.correlation_id, response.result, expected_instance);
 }
 ProbeResult V2Connection::accept_hello(const std::vector<uint8_t>& bytes, uint16_t operation, uint64_t correlation, uint32_t wire, const std::array<uint8_t, 16>* expected_instance) {
@@ -540,5 +295,204 @@ V2Response V2Connection::exchange(uint16_t operation, const generated::Bytes& bo
     if (response.operation != operation || response.correlation_id != correlation_ || response.result > 4 ||
         !v2_verify(operation, body, bytes, identity_)) { result.transport = ProbeResult::invalid_response; close(); return result; }
     result.transport = ProbeResult::ok; result.wire = static_cast<WireResult>(response.result); result.body = std::move(bytes); return result;
+}
+}
+
+namespace sentinel {
+namespace {
+struct ClientRoute { uint16_t selector, type, operation; };
+constexpr ClientRoute client_routes[] = {
+    {1, 1, 1},
+    {2, 2, 1},
+    {3, 3, 1},
+    {4, 4, 1},
+    {5, 5, 2},
+    {6, 5, 3},
+    {7, 5, 4},
+    {8, 8, 2},
+    {9, 8, 3},
+    {10, 8, 4},
+    {11, 11, 1},
+    {12, 12, 1},
+    {13, 13, 1},
+    {14, 14, 2},
+    {15, 14, 3},
+    {16, 14, 4},
+    {17, 17, 1},
+    {18, 18, 2},
+    {19, 18, 3},
+    {20, 18, 4},
+    {21, 18, 5},
+    {22, 22, 2},
+    {23, 23, 2},
+    {24, 24, 1},
+    {25, 25, 2},
+    {26, 25, 3},
+    {27, 25, 4},
+    {28, 25, 5},
+    {29, 29, 2},
+    {30, 29, 3},
+    {31, 29, 4},
+    {32, 29, 5},
+    {33, 33, 2},
+    {34, 33, 3},
+    {35, 33, 4},
+    {36, 33, 5},
+    {37, 37, 2},
+    {38, 37, 3},
+    {39, 37, 4},
+    {40, 37, 5},
+    {41, 41, 2},
+    {42, 41, 3},
+    {43, 41, 4},
+    {44, 41, 5},
+    {45, 45, 2},
+    {46, 46, 2},
+    {47, 46, 3},
+    {48, 46, 4},
+    {49, 46, 5},
+    {50, 50, 1},
+    {51, 51, 2},
+};
+bool read_value(V2Connection& connection, uint16_t type, const generated::Bytes& payload,
+                const generated::submission& submission, uint32_t timeout, Inspection& out) {
+    generated::Bytes body;
+    generated::read_envelope envelope{submission.reference.scope, submission.reference.namespace_id,
+        type, submission.reference.payload_revision, submission.save_binding};
+    if (!generated::encode(envelope, body)) { out.result = ProbeResult::usage; return false; }
+    body.insert(body.end(), payload.begin(), payload.end());
+    const auto response = connection.exchange(1, body, timeout);
+    out.result = client_transport(response); out.win32_error = response.win32_error;
+    if (out.result != ProbeResult::ok) return false;
+    if (response.body.size() < 36 || !client_result(type, generated::Bytes(response.body.begin() + 36, response.body.end()), out)) {
+        out.result = ProbeResult::invalid_response; return false;
+    }
+    return true;
+}
+}
+void client_execution(uint16_t type, const sc_diagnostic_result& execution, Inspection& out) {
+    switch (type) {
+    case 5: case 8: out.diagnostic = execution; break;
+    case 14:
+        out.backup.execution = execution;
+        if (!out.backup.state) out.backup.state = execution.state == SC_DIAGNOSTIC_REJECTED ? SC_BACKUP_REJECTED : SC_BACKUP_UNKNOWN;
+        break;
+    case 18: out.weapon_points.execution = execution; break;
+    case 25: out.inventory.execution = execution; break;
+    case 29: out.arsenal.execution = execution; break;
+    case 33: out.runes.execution = execution; break;
+    case 37: out.special.execution = execution; break;
+    case 41: out.deathlink.execution = execution; break;
+    case 46: out.command.execution = execution; break;
+    default: break;
+    }
+}
+namespace {
+bool prepare_client(uint16_t type, uint32_t pid, const sc_native_scope& scope, const sc_diagnostic_request& execution,
+        uint64_t cursor, generated::NativeRequest value, const sc_campaign_summary* summary,
+        const sc_campaign_rewards* rewards, Inspection& out, generated::submission& input, generated::Bytes& payload) {
+    input.reference.scope = {pid, scope.process_created, out.snapshot.instance, scope.lifecycle_generation};
+    input.reference.namespace_id.fill('0'); input.reference.command_type = type; input.reference.payload_revision = 1;
+    input.deadline_ms = execution.deadline_ms ? execution.deadline_ms : 1000;
+    std::array<uint8_t,16> nonce{}; std::copy(std::begin(execution.nonce), std::end(execution.nonce), nonce.begin());
+    input.reference.command_id = instance_text(nonce) + ":" + std::to_string(execution.request_id);
+    if (execution.expected.pid) input.reference.scope.generation = execution.expected.lifecycle_generation;
+    if (type == 5 || type == 8) value = execution;
+    if (std::holds_alternative<std::monostate>(value)) value = generated::NativeRead{cursor};
+    if (auto* campaign = std::get_if<CampaignRequest>(&value)) {
+        if (summary) campaign->summary = *summary;
+        if (rewards) campaign->rewards = *rewards;
+        input.reference.payload_revision = 4;
+    }
+    std::visit([&](const auto& v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, CampaignRequest>)
+            std::copy_n(v.request.namespace_id, 64, input.reference.namespace_id.begin());
+        else if constexpr (!std::is_same_v<T,std::monostate> && !std::is_same_v<T,generated::NativeRead> && !std::is_same_v<T,sc_diagnostic_request> && !std::is_same_v<T,sc_combat_presentation_request>)
+            std::copy_n(v.namespace_id, 64, input.reference.namespace_id.begin());
+    }, value);
+    if (!client_payload(type, input.reference.payload_revision, value, payload)) return false;
+    return true;
+}
+bool client_binding(V2Connection& connection, generated::submission& input, uint32_t timeout, Inspection& out) {
+    generated::Bytes admission_payload; generated::encode(generated::save_admission_payload{generated::save_admission_save_admission_payload{}}, admission_payload);
+    generated::read_envelope admission{input.reference.scope, {}, 12, 1, {}}; admission.namespace_id.fill('0');
+    generated::Bytes admission_body; generated::encode(admission, admission_body);
+    admission_body.insert(admission_body.end(), admission_payload.begin(), admission_payload.end());
+    const auto admitted = connection.exchange(1, admission_body, timeout); generated::save_admission_result binding;
+    if (admitted.transport != ProbeResult::ok || admitted.body.size() < 36 ||
+        !generated::decode(generated::Bytes(admitted.body.begin()+36, admitted.body.end()), binding)) { out.result = admitted.transport == ProbeResult::ok ? ProbeResult::invalid_response : admitted.transport; return false; }
+    input.save_binding = binding.save_binding;
+    return true;
+}
+bool client_is_read(const generated::submission& input, const generated::Bytes& payload) {
+    const auto* descriptor = generated::descriptors;
+    const auto descriptor_end = descriptor + generated::descriptor_count;
+    descriptor = std::find_if(descriptor, descriptor_end, [&](const auto& d) { return d.id == input.reference.command_type && d.revision == input.reference.payload_revision; });
+    generated::Payload decoded;
+    if (descriptor == descriptor_end || !descriptor->decode_payload(payload, decoded)) return false;
+    const auto tag = uint32_t(payload[0]);
+    const auto variant = std::find_if(descriptor->variants, descriptor->variants + descriptor->variant_count, [=](const auto& v) { return v.tag == tag; });
+    if (variant == descriptor->variants + descriptor->variant_count) return false;
+    return variant->operation == generated::Operation::read;
+}
+Inspection client_command(V2Connection& connection, const ClientRoute& route, const generated::submission& input,
+        const generated::Bytes& payload, const sc_diagnostic_request& execution, uint32_t timeout, Inspection out) {
+    generated::command_reference reference;
+    if (!v2_reference(input, payload, reference)) { out.result = ProbeResult::usage; return out; }
+    generated::Bytes body;
+    if (route.operation == 2) { generated::encode(input, body); body.insert(body.end(), payload.begin(), payload.end()); }
+    else generated::encode(reference, body);
+    auto response = connection.exchange(route.operation == 5 ? 3 : route.operation, body, timeout);
+    generated::command_reply reply; generated::sc_diagnostic_result facts; generated::Bytes result; v2::CommandError error;
+    out.result = client_transport(response); out.win32_error = response.win32_error;
+    if (out.result != ProbeResult::ok) return out;
+    if (!v2::command_response(response.body, reply, error, facts, result)) { out.result = ProbeResult::invalid_response; return out; }
+    if (result.empty() && client_publication(route.type)) { out.result = ProbeResult::capability_unavailable; return out; }
+    if (!result.empty() && !client_result(route.type, result, out)) { out.result = ProbeResult::invalid_response; return out; }
+    auto native_facts = generated::from_wire(facts); native_facts.request_id = execution.request_id;
+    std::copy(std::begin(execution.nonce), std::end(execution.nonce), native_facts.nonce);
+    client_execution(route.type, native_facts, out);
+    if (route.operation == 5 && error == v2::CommandError::none) {
+        generated::encode(generated::ack{reference,reply.dimensions.result_token}, body);
+        out.result = connection.exchange(5, body, timeout).transport;
+    }
+    return out;
+}
+}
+Inspection query_native_client(uint32_t pid, uint32_t timeout, uint16_t selector,
+        const sc_diagnostic_request& execution, uint64_t cursor, generated::NativeRequest value,
+        const sc_campaign_summary* summary, const sc_campaign_rewards* rewards, uint64_t capability) {
+    Inspection out; V2Connection connection;
+    const auto end = std::end(client_routes);
+    const auto route = std::find_if(std::begin(client_routes), end, [=](const auto& r) { return r.selector == selector; });
+    if (route == end || (selector == inspect_operation && (capability & ~inspect_capability))) {
+        out.result = ProbeResult::capability_unavailable; return out;
+    }
+    Handle process;
+    if (!identify_process(pid, execution.expected.pid ? &execution : nullptr, process, out)) return out;
+    const std::array<uint8_t,16> instance = [&] { std::array<uint8_t,16> a{}; std::copy(std::begin(execution.expected.instance_id), std::end(execution.expected.instance_id), a.begin()); return a; }();
+    out.failure_stage = "pipe_open"; out.target_state = "live";
+    out.result = connection.connect(pid, timeout, execution.expected.pid ? &instance : nullptr);
+    out.win32_error = connection.win32_error();
+    if (out.result != ProbeResult::ok) return out;
+    const auto& scope = connection.identity();
+    out.server_pid = pid; out.snapshot.pid = pid; out.snapshot.process_created = scope.process_created;
+    out.snapshot.service = ServiceState::listening;
+    std::copy(std::begin(scope.instance_id), std::end(scope.instance_id), out.snapshot.instance.begin());
+    generated::submission input; generated::Bytes payload;
+    if (!prepare_client(route->type,pid,scope,execution,cursor,std::move(value),summary,rewards,out,input,payload)) {
+        out.result = ProbeResult::usage; return out;
+    }
+    if (route->type != 1) {
+        generated::Bytes inspect_payload; generated::encode(generated::inspect_payload{generated::inspect_inspect_payload{}}, inspect_payload);
+        if (!read_value(connection, 1, inspect_payload, input, timeout, out)) return out;
+    }
+    if (!client_binding(connection,input,timeout,out)) return out;
+    if (client_is_read(input,payload)) {
+        if (!read_value(connection,route->type,payload,input,timeout,out) && out.result == ProbeResult::ok) out.result = ProbeResult::invalid_response;
+        return out;
+    }
+    return client_command(connection,*route,input,payload,execution,timeout,out);
 }
 }

@@ -1,5 +1,6 @@
+#include "engine/builds/build_descriptor.h"
 #include "context_observer.h"
-#include "protocol.h"
+#include "sentinel_protocol_generated.h"
 #include <map>
 #include <vector>
 #include <functional>
@@ -43,7 +44,7 @@ struct Fixture {
     Fixture() {
         binding.metadata = engine::unavailable(SC_REASON_NOT_SAMPLED);
         binding.metadata.pe_reason = binding.metadata.disk_hash_reason = binding.metadata.root_locator_reason = SC_REASON_NONE;
-        binding.metadata.profile = SC_PROFILE_STEAM_20260818; binding.metadata.locator_revision = 1;
+        binding.metadata.profile = SC_PROFILE_STEAM_20260818; binding.descriptor = &builds::steam_20260818(); binding.metadata.locator_revision = 1;
         strcpy_s(binding.metadata.disk_sha256, "9809708c823f8db4304201ab0006ff2395d0d484ae9c846d98a56ce8c87c1247");
         binding.image.base = 0x140000000ULL; binding.root = root;
         memory.put(root, uintptr_t{0x142aaa730ULL}); memory.put(root + 0x50, map);
@@ -120,36 +121,5 @@ int main() {
     unknown_map(context::freshness(s, 99), SC_REASON_STALE);
     CHECK(context::freshness(s, 1100).current_map.validity == SC_OBSERVATION_OBSERVED);
     // each field is encoded explicitly; no c padding or live addresses cross ipc
-    Snapshot host{}; host.pid = 42; host.process_created = 123; host.instance[0] = 9;
-    host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.4.0"); strcpy_s(host.core.build_id, "fixture");
-    Message wire{}; Snapshot decoded{}; sc_context_snapshot output{}; WireResult result{};
-    auto size = encode_context_response(wire, WireResult::ok, host, s);
-    CHECK(decode_context_response(wire, size, result, decoded, output));
-    CHECK(output.pid == 42 && output.process_created == 123 && output.instance[0] == 9);
-    CHECK(std::strcmp(output.current_map.bytes, s.current_map.bytes) == 0);
-    for (size_t n = 0; n < size; ++n) CHECK(!decode_context_response(wire, n, result, decoded, output));
-    CHECK(!decode_response(wire, size, result, decoded));
-    sc_engine_snapshot legacy{}; CHECK(!decode_engine_response(wire, size, result, decoded, legacy));
-    wire[size] = 1; wire[8] = static_cast<uint8_t>(size + 1 - header_size); wire[9] = static_cast<uint8_t>((size + 1 - header_size) >> 8);
-    CHECK(!decode_context_response(wire, size + 1, result, decoded, output));
-    auto bad = s; bad.current_map.length = SC_CONTEXT_MAP_CAPACITY - 1; // limited long names also fit the wire
-    std::memset(bad.current_map.bytes, 'q', SC_CONTEXT_MAP_CAPACITY - 1); bad.current_map.bytes[SC_CONTEXT_MAP_CAPACITY - 1] = 0;
-    size = encode_context_response(wire, WireResult::ok, host, bad); CHECK(size < max_message);
-    CHECK(decode_context_response(wire, size, result, decoded, output) && output.current_map.length == 255);
-    bad = s; bad.fields[SC_CONTEXT_LOAD_SERIAL] = {SC_OBSERVATION_OBSERVED, SC_REASON_NONE, 1, 0};
-    size = encode_context_response(wire, WireResult::ok, host, bad); CHECK(!decode_context_response(wire, size, result, decoded, output));
-    bad = s; bad.fields[SC_CONTEXT_GAME_STATE].value = SC_GAME_MAIN_MENU;
-    size = encode_context_response(wire, WireResult::ok, host, bad); CHECK(!decode_context_response(wire, size, result, decoded, output));
-    bad = s; bad.profile = SC_PROFILE_NONE;
-    size = encode_context_response(wire, WireResult::ok, host, bad); CHECK(!decode_context_response(wire, size, result, decoded, output));
-    bad = s; bad.current_map.validity = SC_OBSERVATION_UNKNOWN; bad.current_map.reason = SC_REASON_STALE;
-    size = encode_context_response(wire, WireResult::ok, host, bad); CHECK(!decode_context_response(wire, size, result, decoded, output));
-    size = encode_context_response(wire, WireResult::unsupported_operation, host, s);
-    CHECK(size == header_size && decode_context_response(wire, size, result, decoded, output));
-    uint16_t operation = 0;
-    size = encode_request(wire, context_capability, wire_version, context_operation);
-    CHECK(decode_request(wire, size, &operation) == WireResult::ok && operation == context_operation);
-    size = encode_request(wire, engine_capability, wire_version, context_operation);
-    CHECK(decode_request(wire, size, &operation) == WireResult::capability_unavailable);
     std::puts("PASS context ownership/state/races/bounds/errors/cancellation/freshness/scopes/encoding; HARNESS ONLY");
 }

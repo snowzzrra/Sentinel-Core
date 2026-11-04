@@ -1,4 +1,6 @@
+#include "engine/builds/build_descriptor.h"
 #include "campaign_menu_native.h"
+#include "player_strings_generated.h"
 #include "campaign_menu.h"
 #include "fast_travel.h"
 #include "special.h"
@@ -7,6 +9,7 @@
 #include "save_collector.h"
 #include "save_session.h"
 #include "MinHook.h"
+#include "engine/hooks/hook_set.h"
 #include <intrin.h>
 #include <atomic>
 #include <cstring>
@@ -17,6 +20,10 @@
 
 namespace sentinel::campaign_menu {
 namespace {
+decltype(&MH_EnableHook) menu_enable_operation = MH_EnableHook;
+MH_STATUS WINAPI enable_menu_hook(void* target) { return menu_enable_operation(target); }
+hooks::HookSet menu_hooks("campaign_menu", {MH_CreateHook, enable_menu_hook, MH_DisableHook, MH_RemoveHook},
+    &save::session().installation, 6);
 using Populate=void(*)(uintptr_t,uintptr_t);
 using Update=void(*)(uintptr_t);
 using Load=void(*)(uintptr_t,int);
@@ -122,6 +129,7 @@ thread_local bool building=false;
 template<class T> bool read(uintptr_t base,size_t offset,T& out) {
     uintptr_t address=0; return engine::add(base,offset,sizeof(out),address) && !memory.copy(address,&out,sizeof(out)).reason;
 }
+bool shown_verified = false;
 bool active() { return save::session().campaign_run.enabled(); }
 void fault(const char* reason);
 void present_logo(uintptr_t screen,bool start);
@@ -440,7 +448,7 @@ bool popup_reward(uintptr_t owner,bool screen,sc_campaign_reward& reward) {
     return false;
 }
 const char* encounter_text(const sc_campaign_reward& reward) {
-    return reward.location_id ? reward.text : "ARCHIPELAGO REWARD";
+    return reward.location_id ? reward.text : player_strings::menu_reward_title;
 }
 void present_encounter_card(uintptr_t widget,const sc_campaign_reward& reward) {
     if (!cached_text || !cached_sprite) return;
@@ -452,7 +460,7 @@ void present_encounter_card(uintptr_t widget,const sc_campaign_reward& reward) {
         return;
     }
     swf_set_text(title,encounter_text(reward));
-    swf_set_text(category,"ARCHIPELAGO");
+    swf_set_text(category,player_strings::menu_reward_category);
     for (const size_t offset:{0x1b0u,0x1e0u,0x270u,0x300u})
         if (const auto child=cached_sprite(widget+offset)) original_sprite_visibility(child,0,1);
     for (const size_t offset:{0x380u,0x388u,0x390u}) {
@@ -494,7 +502,7 @@ void escalation_perk(uintptr_t screen,const char* root_name,const void* pack) {
     }
     std::array<char,0x340> replacement{};
     std::memcpy(replacement.data(),pack,replacement.size());
-    strcpy_s(replacement.data(),0xc0,"ARCHIPELAGO");
+    strcpy_s(replacement.data(),0xc0,player_strings::menu_reward_category);
     strcpy_s(replacement.data()+0xc0,0x200,encounter_text(reward));
     original_escalation_perk(screen,root_name,replacement.data());
     uintptr_t widget=0,root=0;
@@ -716,7 +724,7 @@ void present_physical_completion(uintptr_t widget,uint32_t id,const sc_physical_
     if (!completion_edge(toast,id,challenge.checked!=0)) return;
     const auto reward=mission_reward(id);
     if (!reward.location_id) return;
-    const auto title=std::string("CHALLENGE COMPLETED: ")+reward.name;
+    const auto title=player_strings::menu_challenge_completed(reward.name);
     if (special::present_challenge_completion(widget,title.c_str(),reward.text)) {
         toast.checked=true;
         save::session().btrace.record(save::BStage::hud_challenges,save::BStatus::succeeded,
@@ -835,7 +843,7 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
             "hud_found_summary_unknown",0,{{"revision",revision},{"row_found",row_found},{"known",summary.known}},root);
         return true;
     }
-    char value[64]; std::snprintf(value,sizeof(value),"ITEMS FOUND %u/%u",summary.found,summary.total);
+    char value[64]; std::snprintf(value,sizeof(value),player_strings::hud_items_found,summary.found,summary.total);
     if (!text_matches(title,value)) swf_set_text(title,value);
     constexpr uint32_t slayer_green=54;
     constexpr uint32_t white=57;
@@ -948,17 +956,17 @@ bool present_found_counts(uintptr_t root,const sc_campaign_summary& summary,cons
     char value[24]{},max_value[24]{};
     std::snprintf(value,sizeof(value),"%u",summary.found);
     std::snprintf(max_value,sizeof(max_value),"/%u",summary.total);
-    const unsigned before=(text_matches(label,"ITEMS FOUND")?1u:0u)|(text_matches(current,value)?2u:0u)|(text_matches(maximum,max_value)?4u:0u);
+    const unsigned before=(text_matches(label,player_strings::menu_items_found)?1u:0u)|(text_matches(current,value)?2u:0u)|(text_matches(maximum,max_value)?4u:0u);
     static uintptr_t last_header=0;
     static uint64_t last_revision=0;
     if (nested_label && header==last_header && shown.revision==last_revision && before!=7)
         save::session().btrace.record(save::BStage::mission_count_rewrite,save::BStatus::entered,"native_text_rewrite_observed",shown.revision,
             {{"before_matches",before},{"found",summary.found},{"total",summary.total}},header);
-    swf_set_text(label,"ITEMS FOUND");
+    swf_set_text(label,player_strings::menu_items_found);
     swf_set_text(current,value);
     swf_set_text(maximum,max_value);
     original_sprite_visibility(header,1,1);
-    const bool label_ok=text_matches(label,"ITEMS FOUND"),current_ok=text_matches(current,value),max_ok=text_matches(maximum,max_value);
+    const bool label_ok=text_matches(label,player_strings::menu_items_found),current_ok=text_matches(current,value),max_ok=text_matches(maximum,max_value);
     const bool verified=label_ok && current_ok && max_ok;
     save::session().btrace.record(stage,verified?save::BStatus::succeeded:save::BStatus::pending,"count_text_readback",shown.revision,
         {{"label",label_ok},{"current",current_ok},{"maximum",max_ok},{"label_type",label_type},
@@ -1213,13 +1221,13 @@ void meter_update_detour(uintptr_t meter) {
     meter_update_delegated.fetch_add(1,std::memory_order_relaxed);
     if (original_meter_update) original_meter_update(meter);
 }
-void sprite_visibility_detour(uintptr_t sprite,uint32_t visible,uint32_t flag) {
+void sprite_visibility_detour(uintptr_t sprite,uint32_t visible,uint32_t flag, void* hook_caller) {
     if (!sprite) return;
     if (current_ap_details) {
         uintptr_t meter=0, meter_sprite=0;
         read(current_ap_details,0x6f8,meter);
         if (meter) read(meter,0x18,meter_sprite);
-        const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
+        const auto caller=reinterpret_cast<uintptr_t>(hook_caller);
         const bool is_meter=(caller==meter_visibility_return) || (meter_sprite && sprite==meter_sprite);
         if (is_meter) {
             if (original_sprite_visibility) original_sprite_visibility(sprite,0,flag);
@@ -1285,6 +1293,7 @@ void populate_owned(uintptr_t screen,uintptr_t list,uintptr_t campaign,uintptr_t
     __finally { *reinterpret_cast<uintptr_t*>(campaign+0x1a8)=previous; building=false; }
 }
 void populate(uintptr_t screen,uintptr_t list) {
+    shown_verified = false;
     if (!active()) { original_populate(screen,list); return; }
     if (!save::session().accepts_requests()) { hide_details(screen); return; }
     const auto projection=menu().projection();
@@ -1343,6 +1352,7 @@ void populate(uintptr_t screen,uintptr_t list) {
         string_assign(widget+0x188,label.c_str());
         if (!(shown.rows[i].flags&SC_CAMPAIGN_UNLOCKED)) widget_state(widget,5);
     }
+    shown_verified = true;
     focus(screen);
 }
 void load(uintptr_t screen,int index) {
@@ -1378,6 +1388,7 @@ void load(uintptr_t screen,int index) {
     fast_travel::entry_policy().selected(namespace_id.c_str(),shown.rows[index].map,
         boundary.generation_after,completion_known,completed);
     menu().selected(shown.rows[index].id);
+    menu().load_requested(shown.rows[index].id, shown, native::evidence_scope());
     session.btrace.record(save::BStage::checkpoint_factory,save::BStatus::entered,"mission_native_load_invoked",0,
         {{"index",static_cast<uint64_t>(index)},{"row_id",shown.rows[index].id},
          {"generation",boundary.generation_after}},screen);
@@ -1388,6 +1399,9 @@ void load(uintptr_t screen,int index) {
 bool is_available(uintptr_t screen) {
     if (!active()) return original_available(screen);
     return save::session().accepts_requests() && menu().projection().count!=0;
+}
+void observe_menu_entries() {
+    if (shown_verified) menu().entries_usable(shown, native::evidence_scope());
 }
 void update(uintptr_t screen) {
     int32_t before=0;
@@ -1412,8 +1426,21 @@ void update(uintptr_t screen) {
     }
     int32_t state=-1;
     if (active() && save::session().accepts_requests() && screen==shown_screen &&
-        read(screen,0x108,state) && state==0) menu().rendered(shown.revision);
+        read(screen,0x108,state) && state==0) {
+        menu().rendered(shown.revision);
+        observe_menu_entries();
+    }
 }
+}
+sc_mission_access_result observe_access(const sc_mission_access_request& request) {
+    const auto scope = native::evidence_scope();
+    if (!available() || !native::same_scope(scope.process, request.execution.expected) ||
+        std::memcmp(scope.namespace_id, request.namespace_id, 65) || std::memcmp(scope.save_binding, request.save_binding, 16)) return {};
+    auto out = menu().access(request.stage_id, scope);
+    const auto after = native::evidence_scope();
+    if (!native::same_scope(scope.process, after.process) || std::memcmp(scope.save_binding, after.save_binding, 16) ||
+        std::memcmp(scope.namespace_id, after.namespace_id, 65) || after.readiness != SC_EVIDENCE_READY) return {};
+    return out;
 }
 bool available() { return ready.load(std::memory_order_acquire); }
 void reward_scroll(uintptr_t text) {
@@ -1496,8 +1523,8 @@ void present_campaign_actions(uintptr_t screen,bool entered) {
             !std::strcmp(text,wanted)) return;
         string_assign(widget+0x188,wanted);
     };
-    label(resume,hub?"RETURN TO FORTRESS":"RESUME CHECKPOINT");
-    label(choose,"CHOOSE MISSION");
+    label(resume,hub?player_strings::menu_return_to_fortress:player_strings::menu_resume_checkpoint);
+    label(choose,player_strings::menu_choose_mission);
     const bool projected=menu().projection().count!=0;
     if (!read(choose,0x154,choose_state)) return;
     const bool became_available=projected && choose_state==5;
@@ -1578,7 +1605,7 @@ bool test_question_material() {
     cached_sprite=[](uintptr_t)->uintptr_t { return 0; };
     swf_set_text=[](uintptr_t field,const char* text) {
         if (field==1 && !std::strcmp(text,"Ballista")) written|=1;
-        if (field==2 && !std::strcmp(text,"ARCHIPELAGO")) written|=2;
+        if (field==2 && !std::strcmp(text,player_strings::menu_reward_category)) written|=2;
     };
     sc_campaign_reward reward{};
     reward.location_id=7770001;
@@ -1623,78 +1650,279 @@ void test_root_campaign(uintptr_t screen,uintptr_t declaration) { root_campaign(
 void test_campaign_pump(uintptr_t screen) { pump_campaign(screen,test_pump); }
 void test_meter_allocate(uintptr_t meter,uintptr_t encounters,uintptr_t decl) { meter_allocate_detour(meter,encounters,decl); }
 void test_sprite_visibility(uintptr_t sprite,uint32_t visible,uint32_t flag) {
-    sprite_visibility_detour(sprite,visible,flag);
+    sprite_visibility_detour(sprite,visible,flag,_ReturnAddress());
 }
 void test_meter_update(uintptr_t meter) { meter_update_detour(meter); }
 #endif
 #include "physical_contact_observer.h"
 
+void populate_entry(uintptr_t screen,uintptr_t list) {
+    const auto lease = menu_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_populate)>(lease.original)(screen, list);
+        return populate(screen, list);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void focus_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_focus)>(lease.original)(screen);
+        return focus(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void load_entry(uintptr_t screen,int index) {
+    const auto lease = menu_hooks.enter(2);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_load)>(lease.original)(screen, index);
+        return load(screen, index);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+bool is_available_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(3);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_available)>(lease.original)(screen);
+        return is_available(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void update_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(4);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_update)>(lease.original)(screen);
+        return update(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void root_navigation_entry(uintptr_t screen,uint8_t reset) {
+    const auto lease = menu_hooks.enter(5);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_root_navigation)>(lease.original)(screen, reset);
+        return root_navigation(screen, reset);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void root_campaign_entry(uintptr_t screen,uintptr_t declaration) {
+    const auto lease = menu_hooks.enter(6);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_root_campaign)>(lease.original)(screen, declaration);
+        return root_campaign(screen, declaration);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void render_details_entry(uintptr_t details) {
+    const auto lease = menu_hooks.enter(7);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(details_update)>(lease.original)(details);
+        return render_details(details);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void meter_allocate_detour_entry(uintptr_t meter,uintptr_t encounters,uintptr_t decl) {
+    const auto lease = menu_hooks.enter(8);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_meter_allocate)>(lease.original)(meter, encounters, decl);
+        return meter_allocate_detour(meter, encounters, decl);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void sprite_visibility_detour_entry(uintptr_t sprite,uint32_t visible,uint32_t flag) {
+    const auto caller = _ReturnAddress();
+    const auto lease = menu_hooks.enter(9);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_sprite_visibility)>(lease.original)(sprite, visible, flag);
+        return sprite_visibility_detour(sprite, visible, flag, caller);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void meter_update_detour_entry(uintptr_t meter) {
+    const auto lease = menu_hooks.enter(10);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_meter_update)>(lease.original)(meter);
+        return meter_update_detour(meter);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void userinfo_point_entry(uintptr_t widget,int kind,uintptr_t material,int count,int width,int delta) {
+    const auto lease = menu_hooks.enter(11);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_userinfo_point)>(lease.original)(widget, kind, material, count, width, delta);
+        return userinfo_point(widget, kind, material, count, width, delta);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void hud_score_init_entry(uintptr_t score) {
+    const auto lease = menu_hooks.enter(12);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_hud_score_init)>(lease.original)(score);
+        return hud_score_init(score);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void end_items_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(13);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_end_items)>(lease.original)(screen);
+        return end_items(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void end_combat_init_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(14);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_end_combat_init)>(lease.original)(screen);
+        return end_combat_init(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void dossier_map_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(15);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_dossier_map)>(lease.original)(screen);
+        return dossier_map(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void challenge_card_update_entry(uintptr_t widget,uintptr_t context,uintptr_t flags) {
+    const auto lease = menu_hooks.enter(16);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_challenge_card_update)>(lease.original)(widget, context, flags);
+        return challenge_card_update(widget, context, flags);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void start_show_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(17);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_start_show)>(lease.original)(screen);
+        return start_show(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void boss_update_entry(uintptr_t screen,uintptr_t event) {
+    const auto lease = menu_hooks.enter(18);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_boss_update)>(lease.original)(screen, event);
+        return boss_update(screen, event);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void hud_challenge_update_entry(uintptr_t widget) {
+    const auto lease = menu_hooks.enter(19);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_hud_challenge_update)>(lease.original)(widget);
+        return hud_challenge_update(widget);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void eol_challenge_update_entry(uintptr_t widget) {
+    const auto lease = menu_hooks.enter(20);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_eol_challenge_update)>(lease.original)(widget);
+        return eol_challenge_update(widget);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void category_counts_entry(uintptr_t category) {
+    const auto lease = menu_hooks.enter(21);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_category_counts)>(lease.original)(category);
+        return category_counts(category);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void hud_score_update_entry(uintptr_t score) {
+    const auto lease = menu_hooks.enter(23);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_hud_score_update)>(lease.original)(score);
+        return hud_score_update(score);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void challenges_show_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(24);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_challenges_show)>(lease.original)(screen);
+        return challenges_show(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+uintptr_t challenges_action_entry(uintptr_t screen,uintptr_t action,uintptr_t event,uintptr_t source) {
+    const auto lease = menu_hooks.enter(25);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_challenges_action)>(lease.original)(screen, action, event, source);
+        return challenges_action(screen, action, event, source);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void mission_tab_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(26);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_mission_tab)>(lease.original)(screen);
+        return mission_tab(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void end_challenges_show_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(27);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_end_challenges_show)>(lease.original)(screen);
+        return end_challenges_show(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void secret_rewards_show_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(28);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_secret_rewards_show)>(lease.original)(screen);
+        return secret_rewards_show(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void escalation_rewards_show_entry(uintptr_t screen) {
+    const auto lease = menu_hooks.enter(29);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_escalation_rewards_show)>(lease.original)(screen);
+        return escalation_rewards_show(screen);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void reward_card_entry(uintptr_t widget,uintptr_t declaration) {
+    const auto lease = menu_hooks.enter(30);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_reward_card)>(lease.original)(widget, declaration);
+        return reward_card(widget, declaration);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void escalation_card_entry(uintptr_t widget,uintptr_t declaration) {
+    const auto lease = menu_hooks.enter(31);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_escalation_card)>(lease.original)(widget, declaration);
+        return escalation_card(widget, declaration);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+void escalation_perk_entry(uintptr_t screen,const char* root_name,const void* pack) {
+    const auto lease = menu_hooks.enter(32);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_escalation_perk)>(lease.original)(screen, root_name, pack);
+        return escalation_perk(screen, root_name, pack);
+    } __finally { menu_hooks.leave(lease); }
+}
+
+bool trigger_gate_entry(uintptr_t entity) {
+    const auto lease = menu_hooks.enter(22);
+    __try {
+        if (!lease.committed) return reinterpret_cast<Available>(lease.original)(entity);
+        return trigger_gate(entity);
+    } __finally { menu_hooks.leave(lease); }
+}
+
 std::array<native::Target,46> native_targets(uintptr_t base) {
-    constexpr uint32_t rvas[]={0x10d2c00,0x10d42f0,0x10d27b0,0x10d1c50,0x10d3140,
-        0x3fa8e0,0x3faff0,0x10d1cf0,0x43c070,0x1116c50,0x159c280,
-        0x10e08f0,0x10dc420,0x18071d0,0x1857110,0x0f9bd70,0x1864430,
-        0x0f9c000,0x185c150,0x184e470,0x184e4b0,0x184e3b0,0x186db00,
-        0x17a9660,0x1d69e00,0x360bb0,0x1863b00,0x15b2680,0x0effea0,0x0f5cfe0,0x0f59270,
-        0x0f489c0,0x0f4f990,0x17aa5d0,0x10ef3e0,0x0f30810,0x1859e20,0x1865280,0xf98fc0,0xf62bc0,0x1863c30,0xfaa270,0xd9d010,0x1838970,0x1863d90,0x0ed01b0};
-    constexpr const char* bytes[]={
-        "4053565741554881ec98000000488b05c4bd0d034833c4488944247033db488d",
-        "40574883ec60488b05dba60d034833c44889442450488bf9488d4c2420e8ce65",
-        "40534881ecf0010000488b0518c20d034833c448898424e00100004c8b811001",
-        "48895c240848896c24104889742418574883ec20488b0505c55703488be98378",
-        "48895c2410564883ec208bb108010000488bd98b810c0100003bf00f84f90000",
-        "488d0591cb6602c7411414000080488901488d411848894108c7411000000000",
-        "48895c2410488974241848897c242041564883ec304c8bf2488bd94885d20f85",
-        "48895c2418488974242057b890400000e89ba07901482be0488b05c9cc0d0348",
-        "48895c2408574883ec20488bfa488bd9483bca747e8b410c39420c74370fb641",
-        "405557488d6c24c84881ec38010000488b05727d09034833c448894520488bf9",
-        "488b01448bc28b91540100004489815401000048ffa0c0000000cccccccccccc",
-        "48895c2418554883ec200fb6ea488bd984d2751081b9bc010000bf0300000f84",
-        "405541564157488dac24e0fdffff4881ec20030000488b059c250d034833c448",
-        "40534883ec20488b05c308ec024885c07570e879b6b5fe83f803742285c0741e",
-        "4c8bdc574883ec70488b05b97895024833c448894424584863410c488bf983f8",
-        "48895c24184889742420574883ec20488b829801000033db488bfa488981c001",
-        "440fb6d23851517457807952007551488b41104c6349088851514d03c9488b10",
-        "405553488dac2408c0ffffb8f8400000e88bfd8c01482be0488b05b929210348",
-        "40534883ec20488b4928488bda488b01ff5028488bc34883c4205bc3cccccccc",
-        "40534883ec20833908752b488b59084885db74224c8b03488bcb488b150f5c06",
-        "40534883ec20833908752b488b59084885db74224c8b03488bcb488b15d75b06",
-        "4883ec288b0183f8027527488b4908b8fffffffff00fc1413083f80175544885",
-        "40534883ec20488bd94883c140e8ded4b8fe488bcb4883c4205be9e1cbffffcc",
-        "488d0549a1f002c3cccccccccccccccc488d05e9acf002c3cccccccccccccccc",
-        "4055535657415441554156488d6c24804881ec80010000488b05ba4b44024833",
-        "4883ec58488b150d10f103488d0526c76e0248894424604c8d4c24208b01488d",
-        "48895c24084889742410574883ec20488bd9418bf0488b4960488bfa483bca0f",
-        "48895c2408574883ec40486381880100004533db488bf985c07e28488b898001",
-        "40534883ec300fb791d00000004c8d0d2cffffff488bd948894c2420488b0d45",
-        "48895c240848896c2410488974241848897c242041564883ec20488bf9e8ce00",
-        "48895c241048896c2418488974242057b850400000e8162b9101482be0488b05",
-        "80b98102000000750e488b8928010000488b0148ff6020c3cccccccccccccccc",
-        "405553488dac2478c0ffffb888400000e8fbc39101482be0488b0529f0250348",
-        "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448",
-        "40534883ec20488bd9e8e2dc0d00488b8bd8000000488d1524d09501e81fc30d",
-        "48895c241848896c242057b870400000e87bb59301482be0488b05a9e1270348",
-        "48895c2420555641564883ec60488b05a44b95024833c448894424580fb60245",
-        "48895c2408574883ec200fb74158bf010000003bd7488bd90f4ffa3bf8742c7d",
-        "40555341544157488dac2448c0ffffb8b8400000e8c72d8d01482be0488b05f5",
-        "40555356574154488bec4881ec800000004533e4488bf9418bf4448965304839",
-        "48895c240848896c24104889742418574883ec20488bd9418bf1488b4960418b",
-        "4053b8a0400000e8241b8c01482be0488b05524720034833c448898424804000",
-        "40534883ec20488b01488bd9ff90480d000084c00f8582000000488b03488bcb",
-        "405356574154415641574881ec98000000488b05506097024833c44889842480",
-        "48896c24104889742418574883ec308bf2488bf981fa0d0100000f87f7000000",
-        "40534883ec40488bd90f29742430488b89c8000000f30f10350bc2b70183b99c"};
-    std::array<native::Target,46> targets{};
-    const auto digit=[](char c) { return c<='9' ? c-'0' : c-'a'+10; };
-    for (unsigned i=0;i<targets.size();++i) {
-        targets[i].address=base+rvas[i];
-        for (size_t n=0;n<32;++n) targets[i].bytes[n]=static_cast<uint8_t>(digit(bytes[i][2*n])*16+digit(bytes[i][2*n+1]));
-    }
-    // idList template instances share this prologue. Use the existing secondary
-    // signature contract: unique bytes inside the same exact unwind owner.
-    constexpr char list_copy_signature[]="d27413488b0dee5ae30341b810000000488b01ff503848c70300000000c7430c";
-    targets[8].signature_offset=48;
-    for (size_t n=0;n<32;++n) targets[8].signature[n]=static_cast<uint8_t>(digit(list_copy_signature[2*n])*16+digit(list_copy_signature[2*n+1]));
-    return targets;
+    return builds::steam_20260818().menu_targets(base);
 }
 bool validate_native_targets(save::Installation& record,engine::Memory& source_memory,
                               const engine::Image& image,HANDLE stop,const std::array<native::Target,46>& targets) {
@@ -1731,52 +1959,58 @@ bool validate_native_targets(save::Installation& record,engine::Memory& source_m
 static bool install_hooks(const engine::Binding& binding,HANDLE stop,
                           const std::array<native::Target,46>& targets,
                           decltype(&MH_EnableHook) enable_hook=MH_EnableHook) {
+    menu_enable_operation = enable_hook;
     meter_visibility_return=binding.image.base+0x1116e07;
     hud_score_vtable=binding.image.base+0x2d01de8;
-    void* detours[]={reinterpret_cast<void*>(populate),reinterpret_cast<void*>(focus),reinterpret_cast<void*>(load),
-        reinterpret_cast<void*>(is_available),reinterpret_cast<void*>(update),
-        reinterpret_cast<void*>(root_navigation),reinterpret_cast<void*>(root_campaign),
-        reinterpret_cast<void*>(render_details),
-        reinterpret_cast<void*>(meter_allocate_detour),
-        reinterpret_cast<void*>(sprite_visibility_detour),
-        reinterpret_cast<void*>(meter_update_detour),reinterpret_cast<void*>(userinfo_point),
-        reinterpret_cast<void*>(hud_score_init),reinterpret_cast<void*>(end_items),reinterpret_cast<void*>(end_combat_init),
-        reinterpret_cast<void*>(dossier_map),reinterpret_cast<void*>(challenge_card_update),
-        reinterpret_cast<void*>(start_show),reinterpret_cast<void*>(boss_update),
-        reinterpret_cast<void*>(hud_challenge_update),reinterpret_cast<void*>(eol_challenge_update),reinterpret_cast<void*>(category_counts),
-        reinterpret_cast<void*>(trigger_gate),reinterpret_cast<void*>(hud_score_update)};
+    void* detours[]={reinterpret_cast<void*>(populate_entry),reinterpret_cast<void*>(focus_entry),reinterpret_cast<void*>(load_entry),
+        reinterpret_cast<void*>(is_available_entry),reinterpret_cast<void*>(update_entry),
+        reinterpret_cast<void*>(root_navigation_entry),reinterpret_cast<void*>(root_campaign_entry),
+        reinterpret_cast<void*>(render_details_entry),
+        reinterpret_cast<void*>(meter_allocate_detour_entry),
+        reinterpret_cast<void*>(sprite_visibility_detour_entry),
+        reinterpret_cast<void*>(meter_update_detour_entry),reinterpret_cast<void*>(userinfo_point_entry),
+        reinterpret_cast<void*>(hud_score_init_entry),reinterpret_cast<void*>(end_items_entry),reinterpret_cast<void*>(end_combat_init_entry),
+        reinterpret_cast<void*>(dossier_map_entry),reinterpret_cast<void*>(challenge_card_update_entry),
+        reinterpret_cast<void*>(start_show_entry),reinterpret_cast<void*>(boss_update_entry),
+        reinterpret_cast<void*>(hud_challenge_update_entry),reinterpret_cast<void*>(eol_challenge_update_entry),reinterpret_cast<void*>(category_counts_entry),
+        reinterpret_cast<void*>(trigger_gate_entry),reinterpret_cast<void*>(hud_score_update_entry)};
     constexpr unsigned hooked[]={0,1,2,3,4,11,12,9,15,16,17,27,28,29,30,31,32,34,35,38,39,41,42,45};
-    void* originals[24]{};
-    std::array<void*,35> created{};
-    size_t created_count=0;
-    const auto rollback=[&] {
-        ready.store(false,std::memory_order_release);
-        while (created_count) {
-            const auto site=created[--created_count];
-            const auto rva=static_cast<uint32_t>(reinterpret_cast<uintptr_t>(site)-binding.image.base);
-            MH_DisableHook(site);
-            save::session().installation.hook(SC_INSTALL_REMOVE,6,SC_INSTALL_UNKNOWN,rva,[&] { return MH_RemoveHook(site); });
-        }
-        return false;
-    };
-    for (unsigned i=0;i<24;++i) {
-        if (save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
-            return MH_CreateHook(reinterpret_cast<void*>(targets[hooked[i]].address),detours[i],&originals[i]); })!=MH_OK) return rollback();
-        created[created_count++]=reinterpret_cast<void*>(targets[hooked[i]].address);
-    }
-    original_populate=reinterpret_cast<Populate>(originals[0]); original_focus=reinterpret_cast<Update>(originals[1]);
-    original_load=reinterpret_cast<Load>(originals[2]); original_available=reinterpret_cast<Available>(originals[3]);
-    original_update=reinterpret_cast<Update>(originals[4]);
-    original_root_navigation=reinterpret_cast<RootNavigation>(originals[5]);
-    original_root_campaign=reinterpret_cast<Populate>(originals[6]);
+    void** originals[]{reinterpret_cast<void**>(&original_populate),
+        reinterpret_cast<void**>(&original_focus),
+        reinterpret_cast<void**>(&original_load),
+        reinterpret_cast<void**>(&original_available),
+        reinterpret_cast<void**>(&original_update),
+        reinterpret_cast<void**>(&original_root_navigation),
+        reinterpret_cast<void**>(&original_root_campaign),
+        reinterpret_cast<void**>(&details_update),
+        reinterpret_cast<void**>(&original_meter_allocate),
+        reinterpret_cast<void**>(&original_sprite_visibility),
+        reinterpret_cast<void**>(&original_meter_update),
+        reinterpret_cast<void**>(&original_userinfo_point),
+        reinterpret_cast<void**>(&original_hud_score_init),
+        reinterpret_cast<void**>(&original_end_items),
+        reinterpret_cast<void**>(&original_end_combat_init),
+        reinterpret_cast<void**>(&original_dossier_map),
+        reinterpret_cast<void**>(&original_challenge_card_update),
+        reinterpret_cast<void**>(&original_start_show),
+        reinterpret_cast<void**>(&original_boss_update),
+        reinterpret_cast<void**>(&original_hud_challenge_update),
+        reinterpret_cast<void**>(&original_eol_challenge_update),
+        reinterpret_cast<void**>(&original_category_counts),
+        reinterpret_cast<void**>(&original_trigger_gate),
+        reinterpret_cast<void**>(&original_hud_score_update)};
+    std::vector<hooks::HookSpec> specs;
+    for (unsigned i = 0; i < 24; ++i)
+        specs.push_back({targets[hooked[i]].address, detours[i], originals[i], hooked[i],
+            static_cast<uint32_t>(targets[hooked[i]].address - binding.image.base)});
+
     campaign_definitions=reinterpret_cast<CampaignDefinitions>(targets[13].address);
     sprite_changed=reinterpret_cast<Update>(targets[14].address);
     string_init=reinterpret_cast<StringInit>(targets[5].address); string_assign=reinterpret_cast<StringAssign>(targets[6].address);
     native_completed=reinterpret_cast<Completed>(targets[7].address); list_assign=reinterpret_cast<ListAssign>(targets[8].address);
-    details_update=reinterpret_cast<Update>(originals[7]);
+
     widget_state=reinterpret_cast<WidgetState>(targets[10].address);
-    original_meter_allocate=reinterpret_cast<MeterAllocate>(originals[8]);
-    original_sprite_visibility=reinterpret_cast<SpriteVisibility>(originals[9]);
+
     swf_lookup=reinterpret_cast<SwfLookup>(targets[18].address);
     swf_sprite=reinterpret_cast<SwfGet>(targets[19].address);
     swf_text=reinterpret_cast<SwfGet>(targets[20].address);
@@ -1792,34 +2026,19 @@ static bool install_hooks(const engine::Binding& binding,HANDLE stop,
     material_manager=binding.image.base+0x5e05200;
     swf_create_material=reinterpret_cast<SwfCreateMaterial>(targets[43].address);
     swf_color=reinterpret_cast<SwfColor>(targets[44].address);
-    original_meter_update=reinterpret_cast<MeterUpdate>(originals[10]);
-    original_userinfo_point=reinterpret_cast<UserInfoPoint>(originals[11]);
-    original_hud_score_init=reinterpret_cast<Update>(originals[12]);
-    original_end_items=reinterpret_cast<Update>(originals[13]);
-    original_end_combat_init=reinterpret_cast<Update>(originals[14]);
-    original_dossier_map=reinterpret_cast<Update>(originals[15]);
-    original_challenge_card_update=reinterpret_cast<CardUpdate>(originals[16]);
-    original_start_show=reinterpret_cast<Update>(originals[17]);
-    original_boss_update=reinterpret_cast<Populate>(originals[18]);
-    original_hud_challenge_update=reinterpret_cast<Update>(originals[19]);
-    original_eol_challenge_update=reinterpret_cast<Update>(originals[20]);
-    original_category_counts=reinterpret_cast<Update>(originals[21]);
-    original_trigger_gate=reinterpret_cast<Available>(originals[22]);
-    original_hud_score_update=reinterpret_cast<Update>(originals[23]);
+
     end_items_category_vtable=binding.image.base+0x2d10d78;
-    for (unsigned i=0;i<24;++i) if (save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,hooked[i],static_cast<uint32_t>(targets[hooked[i]].address-binding.image.base),[&] {
-        return enable_hook(reinterpret_cast<void*>(targets[hooked[i]].address)); })!=MH_OK) return rollback();
     struct OptionalPageHook { uint32_t rva; const char* bytes; void* hook; void** original; };
     const OptionalPageHook pages[]={
-        {0xf42930,"488bc4565741554883ec7048895810488bf14c896020e885a72800488bcee85d",reinterpret_cast<void*>(challenges_show),reinterpret_cast<void**>(&original_challenges_show)},
-        {0xf40bf0,"40535556574881ece8010000488b05d5dd26034833c448898424d0010000488b",reinterpret_cast<void*>(challenges_action),reinterpret_cast<void**>(&original_challenges_action)},
-        {0xf42de0,"405741564157b8b0400000e8b08f9201482be0488b05debb26034833c4488984",reinterpret_cast<void*>(mission_tab),reinterpret_cast<void**>(&original_mission_tab)},
-        {0xf58890,"40574883ec20488bf9e832482700488b07488bcfff50704885c00f84e1000000",reinterpret_cast<void*>(end_challenges_show),reinterpret_cast<void**>(&original_end_challenges_show)},
-        {0xf79720,"40555356488d6c24f04881ec10010000488b05a15223034833c4488945f0488b",reinterpret_cast<void*>(secret_rewards_show),reinterpret_cast<void**>(&original_secret_rewards_show)},
-        {0xf6b340,"405556488dac2488fcffff4881ec78040000488b057f3624034833c448898560",reinterpret_cast<void*>(escalation_rewards_show),reinterpret_cast<void**>(&original_escalation_rewards_show)},
-        {0xf67a20,"b868400000e876439001482be0488b05a46f24034833c4488984243040000048",reinterpret_cast<void*>(reward_card),reinterpret_cast<void**>(&original_reward_card)},
-        {0xf6c7f0,"48895c240848896c24104889742418574883ec50488bda488bf9e811b2ffff8b",reinterpret_cast<void*>(escalation_card),reinterpret_cast<void**>(&original_escalation_card)},
-        {0xf6ba10,"48895c2420564883ec50488bd9498bf0488b89900200004885c90f843b010000",reinterpret_cast<void*>(escalation_perk),reinterpret_cast<void**>(&original_escalation_perk)},
+        {0xf42930,"488bc4565741554883ec7048895810488bf14c896020e885a72800488bcee85d",reinterpret_cast<void*>(challenges_show_entry),reinterpret_cast<void**>(&original_challenges_show)},
+        {0xf40bf0,"40535556574881ece8010000488b05d5dd26034833c448898424d0010000488b",reinterpret_cast<void*>(challenges_action_entry),reinterpret_cast<void**>(&original_challenges_action)},
+        {0xf42de0,"405741564157b8b0400000e8b08f9201482be0488b05debb26034833c4488984",reinterpret_cast<void*>(mission_tab_entry),reinterpret_cast<void**>(&original_mission_tab)},
+        {0xf58890,"40574883ec20488bf9e832482700488b07488bcfff50704885c00f84e1000000",reinterpret_cast<void*>(end_challenges_show_entry),reinterpret_cast<void**>(&original_end_challenges_show)},
+        {0xf79720,"40555356488d6c24f04881ec10010000488b05a15223034833c4488945f0488b",reinterpret_cast<void*>(secret_rewards_show_entry),reinterpret_cast<void**>(&original_secret_rewards_show)},
+        {0xf6b340,"405556488dac2488fcffff4881ec78040000488b057f3624034833c448898560",reinterpret_cast<void*>(escalation_rewards_show_entry),reinterpret_cast<void**>(&original_escalation_rewards_show)},
+        {0xf67a20,"b868400000e876439001482be0488b05a46f24034833c4488984243040000048",reinterpret_cast<void*>(reward_card_entry),reinterpret_cast<void**>(&original_reward_card)},
+        {0xf6c7f0,"48895c240848896c24104889742418574883ec50488bda488bf9e811b2ffff8b",reinterpret_cast<void*>(escalation_card_entry),reinterpret_cast<void**>(&original_escalation_card)},
+        {0xf6ba10,"48895c2420564883ec50488bd9498bf0488b89900200004885c90f843b010000",reinterpret_cast<void*>(escalation_perk_entry),reinterpret_cast<void**>(&original_escalation_perk)},
         {0x185d670,"48895c2408574883ec30488bd9488bfa488b49104885c97516394b207e56488b",nullptr,reinterpret_cast<void**>(&cached_text)},
         {0x185d1a0,"40534883ec20488b4110488bd94885c075143941207f064883c4205bc3e8ae1f",nullptr,reinterpret_cast<void**>(&cached_sprite)}};
     engine::LocalMemory optional_memory;
@@ -1829,25 +2048,20 @@ static bool install_hooks(const engine::Binding& binding,HANDLE stop,
             unsigned value=0; sscanf_s(page.bytes+n*2,"%2x",&value); target.bytes[n]=static_cast<uint8_t>(value);
         }
         auto reason=native::validate_target(optional_memory,binding.image,target,stop,GetTickCount64()+3000);
-        const bool installing=!reason && page.hook;
-        if (installing) {
-            reason=save::session().installation.hook(SC_INSTALL_SAVE_CREATE,6,SC_INSTALL_UNKNOWN,page.rva,[&] {
-                return MH_CreateHook(reinterpret_cast<void*>(target.address),page.hook,page.original); });
-            if (!reason) {
-                created[created_count++]=reinterpret_cast<void*>(target.address);
-                reason=save::session().installation.hook(SC_INSTALL_SAVE_ENABLE,6,SC_INSTALL_UNKNOWN,page.rva,[&] {
-                    return enable_hook(reinterpret_cast<void*>(target.address)); });
-            }
-        } else if (!reason) *page.original=reinterpret_cast<void*>(target.address);
+        if (page.hook)
+            specs.push_back({target.address, page.hook, page.original, SC_INSTALL_UNKNOWN, page.rva, !reason});
+        else if (!reason) *page.original = reinterpret_cast<void*>(target.address);
         save::session().btrace.record(save::BStage::dossier_challenges,
             reason ? save::BStatus::refused : save::BStatus::succeeded,"campaign_page_binding",0,
             {{"rva",page.rva},{"reason",reason}});
-        if (installing && reason) return rollback();
+    }
+    if (!menu_hooks.install(specs.data(), specs.size(), stop)) {
+        ready.store(false, std::memory_order_release); return false;
     }
     ready.store(true,std::memory_order_release); return true;
 }
 bool install(const engine::Binding& binding,HANDLE stop) {
-    if (!save::session().campaign_run.enabled()) return true;
+    if (!save::session().campaign_requested()) return true;
     return install_hooks(binding,stop,native_targets(binding.image.base));
 }
 #ifdef SC_NATIVE_TESTING

@@ -1,6 +1,8 @@
+#include "engine/builds/build_descriptor.h"
 #include "combat_native.h"
 #include "native_runtime.h"
 #include "native_target.h"
+#include "engine/hooks/hook_set.h"
 #include <MinHook.h>
 #include <atomic>
 #include <cstring>
@@ -13,6 +15,7 @@
 
 namespace sentinel::combat {
 namespace {
+hooks::HookSet hook_set("combat");
 SRWLOCK lock = SRWLOCK_INIT;
 Model model;
 save::BTrace death_trace;
@@ -119,6 +122,29 @@ void notify_detour(uintptr_t analytics, const void* record) {
     }
     original_notify(analytics, record);
 }
+void register_entry(uintptr_t world, uintptr_t object, int32_t slot, uint32_t id, uint8_t network, uint8_t flag) {
+    const auto lease = hook_set.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<RegisterObject>(lease.original)(world, object, slot, id, network, flag);
+        register_detour(world, object, slot, id, network, flag);
+    } __finally { hook_set.leave(lease); }
+}
+void dispatch_entry(uintptr_t compiler, uintptr_t inflictor, uintptr_t attacker, uintptr_t victim,
+                    int32_t group, int32_t attack_type, uintptr_t declaration, const void* tag, uint8_t flag, float damage) {
+    const auto lease = hook_set.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<RegisterDeath>(lease.original)(compiler, inflictor, attacker,
+            victim, group, attack_type, declaration, tag, flag, damage);
+        dispatch_detour(compiler, inflictor, attacker, victim, group, attack_type, declaration, tag, flag, damage);
+    } __finally { hook_set.leave(lease); }
+}
+void notify_entry(uintptr_t analytics, const void* record) {
+    const auto lease = hook_set.enter(2);
+    __try {
+        if (!lease.committed) return reinterpret_cast<NotifyDeath>(lease.original)(analytics, record);
+        notify_detour(analytics, record);
+    } __finally { hook_set.leave(lease); }
+}
 native::Target target(uintptr_t base, uint32_t rva, const char* hex) {
     native::Target t{};
     t.address = base + rva;
@@ -140,9 +166,9 @@ void install(const engine::Binding& binding, HANDLE stop_event) {
     install_reason.store(SC_NATIVE_UNKNOWN_BUILD);
     engine::LocalMemory memory;
     const native::Target sites[] = {
-        target(binding.image.base, 0x6cbc40, "4053565741564883ec5881b9f0e50a0000000001418bd94963f84c8bf2488bf1"),
-        target(binding.image.base, 0x120e790, "4053555657415641574881ecb8010000488b053102fa024833c448898424a001"),
-        target(binding.image.base, 0x1212290, "4889742420574881ecc0000000488b0534c7f9024833c448898424a800000048")
+        target(binding.image.base, builds::steam_20260818().combat[0].rva, builds::steam_20260818().combat[0].prefix),
+        target(binding.image.base, builds::steam_20260818().combat[1].rva, builds::steam_20260818().combat[1].prefix),
+        target(binding.image.base, builds::steam_20260818().combat[2].rva, builds::steam_20260818().combat[2].prefix)
     };
     const auto deadline = GetTickCount64() + 10000;
     for (const auto& site : sites) {
@@ -150,19 +176,12 @@ void install(const engine::Binding& binding, HANDLE stop_event) {
         if (why) { install_reason.store(why); return; }
     }
     root_address = binding.root;
-    void* detours[] = {reinterpret_cast<void*>(register_detour), reinterpret_cast<void*>(dispatch_detour),
-                       reinterpret_cast<void*>(notify_detour)};
-    void** originals[] = {reinterpret_cast<void**>(&original_register),
-                          reinterpret_cast<void**>(&original_dispatch), reinterpret_cast<void**>(&original_notify)};
-    for (size_t n = 0; n < 3; ++n) {
-        if (MH_CreateHook(reinterpret_cast<void*>(sites[n].address), detours[n], originals[n]) != MH_OK) {
-            install_reason.store(SC_NATIVE_HOOK_FAILED); return;
-        }
-    }
-    for (const auto& site : sites) {
-        if (MH_EnableHook(reinterpret_cast<void*>(site.address)) != MH_OK) {
-            install_reason.store(SC_NATIVE_HOOK_FAILED); return;
-        }
+    const hooks::HookSpec specs[]{
+        hooks::bind(sites[0].address, register_entry, original_register),
+        hooks::bind(sites[1].address, dispatch_entry, original_dispatch),
+        hooks::bind(sites[2].address, notify_entry, original_notify)};
+    if (!hook_set.install(specs, stop_event)) {
+        install_reason.store(SC_NATIVE_HOOK_FAILED); return;
     }
     install_reason.store(SC_NATIVE_NONE);
     enabled.store(true, std::memory_order_release);

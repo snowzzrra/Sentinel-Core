@@ -1,0 +1,24 @@
+{
+  "fixtures": [
+    {
+      "name": "currency_zero",
+      "hex": "0000000000000000"
+    },
+    {
+      "name": "currency_praetor",
+      "hex": "0000000001000000"
+    },
+    {
+      "name": "currency_mastery",
+      "hex": "0000000002000000"
+    },
+    {
+      "name": "currency_battery",
+      "hex": "0000000004000000"
+    },
+    {
+      "name": "battery_bundle",
+      "hex": "01000000040000000200000007000000"
+    }
+  ]
+}

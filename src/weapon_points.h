@@ -1,6 +1,7 @@
 #pragma once
 #include "sentinel_weapon_points.h"
 #include "engine_observer.h"
+#include "currencies.h"
 
 namespace sentinel::weapon_points {
 enum class Source { unknown, encounter, pickup, target, script, unlockable, devinv, slayer_gate, useable };
@@ -22,6 +23,7 @@ struct Calls {
 void execute(const sc_weapon_points_request&, sc_weapon_points_result&, const Calls&);
 void install(const engine::Binding&, HANDLE stop);
 bool available();
+currencies::Calls currency_calls();
 bool admitted(const char* namespace_id);
 // original native caller while the currency entry detour invokes its trampoline
 uintptr_t currency_origin(uintptr_t direct_return_site);

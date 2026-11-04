@@ -4,13 +4,14 @@ The RemoteStorage boundary persists exact synthetic native bytes. Every stage is
 a separate process. No game, Steam, installed DLL or live save is touched.
 """
 import hashlib
+import shutil
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 
-EXE = Path(__file__).resolve().parents[1] / '.tmp/build/bin/sentinel_campaign_tests.exe'
+EXE = Path(os.environ.get('SC_BUILD_DIR', Path(__file__).resolve().parents[1] / 'build')) / 'bin/sentinel_campaign_tests.exe'
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows production adapters')
@@ -117,11 +118,15 @@ class CampaignRecovery(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='sentinel-c-') as temp:
             root = Path(temp); _, target, _ = self.create(root)
             old = {f.name: f.read_bytes() for f in target.iterdir()}
-            record = next(root.rglob('campaign.checkpoint')); old_record = record.read_bytes()
+            record = next(root.rglob('campaign.checkpoint'))
+            old_records = {p.name: p.read_bytes() for p in record.parent.glob('checkpoint-*')}
             self.stage(root, 'resume', 'native_read_c_backup_next')
             newer = self.digest(target)
             for name, data in old.items(): (target / name).write_bytes(data)
-            record.write_bytes(old_record)
+            for p in record.parent.glob('checkpoint-*'):
+                p.unlink()
+            for name, data in old_records.items():
+                (record.parent / name).write_bytes(data)
             self.assertIn('recovery_native_payload_verified', self.stage(root, 'recover'))
             self.assertEqual(self.digest(target), newer)
 
@@ -170,10 +175,27 @@ class CampaignRecovery(unittest.TestCase):
                 elif case == 'corrupt': (target / 'game.details').write_bytes(b'unknown authentic-or-corrupt bytes')
                 elif case == 'extra': (target / 'unknown.dat').write_bytes(b'do not delete')
                 else:
-                    checkpoint = next(root.rglob('campaign.checkpoint'))
-                    text = checkpoint.read_text()
-                    map_line = next(s for s in text.splitlines() if s.startswith('map='))
-                    checkpoint.write_text(text.replace(map_line, 'map=another_map'), newline='\n')
+                    pending = next(root.rglob('checkpoint-A.pending'))
+                    text = pending.read_bytes()
+                    archive_name = text.split(b'archive=')[1].splitlines()[0]
+                    archive = root / archive_name.decode()
+                    other = root / (archive.name[:-32] + 'e' * 32)
+                    shutil.copytree(archive, other)
+                    record = bytes.fromhex(text.split(b'checkpoint_hex=')[1].splitlines()[0].decode())
+                    altered = record.replace(b'map=game/hub/hub', b'map=another_map')
+                    manifest = (other / 'transport.manifest').read_bytes().replace(record.hex().encode(), altered.hex().encode())
+                    (other / 'transport.manifest').write_bytes(manifest)
+                    body = text[:-72].replace(archive_name, other.name.encode()).replace(record.hex().encode(), altered.hex().encode())
+                    old_hash = body.split(b'manifest_sha256=')[1].splitlines()[0]
+                    body = body.replace(old_hash, hashlib.sha256(manifest).hexdigest().encode())
+                    def signed(body):
+                        return body + b'sha256=' + hashlib.sha256(body).hexdigest().encode() + b'\n'
+                    pending.write_bytes(signed(body))
+                    receipt = signed(b'sentinel-checkpoint-receipt-v1\npending_sha256=' + hashlib.sha256(body).hexdigest().encode() +
+                                     b'\nnative_success=1\ncallbacks=1\nreadback_terminal=1\ntransition=1\n')
+                    pending.with_suffix('.receipt').write_bytes(receipt)
+                    pending.with_suffix('.commit').write_bytes(signed(b'sentinel-checkpoint-commit-v1\npending_sha256=' +
+                        hashlib.sha256(body).hexdigest().encode() + b'\nreceipt_sha256=' + receipt[-65:-1] + b'\n'))
                 before = self.digest(root / 'remote')
                 self.stage(root, 'recover', code=2)
                 self.assertEqual(self.digest(root / 'remote'), before)
@@ -185,9 +207,12 @@ class CampaignRecovery(unittest.TestCase):
                 root = Path(temp); archive, target, _ = self.create(root)
                 source = self.digest(archive); self.remove_payload(target)
                 before = self.digest(target)
-                self.stage(root, 'recover', f'native_read_c_interrupt{boundary}', code=77 if boundary < 6 else 2)
+                self.stage(root, 'recover', f'native_read_c_interrupt{boundary}', code=77 if boundary < 6 else 0 if boundary == 6 else 2)
                 self.assertTrue(list(root.rglob('recovery.pending')))
-                self.assertIn('REFUSED', self.stage(root, 'resume', code=2))
+                if boundary == 6:
+                    self.assertIn('checkpoint=2', self.stage(root, 'resume'))
+                else:
+                    self.assertIn('REFUSED', self.stage(root, 'resume', code=2))
                 self.assertEqual(self.digest(archive), source)
                 quarantine = next(p for p in root.glob('transport-backup-*') if p != archive)
                 manifest = (quarantine / 'transport.manifest').read_text()

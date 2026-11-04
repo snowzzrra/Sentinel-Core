@@ -101,6 +101,7 @@ public:
     void readback_hashes(uint64_t operation);
     void readback_result(uint64_t operation, bool success);
     bool request_backup(uint64_t operation, const std::shared_ptr<BackupJob>&);
+    bool ensure_archive(uint64_t operation, const std::shared_ptr<BackupJob>&);
     std::shared_ptr<BackupJob> backup(uint64_t operation) const;
 private:
     // helpers below run only under mutex_

@@ -28,8 +28,9 @@ struct RecoveryResult {
     const char* reason = "not_requested";
     std::wstring quarantine;
 };
-// pending without an exact completion remains a durable admission barrier
+// unfinished journals block import until startup recovery verifies the provider
 bool recovery_clear(storage::Namespace&);
 bool snapshot_campaign_files(const RecoveryTransport&, const std::string& directory, storage::TransportMetadata&);
 RecoveryResult recover_campaign(storage::Namespace&, const storage::Descriptor&, const RecoveryTransport&);
+RecoveryResult recover_checkpoint(storage::Namespace&, const storage::Descriptor&, const RecoveryTransport&);
 }

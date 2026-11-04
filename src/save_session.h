@@ -113,7 +113,8 @@ public:
     ~Session();
     storage::Result configure(const storage::Descriptor&, std::unique_ptr<storage::Namespace>);
     bool recover_startup(const RecoveryTransport&);
-    bool recovery_requested() const { return recovery_descriptor_.campaign.intent == storage::CampaignIntent::recover; }
+    bool recovery_requested() const { return recovery_descriptor_.campaign.intent != storage::CampaignIntent::none; }
+    bool campaign_requested() const { return campaign_run.enabled() || recovery_requested(); }
     void reject(SessionFault);
     void install(uintptr_t root, uintptr_t startup_return, uint32_t routes);
     bool startup_enter(uintptr_t root, uintptr_t caller, uint32_t thread);
@@ -179,6 +180,8 @@ public:
         bool attempted = false, int64_t state = 0, int64_t outcome = 0, uint32_t value = 0, ProfileRead read = {});
     ProfileTrace profile_trace() const;
 private:
+    storage::Result configure_campaign(const storage::Descriptor&);
+    bool check_recovery_record(const storage::CheckpointPlan&);
     UnroutedTrace unrouted_{};
     mutable std::mutex profile_trace_mutex_;
     ProfileTrace profile_trace_{};

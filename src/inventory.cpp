@@ -4,6 +4,20 @@
 #include <atomic>
 
 namespace sentinel::inventory {
+void progression_facts(const SnapshotFacts& facts, sc_progression_result& out) {
+    const unsigned items[] = {7770098, 7770099, 7770097, 0, 7770106, 7770107};
+    for (unsigned stage = 0; stage < 6; ++stage) {
+        const auto bit = items[stage] ? 1ull << (items[stage] - 7770058) : 0;
+        const bool known = bit ? (facts.perks_known & bit) != 0 : facts.pickup_radius <= 1;
+        const bool owned = bit ? (facts.perks_owned & bit) != 0 : facts.pickup_radius == 1;
+        if (known) out.suit_known |= 1u << stage;
+        if (known && owned) out.suit_owned |= 1u << stage;
+    }
+    out.slayer_key_quantity = facts.slayer_key_quantity;
+    const auto hook = 1ull << (7770083 - 7770058);
+    if (facts.perks_known & hook) out.meat_hook = (facts.perks_owned & hook) ? SC_EFFECT_PRESENT : SC_EFFECT_ABSENT;
+}
+
 uint8_t capacity_stage(uint32_t available, uint32_t active, int host_level) {
     if (host_level < 0 || host_level > SC_INVENTORY_MAX_CAPACITY_TIER ||
         available != ((1u << host_level) - 1) || active != available)

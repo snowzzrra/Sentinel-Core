@@ -1,5 +1,5 @@
 #include "native_model.h"
-#include "protocol.h"
+#include "sentinel_protocol_generated.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
@@ -104,35 +104,5 @@ void run_backup_request_contracts() {
             CHECK(q.backup_result(value, false, 104).state == SC_BACKUP_CANCELLED && owned->progress().readback_terminal);
         }
     }
-    Message wire{}; sc_save_backup_request decoded{}; uint16_t op = 0;
-    const auto size = encode_backup_request(wire, save_backup_submit_operation, r);
-    CHECK(size == 165 && decode_request(wire, size, &op, nullptr, nullptr, nullptr, &decoded) == WireResult::ok);
-    CHECK(op == save_backup_submit_operation && decoded.slot == 11 && decoded.campaign == 2 && decoded.execution.request_id == 77);
-    CHECK(decode_request(wire, size - 1) == WireResult::malformed);
-    CHECK(decode_request(wire, size + 1) == WireResult::malformed);
-    for (unsigned mode = 0; mode < 7; ++mode) {
-        auto bad = r;
-        if (mode == 0) bad.namespace_id[0] = 'A';
-        if (mode == 1) bad.namespace_id[64] = 'a';
-        if (mode == 2) bad.slot = 12;
-        if (mode == 3) bad.campaign = 3;
-        if (mode == 4) bad.work_deadline_ms = SC_SAVE_BACKUP_MAX_WORK_MS + 1;
-        if (mode == 5) bad.execution.request_id = 0;
-        if (mode == 6) std::memset(bad.execution.nonce, 0, 16);
-        CHECK(decode_request(wire, encode_backup_request(wire, save_backup_submit_operation, bad)) == WireResult::malformed);
-    }
-    Snapshot host{}; host.pid = 7; host.process_created = 13; host.instance[0] = 1;
-    host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.7.0"); std::memset(host.core.build_id, 'a', 64);
-    WireResult code{}; Snapshot restored{}; sc_save_backup_snapshot value{};
-    for (const auto& record : {before, pending, failed}) {
-        const auto length = encode_backup_response(wire, WireResult::ok, save_backup_result_operation, host, record);
-        CHECK(length && length <= max_message);
-        CHECK(decode_backup_response(wire, length, code, save_backup_result_operation, restored, value));
-        CHECK(value.state == record.state && value.operation_id == record.operation_id);
-        CHECK(!decode_backup_response(wire, length - 1, code, save_backup_result_operation, restored, value));
-        CHECK(!decode_backup_response(wire, length, code, save_backup_cancel_operation, restored, value));
-    }
-    failed.flags |= 256u;
-    CHECK(!encode_backup_response(wire, WireResult::ok, save_backup_result_operation, host, failed));
     std::puts("PASS shared backup request capacity, ownership handoff, cross-kind isolation, cancellation, retirement and strict wire");
 }

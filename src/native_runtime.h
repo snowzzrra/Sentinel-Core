@@ -19,6 +19,7 @@ void test_observation_epoch(uint64_t value);
 #endif
 void publish_context(const sc_context_snapshot& snapshot, uint64_t before);
 sc_native_snapshot inspect(uint64_t after_event = 0);
+sc_evidence_scope evidence_scope();
 sc_diagnostic_result submit(const sc_diagnostic_request& request, sc_diagnostic_detail* detail = nullptr);
 sc_diagnostic_result result(const sc_diagnostic_request& request, bool cancel, sc_diagnostic_detail* detail = nullptr);
 sc_save_backup_snapshot submit_backup(const sc_save_backup_request&);

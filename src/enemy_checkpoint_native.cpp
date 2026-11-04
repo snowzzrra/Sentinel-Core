@@ -1,14 +1,17 @@
+#include "engine/builds/build_descriptor.h"
 #include "enemy_checkpoint_native.h"
 #include "native_target.h"
 #include "save_collector.h"
 #include "commands_native.h"
 #include <MinHook.h>
+#include "engine/hooks/hook_set.h"
 #include <cstring>
 #include <cstdio>
 #include <atomic>
 
 namespace sentinel::expanded {
 namespace {
+hooks::HookSet checkpoint_hooks("enemy_checkpoint");
 using SaveCheckpoint = uint64_t(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 using SerializeSpawn = void(*)(uintptr_t, uintptr_t);
 using SerializeString = void(*)(uintptr_t, uintptr_t, const char*, save::NativeString*);
@@ -147,17 +150,27 @@ bool read_recipe_checkpoint(uintptr_t serializer, std::string_view map, uint32_t
         return restored;
     } catch (...) { commands::diagnostic_trace("AP_CHECKPOINT stage=enemy_restore result=failed reason=exception"); return false; }
 }
+uint64_t save_checkpoint_entry(uintptr_t world, uintptr_t output, uintptr_t request, uintptr_t fourth, uintptr_t fifth) {
+    const auto lease = checkpoint_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_save)>(lease.original)(world, output, request, fourth, fifth);
+        return save_checkpoint(world, output, request, fourth, fifth);
+    } __finally { checkpoint_hooks.leave(lease); }
+}
+
+void serialize_spawn_entry(uintptr_t prepared, uintptr_t archive) {
+    const auto lease = checkpoint_hooks.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_spawn)>(lease.original)(prepared, archive);
+        return serialize_spawn(prepared, archive);
+    } __finally { checkpoint_hooks.leave(lease); }
+}
+
 bool install_recipe_checkpoint(const engine::Binding& binding, HANDLE stop_event, const RecipeCheckpointCalls& callbacks) {
     if (binding.metadata.profile != SC_PROFILE_STEAM_20260818 || !callbacks.lock || !callbacks.unlock ||
         !callbacks.capture || !callbacks.restore) return false;
-    constexpr uint32_t rvas[]{0x6a8b80, 0x17df430, 0x684530, 0x3fa8e0, 0x3facb0, 0x55b8d0};
-    constexpr const char* prefixes[]{
-        "405553574156488dac245897feffb8a8690100e808321c02482be0488b05365e",
-        "4055535741564157488dac2450c0ffffb8b0400000e856c90801482be0488b05",
-        "48895c24085556574883ec60488b0595a4b2034833c44889442450803900498b",
-        "488d0591cb6602c7411414000080488901488d411848894108c7411000000000",
-        "40534883ec20488b5108488d05b7c76602488901488bd94885d2742d8b4114c1",
-        "40555356574156488d6c24c04881ec40010000488b05ee30c5034833c4488945"};
+    const auto& rvas = builds::steam_20260818().checkpoint_rvas;
+    const auto& prefixes = builds::steam_20260818().checkpoint_bytes;
     native::Target targets[6]{};
     engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 10000;
@@ -177,18 +190,12 @@ bool install_recipe_checkpoint(const engine::Binding& binding, HANDLE stop_event
     destroy_string = reinterpret_cast<StringLifetime>(targets[4].address);
     read_block = reinterpret_cast<ReadBlock>(targets[5].address);
     void* sites[]{reinterpret_cast<void*>(targets[0].address), reinterpret_cast<void*>(targets[1].address)};
-    void* detours[]{reinterpret_cast<void*>(save_checkpoint), reinterpret_cast<void*>(serialize_spawn)};
+    void* detours[]{reinterpret_cast<void*>(save_checkpoint_entry), reinterpret_cast<void*>(serialize_spawn_entry)};
     void** originals[]{reinterpret_cast<void**>(&original_save), reinterpret_cast<void**>(&original_spawn)};
-    for (size_t i = 0; i < std::size(sites); ++i) {
-        if (MH_CreateHook(sites[i], detours[i], originals[i]) == MH_OK) continue;
-        while (i) MH_RemoveHook(sites[--i]);
-        return false;
-    }
-    for (auto site : sites) {
-        if (MH_EnableHook(site) == MH_OK) continue;
-        for (auto other : sites) MH_DisableHook(other);
-        return false;
-    }
+    const hooks::HookSpec specs[]{
+        {reinterpret_cast<uintptr_t>(sites[0]), detours[0], originals[0]},
+        {reinterpret_cast<uintptr_t>(sites[1]), detours[1], originals[1]}};
+    if (!checkpoint_hooks.install(specs, stop_event)) return false;
     checkpoint_enabled.store(true, std::memory_order_release);
     return true;
 }

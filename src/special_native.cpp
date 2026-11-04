@@ -1,4 +1,6 @@
+#include "engine/builds/build_descriptor.h"
 #include "special.h"
+#include "player_strings_generated.h"
 #include "native_target.h"
 #include "native_runtime.h"
 #include "local_controls.h"
@@ -7,6 +9,7 @@
 #include "save_session.h"
 #include "inventory.h"
 #include "MinHook.h"
+#include "engine/hooks/hook_set.h"
 #include "hde/hde64.h"
 #include <atomic>
 #include <cstring>
@@ -27,6 +30,9 @@
 
 namespace sentinel::special {
 namespace {
+hooks::HookSet selection_hooks("special_selection"), hands_hooks("special_hands"), loot_hooks("special_loot"),
+    toast_hooks("special_toast"), fast_travel_hooks("special_fast_travel"), hud_hooks("special_hud"),
+    chainsaw_hooks("special_chainsaw");
 
 std::atomic<bool> ready{false};
 save::BTrace installation_trace, input_trace, route_trace, hud_trace;
@@ -119,37 +125,37 @@ char fixture_namespace[65]{};
 #endif
 
 // checked against steam image 9809708c; all addresses are offsets from the image base
-constexpr uint32_t rva_inventory_typeinfo = 0x1617cd0;   // get the inventory declaration type
-constexpr uint32_t rva_find_decl = 0x17aa5d0;            // look up the declaration with this type, path and flags
-constexpr uint32_t rva_find_item = 0x1690660;            // find the inventory item for this declaration
-constexpr uint32_t rva_give_item = 0x1691cd0;            // give an inventory item
-constexpr uint32_t rva_item_count = 0x398510;            // count inventory items
-constexpr uint32_t rva_item_at = 0x1691450;              // get an inventory item by index
-constexpr uint32_t rva_meter_set = 0x128c3b0;
-constexpr uint32_t rva_judgement_meter_vtable = 0x2d6cf18;
-constexpr uintptr_t judgement_meter_offset = 0x177a0;
-constexpr uint32_t rva_unlock_perk = 0xfe2500;           // exact perk registration
-constexpr uint32_t rva_activate_perk = 0xfe19b0;         // exact perk activation
-constexpr uint32_t rva_active_perk = 0xfe37f0;           // exact active-perk reader
-constexpr uint32_t rva_loot_spawn_amount = 0xaa44f0;     // hammer loot amount terminal
-constexpr uint32_t rva_perk_typeinfo = 0x1631f90;        // get the perk declaration type
-constexpr uint32_t rva_current_weapon = 0xbd7740;        // the player's current weapon
-constexpr uint32_t rva_hud_earnings = 0xeea070;          // append mission challenge earnings to the hud
-constexpr uint32_t rva_hud_element_setup = 0xeeac40;     // build the mission challenge hud
-constexpr uint32_t rva_mission_challenge_vtable = 0x2cff930;
-constexpr uint32_t rva_weapon_info_vtable = 0x2d03798;
-constexpr uint32_t rva_fast_travel_checkpoint_render = 0xf4a100;
-constexpr uint32_t rva_fast_travel_widget_resolve = 0x1599920;
-constexpr uint32_t rva_player = 0x69af70;
-constexpr uint32_t rva_crucible_resolver = 0x145d640;
-constexpr uint32_t rva_input_down = 0x146b850;
-constexpr uint32_t rva_hammer_input_return = 0x14433f0;
-constexpr uint32_t rva_weapon_cast = 0x21107c0;
-constexpr uint32_t rva_best_weapon = 0x145a410;
-constexpr uint32_t rva_weapon_mode_decl = 0x16c0f90;
-constexpr uint32_t rva_hands_reset_return = 0x136779a;
-constexpr uint32_t rva_hands_refresh_return = 0x14641bf;
-constexpr uint32_t rva_hands_init_return = 0x1361503;
+const auto rva_inventory_typeinfo = builds::steam_20260818().special.rva_inventory_typeinfo;
+const auto rva_find_decl = builds::steam_20260818().special.rva_find_decl;
+const auto rva_find_item = builds::steam_20260818().special.rva_find_item;
+const auto rva_give_item = builds::steam_20260818().special.rva_give_item;
+const auto rva_item_count = builds::steam_20260818().special.rva_item_count;
+const auto rva_item_at = builds::steam_20260818().special.rva_item_at;
+const auto rva_meter_set = builds::steam_20260818().special.rva_meter_set;
+const auto rva_judgement_meter_vtable = builds::steam_20260818().special.rva_judgement_meter_vtable;
+const auto judgement_meter_offset = builds::steam_20260818().special.judgement_meter_offset;
+const auto rva_unlock_perk = builds::steam_20260818().special.rva_unlock_perk;
+const auto rva_activate_perk = builds::steam_20260818().special.rva_activate_perk;
+const auto rva_active_perk = builds::steam_20260818().special.rva_active_perk;
+const auto rva_loot_spawn_amount = builds::steam_20260818().special.rva_loot_spawn_amount;
+const auto rva_perk_typeinfo = builds::steam_20260818().special.rva_perk_typeinfo;
+const auto rva_current_weapon = builds::steam_20260818().special.rva_current_weapon;
+const auto rva_hud_earnings = builds::steam_20260818().special.rva_hud_earnings;
+const auto rva_hud_element_setup = builds::steam_20260818().special.rva_hud_element_setup;
+const auto rva_mission_challenge_vtable = builds::steam_20260818().special.rva_mission_challenge_vtable;
+const auto rva_weapon_info_vtable = builds::steam_20260818().special.rva_weapon_info_vtable;
+const auto rva_fast_travel_checkpoint_render = builds::steam_20260818().special.rva_fast_travel_checkpoint_render;
+const auto rva_fast_travel_widget_resolve = builds::steam_20260818().special.rva_fast_travel_widget_resolve;
+const auto rva_player = builds::steam_20260818().special.rva_player;
+const auto rva_crucible_resolver = builds::steam_20260818().special.rva_crucible_resolver;
+const auto rva_input_down = builds::steam_20260818().special.rva_input_down;
+const auto rva_hammer_input_return = builds::steam_20260818().special.rva_hammer_input_return;
+const auto rva_weapon_cast = builds::steam_20260818().special.rva_weapon_cast;
+const auto rva_best_weapon = builds::steam_20260818().special.rva_best_weapon;
+const auto rva_weapon_mode_decl = builds::steam_20260818().special.rva_weapon_mode_decl;
+const auto rva_hands_reset_return = builds::steam_20260818().special.rva_hands_reset_return;
+const auto rva_hands_refresh_return = builds::steam_20260818().special.rva_hands_refresh_return;
+const auto rva_hands_init_return = builds::steam_20260818().special.rva_hands_init_return;
 using BestWeapon = uintptr_t(*)(uintptr_t, bool, uintptr_t);
 BestWeapon original_best_weapon = nullptr;
 constexpr uint64_t special_button = UINT64_C(0x400000000);
@@ -225,20 +231,35 @@ void chainsaw_tick_detour(uintptr_t p) {
 using FastTravelCheckpointRender = void(*)(uintptr_t, int);
 FastTravelCheckpointRender original_fast_travel_checkpoint_render = nullptr;
 
-void fast_travel_checkpoint_render_detour(uintptr_t screen, int index) {
-    if (!original_fast_travel_checkpoint_render || !screen) return;
-    const auto widget = *reinterpret_cast<uintptr_t*>(screen + 0x108);
-    if (!widget) return;
-    if (!*reinterpret_cast<uintptr_t*>(widget + 0x18)) {
-        const auto resolve = reinterpret_cast<bool(*)(uintptr_t)>(image_base + rva_fast_travel_widget_resolve);
-        if (!resolve(widget)) return;
+// shortcut: MSVC 14.44 breaks optimized SEH here; retest on compiler upgrade.
+#pragma optimize("", off)
+__declspec(noinline) bool fast_travel_widget_ready(uintptr_t screen) {
+    if (!screen) return false;
+    __try {
+        const auto widget = *reinterpret_cast<uintptr_t*>(screen + 0x108);
+        if (!widget) return false;
+        if (!*reinterpret_cast<uintptr_t*>(widget + 0x18)) {
+            const auto resolve = reinterpret_cast<bool(*)(uintptr_t)>(image_base + rva_fast_travel_widget_resolve);
+            if (!resolve(widget)) return false;
+        }
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ready.store(false, std::memory_order_release);
+        installation_trace.record(save::BStage::native_start, save::BStatus::refused,
+            "fast_travel_widget_fault", 0, {{"exception", GetExceptionCode()}});
+        return false;
     }
-    original_fast_travel_checkpoint_render(screen, index);
 }
-constexpr uint32_t rva_equipment_upgrade_vtable = 0x2e04ba0;
-constexpr uintptr_t perk_component_offset = 0x3b40;
-constexpr uintptr_t equipment_upgrade_offset = 0x26568;
-constexpr uintptr_t hammer_loot_modifier_offset = 0x2d0;
+#pragma optimize("", on)
+void fast_travel_checkpoint_render_detour(uintptr_t screen, int index) {
+    if (original_fast_travel_checkpoint_render && fast_travel_widget_ready(screen))
+        original_fast_travel_checkpoint_render(screen, index);
+}
+
+const auto rva_equipment_upgrade_vtable = builds::steam_20260818().special.rva_equipment_upgrade_vtable;
+const auto perk_component_offset = builds::steam_20260818().special.perk_component_offset;
+const auto equipment_upgrade_offset = builds::steam_20260818().special.equipment_upgrade_offset;
+const auto hammer_loot_modifier_offset = builds::steam_20260818().special.hammer_loot_modifier_offset;
 using LootSpawnAmount = uint64_t(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
                                     float*, float*, uint32_t, uint32_t, uint32_t);
 LootSpawnAmount original_loot_spawn_amount = nullptr;
@@ -322,40 +343,55 @@ uintptr_t current_hud_player() {
     return player(nullptr);
 }
 
-uint64_t weapon_info_label_detour(uintptr_t parent, const char* label, bool warn) {
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress()) - image_base;
-    // only the native weaponinfo visibility and quickuse presenters use this projection
-    if ((caller == 0xf0cb96 || caller == 0xf0c314 || caller == 0xf0c34a) &&
-        !std::strcmp(label, "noEquipment")) {
-        __try {
-            const auto element = weapon_info_element.load(std::memory_order_acquire);
-            const auto epoch = route_epoch.load(std::memory_order_acquire);
-            const auto current_player = route_player.load(std::memory_order_acquire);
-            char namespace_id[65];
-            AcquireSRWLockShared(&route_namespace_lock);
-            std::memcpy(namespace_id, route_namespace, sizeof(namespace_id));
-            ReleaseSRWLockShared(&route_namespace_lock);
-            if (element && epoch && epoch == native::observation_stamp() &&
-                epoch == weapon_info_epoch.load(std::memory_order_acquire) && current_player &&
-                current_player == weapon_info_player.load(std::memory_order_acquire) &&
-                current_player == current_hud_player() &&
-                *reinterpret_cast<uintptr_t*>(element) == image_base + rva_weapon_info_vtable &&
-                *reinterpret_cast<uint8_t*>(element + 0x209) &&
-                hud_owner_snapshot(namespace_id).namespace_valid && inventory::admitted(namespace_id) &&
-                inventory::grenade_indicator_mask(current_player) == 2 &&
-                hud::graphics_source(element).parent == parent) {
-                const auto desired = original_weapon_info_label(parent,
-                    *reinterpret_cast<uint8_t*>(element + 0x2a9) ? "cursed" : "normal", warn);
-                const auto absent = original_weapon_info_label(parent, label, false);
-                if (desired > 0 && desired != absent) {
-                    hud_trace.record(save::BStage::root_layout, save::BStatus::succeeded,
-                        "hud_ice_only_timeline_preserved", epoch,
-                        {{"owner", element}, {"parent", parent}, {"native_frame", absent},
-                         {"projected_frame", desired}, {"grenade_mask", 2}}, element);
-                    return desired;
-                }
-            }
-        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+struct LabelProjection { uintptr_t element = 0; uint64_t epoch = 0; const char* label = nullptr; };
+// shortcut: MSVC 14.44 breaks optimized SEH here; retest on compiler upgrade.
+#pragma optimize("", off)
+LabelProjection project_weapon_label(uintptr_t element, uint64_t epoch, uintptr_t current_player,
+                                     const char (&namespace_id)[65], uintptr_t parent) {
+    if (element && epoch && epoch == native::observation_stamp() &&
+        epoch == weapon_info_epoch.load(std::memory_order_acquire) && current_player &&
+        current_player == weapon_info_player.load(std::memory_order_acquire) &&
+        current_player == current_hud_player() &&
+        *reinterpret_cast<uintptr_t*>(element) == image_base + rva_weapon_info_vtable &&
+        *reinterpret_cast<uint8_t*>(element + 0x209) && hud_owner_snapshot(namespace_id).namespace_valid &&
+        inventory::admitted(namespace_id) && inventory::grenade_indicator_mask(current_player) == 2 &&
+        hud::graphics_source(element).parent == parent)
+        return {element, epoch, *reinterpret_cast<uint8_t*>(element + 0x2a9) ? "cursed" : "normal"};
+    return {};
+}
+__declspec(noinline) LabelProjection label_projection(uintptr_t parent, const char* label, uintptr_t caller) {
+    __try {
+        if ((caller != 0xf0cb96 && caller != 0xf0c314 && caller != 0xf0c34a) ||
+            std::strcmp(label, "noEquipment")) return {};
+        const auto element = weapon_info_element.load(std::memory_order_acquire);
+        const auto epoch = route_epoch.load(std::memory_order_acquire);
+        const auto current_player = route_player.load(std::memory_order_acquire);
+        char namespace_id[65];
+        AcquireSRWLockShared(&route_namespace_lock);
+        std::memcpy(namespace_id, route_namespace, sizeof(namespace_id));
+        ReleaseSRWLockShared(&route_namespace_lock);
+        return project_weapon_label(element, epoch, current_player, namespace_id, parent);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ready.store(false, std::memory_order_release);
+        hud_trace.record(save::BStage::root_layout, save::BStatus::refused,
+            "weapon_label_fault", 0, {{"exception", GetExceptionCode()}});
+    }
+    return {};
+}
+#pragma optimize("", on)
+uint64_t weapon_info_label_detour(uintptr_t parent, const char* label, bool warn, void* hook_caller = nullptr) {
+    const auto caller = reinterpret_cast<uintptr_t>(hook_caller) - image_base;
+    const auto projection = label_projection(parent, label, caller);
+    if (projection.label) {
+        const auto desired = original_weapon_info_label(parent, projection.label, warn);
+        const auto absent = original_weapon_info_label(parent, label, false);
+        if (desired > 0 && desired != absent) {
+            hud_trace.record(save::BStage::root_layout, save::BStatus::succeeded,
+                "hud_ice_only_timeline_preserved", projection.epoch,
+                {{"owner", projection.element}, {"parent", parent}, {"native_frame", absent},
+                 {"projected_frame", desired}, {"grenade_mask", 2}}, projection.element);
+            return desired;
+        }
     }
     return original_weapon_info_label(parent, label, warn);
 }
@@ -669,8 +705,8 @@ uint32_t policy_snapshot(uintptr_t p, PolicySnapshot& snapshot) {
     return snapshot.known ? 0 : 8;
 }
 
-__declspec(noinline) bool crucible_resolver_detour(uintptr_t p) {
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+__declspec(noinline) bool crucible_resolver_detour(uintptr_t p, void* hook_caller = nullptr) {
+    const auto caller = reinterpret_cast<uintptr_t>(hook_caller);
     PolicySnapshot snapshot{};
     const auto reason = policy_snapshot(p, snapshot);
     const bool known = !reason;
@@ -734,8 +770,8 @@ bool filter_hammer_input(uintptr_t caller, uint64_t button, bool raw, uintptr_t 
     return known ? allowed && raw : raw;
 }
 
-__declspec(noinline) bool input_down_detour(uintptr_t input, uint64_t button) {
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+__declspec(noinline) bool input_down_detour(uintptr_t input, uint64_t button, void* hook_caller = nullptr) {
+    const auto caller = reinterpret_cast<uintptr_t>(hook_caller);
     return filter_hammer_input(caller, button, original_input_down(input, button), input);
 }
 
@@ -792,8 +828,17 @@ uintptr_t hands_restore_weapon(uintptr_t p, int16_t& subweb, uint32_t& ordinal) 
     return 0;
 }
 
-__declspec(noinline) uintptr_t best_weapon_detour(uintptr_t p, bool exclude_current, uintptr_t excluded) {
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress()) - image_base;
+uintptr_t restore_hands_guarded(uintptr_t p, bool checkpoint, uintptr_t caller, int16_t& subweb, uint32_t& ordinal) {
+    uintptr_t fallback = 0;
+    __try {
+        if (p && (checkpoint || caller != rva_hands_init_return || *reinterpret_cast<uint8_t*>(p + 0x4ea2)))
+            fallback = hands_restore_weapon(p, subweb, ordinal);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return fallback;
+}
+__declspec(noinline) uintptr_t best_weapon_detour(uintptr_t p, bool exclude_current, uintptr_t excluded, void* hook_caller = nullptr) {
+    const auto caller = reinterpret_cast<uintptr_t>(hook_caller) - image_base;
     const auto selected = original_best_weapon(p, exclude_current, excluded);
     if (selected || exclude_current || excluded ||
         (caller != rva_hands_reset_return && caller != rva_hands_refresh_return && caller != rva_hands_init_return))
@@ -805,26 +850,25 @@ __declspec(noinline) uintptr_t best_weapon_detour(uintptr_t p, bool exclude_curr
     uintptr_t fallback = 0;
     int16_t subweb = -1;
     uint32_t ordinal = UINT32_MAX;
-    __try {
-        if (p && (checkpoint || caller != rva_hands_init_return || *reinterpret_cast<uint8_t*>(p + 0x4ea2)))
-            fallback = hands_restore_weapon(p, subweb, ordinal);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    fallback = restore_hands_guarded(p, checkpoint, caller, subweb, ordinal);
     record_use("hands_restore_fallback", fallback ? save::BStatus::succeeded : save::BStatus::refused,
         {{"caller_rva", caller}, {"checkpoint", checkpoint}, {"subweb", static_cast<uint16_t>(subweb)},
          {"weapon_ordinal", ordinal}, {"epoch", native::observation_stamp()}});
     return fallback;
 }
 
+uintptr_t best_weapon_detour_entry(uintptr_t p, bool exclude_current, uintptr_t excluded) {
+    const auto caller = _ReturnAddress();
+    const auto lease = hands_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_best_weapon)>(lease.original)(p, exclude_current, excluded);
+        return best_weapon_detour(p, exclude_current, excluded, caller);
+    } __finally { hands_hooks.leave(lease); }
+}
+
 void install_hands_restore(const engine::Binding& binding, HANDLE stop) {
     engine::LocalMemory memory;
-    const struct { uint32_t rva; const char* bytes; uint32_t owner, call_length; } sites[] = {
-        {rva_best_weapon, "88542410565741554883ec4083b9d84e0000004d8be80fb6fa488bf17e0d4883", 0, 0},
-        {rva_weapon_mode_decl, "448bc283faff7507448b81e8190000488b51384d63c8496bc138488b84082001", 0, 0},
-        {rva_weapon_cast, "40534883ec20488bd94885c97427488b01ff50104885c0741c8b40683b05a6cb", 0, 0},
-        {0x1367790, "4533c033d2e8762c0f00488bd04885c07441486382e8190000488d0cc5640000", 0x1367530, 10},
-        {0x14641a2, "80bba24e0000000f848d00000041b1014533c033d2488bcbe85162ffff4885c0", 0x1464140, 29},
-        {0x13614f0, "8b8e5803000041b1014533c033d2e80d8f0f004c8bf84885c07517488b8e5803", 0x13612fd, 19},
-    };
+    const auto& sites = builds::steam_20260818().hands;
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets())
 #endif
@@ -847,14 +891,11 @@ void install_hands_restore(const engine::Binding& binding, HANDLE stop) {
             {{"rva", site.rva}, {"validation", validation}});
         if (validation) return;
     }
-    const auto target = reinterpret_cast<void*>(image_base + rva_best_weapon);
-    const auto created = MH_CreateHook(target, reinterpret_cast<void*>(best_weapon_detour),
-        reinterpret_cast<void**>(&original_best_weapon));
-    const auto enabled = created == MH_OK ? MH_EnableHook(target) : MH_UNKNOWN;
-    if (created == MH_OK && enabled != MH_OK) MH_RemoveHook(target);
+    const hooks::HookSpec specs[]{hooks::bind(image_base + rva_best_weapon, best_weapon_detour_entry, original_best_weapon)};
+    const bool installed = hands_hooks.install(specs, stop);
     installation_trace.record(save::BStage::native_start,
-        enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused, "hands_restore_install", 0,
-        {{"rva", rva_best_weapon}, {"create_status", created}, {"enable_status", enabled}});
+        installed ? save::BStatus::succeeded : save::BStatus::refused, "hands_restore_install", 0,
+        {{"rva", rva_best_weapon}, {"installed", installed}});
 }
 
 uint32_t item_count(uintptr_t item) {
@@ -1288,8 +1329,8 @@ void input_job_detour(uintptr_t context) {
     }
 }
 
-__declspec(noinline) void weapon_dispatch_detour(uintptr_t p, uintptr_t command) {
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+__declspec(noinline) void weapon_dispatch_detour(uintptr_t p, uintptr_t command, void* hook_caller = nullptr) {
+    const auto caller = reinterpret_cast<uintptr_t>(hook_caller);
     const auto previous_player = input_job_player;
     const auto previous_epoch = input_job_epoch;
     const bool site = caller == image_base + 0x13f225c || caller == image_base + 0x13f203a;
@@ -1306,8 +1347,8 @@ __declspec(noinline) void weapon_dispatch_detour(uintptr_t p, uintptr_t command)
     }
 }
 
-__declspec(noinline) bool input_pressed_detour(uintptr_t input, uint64_t mask) {
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+__declspec(noinline) bool input_pressed_detour(uintptr_t input, uint64_t mask, void* hook_caller = nullptr) {
+    const auto caller = reinterpret_cast<uintptr_t>(hook_caller);
     const bool raw = original_input_pressed(input, mask);
     if (mask == 0x8000000 && raw) {
         static std::atomic<uint64_t> presses{0};
@@ -1325,8 +1366,8 @@ __declspec(noinline) bool input_pressed_detour(uintptr_t input, uint64_t mask) {
     return raw;
 }
 
-__declspec(noinline) bool crucible_activate_detour(uintptr_t p) {
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+__declspec(noinline) bool crucible_activate_detour(uintptr_t p, void* hook_caller = nullptr) {
+    const auto caller = reinterpret_cast<uintptr_t>(hook_caller);
     const auto reason = route_scope_reason(p);
     const auto before = !reason ? observe_route(p) : RouteObservation{};
     record_use("crucible_activate_enter", reason ? save::BStatus::refused : save::BStatus::entered,
@@ -1348,8 +1389,8 @@ __declspec(noinline) bool crucible_activate_detour(uintptr_t p) {
     return result;
 }
 
-__declspec(noinline) void hammer_attack_detour(uintptr_t p) {
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+__declspec(noinline) void hammer_attack_detour(uintptr_t p, void* hook_caller = nullptr) {
+    const auto caller = reinterpret_cast<uintptr_t>(hook_caller);
     const auto reason = route_scope_reason(p);
     const auto before = !reason ? observe_route(p) : RouteObservation{};
     record_use("hammer_handler_enter", reason ? save::BStatus::refused : save::BStatus::entered,
@@ -1443,25 +1484,26 @@ void present_selection(uintptr_t p) {
     if (!observed || !facts.selection_policy || !facts.native_selected) return;
     const auto element = challenge_element.load(std::memory_order_acquire);
     if (!element || challenge_player.load(std::memory_order_acquire) != p) return;
-    char text[96]{}, resource[32] = "RESOURCE UNKNOWN", key[32]{};
+    char text[96]{}, resource[32]{}, key[32]{};
+    strcpy_s(resource, player_strings::hud_resource_unknown);
     const auto vk = static_cast<int>((configured_keys.load(std::memory_order_relaxed) >> 8) & 0xff);
     if (facts.native_crucible && facts.native_hammer && vk) {
-        if (vk >= VK_F1 && vk <= VK_F12) std::snprintf(key, sizeof(key), " [F%d TOGGLE]", vk - VK_F1 + 1);
+        if (vk >= VK_F1 && vk <= VK_F12) std::snprintf(key, sizeof(key), player_strings::hud_function_key_toggle, vk - VK_F1 + 1);
         else {
             char label[16]{};
             if (GetKeyNameTextA(static_cast<LONG>(MapVirtualKeyA(vk, MAPVK_VK_TO_VSC) << 16), label, sizeof(label)))
-                std::snprintf(key, sizeof(key), " [%s TOGGLE]", label);
+                std::snprintf(key, sizeof(key), player_strings::hud_key_toggle, label);
         }
     }
     if (facts.native_selected == SC_SPECIAL_WEAPON_CRUCIBLE && (facts.known & SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE))
-        std::snprintf(resource, sizeof(resource), "%u CHARGES", facts.crucible_charge);
+        std::snprintf(resource, sizeof(resource), player_strings::hud_charges, facts.crucible_charge);
     __try {
         if (*reinterpret_cast<uintptr_t*>(element) != image_base + rva_mission_challenge_vtable) return;
         if (facts.native_selected == SC_SPECIAL_WEAPON_HAMMER &&
             *reinterpret_cast<uintptr_t*>(p + equipment_upgrade_offset + 0x2b8)) {
             const auto meter = reinterpret_cast<float(*)(uintptr_t)>(image_base + 0x1643260)(p + equipment_upgrade_offset);
             if (std::isfinite(meter) && meter >= 0)
-                std::snprintf(resource, sizeof(resource), "%.0f%% METER", static_cast<double>(meter * 100));
+                std::snprintf(resource, sizeof(resource), player_strings::hud_meter, static_cast<double>(meter * 100));
         }
         std::snprintf(text, sizeof(text), "%s%s", resource, key);
         auto append = reinterpret_cast<EarningsAppend>(image_base + rva_hud_earnings);
@@ -1469,7 +1511,8 @@ void present_selection(uintptr_t p) {
         if (test_earnings_append) append = test_earnings_append;
 #endif
         append(element,
-            facts.native_selected == SC_SPECIAL_WEAPON_CRUCIBLE ? "CRUCIBLE SELECTED" : "HAMMER SELECTED", text, 3000, 0, 0);
+            facts.native_selected == SC_SPECIAL_WEAPON_CRUCIBLE ? player_strings::hud_crucible_selected :
+                player_strings::hud_hammer_selected, text, 3000, 0, 0);
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
@@ -1693,6 +1736,125 @@ void use_fixture(Calls value, const char* id) {
 }
 #endif
 
+bool crucible_resolver_detour_entry(uintptr_t p) {
+    const auto caller = _ReturnAddress();
+    const auto lease = selection_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_crucible_resolver)>(lease.original)(p);
+        return crucible_resolver_detour(p, caller);
+    } __finally { selection_hooks.leave(lease); }
+}
+
+bool input_down_detour_entry(uintptr_t input, uint64_t button) {
+    const auto caller = _ReturnAddress();
+    const auto lease = selection_hooks.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_input_down)>(lease.original)(input, button);
+        return input_down_detour(input, button, caller);
+    } __finally { selection_hooks.leave(lease); }
+}
+
+void input_job_detour_entry(uintptr_t context) {
+    const auto lease = selection_hooks.enter(2);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_input_job)>(lease.original)(context);
+        return input_job_detour(context);
+    } __finally { selection_hooks.leave(lease); }
+}
+
+void hammer_attack_detour_entry(uintptr_t p) {
+    const auto caller = _ReturnAddress();
+    const auto lease = selection_hooks.enter(3);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_hammer_attack)>(lease.original)(p);
+        return hammer_attack_detour(p, caller);
+    } __finally { selection_hooks.leave(lease); }
+}
+
+void weapon_dispatch_detour_entry(uintptr_t p, uintptr_t command) {
+    const auto caller = _ReturnAddress();
+    const auto lease = selection_hooks.enter(4);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_weapon_dispatch)>(lease.original)(p, command);
+        return weapon_dispatch_detour(p, command, caller);
+    } __finally { selection_hooks.leave(lease); }
+}
+
+bool crucible_activate_detour_entry(uintptr_t p) {
+    const auto caller = _ReturnAddress();
+    const auto lease = selection_hooks.enter(5);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_crucible_activate)>(lease.original)(p);
+        return crucible_activate_detour(p, caller);
+    } __finally { selection_hooks.leave(lease); }
+}
+
+bool input_pressed_detour_entry(uintptr_t input, uint64_t mask) {
+    const auto caller = _ReturnAddress();
+    const auto lease = selection_hooks.enter(6);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_input_pressed)>(lease.original)(input, mask);
+        return input_pressed_detour(input, mask, caller);
+    } __finally { selection_hooks.leave(lease); }
+}
+
+uint64_t loot_spawn_amount_detour_entry(uintptr_t loot, uintptr_t declaration, uintptr_t player,
+                                  uintptr_t target, float* amount, float* scale,
+                                  uint32_t arg7, uint32_t trigger, uint32_t mode) {
+    const auto lease = loot_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_loot_spawn_amount)>(lease.original)(loot, declaration, player, target, amount, scale, arg7, trigger, mode);
+        return loot_spawn_amount_detour(loot, declaration, player, target, amount, scale, arg7, trigger, mode);
+    } __finally { loot_hooks.leave(lease); }
+}
+
+char hud_element_setup_detour_entry(uintptr_t element) {
+    const auto lease = toast_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_hud_element_setup)>(lease.original)(element);
+        return hud_element_setup_detour(element);
+    } __finally { toast_hooks.leave(lease); }
+}
+
+void fast_travel_checkpoint_render_detour_entry(uintptr_t screen, int index) {
+    const auto lease = fast_travel_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_fast_travel_checkpoint_render)>(lease.original)(screen, index);
+        return fast_travel_checkpoint_render_detour(screen, index);
+    } __finally { fast_travel_hooks.leave(lease); }
+}
+
+uint64_t weapon_info_label_detour_entry(uintptr_t parent, const char* label, bool warn) {
+    const auto caller = _ReturnAddress();
+    const auto lease = hud_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_weapon_info_label)>(lease.original)(parent, label, warn);
+        return weapon_info_label_detour(parent, label, warn, caller);
+    } __finally { hud_hooks.leave(lease); }
+}
+
+void weapon_hud_update_detour_entry(uintptr_t element, uintptr_t time) {
+    const auto lease = hud_hooks.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_weapon_hud_update)>(lease.original)(element, time);
+        return weapon_hud_update_detour(element, time);
+    } __finally { hud_hooks.leave(lease); }
+}
+
+void chainsaw_tick_detour_entry(uintptr_t p) {
+    const auto lease = chainsaw_hooks.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_chainsaw_tick)>(lease.original)(p);
+        return chainsaw_tick_detour(p);
+    } __finally { chainsaw_hooks.leave(lease); }
+}
+
+uint64_t weapon_info_label_original(uintptr_t parent, const char* label, bool warn) {
+    const auto lease = hud_hooks.enter(0);
+    __try { return reinterpret_cast<WeaponInfoLabel>(lease.original)(parent, label, warn); }
+    __finally { hud_hooks.leave(lease); }
+}
+
 void install(const engine::Binding& binding, HANDLE stop) {
     installation_trace.record(save::BStage::native_start, save::BStatus::entered, "validating");
     image_base = binding.image.base;
@@ -1700,21 +1862,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
     engine_root = binding.root;
 
     engine::LocalMemory memory;
-    struct Site { uint32_t offset; const char* bytes; };
-    const Site sites[] = {
-        {0x1432100, "48895c241855565741544155415641574881ecb0000000488b05bac8d7024833"},
-        {rva_find_decl, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448"},
-        {rva_find_item, "48895c240848896c2410488974241848897c242041564883ec2033ff488bea4c"},
-        {rva_give_item, "40555356574154415541564157488d6c24f94881ecb8000000488b05e8ccb102"},
-        {rva_item_at, "4883ec2885d2784f3b51087d4a48895c24204863da48c1e3054803198b03488d"},
-        {rva_item_count, "8b4108c3cccccccccccccccccccccccc48896c2418574883ec204863790833ed"},
-        {rva_meter_set, "40534883ec308b4108488bd989410c488b010f297424200f28f1ff5028488b03"},
-        {rva_perk_typeinfo, "488d05c9c70603c3cccccccccccccccc488d05f9950603c3cccccccccccccccc"},
-        {rva_current_weapon, "40534883ec20488b01488bd9ff90b0000000488b13488bcb4885c07412ff92b0"},
-        {rva_hud_earnings, "48895c240848896c2410488974241848897c242041564883ec20488db9700600"},
-        {rva_player, "488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc"},
-        {rva_inventory_typeinfo, "488d0569210803c3cccccccccccccccc4883ec28ba33000000b9d8000000e84d"},
-    };
+    const auto& sites = builds::steam_20260818().special_required;
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets())
 #endif
@@ -1766,30 +1914,8 @@ void install(const engine::Binding& binding, HANDLE stop) {
 #ifdef SC_NATIVE_TESTING
     }
 #endif
-    enum class RouteSiteKind : uint32_t { function_entry = 1, exact_leaf = 2, call_window = 3 };
-    struct RouteSite { uint32_t offset; const char* bytes; RouteSiteKind kind; uint32_t owner; size_t length; };
-    const RouteSite route_sites[] = {
-        {0x146be40, "33c0448bc03881a100000075074c8b81a80000004c85c274113841097504488b",
-            RouteSiteKind::exact_leaf, 0, 45},
-        {0x14644e0, "405556488dac24c8feffff4881ec38020000488b05dfa4d4024833c448898500",
-            RouteSiteKind::function_entry, 0x14644e0, 32},
-        {0x1456310, "4055574883ec28488b01488bf94032edff90700500004885c0751f4c8d05ded6",
-            RouteSiteKind::function_entry, 0x1456310, 32},
-        {0x1438f00, "40534883ec208b5108488bd9488b0d5de41b03e8582026ff4885c074110fb653",
-            RouteSiteKind::function_entry, 0x1438f00, 32},
-        {0x143c7f0, "405356574883ec50488bf9e830f00100488b17488bcf488bd8ff924005000048",
-            RouteSiteKind::function_entry, 0x143c7f0, 32},
-        {rva_crucible_resolver, "48895c2408574883ec20488bb9d8d10400488bd94885ff7513488d15206b9601",
-            RouteSiteKind::function_entry, rva_crucible_resolver, 32},
-        {rva_input_down, "80b9a100000000740933c04885c20f95c0c3488b81a80000004885c20f95c0c3",
-            RouteSiteKind::exact_leaf, 0, 32},
-        {0x14433de, "48ba0000000004000000498bcee86084020084c0744f488d8e68650200e860fe",
-            RouteSiteKind::call_window, 0x1442c14, rva_hammer_input_return - 0x14433de},
-        {rva_weapon_cast, "40534883ec20488bd94885c97427488b01ff50104885c0741c8b40683b05a6cb",
-            RouteSiteKind::function_entry, rva_weapon_cast, 32},
-        {0x1643260, "488b81b80200004885c075040f57c0c3f30f108194040000f30f5e8090020000",
-            RouteSiteKind::exact_leaf, 0, 33},
-    };
+    using builds::RouteSiteKind;
+    const auto& route_sites = builds::steam_20260818().special_routes;
     bool route_valid = true;
     const auto route_deadline = GetTickCount64() + 10000;
     size_t site_index = 0;
@@ -1873,48 +1999,22 @@ void install(const engine::Binding& binding, HANDLE stop) {
         ++site_index;
     }
     if (route_valid) {
-        struct Hook { uint32_t rva; void* detour; void** original; };
-        const Hook hooks[] = {
-            {rva_crucible_resolver, reinterpret_cast<void*>(crucible_resolver_detour), reinterpret_cast<void**>(&original_crucible_resolver)},
-            {rva_input_down, reinterpret_cast<void*>(input_down_detour), reinterpret_cast<void**>(&original_input_down)},
-            {0x1438f00, reinterpret_cast<void*>(input_job_detour), reinterpret_cast<void**>(&original_input_job)},
-            {0x143c7f0, reinterpret_cast<void*>(hammer_attack_detour), reinterpret_cast<void**>(&original_hammer_attack)},
-            {0x14644e0, reinterpret_cast<void*>(weapon_dispatch_detour), reinterpret_cast<void**>(&original_weapon_dispatch)},
-            {0x1456310, reinterpret_cast<void*>(crucible_activate_detour), reinterpret_cast<void**>(&original_crucible_activate)},
-            {0x146be40, reinterpret_cast<void*>(input_pressed_detour), reinterpret_cast<void**>(&original_input_pressed)},
-        };
-        size_t created = 0, queued = 0;
-        MH_STATUS status = MH_OK;
-        for (const auto& hook : hooks) {
-            status = MH_CreateHook(reinterpret_cast<void*>(image_base + hook.rva), hook.detour, hook.original);
-            if (status != MH_OK) break;
-            ++created;
-        }
-        if (status == MH_OK) for (const auto& hook : hooks) {
-            status = MH_QueueEnableHook(reinterpret_cast<void*>(image_base + hook.rva));
-            if (status != MH_OK) break;
-            ++queued;
-        }
-        if (status == MH_OK) status = MH_ApplyQueued();
-        const bool installed = status == MH_OK;
-        if (!installed) {
-            size_t remove = created;
-            while (remove) {
-                const auto target = reinterpret_cast<void*>(image_base + hooks[--remove].rva);
-                MH_DisableHook(target); MH_RemoveHook(target);
-            }
-        }
+        const hooks::HookSpec specs[]{
+            hooks::bind(image_base + rva_crucible_resolver, crucible_resolver_detour_entry, original_crucible_resolver),
+            hooks::bind(image_base + rva_input_down, input_down_detour_entry, original_input_down),
+            hooks::bind(image_base + 0x1438f00, input_job_detour_entry, original_input_job),
+            hooks::bind(image_base + 0x143c7f0, hammer_attack_detour_entry, original_hammer_attack),
+            hooks::bind(image_base + 0x14644e0, weapon_dispatch_detour_entry, original_weapon_dispatch),
+            hooks::bind(image_base + 0x1456310, crucible_activate_detour_entry, original_crucible_activate),
+            hooks::bind(image_base + 0x146be40, input_pressed_detour_entry, original_input_pressed)};
+        const bool installed = selection_hooks.install(specs, stop);
         route_ready.store(installed, std::memory_order_release);
         installation_trace.record(save::BStage::special_toggle, installed ? save::BStatus::succeeded : save::BStatus::refused,
-            "joint_route_install", 0, {{"created", created}, {"queued", queued}, {"status", status}, {"ready", installed}});
+            "joint_route_install", 0, {{"ready", installed}});
     }
 
     // upgrade writers and reader are checked together; base special routing stays independent
-    const Site upgrade_sites[] = {
-        {rva_unlock_perk, "4885d20f84c903000044884c2420448844241848894c24085356415441564883"},
-        {rva_activate_perk, "44884c24204488442418488954241048894c2408555357415541564157488d6c"},
-        {rva_active_perk, "4c8bc24885d2742b4863517033c085d27e21488b49684c8bca8bd00f1f440000"},
-    };
+    const auto& upgrade_sites = builds::steam_20260818().special_upgrade;
     bool upgrade_valid = true;
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets())
@@ -1949,19 +2049,11 @@ void install(const engine::Binding& binding, HANDLE stop) {
         loot_target.bytes[n] = static_cast<uint8_t>(loot_digit(loot_bytes[n * 2]) * 16 + loot_digit(loot_bytes[n * 2 + 1]));
     const auto loot_validation = native::validate_target(memory, binding.image, loot_target,
                                                           stop, GetTickCount64() + 10000);
-    const auto loot_created = loot_validation ? MH_UNKNOWN :
-        MH_CreateHook(reinterpret_cast<void*>(loot_target.address),
-                      reinterpret_cast<void*>(loot_spawn_amount_detour),
-                      reinterpret_cast<void**>(&original_loot_spawn_amount));
-    const auto loot_enabled = loot_created == MH_OK ?
-        MH_EnableHook(reinterpret_cast<void*>(loot_target.address)) : MH_UNKNOWN;
-    if (loot_created == MH_OK && loot_enabled != MH_OK)
-        MH_RemoveHook(reinterpret_cast<void*>(loot_target.address));
+    const hooks::HookSpec loot_specs[]{hooks::bind(loot_target.address, loot_spawn_amount_detour_entry, original_loot_spawn_amount)};
+    const bool loot_installed = !loot_validation && loot_hooks.install(loot_specs, stop);
     installation_trace.record(save::BStage::special_toggle,
-        loot_enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
-        "hammer_loot_terminal_install", 0,
-        {{"rva", rva_loot_spawn_amount}, {"validation", loot_validation},
-         {"create_status", loot_created}, {"enable_status", loot_enabled}});
+        loot_installed ? save::BStatus::succeeded : save::BStatus::refused, "hammer_loot_terminal_install", 0,
+        {{"rva", rva_loot_spawn_amount}, {"validation", loot_validation}, {"installed", loot_installed}});
 
     // optional missionchallenge toast capture is independent of gameplay hooks
     const auto deadline = GetTickCount64() + 10000;
@@ -1972,20 +2064,12 @@ void install(const engine::Binding& binding, HANDLE stop) {
     for (size_t n = 0; n < hud_target.bytes.size(); ++n)
         hud_target.bytes[n] = static_cast<uint8_t>(digit(hud_bytes[n * 2]) * 16 + digit(hud_bytes[n * 2 + 1]));
     const auto hud_validation = native::validate_target(memory, binding.image, hud_target, stop, deadline);
-    const auto hud_created = hud_validation ? MH_UNKNOWN :
-        MH_CreateHook(reinterpret_cast<void*>(image_base + rva_hud_element_setup),
-                      reinterpret_cast<void*>(hud_element_setup_detour),
-                      reinterpret_cast<void**>(&original_hud_element_setup));
-    const auto hud_enabled = hud_created == MH_OK ?
-        MH_EnableHook(reinterpret_cast<void*>(image_base + rva_hud_element_setup)) : MH_UNKNOWN;
+    const hooks::HookSpec toast_specs[]{hooks::bind(hud_target.address, hud_element_setup_detour_entry, original_hud_element_setup)};
+    const bool hud_installed = !hud_validation && toast_hooks.install(toast_specs, stop);
     installation_trace.record(save::BStage::profile_publish,
-        hud_enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused, "optional_hud_hook", 0,
-        {{"rva", rva_hud_element_setup}, {"validation", hud_validation},
-         {"create_status", static_cast<uint64_t>(hud_created)}, {"enable_status", static_cast<uint64_t>(hud_enabled)}});
-    const struct { uint32_t rva; const char* bytes; } fast_travel_sites[] = {
-        {rva_fast_travel_checkpoint_render, "48895c24185556574881ecc0000000488b05c24826034833c448898424b00000"},
-        {rva_fast_travel_widget_resolve, "40534883ec20488bd9488b89680100004885c9750832c04883c4205bc38b9398"},
-    };
+        hud_installed ? save::BStatus::succeeded : save::BStatus::refused, "optional_hud_hook", 0,
+        {{"rva", rva_hud_element_setup}, {"validation", hud_validation}, {"installed", hud_installed}});
+    const auto& fast_travel_sites = builds::steam_20260818().fast_travel;
     bool fast_travel_valid = true;
     for (const auto& site : fast_travel_sites) {
         native::Target target{};
@@ -1995,22 +2079,13 @@ void install(const engine::Binding& binding, HANDLE stop) {
         const auto reason = native::validate_target(memory, binding.image, target, stop, deadline);
         if (reason) { fast_travel_valid = false; break; }
     }
-    const auto fast_travel_target = reinterpret_cast<void*>(image_base + rva_fast_travel_checkpoint_render);
-    const auto fast_travel_created = fast_travel_valid ?
-        MH_CreateHook(fast_travel_target, reinterpret_cast<void*>(fast_travel_checkpoint_render_detour),
-                      reinterpret_cast<void**>(&original_fast_travel_checkpoint_render)) : MH_UNKNOWN;
-    const auto fast_travel_enabled = fast_travel_created == MH_OK ? MH_EnableHook(fast_travel_target) : MH_UNKNOWN;
-    if (fast_travel_created == MH_OK && fast_travel_enabled != MH_OK) MH_RemoveHook(fast_travel_target);
+    const hooks::HookSpec fast_travel_specs[]{hooks::bind(image_base + rva_fast_travel_checkpoint_render,
+        fast_travel_checkpoint_render_detour_entry, original_fast_travel_checkpoint_render)};
+    const bool fast_travel_installed = fast_travel_valid && fast_travel_hooks.install(fast_travel_specs, stop);
     installation_trace.record(save::BStage::profile_publish,
-        fast_travel_enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
-        "fast_travel_checkpoint_guard", 0,
-        {{"validated", fast_travel_valid}, {"create_status", fast_travel_created},
-         {"enable_status", fast_travel_enabled}});
-    const struct { uint32_t rva; const char* bytes; } presentation_sites[] = {
-        {0xf0b3b0, "48895c2418555641564883ec50488bea4533f633d24489742470418bf6488bd9"},
-        {0xf0c230, "40534883ec20488bd9488b89e801000080bb6901000000750e488b01b2014883"},
-        {0xf0c640, "40534883ec20488bd9488b89f801000080bbb901000000750e488b01b2014883"},
-    };
+        fast_travel_installed ? save::BStatus::succeeded : save::BStatus::refused, "fast_travel_checkpoint_guard", 0,
+        {{"validated", fast_travel_valid}, {"installed", fast_travel_installed}});
+    const auto& presentation_sites = builds::steam_20260818().presentation;
     bool presentation_valid = true;
     for (const auto& site : presentation_sites) {
         native::Target target{};
@@ -2070,28 +2145,14 @@ void install(const engine::Binding& binding, HANDLE stop) {
             "hud_adapters_ready", 0, {{"graphics_ready", hud::graphics_ready}, {"keycap_ready", hud::keycap_ready}});
         project_crucible_hud = reinterpret_cast<WeaponHudProject>(image_base + 0xf0c230);
         project_hammer_hud = reinterpret_cast<WeaponHudProject>(image_base + 0xf0c640);
-        const auto label_target = reinterpret_cast<void*>(hud::swf.label);
-        const auto label_created = hud::graphics_ready ? MH_CreateHook(label_target,
-            reinterpret_cast<void*>(weapon_info_label_detour),
-            reinterpret_cast<void**>(&original_weapon_info_label)) : MH_UNKNOWN;
-        const auto label_enabled = label_created == MH_OK ? MH_EnableHook(label_target) : MH_UNKNOWN;
-        if (label_enabled == MH_OK) hud::swf.label = original_weapon_info_label;
-        else if (label_created == MH_OK) MH_RemoveHook(label_target);
-        const auto target = reinterpret_cast<void*>(image_base + 0xf0b3b0);
-        const auto created = label_enabled == MH_OK ? MH_CreateHook(target,
-            reinterpret_cast<void*>(weapon_hud_update_detour),
-            reinterpret_cast<void**>(&original_weapon_hud_update)) : MH_UNKNOWN;
-        const auto enabled = created == MH_OK ? MH_EnableHook(target) : MH_UNKNOWN;
-        if (created == MH_OK && enabled != MH_OK) MH_RemoveHook(target);
-        if (enabled != MH_OK && label_enabled == MH_OK) {
-            MH_DisableHook(label_target);
-            MH_RemoveHook(label_target);
-            hud::swf.label = reinterpret_cast<WeaponInfoLabel>(label_target);
-        }
+        const hooks::HookSpec hud_specs[]{
+            hooks::bind(reinterpret_cast<uintptr_t>(hud::swf.label), weapon_info_label_detour_entry, original_weapon_info_label),
+            hooks::bind(image_base + 0xf0b3b0, weapon_hud_update_detour_entry, original_weapon_hud_update)};
+        const bool installed = hud::graphics_ready && hud_hooks.install(hud_specs, stop);
+        if (installed) hud::swf.label = weapon_info_label_original;
         installation_trace.record(save::BStage::profile_prepare,
-            enabled == MH_OK ? save::BStatus::succeeded : save::BStatus::refused,
-            "special_hud_install", 0, {{"create_status", created}, {"enable_status", enabled},
-                {"label_create_status", label_created}, {"label_enable_status", label_enabled}});
+            installed ? save::BStatus::succeeded : save::BStatus::refused, "special_hud_install", 0,
+            {{"installed", installed}});
     }
     native::Target chainsaw{};
     chainsaw.address=image_base+0x143ca30;
@@ -2099,24 +2160,46 @@ void install(const engine::Binding& binding, HANDLE stop) {
     for (size_t i=0;i<chainsaw.bytes.size();++i)
         chainsaw.bytes[i]=static_cast<uint8_t>(digit(chainsaw_bytes[i*2])*16+digit(chainsaw_bytes[i*2+1]));
     const auto chainsaw_validation=native::validate_target(memory,binding.image,chainsaw,stop,GetTickCount64()+10000);
-    const auto chainsaw_created=!chainsaw_validation ? MH_CreateHook(reinterpret_cast<void*>(chainsaw.address),
-        reinterpret_cast<void*>(chainsaw_tick_detour),reinterpret_cast<void**>(&original_chainsaw_tick)) : MH_UNKNOWN;
-    const auto chainsaw_enabled=chainsaw_created==MH_OK ? MH_EnableHook(reinterpret_cast<void*>(chainsaw.address)) : MH_UNKNOWN;
-    if (chainsaw_created==MH_OK && chainsaw_enabled!=MH_OK) MH_RemoveHook(reinterpret_cast<void*>(chainsaw.address));
+    const hooks::HookSpec chainsaw_specs[]{hooks::bind(chainsaw.address, chainsaw_tick_detour_entry, original_chainsaw_tick)};
+    const bool chainsaw_installed = !chainsaw_validation && chainsaw_hooks.install(chainsaw_specs, stop);
     installation_trace.record(save::BStage::chainsaw_state,
-        chainsaw_enabled==MH_OK ? save::BStatus::succeeded : save::BStatus::refused,"chainsaw_diagnostic_install",0,
-        {{"validation",chainsaw_validation},{"created",chainsaw_created},{"enabled",chainsaw_enabled}});
+        chainsaw_installed ? save::BStatus::succeeded : save::BStatus::refused, "chainsaw_diagnostic_install", 0,
+        {{"validation", chainsaw_validation}, {"installed", chainsaw_installed}});
     ready.store(true, std::memory_order_release);
     installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "ownership_ready", 0,
         {{"selection_route_ready", route_ready.load(std::memory_order_acquire)},
-         {"hud_hook", hud_enabled == MH_OK}});
+         {"hud_hook", hud_installed}});
 }
 
 #ifdef SC_NATIVE_TESTING
+bool test_native_pointer_guards() {
+    const auto saved_ready = ready.load();
+    ready.store(true);
+    const auto widget_result = fast_travel_widget_ready(1);
+    const auto widget_ready = ready.load();
+    const bool invalid_widget = !widget_result && !widget_ready;
+    ready.store(true);
+    const auto label_result = label_projection(0, reinterpret_cast<const char*>(1), 0xf0cb96);
+    const auto label_ready = ready.load();
+    const bool invalid_label = !label_result.label && !label_ready;
+    ready.store(saved_ready);
+    if (!invalid_widget || !invalid_label) {
+        std::fprintf(stderr, "native pointer guards: widget=%d ready=%d label=%p ready=%d\n", widget_result, widget_ready, static_cast<const void*>(label_result.label), label_ready); return false;
+    }
+    return true;
+}
+bool test_refill_pool(const RefillPool& pool, uintptr_t nested_decl, uintptr_t ammo_decl, uintptr_t ammo_item) {
+    return pool.list_source == 1 && pool.list_decl == nested_decl && pool.ammo_decl == ammo_decl &&
+           pool.quantity_before == 50 && pool.quantity_after == 50 && pool.writer_result == ammo_item &&
+           pool.capacity_before == 50 && pool.capacity_after == 50 &&
+           !std::strcmp(pool.weapon, "weapon/player/shotgun") &&
+           !std::strcmp(pool.declaration, "ammo/sharedammopool/shells") && !std::strcmp(pool.step, "confirmed");
+}
 bool test_hands_restore() {
+    if (!test_native_pointer_guards()) return false;
     const auto saved_image = image_base;
     const auto saved_best = original_best_weapon;
-    constexpr size_t fixture_image_size = rva_judgement_meter_vtable + 4096;
+    const size_t fixture_image_size = rva_judgement_meter_vtable + 4096;
     auto* image = static_cast<uint8_t*>(VirtualAlloc(nullptr, fixture_image_size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
     if (!image) return false;
     image_base = reinterpret_cast<uintptr_t>(image);
@@ -2207,11 +2290,7 @@ bool test_hands_restore() {
     const auto latest_pool = [] { const auto h = refill_history(); return h.pools[(h.sequence - 1) % h.pools.size()]; };
     ok &= !refill(nullptr, p) && writes == 2;
     auto pool = latest_pool();
-    ok &= pool.list_source == 1 && pool.list_decl == nested_decl && pool.ammo_decl == ammo_decl &&
-        pool.quantity_before == 50 && pool.quantity_after == 50 && pool.writer_result == ammo_item &&
-        pool.capacity_before == 50 && pool.capacity_after == 50 &&
-        !std::strcmp(pool.weapon, "weapon/player/shotgun") && !std::strcmp(pool.declaration, "ammo/sharedammopool/shells") &&
-        !std::strcmp(pool.step, "confirmed");
+    ok &= test_refill_pool(pool, nested_decl, ammo_decl, ammo_item);
     writer_mode = 1;
     put(ammo_item, 0x40, int32_t{0});
     ok &= refill(nullptr, p) == 4 && writes == 4;

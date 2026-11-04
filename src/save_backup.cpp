@@ -60,8 +60,18 @@ void BackupJob::readback_finished(bool success) {
     if (!progress_.readback_success) abandoned_.store(true, std::memory_order_release);
     settle();
 }
+bool backup_file_metadata(const SdkWriteObservation& manifest, storage::TransportMetadata& metadata) {
+    const std::string prefix = manifest.directory + "/";
+    for (const auto& file : manifest.payloads) {
+        const std::string full(file.name.data());
+        if (full.compare(0, prefix.size(), prefix)) return false;
+        metadata.files.push_back({full.substr(prefix.size()), file.size, file.sha256});
+    }
+    return true;
+}
 void BackupJob::copy(Session& owner, engine::Memory& memory, const SdkWriteObservation& manifest,
         const std::vector<uintptr_t>& buffers) {
+    LARGE_INTEGER started{}, frequency{}; QueryPerformanceCounter(&started); QueryPerformanceFrequency(&frequency);
     {
         std::lock_guard<std::mutex> guard(mutex_);
         if (progress_.state != BackupState::pending) return;
@@ -77,17 +87,13 @@ void BackupJob::copy(Session& owner, engine::Memory& memory, const SdkWriteObser
         metadata.directory = manifest.directory; metadata.process_id = pid_;
         metadata.process_created = created_; metadata.operation_id = manifest.operation;
         if (owner.campaign_run.enabled()) {
+            metadata.automatic = automatic_;
             metadata.steam_user = owner_ ? owner_(manifest.remote) : 0;
             metadata.provider = recovery_provider;
             if (!metadata.steam_user || !owner.collecting(manifest.remote, owner.native_root()) ||
                 !owner.campaign_run.backup_continuity(manifest, metadata)) failure = BackupFailure::native;
         }
-        const std::string prefix = manifest.directory + "/";
-        for (const auto& file : manifest.payloads) {
-            const std::string full(file.name.data());
-            if (full.compare(0, prefix.size(), prefix)) { failure = BackupFailure::native; break; }
-            metadata.files.push_back({full.substr(prefix.size()), file.size, file.sha256});
-        }
+        if (!backup_file_metadata(manifest, metadata)) failure = BackupFailure::native;
         if (failure == BackupFailure::none) {
             struct Source {
                 BackupJob& job; engine::Memory& memory;
@@ -111,6 +117,8 @@ void BackupJob::copy(Session& owner, engine::Memory& memory, const SdkWriteObser
         result = {storage::Outcome::io_error, ERROR_NOT_ENOUGH_MEMORY};
     }
     std::lock_guard<std::mutex> guard(mutex_);
+    LARGE_INTEGER finished{}; QueryPerformanceCounter(&finished);
+    if (frequency.QuadPart > 0) progress_.copy_us = static_cast<uint64_t>((finished.QuadPart - started.QuadPart) * 1000000 / frequency.QuadPart);
     progress_.storage_attempted = attempted; progress_.storage_result = result;
     progress_.storage_complete = attempted && failure == BackupFailure::none && result.outcome == storage::Outcome::transport_backup_complete;
     progress_.output = std::move(output); progress_.failure = failure;

@@ -1,0 +1,58 @@
+{
+  "fixtures": [
+    {
+      "name": "inspect_request",
+      "description": "Inspect core capabilities.",
+      "family": "empty",
+      "operation": 1,
+      "response": false,
+      "size": 24,
+      "sha256": "63ff7e526e523174b871b986b23f9b8edeaf3bd706a8910ce1bd881297439f5e",
+      "layout": "inspect_request",
+      "fields": [
+        {
+          "offset": 0,
+          "field": "magic",
+          "type": "u32",
+          "value": 1346978643,
+          "hex": "53434950"
+        },
+        {
+          "offset": 4,
+          "field": "version",
+          "type": "u16",
+          "value": 1,
+          "hex": "0100"
+        },
+        {
+          "offset": 6,
+          "field": "operation",
+          "type": "u16",
+          "value": 1,
+          "hex": "0100"
+        },
+        {
+          "offset": 8,
+          "field": "payload_length",
+          "type": "u32",
+          "value": 8,
+          "hex": "08000000"
+        },
+        {
+          "offset": 12,
+          "field": "result",
+          "type": "u32",
+          "value": 0,
+          "hex": "00000000"
+        },
+        {
+          "offset": 16,
+          "field": "capability",
+          "type": "u64",
+          "value": 1,
+          "hex": "0100000000000000"
+        }
+      ]
+    }
+  ]
+}

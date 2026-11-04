@@ -2,6 +2,7 @@
 #include "engine_observer.h"
 #include "native_target.h"
 #include "sentinel_campaign_menu.h"
+#include "sentinel_evidence.h"
 #include <string>
 #ifdef SC_NATIVE_TESTING
 #include <MinHook.h>
@@ -14,6 +15,7 @@ std::array<native::Target,46> native_targets(uintptr_t base);
 bool validate_native_targets(save::Installation&,engine::Memory&,const engine::Image&,
                              HANDLE,const std::array<native::Target,46>&);
 bool available();
+sc_mission_access_result observe_access(const sc_mission_access_request&);
 sc_campaign_reward mastery_reward(const char* perk);
 void reward_scroll(uintptr_t text);
 void present_campaign_actions(uintptr_t screen, bool entered);

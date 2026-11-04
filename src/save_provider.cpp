@@ -343,20 +343,51 @@ bool bind_root_provider(Session& owner, engine::Memory& memory, const ProviderCa
     }
     return provider_initialized(owner, memory, manager, calls);
 }
-bool provider_initialized(Session& owner, engine::Memory& memory, uintptr_t manager, const ProviderCalls& calls) {
+bool recover_provider(Session& owner, engine::Memory& memory, uintptr_t context, const ProviderCalls& calls) {
+    uintptr_t remote = 0;
+    RecoveryTransport recovery{};
+    recovery.owner = calls.owner;
+    if (owner.recovery_requested()) {
+        uintptr_t remote_table = 0;
+        if (!at(memory, context, 0, remote) || !at(memory, remote, 0, remote_table) ||
+            !at(memory, remote_table, 0, recovery.write) || !at(memory, remote_table, 8, recovery.read) ||
+            !at(memory, remote_table, 0x68, recovery.exists) || !at(memory, remote_table, 0x78, recovery.size) ||
+            !at(memory, remote_table, 0x90, recovery.count) || !at(memory, remote_table, 0x98, recovery.name)) {
+            provider_refused(owner, "recovery_remote_storage_methods_unavailable");
+            owner.fail(SessionFault::provider_identity);
+            return false;
+        }
+        recovery.remote = remote;
+        if (!owner.recover_startup(recovery)) return false;
+    }
+    return true;
+}
+bool provider_chain(Session& owner, engine::Memory& memory, uintptr_t manager, const ProviderCalls& calls,
+                    uintptr_t& control, uintptr_t& provider) {
+    uintptr_t table = 0;
+    const auto refuse = [&](const char* predicate) {
+        provider_refused(owner, predicate);
+        owner.fail(SessionFault::provider_identity);
+        return false;
+    };
+    if (!at(memory, manager, 0, control) || !at(memory, control, 8, provider) || !at(memory, provider, 0, table))
+        return refuse("provider_object_chain_unreadable");
+    if (table != calls.image_base + 0x2e90658) return refuse("provider_is_not_native_steam");
+    if (!calls.context) return refuse("provider_context_initializer_unavailable");
+    return true;
+}
+bool provider_initialized_impl(Session& owner, engine::Memory& memory, uintptr_t manager, const ProviderCalls& calls) {
     uintptr_t root = 0;
     if (!owner.provider_root(root)) return false;
     const auto refuse = [&](const char* predicate) {
         provider_refused(owner,predicate); owner.fail(SessionFault::provider_identity); return false;
     };
     try {
-        uintptr_t selected_manager = 0, control = 0, provider = 0, table = 0;
+        uintptr_t selected_manager = 0;
         if (!at(memory, root, 0x9b38, selected_manager)) return refuse("root_provider_manager_unreadable");
         if (manager != selected_manager) return false; // another native account/service manager
-        if (!at(memory, manager, 0, control) || !at(memory, control, 8, provider) || !at(memory, provider, 0, table))
-            return refuse("provider_object_chain_unreadable");
-        if (table != calls.image_base + 0x2e90658) return refuse("provider_is_not_native_steam");
-        if (!calls.context) return refuse("provider_context_initializer_unavailable");
+        uintptr_t control = 0, provider = 0;
+        if (!provider_chain(owner, memory, manager, calls, control, provider)) return false;
         {
             const auto context = calls.context(calls.image_base + 0x397fb88);
             uintptr_t remote = 0; NativeCatalogSource catalog;
@@ -367,18 +398,7 @@ bool provider_initialized(Session& owner, engine::Memory& memory, uintptr_t mana
                 if (at(memory, context, 0, remote) && owner.collecting(remote, owner.native_root())) return true;
                 return refuse("provider_remote_identity_changed");
             }
-            RecoveryTransport recovery{}; recovery.owner=calls.owner;
-            if (owner.recovery_requested()) {
-                uintptr_t remote_table=0;
-                if (!at(memory,context,0,remote) || !at(memory,remote,0,remote_table) ||
-                    !at(memory,remote_table,0,recovery.write) || !at(memory,remote_table,8,recovery.read) ||
-                    !at(memory,remote_table,0x68,recovery.exists) || !at(memory,remote_table,0x78,recovery.size) ||
-                    !at(memory,remote_table,0x90,recovery.count) || !at(memory,remote_table,0x98,recovery.name)) {
-                    return refuse("recovery_remote_storage_methods_unavailable");
-                }
-                recovery.remote=remote;
-                if (!owner.recover_startup(recovery)) return false;
-            }
+            if (!recover_provider(owner, memory, context, calls)) return false;
             if (!at(memory, context, 0, remote)) return refuse("provider_context_unreadable");
             if (!owner.acquire_native_root_lock()) return refuse("native_root_lock_unavailable");
             if (inspect_remote(owner, memory, remote, catalog, true) &&
@@ -386,5 +406,9 @@ bool provider_initialized(Session& owner, engine::Memory& memory, uintptr_t mana
         }
     } catch (const std::bad_alloc&) { return refuse("provider_binding_allocation_failed"); }
     owner.fail(SessionFault::provider_identity); return false;
+}
+bool provider_initialized(Session& owner, engine::Memory& memory, uintptr_t manager, const ProviderCalls& calls) {
+    __try { return provider_initialized_impl(owner,memory,manager,calls); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { owner.fail(SessionFault::provider_identity); return false; }
 }
 } // namespace sentinel::save

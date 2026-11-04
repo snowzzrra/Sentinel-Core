@@ -2,6 +2,7 @@
 #include "native_runtime.h"
 #include "commands_native.h"
 #include "save_native_hooks.h"
+#include "campaign_menu_native.h"
 #include <algorithm>
 #include <cstring>
 
@@ -21,6 +22,14 @@ uint32_t admit_points(const Request& request, const LiveState& live) {
     const auto& value = std::get<sc_weapon_points_request>(request);
     if (const auto why = gameplay(live)) return why;
     return weapon_points::admitted(value.namespace_id) ? SC_NATIVE_NONE : SC_NATIVE_SCOPE_MISMATCH;
+}
+uint32_t admit_progression(const Request& request, const LiveState& live) {
+    if (const auto why = save_scope(std::get<sc_progression_request>(request).namespace_id, live)) return why;
+    return inventory::available() ? SC_NATIVE_NONE : SC_NATIVE_BINDING_FAILED;
+}
+uint32_t admit_currencies(const Request& request, const LiveState& live) {
+    if (const auto why = save_scope(std::get<sc_currency_request>(request).namespace_id, live)) return why;
+    return weapon_points::available() ? SC_NATIVE_NONE : SC_NATIVE_BINDING_FAILED;
 }
 uint32_t admit_inventory(const Request& request, const LiveState& live) {
     if (const auto why = gameplay(live)) return why;
@@ -72,6 +81,19 @@ void execute_backup(const Request&, Result&, ExecutionContext& context) {
 }
 void execute_points(const Request& request, Result& result, ExecutionContext&) {
     weapon_points::execute_native(std::get<sc_weapon_points_request>(request), std::get<sc_weapon_points_result>(result));
+}
+void execute_progression(const Request&, Result& result, ExecutionContext& context) {
+    auto& out = std::get<sc_progression_result>(result);
+    out.before_scope = out.after_scope = context.evidence_scope;
+    inventory::read_progression(context.player, out);
+}
+void execute_mission_access(const Request& request, Result& result, ExecutionContext&) {
+    result = campaign_menu::observe_access(std::get<sc_mission_access_request>(request));
+}
+void execute_currencies(const Request& request, Result& result, ExecutionContext& context) {
+    auto& out = std::get<sc_currency_result>(result);
+    out.before_scope = out.after_scope = context.evidence_scope;
+    currencies::execute(std::get<sc_currency_request>(request), out, weapon_points::currency_calls());
 }
 void execute_inventory(const Request& request, Result& result, ExecutionContext&) {
     inventory::execute_native(std::get<sc_inventory_request>(request), std::get<sc_inventory_result>(result));
@@ -135,6 +157,13 @@ Evidence points_evidence(const Request& request, const Result& result, const sc_
         uint64_t(value.gained_before) + r.amount == value.gained_after;
     return entered(execution, exact ? EffectEvidence::observed_effect : EffectEvidence::effect_unknown);
 }
+Evidence currency_evidence(const Request& request, const Result& result, const sc_diagnostic_result& execution) {
+    const auto& value = std::get<sc_currency_result>(result);
+    if (std::get<sc_currency_request>(request).kind == SC_CURRENCY_OBSERVE || !(value.flags & SC_CURRENCY_WRITER_ENTERED))
+        return entered(execution, EffectEvidence::no_effect);
+    const bool ready = value.before_scope.readiness == SC_EVIDENCE_READY && value.after_scope.readiness == SC_EVIDENCE_READY;
+    return entered(execution, ready && currencies::exact(value) ? EffectEvidence::observed_effect : EffectEvidence::effect_unknown);
+}
 Evidence command_evidence(const Request&, const Result& result, const sc_diagnostic_result& execution) {
     if (!execution.executed_at_ms) return {};
     const auto& value = std::get<sc_command_result>(result);
@@ -185,6 +214,9 @@ template<> Handler make_handler<Id::command>() { return {Id::command, admit_comm
 template<> Handler make_handler<Id::combat>() { return {Id::combat, admit_process, execute_snapshot<Id::combat>, observation}; }
 template<> Handler make_handler<Id::combat_presentation>() { return {Id::combat_presentation, admit_presentation, execute_presentation, publication}; }
 template<> Handler make_handler<Id::support_dump>() { return {Id::support_dump, admit_support_dump, execute_command, command_evidence}; }
+template<> Handler make_handler<Id::currencies>() { return {Id::currencies, admit_currencies, execute_currencies, currency_evidence}; }
+template<> Handler make_handler<Id::progression>() { return {Id::progression, admit_progression, execute_progression, observation}; }
+template<> Handler make_handler<Id::mission_access>() { return {Id::mission_access, admit_process, execute_mission_access, observation}; }
 struct Factory {
     template<Id id> Handler entry() const { return make_handler<id>(); }
 };

@@ -3,10 +3,10 @@
 #include "save_session.h"
 #include "save_catalog.h"
 #include "save_provider.h"
+#include "save_backup.h"
 #include "sentinel_context.h"
 #include <windows.h>
 #include <algorithm>
-#include <charconv>
 #include <cstring>
 
 namespace sentinel::save {
@@ -25,16 +25,6 @@ std::string hex(const std::array<unsigned char,32>& bytes) {
     constexpr char chars[]="0123456789abcdef"; std::string out;
     for (auto c:bytes) { out+=chars[c>>4]; out+=chars[c&15]; } return out;
 }
-bool take(std::string_view& input, std::string_view key, std::string_view& out) {
-    if (input.substr(0,key.size())!=key) return false;
-    input.remove_prefix(key.size()); const auto end=input.find('\n');
-    if (end==input.npos) return false; out=input.substr(0,end); input.remove_prefix(end+1); return true;
-}
-template<class T> bool number(std::string_view value,T& out) {
-    if (value.empty() || (value.size()>1 && value[0]=='0')) return false;
-    const auto r=std::from_chars(value.data(),value.data()+value.size(),out);
-    return r.ec==std::errc{} && r.ptr==value.data()+value.size();
-}
 uint32_t phase_id(std::string_view phase) {
     constexpr std::string_view names[]={"disabled","armed","create_requested","native_start_queued","resume_requested",
         "source_verified","parser_succeeded","native_transition_pending","native_created","reopened","native_save_pending","checkpoint_saved","refused"};
@@ -43,9 +33,32 @@ uint32_t phase_id(std::string_view phase) {
 }
 }
 std::string campaign_contract(const storage::Descriptor& descriptor,const std::string& namespace_id) {
-    return "sentinel-campaign-v2\nnamespace="+namespace_id+"\ngeneration="+
-        descriptor.identity.generation_fingerprint+"\nprovenance=synthetic-fixture\ncampaign=unified\nstarting_stage=hub\ndifficulty="+
-        std::to_string(descriptor.campaign.difficulty)+"\nslot=AUTOSAVE0\n";
+    return storage::checkpoint_contract(descriptor,namespace_id);
+}
+bool Campaign::configure_resume(std::string record, storage::Result r) {
+    if (!r.ok() || record != contract_)
+        return reject("resume_contract_or_options_mismatch", {{"ok", r.ok()},
+                                                              {"outcome", r.outcome},
+                                                              {"win32", r.win32_error},
+                                                              {"bytes", record.size()},
+                                                              {"expected_bytes", contract_.size()},
+                                                              {"contract_equal", record == contract_}});
+    contract_created_ = true;
+    owner_->btrace.record(diagnostic_stage_, BStatus::entered, "resume_checkpoint_read");
+    r = lease_->campaign_record(true, record);
+    if (!r.ok())
+        return reject("resume_checkpoint_read_failed",
+                      {{"outcome", r.outcome}, {"win32", r.win32_error}, {"bytes", record.size()}});
+    if (record == "sentinel-checkpoint-ab-v1\n") {
+        storage::CheckpointPlan plan;
+        r = lease_->checkpoint_plan(descriptor_, plan);
+        if (!r.ok() || plan.state != storage::CheckpointState::confirmed) return reject("checkpoint_recovery_required");
+        record = plan.text;
+    }
+    if (!parse_checkpoint(record)) return false;
+    checkpoint_exists_ = true;
+    state_.source_checkpoint = state_.checkpoint;
+    return true;
 }
 bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,storage::Namespace& lease) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -56,7 +69,7 @@ bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,st
         owner.btrace.record(BStage::creation,BStatus::refused,"campaign_configuration_invalid",0,
             {{"difficulty",descriptor.campaign.difficulty},{"already_configured",owner_!=nullptr}}); return false;
     }
-    owner_=&owner; lease_=&lease; options_=descriptor.campaign; state_.enabled=true;
+    owner_=&owner; lease_=&lease; options_=descriptor.campaign; descriptor_=descriptor; state_.enabled=true;
     state_.difficulty=options_.difficulty; state_.resumed=options_.intent==storage::CampaignIntent::resume;
     // exact native suffix, never an index inferred from directory enumeration
     state_.slot="AUTOSAVE0"; directory_=owner.native_root()+"/GAME-"+state_.slot;
@@ -72,14 +85,7 @@ bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,st
         r=lease.campaign_record(true,record);
         if (r.ok() || r.win32_error!=ERROR_FILE_NOT_FOUND) return reject("create_has_checkpoint_or_partial_metadata",{{"ok",r.ok()},{"outcome",r.outcome},{"win32",r.win32_error},{"bytes",record.size()}});
     } else {
-        if (!r.ok() || record!=contract_) return reject("resume_contract_or_options_mismatch",{{"ok",r.ok()},{"outcome",r.outcome},{"win32",r.win32_error},{"bytes",record.size()},{"expected_bytes",contract_.size()},{"contract_equal",record==contract_}});
-        contract_created_=true;
-        owner.btrace.record(diagnostic_stage_,BStatus::entered,"resume_checkpoint_read");
-        r=lease.campaign_record(true,record);
-        if (!r.ok()) return reject("resume_checkpoint_read_failed",{{"outcome",r.outcome},{"win32",r.win32_error},{"bytes",record.size()}});
-        if (!parse_checkpoint(record)) return false;
-        checkpoint_exists_=true;
-        state_.source_checkpoint=state_.checkpoint;
+        if (!configure_resume(record, r)) return false;
     }
     state_.phase="armed";
     owner.btrace.record(diagnostic_stage_,BStatus::succeeded,"campaign_armed",0,
@@ -87,6 +93,13 @@ bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,st
     return true;
 }
 bool Campaign::enabled() const { std::lock_guard<std::recursive_mutex> lock(mutex_); return state_.enabled; }
+bool Campaign::refresh_checkpoint() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    storage::CheckpointPlan plan;
+    if (!lease_->checkpoint_plan(descriptor_,plan).ok() || plan.state!=storage::CheckpointState::confirmed || !parse_checkpoint(plan.text))
+        return reject("checkpoint_recovery_required");
+    state_.source_checkpoint=state_.checkpoint; state_.phase="armed"; return true;
+}
 bool Campaign::restoring_mission_checkpoint() const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     return state_.enabled && state_.native_subtype==2 && mission_destination_.empty();
@@ -254,17 +267,7 @@ bool Campaign::allow_access(uintptr_t data,const std::string& directory,bool wri
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"campaign_load_associated",state_.operation,{{"source_present",data!=0}},data);
     return true;
 }
-bool Campaign::save_record(const std::string& record,bool create) {
-    diagnostic_stage_=BStage::continuity;
-    owner_->btrace.record(diagnostic_stage_,BStatus::entered,"checkpoint_metadata_publish",state_.operation,
-        {{"create",create},{"bytes",record.size()},{"checkpoint",state_.checkpoint}});
-    const auto result=lease_->publish_campaign_record(true,record,create);
-    if (!result.ok()) return reject("checkpoint_metadata_publication_failed",{{"create",create},{"bytes",record.size()},{"outcome",result.outcome},{"win32",result.win32_error}});
-    checkpoint_exists_=true;
-    owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"checkpoint_metadata_published",state_.operation,
-        {{"create",create},{"bytes",record.size()},{"outcome",result.outcome},{"win32",result.win32_error},{"checkpoint",state_.checkpoint}}); return true;
-}
-bool Campaign::write_started(uint64_t operation,const std::string& directory,bool native_factory_matched) {
+bool Campaign::write_started(uint64_t operation,const std::string& directory,bool native_factory_matched,uint64_t steam_user) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled || directory=="PROFILE") return true;
     diagnostic_stage_=BStage::checkpoint_factory;
@@ -275,12 +278,12 @@ bool Campaign::write_started(uint64_t operation,const std::string& directory,boo
         (!state_.map_active && !state_.save_ready) || state_.phase=="native_save_pending") return reject("save_operation_conflict",
             {{"accepting",owner_->accepts_requests()},{"native_factory_matched",native_factory_matched},{"operation",operation},
              {"directory_equal",directory==directory_},{"map_active",state_.map_active},{"save_ready",state_.save_ready},{"phase",phase_id(state_.phase)}});
-    // Invalidate durable completion BEFORE this specific native write can mutate
-    // its files. Interrupted/failed saves cannot reuse an older success receipt.
-    if (!save_record(contract_+"state=native_save_pending\n",!checkpoint_exists_)) return false;
+    const auto begun=lease_->begin_checkpoint(descriptor_,steam_user,checkpoint_write_);
+    if (!begun.ok() || checkpoint_write_.number!=state_.checkpoint+1) return reject("checkpoint_pending_write_failed");
     state_.operation=operation; state_.native_factory_matched=true; state_.native_saved=false; state_.readback_verified=false;
     menu_save_pending_=false;
     if (menu_save_source_!=MenuSaveSource::active_fortress) menu_save_source_=MenuSaveSource::none;
+    state_.archive_complete=false; state_.archive_bytes=0; state_.archive_copy_us=0;
     state_.continuity_persisted=false; state_.phase="native_save_pending";
     owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"checkpoint_write_associated",operation,
         {{"native_factory_matched",native_factory_matched},{"generation",state_.generation_after},{"checkpoint",state_.checkpoint}}); return true;
@@ -288,8 +291,7 @@ bool Campaign::write_started(uint64_t operation,const std::string& directory,boo
 std::vector<SdkFileWrite> Campaign::readback_baseline(uint64_t operation) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled || operation!=state_.operation || state_.phase!="native_save_pending") return {};
-    // Native saves can write only dirty streams. Previously verified files still
-    // belong to the slot; re-read them too before publishing its next checkpoint.
+    // dirty-stream saves need the unchanged files in their readback too
     return expected_;
 }
 std::string Campaign::checkpoint_text(const SdkWriteObservation& observation) const {
@@ -300,8 +302,9 @@ std::string Campaign::checkpoint_text(const SdkWriteObservation& observation) co
 }
 bool Campaign::backup_continuity(const SdkWriteObservation& observation, storage::TransportMetadata& out) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // the verified readback can finish before the campaign future observes native completion
     if (!state_.enabled || observation.operation != state_.operation || observation.directory != directory_ ||
-        state_.phase != "native_save_pending" || (!state_.map_active && !state_.save_ready) || !state_.native_saved || state_.checkpoint == UINT64_MAX)
+        state_.phase != "native_save_pending" || state_.checkpoint == UINT64_MAX)
         return false;
     out.contract = contract_;
     out.checkpoint = checkpoint_text(observation);
@@ -312,57 +315,34 @@ bool Campaign::backup_continuity(const SdkWriteObservation& observation, storage
 bool Campaign::parse_checkpoint(std::string_view value) {
     diagnostic_stage_=BStage::resume;
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"checkpoint_metadata_parse",0,{{"bytes",value.size()},{"contract_bytes",contract_.size()}});
-    if (value.substr(0,contract_.size())!=contract_) return reject("checkpoint_contract_prefix_mismatch",{{"bytes",value.size()},{"contract_bytes",contract_.size()}});
-    value.remove_prefix(contract_.size());
-    std::string_view part; uint32_t count=0;
-    if (!take(value,"checkpoint=",part)) return reject("checkpoint_number_field_missing");
-    if (!number(part,state_.checkpoint) || !state_.checkpoint) return reject("checkpoint_number_invalid",{{"field_bytes",part.size()},{"checkpoint",state_.checkpoint}});
-    if (!take(value,"map=",part)) return reject("checkpoint_map_field_missing");
-    if (part.empty() || part.size()>191) return reject("checkpoint_map_length_invalid",{{"map_bytes",part.size()}});
-    if (part.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.")!=part.npos) return reject("checkpoint_map_characters_invalid");
-    state_.map=part;
-    state_.native_subtype=1; // legacy records describe the campaign snapshot
-    if (value.substr(0,8)=="subtype=") {
-        if (!take(value,"subtype=",part) || !number(part,state_.native_subtype) ||
-            (state_.native_subtype!=1 && state_.native_subtype!=2)) return reject("checkpoint_subtype_invalid");
+    storage::CheckpointRecord record;
+    const auto result = storage::parse_checkpoint(value,contract_,directory_,record);
+    if (!result.ok()) return reject(result.outcome==storage::Outcome::interrupted_preparation ?
+        "checkpoint_save_interrupted" : "checkpoint_metadata_invalid",{{"outcome",result.outcome}});
+    state_.checkpoint=record.number; state_.map=record.map; state_.native_subtype=record.subtype;
+    expected_.clear();
+    for (const auto& file:record.files) {
+        SdkFileWrite native{}; const auto name=directory_+"/"+file.name;
+        std::memcpy(native.name.data(),name.c_str(),name.size()+1);
+        native.size=file.size; native.sha256=file.sha256; expected_.push_back(native);
     }
-    if (!take(value,"files=",part)) return reject("checkpoint_file_count_missing");
-    if (!number(part,count) || !count || count>64) return reject("checkpoint_file_count_invalid",{{"count",count},{"field_bytes",part.size()},{"limit",64}});
-    std::vector<SdkFileWrite> files;
-    for (uint32_t i=0;i<count;++i) {
-        owner_->btrace.record(diagnostic_stage_,BStatus::entered,"checkpoint_file_parse",0,{{"file_index",i},{"file_count",count}});
-        if (!take(value,"file=",part)) return reject("checkpoint_file_field_missing",{{"file_index",i},{"file_count",count}});
-        const auto comma=part.find(','), last=part.rfind(','); SdkFileWrite f{};
-        if (comma==part.npos || comma==last) return reject("checkpoint_file_delimiters_invalid",{{"file_index",i},{"field_bytes",part.size()}});
-        if (comma>=f.name.size()) return reject("checkpoint_file_name_length_invalid",{{"file_index",i},{"name_bytes",comma},{"limit",f.name.size()}});
-        if (part.substr(0,directory_.size()+1)!=directory_+"/") return reject("checkpoint_file_namespace_mismatch",{{"file_index",i}});
-        if (!number(part.substr(comma+1,last-comma-1),f.size) || !f.size) return reject("checkpoint_file_size_invalid",{{"file_index",i},{"size",f.size}});
-        if (part.size()-last-1!=64) return reject("checkpoint_file_hash_length_invalid",{{"file_index",i},{"hash_chars",part.size()-last-1},{"expected_chars",64}});
-        std::memcpy(f.name.data(),part.data(),comma);
-        if (std::any_of(files.begin(),files.end(),[&](const auto& p){return steam_name_equal(p.name.data(),f.name.data());})) return reject("checkpoint_file_name_duplicate",{{"file_index",i}});
-        for (size_t n=0;n<32;++n) {
-            const auto pair=part.substr(last+1+n*2,2); unsigned byte=0;
-            const auto result=std::from_chars(pair.data(),pair.data()+2,byte,16);
-            if (result.ec!=std::errc{} || result.ptr!=pair.data()+2) return reject("checkpoint_file_hash_encoding_invalid",{{"file_index",i},{"hash_byte",n},{"parse_error",result.ec}});
-            f.sha256[n]=static_cast<unsigned char>(byte);
-        }
-        files.push_back(f);
-    }
-    if (value!="state=native_saved_readback_verified\n") return reject("checkpoint_completion_state_invalid",{{"remaining_bytes",value.size()}});
-    expected_=std::move(files);
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"checkpoint_metadata_verified",0,{{"checkpoint",state_.checkpoint},{"expected_files",expected_.size()}}); return true;
 }
-void Campaign::write_observed(uint64_t operation,bool terminal,bool successful,engine::Memory& memory) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!state_.enabled || operation!=state_.operation) return;
-    diagnostic_stage_=BStage::continuity;
-    const auto actual=owner_->native_writes.snapshot(operation);
+void Campaign::observe_receipt(const sc_save_write_snapshot& actual, uint64_t operation, bool terminal,
+                               bool successful) {
     state_.native_saved=actual.native_state==0 && actual.native_outcome==0 && actual.native_value==1 &&
         (actual.flags&SC_SAVE_WRITE_SDK_SUCCEEDED) && (actual.flags&SC_SAVE_WRITE_CALLBACKS_SUCCEEDED);
     state_.readback_verified=(actual.flags&SC_SAVE_WRITE_READBACK_HASHES) && (actual.flags&SC_SAVE_WRITE_READBACK_TERMINAL) && !(actual.flags&SC_SAVE_WRITE_READBACK_ERROR);
     owner_->btrace.record(diagnostic_stage_,terminal?BStatus::entered:BStatus::pending,"checkpoint_native_receipt",operation,
         {{"terminal",terminal},{"successful",successful},{"native_state",actual.native_state},{"native_outcome",actual.native_outcome},
          {"native_value",actual.native_value},{"flags",actual.flags},{"native_saved",state_.native_saved},{"readback_verified",state_.readback_verified},{"map_pending",map_pending_}});
+}
+void Campaign::write_observed(uint64_t operation, bool terminal, bool successful, engine::Memory& memory) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!state_.enabled || operation != state_.operation) return;
+    diagnostic_stage_ = BStage::continuity;
+    const auto actual = owner_->native_writes.snapshot(operation);
+    observe_receipt(actual, operation, terminal, successful);
     if (!terminal) return;
     SdkWriteObservation manifest;
     const bool receipt_ok=successful && state_.native_saved && state_.readback_verified;
@@ -373,6 +353,14 @@ void Campaign::write_observed(uint64_t operation,bool terminal,bool successful,e
             {"native_saved",state_.native_saved},{"readback_verified",state_.readback_verified},{"manifest_observed",receipt_ok},
             {"manifest_valid",manifest_ok},{"directory_equal",manifest.directory==directory_},{"file_count",manifest.payloads.size()}}); return;
     }
+    const auto archive=owner_->native_writes.backup(operation);
+    const auto progress=archive ? archive->progress() : BackupProgress{};
+    state_.archive_complete=archive && progress.state==BackupState::complete;
+    state_.archive_bytes=progress.output.bytes; state_.archive_copy_us=progress.copy_us;
+    if (!state_.archive_complete) {
+        reject("checkpoint_archive_incomplete",{{"archive_attached",archive!=nullptr},{"storage_complete",progress.storage_complete},
+            {"failure",progress.failure},{"outcome",progress.storage_result.outcome},{"win32",progress.storage_result.win32_error}}); return;
+    }
     if (map_pending_) {
         checkpoint_awaiting_transition_=std::move(manifest);
         owner_->btrace.record(diagnostic_stage_,BStatus::pending,"checkpoint_awaits_transition",operation,
@@ -381,16 +369,12 @@ void Campaign::write_observed(uint64_t operation,bool terminal,bool successful,e
     persist_checkpoint(manifest,memory);
 }
 ProfilePublication Campaign::finish_profile_write(Session& owner,const ProfileWrite& write,engine::Memory& memory) {
-    // Serialize the publication decision with write_started and checkpoint
-    // completion. Native PROFILE and gameplay futures may finish independently;
-    // the first gameplay payload can exist before game.details is written.
+    // profile can finish before the campaign's complete payload and readback
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (state_.enabled && owner_==&owner && owner.accepts_requests() &&
         state_.phase=="native_save_pending" && write.campaign==0 &&
         write.choice.index==0 && steam_name_equal(write.choice.name.data(),state_.slot)) {
-        // The exact admitted campaign operation already owns durable selection
-        // publication in persist_checkpoint, after native success AND readback.
-        // PROFILE's native completion is valid now; it is not a checkpoint receipt.
+        // the campaign receipt owns selection persistence for this operation
         owner.btrace.record(BStage::profile_publish,BStatus::pending,"selection_deferred_to_native_checkpoint",write.sequence,
             {{"checkpoint_operation",state_.operation},{"checkpoint",state_.checkpoint},{"campaign",write.campaign}});
         return ProfilePublication::checkpoint_owned;
@@ -399,6 +383,13 @@ ProfilePublication Campaign::finish_profile_write(Session& owner,const ProfileWr
 }
 void Campaign::persist_checkpoint(const SdkWriteObservation& manifest,engine::Memory& memory) {
     diagnostic_stage_=BStage::continuity;
+    const auto archive=owner_->native_writes.backup(state_.operation);
+    if (!archive) { reject("checkpoint_archive_incomplete"); return; }
+    const auto path=archive->progress().output.path;
+    const auto basename=path.substr(path.find_last_of(L"\\/")+1);
+    if (!lease_->stage_checkpoint(checkpoint_write_,basename).ok() || !lease_->receipt_checkpoint(checkpoint_write_).ok()) {
+        reject("checkpoint_receipt_write_failed"); return;
+    }
     ProfileChoice choice{}; ProfileWrite selection{};
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"checkpoint_selection_capture",state_.operation,
         {{"checkpoint_before",state_.checkpoint},{"file_count",manifest.payloads.size()}});
@@ -409,8 +400,11 @@ void Campaign::persist_checkpoint(const SdkWriteObservation& manifest,engine::Me
         {{"index",choice.index},{"slot_equal",choice.name.data()==state_.slot}});
     if (!owner_->persist_profile_write(selection,memory)) { reject("checkpoint_selection_persistence_failed",
         {{"choice_valid",choice_valid},{"captured",captured},{"persisted",false},{"index",choice.index}}); return; }
-    ++state_.checkpoint;
-    if (!save_record(checkpoint_text(manifest),false)) return;
+    if (!lease_->commit_checkpoint(checkpoint_write_).ok()) { reject("checkpoint_commit_write_failed"); return; }
+    state_.checkpoint=checkpoint_write_.number;
+    const auto cleanup=lease_->prune_checkpoints();
+    owner_->btrace.record(diagnostic_stage_,cleanup.ok()?BStatus::succeeded:BStatus::pending,"checkpoint_retention",state_.operation,
+        {{"outcome",cleanup.outcome},{"win32",cleanup.win32_error}});
     expected_=manifest.payloads; checkpoint_exists_=true; state_.continuity_persisted=true; state_.phase="checkpoint_saved";
     if (menu_active_) state_.save_ready=false;
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"checkpoint_continuity_persisted",state_.operation,
@@ -450,7 +444,6 @@ bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t ima
         {{"actual_count",count},{"expected_count",primary_count},{"persisted_count",expected_.size()},{"metadata_only",metadata_only}});
     bool backup_group=false;
     bool checkpoint_changed=false;
-    std::vector<SdkFileWrite> loaded;
     std::vector<std::string> seen;
     for (int32_t i=0;i<count;++i) {
         owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_payload_validate",state_.operation,{{"file_index",i},{"file_count",count}},data);
@@ -481,22 +474,9 @@ bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t ima
             owner_->btrace.record(diagnostic_stage_,BStatus::pending,"resume_checkpoint_drift",state_.operation,
                 {{"file_index",i},{"actual_size",size},{"expected_size",expected->size},{"hash_equal",hash==expected->sha256},{"backup_group",backup_group}},data);
         }
-        auto actual=*expected; actual.size=static_cast<uint32_t>(size); actual.sha256=hash;
-        loaded.push_back(actual);
         seen.emplace_back(expected->name.data());
     }
-    if (checkpoint_changed) {
-        std::vector<SdkFileWrite> current;
-        if (!snapshot_campaign_manifest(*owner_,memory,directory_,current)) return reject("resume_current_provider_unavailable");
-        for (size_t i=0;i<loaded.size();++i) {
-            const auto& file=loaded[i];
-            const auto match=std::find_if(current.begin(),current.end(),[&](const auto& candidate){return steam_name_equal(candidate.name.data(),file.name.data());});
-            if (match==current.end() || match->size!=file.size || match->sha256!=file.sha256)
-                return reject("resume_payload_hash_mismatch",{{"file_index",i},{"actual_size",file.size},{"expected_size",match==current.end()?0:match->size},{"hash_equal",false}});
-        }
-        // the native decoder authenticates this owned snapshot; future partial saves use its complete inventory
-        expected_=std::move(current);
-    }
+    if (checkpoint_changed) return reject("resume_payload_hash_mismatch");
     state_.source_verified=true; state_.phase="source_verified";
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"resume_source_verified",state_.operation,
         {{"file_count",count},{"expected_count",primary_count},{"persisted_count",expected_.size()},{"backup_group",backup_group},

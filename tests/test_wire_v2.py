@@ -59,6 +59,24 @@ class WireV2Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             codec.encode('sc_save_admission_snapshot', result)
 
+    def test_campaign_revision4_bounds(self):
+        for count in (1, 21):
+            payload = dict(revision=7, count=count, selected_id=2)
+            data = codec.encode_variant(23, 4, 0, payload)
+            self.assertEqual(codec.decode_variant(23, 4, data), (0, payload))
+        for count in (0, 22):
+            with self.assertRaises(ValueError):
+                codec.encode_variant(23, 4, 0, dict(revision=7, count=count, selected_id=2))
+        item = self.fixtures['campaign_row_unknown']
+        data = b''.join(bytes.fromhex(f['hex']) for f in item['fields'])[165:]
+        tag, payload = codec.decode_variant(22, 4, data)
+        for known in (0, 1):
+            payload['rewards_known'] = known
+            self.assertEqual(codec.decode_variant(22, 4, codec.encode_variant(22, 4, tag, payload)), (tag, payload))
+        payload['rewards_known'] = 2
+        with self.assertRaises(ValueError):
+            codec.encode_variant(22, 4, tag, payload)
+
     def test_requests_and_hello(self):
         for name, item in self.fixtures.items():
             data = b''.join(bytes.fromhex(f['hex']) for f in item['fields'])[32:]
@@ -75,8 +93,19 @@ class WireV2Tests(unittest.TestCase):
                     submission = codec.decode('submission', data[:length])
                     self.assertEqual(submission['reference']['command_id'], 'fixture')
                     self.assertEqual(codec.encode('submission', submission), data[:length])
-                    tag, payload = codec.decode_variant(18, 1, data[length:])
-                    self.assertEqual(codec.encode_variant(18, 1, tag, payload), data[length:])
+                    reference = submission['reference']
+                    command, revision = reference['command_type'], reference['payload_revision']
+                    if name == 'unsupported_revision':
+                        with self.assertRaises(ValueError):
+                            codec.decode_variant(command, revision, data[length:])
+                        continue
+                    tag, payload = codec.decode_variant(command, revision, data[length:])
+                    self.assertEqual(codec.encode_variant(command, revision, tag, payload), data[length:])
+                    if command == 22:
+                        self.assertEqual(payload['rewards_known'], item['expect']['rewards_known'])
+                    elif command == 23:
+                        self.assertEqual(payload['count'], item['expect']['count'])
+                        self.assertEqual(payload['selected_id'], item['expect']['selected_id'])
                 elif not item['response']:
                     typename = 'ack' if item['operation'] == 5 else 'command_reference'
                     value = codec.decode(typename, data)

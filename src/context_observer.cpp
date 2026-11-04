@@ -1,14 +1,10 @@
+#include "engine/builds/build_descriptor.h"
 #include "context_observer.h"
 #include <cstring>
 #include <cmath>
 
 namespace sentinel::context {
 namespace {
-// SHA256 9809708c...1247, Ghidra 12.1.3/ReVa 7.3.1. Native mappath handler
-// RVA 0x437f10 -> root+0x50 -> map vtable+0x50 -> getter RVA 0x69a850.
-// Constructor RVA 0x685f50 owns idStr at +0x9a060; setter 0x6abf00 and
-constexpr uint32_t root_vtable_rva = 0x2aaa730, map_vtable_rva = 0x2ab30c8;
-constexpr size_t name_offset = 0x9a060;
 sc_context_field unknown(uint32_t reason, uint32_t error = 0) {
     return {SC_OBSERVATION_UNKNOWN, reason, 0, error};
 }
@@ -36,11 +32,12 @@ struct Frame {
 };
 Frame frame(engine::Memory& memory, const engine::Binding& b) {
     Frame f;
+    const auto& descriptor = *b.descriptor;
     auto status = read(memory, b.root, 0, f.root_vtable);
-    if (!status.reason && f.root_vtable != b.image.base + root_vtable_rva)
+    if (!status.reason && f.root_vtable != b.image.base + descriptor.root_vtable)
         status.reason = SC_REASON_INVALID_VALUE;
     if (status.reason) { f.state_result = f.map_result = status; return f; }
-    f.state_result = read(memory, b.root, 0x44, f.state);
+    f.state_result = read(memory, b.root, descriptor.state_offset, f.state);
     if (!f.state_result.reason && f.state.value > SC_GAME_IN_GAME)
         f.state_result.reason = SC_REASON_INVALID_VALUE;
     if (f.state_result.reason) { f.map_result = f.state_result; return f; }
@@ -48,13 +45,13 @@ Frame frame(engine::Memory& memory, const engine::Binding& b) {
         f.map_result.reason = f.state.value == SC_GAME_LOADING ? SC_REASON_TRANSITION : SC_CONTEXT_MENU_WORLD;
         return f;
     }
-    status = read(memory, b.root, 0x50, f.map);
+    status = read(memory, b.root, descriptor.map_offset, f.map);
     if (!status.reason && !f.map) status.reason = SC_REASON_PARENT_NULL;
     if (!status.reason && f.map % 8) status.reason = SC_REASON_INVALID_VALUE;
     if (!status.reason) status = read(memory, f.map, 0, f.map_vtable);
-    if (!status.reason && f.map_vtable != b.image.base + map_vtable_rva)
+    if (!status.reason && f.map_vtable != b.image.base + descriptor.map_vtable)
         status.reason = SC_REASON_INVALID_VALUE;
-    if (!status.reason) status = read(memory, f.map, name_offset, f.string);
+    if (!status.reason) status = read(memory, f.map, descriptor.name_offset, f.string);
     if (!status.reason) {
         // idStr capacity occupies bits 0..29; bit 30 owns the allocation and
         // bit 31 permits growth. Inline and heap storage use the same data pointer.

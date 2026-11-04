@@ -4,6 +4,7 @@
 #include <array>
 #include <vector>
 
+namespace sentinel::builds { struct BuildDescriptor; }
 namespace sentinel::engine {
 struct ReadResult { uint32_t reason = SC_REASON_NONE, error = 0; };
 /* Internal fixed-field adapter only; never accepts protocol-supplied addresses. */
@@ -26,6 +27,7 @@ bool add(uintptr_t address, size_t offset, size_t width, uintptr_t& result);
 ReadResult read_image(Memory& memory, uintptr_t base, Image& image);
 struct Binding {
     sc_engine_snapshot metadata{};
+    const builds::BuildDescriptor* descriptor = nullptr;
     Image image;
     uintptr_t root = 0;
     std::array<uintptr_t, 3> globals{};

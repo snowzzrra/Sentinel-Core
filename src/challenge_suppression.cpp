@@ -5,6 +5,7 @@
 #include "save_session.h"
 #include "weapon_points.h"
 #include "MinHook.h"
+#include "engine/hooks/hook_set.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -12,6 +13,7 @@
 
 namespace sentinel::challenge {
 namespace {
+hooks::HookSet hook_set("challenge");
 
 std::atomic<bool> ready{false};
 std::atomic<bool> install_attempted{false};
@@ -43,6 +45,7 @@ using ChallengeRead = uint8_t (*)(uintptr_t, uintptr_t);
 ChallengeUpdate original_update = nullptr;
 ChallengeRead original_read = nullptr;
 uint8_t* adapter = nullptr;
+void* original_seam = nullptr;
 
 void hex_bytes(const char* hex, std::array<uint8_t, 32>& out) {
     const auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
@@ -199,8 +202,28 @@ bool evaluate(uintptr_t player, uint32_t currency, int32_t delta, uint8_t notify
 }
 
 bool seam_predicate(uintptr_t player, uint32_t currency, int32_t delta, uint8_t notify, uintptr_t return_site) {
-    __try { return evaluate(player, currency, delta, notify, return_site); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    const auto lease = hook_set.enter(2);
+    __try {
+        if (!lease.committed) return false;
+        __try { return evaluate(player, currency, delta, notify, return_site); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { ready.store(false, std::memory_order_release); return false; }
+    } __finally { hook_set.leave(lease); }
+}
+
+uint8_t update_hook_entry(uintptr_t manager, uintptr_t record, uintptr_t p3, uintptr_t p4, uintptr_t p5) {
+    const auto lease = hook_set.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_update)>(lease.original)(manager, record, p3, p4, p5);
+        return update_hook(manager, record, p3, p4, p5);
+    } __finally { hook_set.leave(lease); }
+}
+
+uint8_t read_hook_entry(uintptr_t manager, uintptr_t decl) {
+    const auto lease = hook_set.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_read)>(lease.original)(manager, decl);
+        return read_hook(manager, decl);
+    } __finally { hook_set.leave(lease); }
 }
 
 native::Target target(uintptr_t base, uint32_t offset, const char* hex) {
@@ -267,6 +290,28 @@ bool consume_qualified_battery_toast() {
     return true;
 }
 
+bool validate_currency_seam(engine::Memory& memory, const engine::Image& image, HANDLE stop, uint64_t deadline) {
+    if (!unique_leaf(memory, image, image_base + 0x14703b0,
+                     "4c8bd24c8bc94885d20f8485000000488b4a084533c00fb60184c074180f1f00", stop, deadline))
+        return false;
+    if (!image.contains(seam::currency_entry_rva, seam::wup_entry_patch_bytes,
+                        IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE))
+        return false;
+    if (!native::function_window(memory, image, image_base + seam::currency_entry_rva,
+                                 image_base + seam::currency_seam_rva, 16) ||
+        !native::function_window(memory, image, image_base + seam::currency_entry_rva,
+                                 image_base + seam::currency_continuation_rva, 16) ||
+        !native::function_window(memory, image, image_base + 0x1474a00, image_base + 0x1475452, 23) ||
+        !native::function_window(memory, image, image_base + 0x1474a00, image_base + 0x147546e, 16))
+        return false;
+    if (!bytes_match(memory, image_base + seam::currency_seam_rva, "440184b16ccd0400488b05a2832b0383", 16) ||
+        !bytes_match(memory, image_base + seam::currency_continuation_rva, "488d8be05a02008bd6e8888aebff83fe", 16) ||
+        !bytes_match(memory, image_base + 0x1475452, "488b4e104533c9c7442420ffffffff418d5104458d4101", 23) ||
+        !bytes_match(memory, image_base + 0x147546e, "418b953c01000083faff741b488b4e10", 16) ||
+        !call_site(memory, image_base, 0x147546e, seam::currency_entry_rva))
+        return false;
+    return true;
+}
 void install(const engine::Binding& binding, HANDLE stop) {
     if (install_attempted.exchange(true, std::memory_order_acq_rel)) return;
     image_base = binding.image.base;
@@ -279,43 +324,36 @@ void install(const engine::Binding& binding, HANDLE stop) {
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets()) {
 #endif
-    if (!unique_leaf(memory, binding.image, image_base + 0x14703b0,
-            "4c8bd24c8bc94885d20f8485000000488b4a084533c00fb60184c074180f1f00", stop, deadline)) return;
-    if (!binding.image.contains(seam::currency_entry_rva, seam::wup_entry_patch_bytes,
-            IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE)) return;
-    if (!native::function_window(memory, binding.image, image_base + seam::currency_entry_rva,
-            image_base + seam::currency_seam_rva, 16) ||
-        !native::function_window(memory, binding.image, image_base + seam::currency_entry_rva,
-            image_base + seam::currency_continuation_rva, 16) ||
-        !native::function_window(memory, binding.image, image_base + 0x1474a00, image_base + 0x1475452, 23) ||
-        !native::function_window(memory, binding.image, image_base + 0x1474a00, image_base + 0x147546e, 16)) return;
-    if (!bytes_match(memory, image_base + seam::currency_seam_rva, "440184b16ccd0400488b05a2832b0383", 16) ||
-        !bytes_match(memory, image_base + seam::currency_continuation_rva, "488d8be05a02008bd6e8888aebff83fe", 16) ||
-        !bytes_match(memory, image_base + 0x1475452,
-            "488b4e104533c9c7442420ffffffff418d5104458d4101", 23) ||
-        !bytes_match(memory, image_base + 0x147546e, "418b953c01000083faff741b488b4e10", 16) ||
-        !call_site(memory, image_base, 0x147546e, seam::currency_entry_rva)) return;
+        if (!validate_currency_seam(memory, binding.image, stop, deadline)) return;
 
 #ifdef SC_NATIVE_TESTING
     }
 #endif
-    adapter = static_cast<uint8_t*>(VirtualAlloc(nullptr, seam::adapter_size,
-        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    constexpr auto code_size = seam::adapter_size + seam::replay_size;
+    adapter = static_cast<uint8_t*>(VirtualAlloc(nullptr, code_size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!adapter) return;
-    void* trampoline = nullptr;
-    if (MH_CreateHook(reinterpret_cast<void*>(image_base + seam::currency_seam_rva), adapter, &trampoline) != MH_OK) return;
+    const auto release_adapter = [] {
+        if (VirtualFree(adapter, 0, MEM_RELEASE)) adapter = nullptr;
+        else save::session().btrace.record(save::BStage::native_start, save::BStatus::refused,
+            "challenge_adapter_retained", 0, {{"win32", GetLastError()}});
+    };
+    auto* replay = adapter + seam::adapter_size;
+    seam::write_replay(replay, image_base + seam::currency_seam_rva + seam::mutation_size);
     seam::write_adapter(adapter, reinterpret_cast<uintptr_t>(&seam_predicate),
-        reinterpret_cast<uintptr_t>(trampoline), image_base + seam::currency_continuation_rva);
+        reinterpret_cast<uintptr_t>(replay), image_base + seam::currency_continuation_rva);
     DWORD previous = 0;
-    if (!VirtualProtect(adapter, seam::adapter_size, PAGE_EXECUTE_READ, &previous)) return;
-    FlushInstructionCache(GetCurrentProcess(), adapter, seam::adapter_size);
-    if (MH_CreateHook(reinterpret_cast<void*>(image_base + 0x1474a00),
-            reinterpret_cast<void*>(update_hook), reinterpret_cast<void**>(&original_update)) != MH_OK) return;
-    if (MH_CreateHook(reinterpret_cast<void*>(image_base + 0x14703b0),
-            reinterpret_cast<void*>(read_hook), reinterpret_cast<void**>(&original_read)) != MH_OK) return;
-    if (MH_EnableHook(reinterpret_cast<void*>(image_base + 0x1474a00)) != MH_OK) return;
-    if (MH_EnableHook(reinterpret_cast<void*>(image_base + 0x14703b0)) != MH_OK) return;
-    if (MH_EnableHook(reinterpret_cast<void*>(image_base + seam::currency_seam_rva)) != MH_OK) return;
+    if (!VirtualProtect(adapter, code_size, PAGE_EXECUTE_READ, &previous) ||
+        !FlushInstructionCache(GetCurrentProcess(), adapter, code_size)) { release_adapter(); return; }
+    const hooks::HookSpec specs[]{
+        hooks::bind(image_base + 0x1474a00, update_hook_entry, original_update),
+        hooks::bind(image_base + 0x14703b0, read_hook_entry, original_read),
+        {image_base + seam::currency_seam_rva, adapter, &original_seam}};
+    if (!hook_set.install(specs, stop)) {
+        const auto snapshot = hook_set.inspect();
+        if (snapshot.state == hooks::State::empty && snapshot.installation.enabled < 3) release_adapter();
+        return;
+    }
     ready.store(true, std::memory_order_release);
 }
 

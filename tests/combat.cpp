@@ -1,6 +1,6 @@
 #include "combat.h"
 #include "combat_presentation.h"
-#include "protocol.h"
+#include "sentinel_protocol_generated.h"
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -45,6 +45,7 @@ sc_combat_query query_for(const Context& ctx) {
 }
 }
 int main(int argc, char** argv) {
+    (void)argc; (void)argv;
     auto model = std::make_unique<Model>();
     const auto ctx = context();
     {
@@ -153,35 +154,6 @@ int main(int argc, char** argv) {
     page.scope.pid = source.pid; page.scope.process_created = source.process_created;
     std::memcpy(page.scope.instance_id, source.instance.data(), 16);
     page.availability = SC_NATIVE_ENABLED; model->snapshot(query, page);
-    Message wire{};
-    const auto size = encode_combat_response(wire, WireResult::ok, source, page);
-    Snapshot decoded_source{}; sc_combat_snapshot decoded_page{}; WireResult result{};
-    check(size && decode_combat_response(wire, size, result, decoded_source, decoded_page), "combat wire roundtrip failed");
-    check(decoded_page.qualified_kills == 2 && !std::strcmp(decoded_page.namespace_id, query.namespace_id),
-          "wire changed cumulative facts or namespace");
-    if (argc >= 2 && size) {
-        std::ofstream fixture(argv[1], std::ios::binary);
-        fixture.write(reinterpret_cast<const char*>(wire.data()), static_cast<std::streamsize>(size));
-        check(static_cast<bool>(fixture), "wire fixture write failed");
-    }
-    check(!decode_combat_response(wire, size - 1, result, decoded_source, decoded_page), "truncated frame accepted");
-    Message request{}; const auto request_size = encode_combat_request(request, source.pid, query);
-    if (argc >= 3) {
-        std::ofstream fixture(argv[2], std::ios::binary);
-        fixture.write(reinterpret_cast<const char*>(request.data()), static_cast<std::streamsize>(request_size));
-        check(static_cast<bool>(fixture), "combat request fixture write failed");
-    }
-    uint16_t operation = 0; sc_combat_query decoded_query{};
-    check(decode_request(request, request_size, &operation, nullptr, nullptr, nullptr, nullptr,
-        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-        nullptr, nullptr, &decoded_query) == WireResult::ok && operation == combat_operation &&
-        !std::strcmp(decoded_query.namespace_id, query.namespace_id) && decoded_query.map_count == 1 &&
-        !std::strcmp(decoded_query.maps[0], query.maps[0]), "combat selection request changed");
-    check(decode_request(request, request_size - 1) == WireResult::malformed, "truncated combat query accepted");
-    auto invalid_query = query; invalid_query.map_count = 2;
-    std::memcpy(invalid_query.maps[1], invalid_query.maps[0], SC_CONTEXT_MAP_CAPACITY);
-    check(!valid_query(invalid_query) && !encode_combat_request(request, source.pid, invalid_query),
-          "duplicate map selection accepted");
     const auto ctx2 = context(2); model->registered(ctx2.world, 0x30000, 3, 0x123456);
     check(!model->confirmed_dead(ctx2.world, 0x30000, 3, 0x123456), "reused registration kept a prior death");
     const auto next = model->capture(ctx2.world, 0x30000, 3, 0x123456, 109, 20, 17);
@@ -285,23 +257,6 @@ int main(int argc, char** argv) {
     check(progress.submit(presentation, scope, true).status == 0 && !progress.view(context().namespace_id).total,
           "another room cannot see prior progress");
     presentation.target = 100; presentation.visible = 1;
-    const auto presentation_size = encode_combat_presentation_request(wire, presentation);
-    sc_combat_presentation_request decoded_presentation{};
-    check(presentation_size == 201 && decode_request(wire, presentation_size, &operation, nullptr, nullptr,
-        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-        nullptr, nullptr, &decoded_presentation) == WireResult::ok && decoded_presentation.total == 3,
-        "presentation request roundtrip preserves progress");
-    check(decode_request(wire, presentation_size - 1) == WireResult::malformed,
-          "truncated presentation request refused");
-    const auto accepted_progress = progress.submit(presentation, scope, true);
-    const auto progress_response_size = encode_combat_presentation_response(wire, WireResult::ok, source, accepted_progress);
-    sc_combat_presentation_result decoded_progress{};
-    check(progress_response_size && decode_combat_presentation_response(wire, progress_response_size, result,
-        decoded_source, decoded_progress) && decoded_progress.total == 3 && decoded_progress.target == 100 &&
-        decoded_progress.request_id == presentation.execution.request_id && decoded_progress.nonce[0] == 1,
-        "presentation response preserves progress and request identity");
-    check(!decode_combat_presentation_response(wire, progress_response_size - 1, result, decoded_source, decoded_progress),
-          "truncated presentation response refused");
     if (!failures) std::cout << "combat registration/delivery PASS\n";
     return failures ? 1 : 0;
 }

@@ -101,7 +101,9 @@ void result_execution(generated::NativeResult& value, const sc_diagnostic_result
 generated::NativeResult initial_value(const generated::NativeRequest& payload) {
     return std::visit([](const auto& r) -> generated::NativeResult {
         using T = std::decay_t<decltype(r)>;
-        if constexpr (std::is_same_v<T, sc_weapon_points_request>) return weapon_points::initial(r);
+        if constexpr (std::is_same_v<T, sc_progression_request>) { sc_progression_result out{}; out.slayer_key_quantity = -1; return out; }
+        else if constexpr (std::is_same_v<T, sc_currency_request>) return currencies::initial(r);
+        else if constexpr (std::is_same_v<T, sc_weapon_points_request>) return weapon_points::initial(r);
         else if constexpr (std::is_same_v<T, sc_inventory_request>) return inventory::initial(r);
         else if constexpr (std::is_same_v<T, sc_arsenal_request>) return [] (const auto& request) { sc_arsenal_result value{}; arsenal::initial(request, value); return value; }(r);
         else if constexpr (std::is_same_v<T, sc_runes_request>) return runes::initial(r);
@@ -165,22 +167,25 @@ bool backup_options(const sc_save_backup_request& b) {
     }
     return true;
 }
+template<class T> bool valid_request(const T& value) {
+    if constexpr (std::is_same_v<T, sc_save_backup_request>) return backup_options(value);
+    else if constexpr (std::is_same_v<T, sc_weapon_points_request>) return weapon_points::valid(value);
+    else if constexpr (std::is_same_v<T, sc_inventory_request>) return inventory::valid(value);
+    else if constexpr (std::is_same_v<T, sc_arsenal_request>) return arsenal::valid(value);
+    else if constexpr (std::is_same_v<T, sc_runes_request>) return runes::valid(value);
+    else if constexpr (std::is_same_v<T, sc_special_request>) return special::valid(value);
+    else if constexpr (std::is_same_v<T, sc_deathlink_request>) return deathlink::valid(value);
+    else if constexpr (std::is_same_v<T, sc_command_request>) return commands::valid(value);
+    else if constexpr (std::is_same_v<T, generated::NativeCampaign>) return value.request.namespace_id[64] == 0;
+    else if constexpr (std::is_same_v<T, sc_automap_request>) return value.namespace_id[64] == 0;
+    else if constexpr (std::is_same_v<T, sc_combat_presentation_request>) return value.namespace_id[64] == 0;
+    else return std::is_same_v<T, sc_diagnostic_request>;
+}
+bool valid_request(const sc_mission_access_request& value) { return value.kind == 0 && value.stage_id != 0; }
+bool valid_request(const sc_progression_request& value) { return value.kind == 0; }
+bool valid_request(const sc_currency_request& value) { return currencies::valid(value); }
 bool valid_payload(const generated::NativeRequest& payload) {
-    return std::visit([](const auto& value) {
-        using T = std::decay_t<decltype(value)>;
-        if constexpr (std::is_same_v<T, sc_save_backup_request>) return backup_options(value);
-        else if constexpr (std::is_same_v<T, sc_weapon_points_request>) return weapon_points::valid(value);
-        else if constexpr (std::is_same_v<T, sc_inventory_request>) return inventory::valid(value);
-        else if constexpr (std::is_same_v<T, sc_arsenal_request>) return arsenal::valid(value);
-        else if constexpr (std::is_same_v<T, sc_runes_request>) return runes::valid(value);
-        else if constexpr (std::is_same_v<T, sc_special_request>) return special::valid(value);
-        else if constexpr (std::is_same_v<T, sc_deathlink_request>) return deathlink::valid(value);
-        else if constexpr (std::is_same_v<T, sc_command_request>) return commands::valid(value);
-        else if constexpr (std::is_same_v<T, generated::NativeCampaign>) return value.request.namespace_id[64] == 0;
-        else if constexpr (std::is_same_v<T, sc_automap_request>) return value.namespace_id[64] == 0;
-        else if constexpr (std::is_same_v<T, sc_combat_presentation_request>) return value.namespace_id[64] == 0;
-        else return std::is_same_v<T, sc_diagnostic_request>;
-    }, payload);
+    return std::visit([](const auto& value) { return valid_request(value); }, payload);
 }
 void bind_execution(Diagnostics::Slot& slot) {
     std::visit([&](auto& value) {

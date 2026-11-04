@@ -1,8 +1,10 @@
+#include "engine/builds/build_descriptor.h"
 #include "weapon_points.h"
 #include "native_target.h"
 #include "save_session.h"
 #include "challenge_suppression.h"
 #include "MinHook.h"
+#include "engine/hooks/hook_set.h"
 #include <intrin.h>
 #include <atomic>
 #include <cstring>
@@ -10,6 +12,7 @@
 
 namespace sentinel::weapon_points {
 namespace {
+hooks::HookSet hook_set("weapon_points");
 std::atomic<bool> ready{false};
 std::atomic<uint64_t> suppressed{0};
 uintptr_t image_base = 0, engine_root = 0;
@@ -26,15 +29,14 @@ Notify original_notify = nullptr;
 Exchange original_exchange = nullptr;
 thread_local Source pair_source = Source::unknown;
 thread_local uintptr_t add_origin = 0;
-// Once AP routing owns the process, a later session fault must not turn vanilla
-// minting back on. New AP execution still requires admitted/accepting below.
+// session faults must not restore vanilla minting after AP routing starts.
 bool active() { return ready.load(std::memory_order_acquire) && save::session().routed(); }
 uint32_t rva(void* address) {
     const auto p = reinterpret_cast<uintptr_t>(address);
     return p >= image_base && p-image_base < image_size ? static_cast<uint32_t>(p-image_base) : UINT32_MAX;
 }
-void add_hook(uintptr_t player, uint32_t currency, int32_t amount, uint8_t silent) {
-    const auto return_site = reinterpret_cast<uintptr_t>(_ReturnAddress());
+void add_hook(uintptr_t player, uint32_t currency, int32_t amount, uint8_t silent, void* hook_caller = nullptr) {
+    const auto return_site = reinterpret_cast<uintptr_t>(hook_caller);
     const auto caller = rva(reinterpret_cast<void*>(return_site));
     const auto source = caller == 0x13ce4b8 ? pair_source : direct_source(caller);
     if (suppress(active(), source, currency, amount, false)) {
@@ -45,21 +47,21 @@ void add_hook(uintptr_t player, uint32_t currency, int32_t amount, uint8_t silen
     __try { original_add(player, currency, amount, silent); }
     __finally { add_origin = prior; }
 }
-void pair_hook(uintptr_t player, const int32_t* pair, uint8_t silent, uint32_t source) {
-    const auto prior = pair_source; pair_source = wrapper_source(rva(_ReturnAddress()));
+void pair_hook(uintptr_t player, const int32_t* pair, uint8_t silent, uint32_t source, void* hook_caller = nullptr) {
+    const auto prior = pair_source; pair_source = wrapper_source(rva(hook_caller));
     __try { original_pair(player, pair, silent, source); }
     __finally { pair_source = prior; }
 }
-void append_hook(uintptr_t self, const char* title, const char* reward, uint32_t time, uint64_t icon, uint32_t color) {
+void append_hook(uintptr_t self, const char* title, const char* reward, uint32_t time, uint64_t icon, uint32_t color, void* hook_caller = nullptr) {
     // The only caller is the native corruption-cleared earnings presenter.
     // Preserve completion title, timing and icon; remove its false WUP subtitle.
-    if (active() && rva(_ReturnAddress()) == 0xeeaa0a) reward = "";
+    if (active() && rva(hook_caller) == 0xeeaa0a) reward = "";
     original_append(self, title, reward, time, icon, color);
 }
-void notify_hook(uintptr_t self, uint32_t code, uintptr_t data) {
+void notify_hook(uintptr_t self, uint32_t code, uintptr_t data, void* hook_caller = nullptr) {
     // The qualified aggregate's writer continues past the frozen currency seam
     // and reaches this exact notification call before its completion scope ends.
-    if (active() && code == 0xd && rva(_ReturnAddress()) == 0x13ce5b1 &&
+    if (active() && code == 0xd && rva(hook_caller) == 0x13ce5b1 &&
         rva(reinterpret_cast<void*>(add_origin)) == 0x147546e &&
         challenge::consume_qualified_battery_toast()) return;
     if (active() && code == 0x39) code = 0x3a; // native slayer gate completion without points
@@ -69,6 +71,50 @@ void exchange_hook(uintptr_t self, uintptr_t player) {
     // native menu action 0x31 exchanges wup for mastery tokens. ap mastery ownership is independent, so this conversion is unavailable in ap
     if (!active()) original_exchange(self, player);
 }
+void add_hook_entry(uintptr_t player, uint32_t currency, int32_t amount, uint8_t silent) {
+    const auto caller = _ReturnAddress();
+    const auto lease = hook_set.enter(0);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_add)>(lease.original)(player, currency, amount, silent);
+        return add_hook(player, currency, amount, silent, caller);
+    } __finally { hook_set.leave(lease); }
+}
+
+void pair_hook_entry(uintptr_t player, const int32_t* pair, uint8_t silent, uint32_t source) {
+    const auto caller = _ReturnAddress();
+    const auto lease = hook_set.enter(1);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_pair)>(lease.original)(player, pair, silent, source);
+        return pair_hook(player, pair, silent, source, caller);
+    } __finally { hook_set.leave(lease); }
+}
+
+void append_hook_entry(uintptr_t self, const char* title, const char* reward, uint32_t time, uint64_t icon, uint32_t color) {
+    const auto caller = _ReturnAddress();
+    const auto lease = hook_set.enter(2);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_append)>(lease.original)(self, title, reward, time, icon, color);
+        return append_hook(self, title, reward, time, icon, color, caller);
+    } __finally { hook_set.leave(lease); }
+}
+
+void notify_hook_entry(uintptr_t self, uint32_t code, uintptr_t data) {
+    const auto caller = _ReturnAddress();
+    const auto lease = hook_set.enter(3);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_notify)>(lease.original)(self, code, data);
+        return notify_hook(self, code, data, caller);
+    } __finally { hook_set.leave(lease); }
+}
+
+void exchange_hook_entry(uintptr_t self, uintptr_t player) {
+    const auto lease = hook_set.enter(4);
+    __try {
+        if (!lease.committed) return reinterpret_cast<decltype(original_exchange)>(lease.original)(self, player);
+        return exchange_hook(self, player);
+    } __finally { hook_set.leave(lease); }
+}
+
 native::Target target(uintptr_t base, uint32_t offset, const char* hex) {
     native::Target out{}; out.address = base+offset;
     const auto digit = [](char c) { return c <= '9' ? c-'0' : c-'a'+10; };
@@ -93,21 +139,32 @@ uintptr_t player(void*) {
         return map ? reinterpret_cast<uintptr_t(*)(uintptr_t,uint32_t)>(image_base+0x69af70)(map,0) : 0;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-bool read(void*, uintptr_t p, uint32_t& balance, uint32_t& gained) {
+bool read_currency(void*, uintptr_t p, uint32_t currency, uint32_t& balance, uint32_t& gained) {
     __try {
         using Get = int32_t(*)(uintptr_t,uint32_t);
-        const auto b = reinterpret_cast<Get>(image_base+0x13e8680)(p,0);
-        const auto g = reinterpret_cast<Get>(image_base+0x13e8690)(p,0);
+        const auto b = reinterpret_cast<Get>(image_base+0x13e8680)(p,currency);
+        const auto g = reinterpret_cast<Get>(image_base+0x13e8690)(p,currency);
         if (b < 0 || g < 0) return false;
         balance = static_cast<uint32_t>(b); gained = static_cast<uint32_t>(g); return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-uint32_t grant(void*, uintptr_t p, uint32_t amount) {
+bool read(void* context, uintptr_t p, uint32_t& balance, uint32_t& gained) {
+    return read_currency(context, p, 0, balance, gained);
+}
+uint32_t grant_currency(void*, uintptr_t p, uint32_t currency, uint32_t amount, bool& entered) {
     uint32_t error = 0;
     // the typed grant calls the validated trampoline directly. nested vanilla rewards keep their own source; they don't inherit an ap bypass
-    __try { original_add(p, 0, static_cast<int32_t>(amount), 1); }
-    __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
+    const auto lease = hook_set.enter(0);
+    __try {
+        if (!lease.committed) return ERROR_CANCELLED;
+        __try { entered = true; reinterpret_cast<Add>(lease.original)(p, currency, static_cast<int32_t>(amount), 1); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
+    } __finally { hook_set.leave(lease); }
     return error;
+}
+uint32_t grant(void* context, uintptr_t p, uint32_t amount) {
+    bool entered = false;
+    return grant_currency(context, p, 0, amount, entered);
 }
 bool refresh(void*, uintptr_t p) {
     __try {
@@ -127,6 +184,7 @@ Calls calls{nullptr, player, read, grant, refresh};
 char fixture_namespace[65]{};
 #endif
 }
+currencies::Calls currency_calls() { return {nullptr, player, read_currency, grant_currency}; }
 bool available() { return ready.load(std::memory_order_acquire); }
 uintptr_t currency_origin(uintptr_t direct_return_site) {
     return add_origin ? add_origin : direct_return_site;
@@ -149,23 +207,22 @@ void use_fixture(Calls value, const char* id) {
 }
 #endif
 void install(const engine::Binding& binding, HANDLE stop) {
-    // called by the existing pinned native owner; no second lifecycle/queue
     image_base = binding.image.base; image_size = binding.image.size; engine_root = binding.root;
     engine::LocalMemory memory;
-    struct Site { uint32_t offset; const char* bytes; void* detour; void** original; };
+    struct Site : builds::Site { void* detour; void** original; };
     const Site sites[] = {
-        {0x13ce4c0,"48895c241048896c2418565741564883ec204863f2450fb6f1418be8488bd944",reinterpret_cast<void*>(add_hook),reinterpret_cast<void**>(&original_add)},
-        {0x13ce4a0,"4883ec3844894c2420450fb6c8448b42048b12e8080000004883c438c3cccccc",reinterpret_cast<void*>(pair_hook),reinterpret_cast<void**>(&original_pair)},
-        {0xeea070,"48895c240848896c2410488974241848897c242041564883ec20488db9700600",reinterpret_cast<void*>(append_hook),reinterpret_cast<void**>(&original_append)},
-        {0x1273710,"48895c2408574881ec5004000048634108488bf94c894424304533c089542420",reinterpret_cast<void*>(notify_hook),reinterpret_cast<void**>(&original_notify)},
-        {0x142d830,"48895c2418574883ec50488b059711d8024833c44889442448ff8274cd040048",reinterpret_cast<void*>(exchange_hook),reinterpret_cast<void**>(&original_exchange)},
-        {0x143c350,"40534883ec20488b01488bd9ff907808000084c0740833c04883c4205bc3488b",nullptr,nullptr},
-        {0xf22f00,"48895c2408574883ec20488bda488bf9488bcb33d2e866574c00ba0100000089",nullptr,nullptr},
-        {0x17c1180,"405541574883ec28410fb7e84d8bf94c8b010fb7c2413b80100608000f8dbb00",nullptr,nullptr},
+        {builds::steam_20260818().weapon_points[0],reinterpret_cast<void*>(add_hook_entry),reinterpret_cast<void**>(&original_add)},
+        {builds::steam_20260818().weapon_points[1],reinterpret_cast<void*>(pair_hook_entry),reinterpret_cast<void**>(&original_pair)},
+        {builds::steam_20260818().weapon_points[2],reinterpret_cast<void*>(append_hook_entry),reinterpret_cast<void**>(&original_append)},
+        {builds::steam_20260818().weapon_points[3],reinterpret_cast<void*>(notify_hook_entry),reinterpret_cast<void**>(&original_notify)},
+        {builds::steam_20260818().weapon_points[4],reinterpret_cast<void*>(exchange_hook_entry),reinterpret_cast<void**>(&original_exchange)},
+        {builds::steam_20260818().weapon_points[5],nullptr,nullptr},
+        {builds::steam_20260818().weapon_points[6],nullptr,nullptr},
+        {builds::steam_20260818().weapon_points[7],nullptr,nullptr},
     };
     const auto deadline = GetTickCount64()+10000;
     for (const auto& s : sites)
-        if (native::validate_target(memory,binding.image,target(image_base,s.offset,s.bytes),stop,deadline)) return;
+        if (native::validate_target(memory,binding.image,target(image_base,s.rva,s.prefix),stop,deadline)) return;
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets()) {
 #endif
@@ -182,11 +239,10 @@ void install(const engine::Binding& binding, HANDLE stop) {
 #ifdef SC_NATIVE_TESTING
     }
 #endif
-    for (const auto& s : sites) if (s.detour) {
-        if (MH_CreateHook(reinterpret_cast<void*>(image_base+s.offset),s.detour,s.original) != MH_OK) return;
-    }
+    std::vector<hooks::HookSpec> specs;
     for (const auto& s : sites) if (s.detour)
-        if (MH_EnableHook(reinterpret_cast<void*>(image_base+s.offset)) != MH_OK) return;
+        specs.push_back({image_base + s.rva, s.detour, s.original});
+    if (!hook_set.install(specs.data(), specs.size(), stop)) return;
     ready.store(true,std::memory_order_release);
 }
 }

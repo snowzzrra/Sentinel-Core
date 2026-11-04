@@ -1,4 +1,4 @@
-// Generated from protocol/schema.json; regenerate: python -B tools/generate_protocol.py; schema-sha256: 6d1dd65bd4d2c3b57cc546d218544141143eb3797461a64e7b829556e0480a0c; generator-format: 1. DO NOT EDIT.
+// Generated from protocol/schema.json; regenerate: python -B tools/generate_protocol.py; schema-sha256: 66a34aae75c217461b96c927e8d182027d9c237d88fd31b91c74490418d5b177; generator-format: 1. DO NOT EDIT.
 #pragma once
 #include "sentinel_inspection.h"
 #include <array>
@@ -10,11 +10,10 @@ namespace sentinel::generated {
 using Bytes = std::vector<uint8_t>;
 inline constexpr size_t max_frame = 16384;
 inline constexpr uint32_t wire_magic = 1346978643;
-inline constexpr size_t header_size_1 = 16;
 inline constexpr size_t header_size_2 = 32;
 enum class Operation : uint16_t { read = 1, submit = 2, query = 3, cancel = 4, ack = 5, hello = 6 };
 enum class WireError : uint16_t { ok = 0, incompatible_protocol = 1, capability_unavailable = 2, unsupported_operation = 3, malformed = 4 };
-enum class CommandId : uint16_t { inspect = 1, engine = 2, context = 3, native = 4, diagnostic = 5, diagnostic_detail = 8, save = 11, save_admission = 12, save_write = 13, save_backup = 14, save_installation = 17, weapon_points = 18, campaign_row = 22, campaign_commit = 23, campaign = 24, inventory = 25, arsenal = 29, runes = 33, special = 37, deathlink = 41, automap = 45, command = 46, combat = 50, combat_presentation = 51, support_dump = 52 };
+enum class CommandId : uint16_t { inspect = 1, engine = 2, context = 3, native = 4, diagnostic = 5, diagnostic_detail = 8, save = 11, save_admission = 12, save_write = 13, save_backup = 14, save_installation = 17, weapon_points = 18, campaign_row = 22, campaign_commit = 23, campaign = 24, inventory = 25, arsenal = 29, runes = 33, special = 37, deathlink = 41, automap = 45, command = 46, combat = 50, combat_presentation = 51, support_dump = 52, currencies = 53, progression = 54, mission_access = 55 };
 inline constexpr std::array<int64_t, 2> limit_execution_deadline_ms = {1, 5000};
 inline constexpr std::array<int64_t, 2> limit_command_id_bytes = {1, 128};
 inline constexpr uint64_t limit_namespace_bytes = 64ULL;
@@ -44,147 +43,6 @@ inline constexpr uint64_t limit_console_text_bytes = 2047ULL;
 inline constexpr size_t execution_slots = 8;
 inline constexpr size_t full_result_ms = 30000;
 inline constexpr size_t identity_records = 65536;
-struct v1_command_submit {
-    uint64_t capability{};
-    uint32_t expected_pid{};
-    uint64_t expected_process_created{};
-    std::array<uint8_t, 16> expected_instance_id{};
-    uint64_t expected_generation{};
-    uint64_t request_id{};
-    std::array<uint8_t, 16> nonce{};
-    uint32_t deadline_ms{};
-    uint32_t command_abi{};
-    std::array<uint8_t, 65> namespace_id{};
-    uint32_t kind{};
-    std::array<uint8_t, 2048> text{};
-};
-struct v1_command_result {
-    uint64_t capability{};
-    uint32_t identity_pid{};
-    uint64_t identity_created{};
-    std::array<uint8_t, 16> identity_instance{};
-    uint32_t core_abi{};
-    std::string product_version{};
-    std::string build_id{};
-    uint32_t domain_abi{};
-    uint32_t execution_state{};
-    uint32_t execution_reason{};
-    uint32_t execution_cancel_requested{};
-    uint32_t execution_retrieved{};
-    uint32_t execution_scope_pid{};
-    uint64_t execution_scope_process_created{};
-    std::array<uint8_t, 16> execution_scope_instance_id{};
-    uint64_t execution_scope_generation{};
-    uint64_t execution_request_id{};
-    std::array<uint8_t, 16> execution_nonce{};
-    uint64_t execution_admitted_ms{};
-    uint64_t execution_deadline_ms{};
-    uint64_t execution_claimed_ms{};
-    uint64_t execution_observed_ms{};
-    uint64_t execution_executed_ms{};
-    uint64_t execution_completed_ms{};
-    uint64_t execution_retrieved_ms{};
-    uint32_t execution_thread{};
-    uint32_t execution_site_revision{};
-    uint32_t execution_phase{};
-    uint32_t execution_lifecycle{};
-    uint32_t execution_game_state{};
-    uint32_t execution_map_validity{};
-    uint32_t execution_map_reason{};
-    uint32_t execution_map_error{};
-    uint32_t execution_map_length{};
-    std::string execution_map{};
-    std::array<uint8_t, 65> namespace_id{};
-    uint32_t kind{};
-    uint32_t outcome{};
-    uint32_t native_exception{};
-};
-struct v1_inventory_result {
-    uint64_t capability{};
-    uint32_t identity_pid{};
-    uint64_t identity_created{};
-    std::array<uint8_t, 16> identity_instance{};
-    uint32_t core_abi{};
-    std::string product_version{};
-    std::string build_id{};
-    uint32_t domain_abi{};
-    uint32_t execution_state{};
-    uint32_t execution_reason{};
-    uint32_t execution_cancel_requested{};
-    uint32_t execution_retrieved{};
-    uint32_t execution_scope_pid{};
-    uint64_t execution_scope_process_created{};
-    std::array<uint8_t, 16> execution_scope_instance_id{};
-    uint64_t execution_scope_generation{};
-    uint64_t execution_request_id{};
-    std::array<uint8_t, 16> execution_nonce{};
-    uint64_t execution_admitted_ms{};
-    uint64_t execution_deadline_ms{};
-    uint64_t execution_claimed_ms{};
-    uint64_t execution_observed_ms{};
-    uint64_t execution_executed_ms{};
-    uint64_t execution_completed_ms{};
-    uint64_t execution_retrieved_ms{};
-    uint32_t execution_thread{};
-    uint32_t execution_site_revision{};
-    uint32_t execution_phase{};
-    uint32_t execution_lifecycle{};
-    uint32_t execution_game_state{};
-    uint32_t execution_map_validity{};
-    uint32_t execution_map_reason{};
-    uint32_t execution_map_error{};
-    uint32_t execution_map_length{};
-    std::string execution_map{};
-    std::array<uint8_t, 65> namespace_id{};
-    uint32_t kind{};
-    uint32_t outcome{};
-    uint32_t flags{};
-    uint32_t native_exception{};
-    uint32_t weapons_before{};
-    uint32_t weapons_after{};
-    uint32_t equipment_before{};
-    uint32_t equipment_after{};
-    uint32_t special_before{};
-    uint32_t special_after{};
-    uint32_t upgrades_before{};
-    uint32_t upgrades_after{};
-    uint8_t health_before{};
-    uint8_t health_after{};
-    uint8_t armor_before{};
-    uint8_t armor_after{};
-    uint8_t ammo_before{};
-    uint8_t ammo_after{};
-    uint8_t reserved_before{};
-    uint8_t reserved_after{};
-    uint64_t operations_applied{};
-    uint8_t ice_before{};
-    uint8_t ice_after{};
-    uint8_t dash_before{};
-    uint8_t dash_after{};
-    uint8_t key_before{};
-    uint8_t key_after{};
-    uint8_t frag_before{};
-    uint8_t frag_after{};
-    uint8_t flame_before{};
-    uint8_t flame_after{};
-    uint8_t punch_before{};
-    uint8_t punch_after{};
-    uint64_t perks_known{};
-    uint64_t perks_owned{};
-};
-struct v1_inspect_request {
-    uint64_t capability{};
-};
-struct v1_diagnostic_detail_submit {
-    uint64_t capability{};
-    uint32_t expected_pid{};
-    uint64_t expected_process_created{};
-    std::array<uint8_t, 16> expected_instance_id{};
-    uint64_t expected_generation{};
-    uint64_t request_id{};
-    std::array<uint8_t, 16> nonce{};
-    uint32_t deadline_ms{};
-};
 struct campaign_reward {
     uint32_t location_id{};
     uint32_t kind{};
@@ -192,137 +50,6 @@ struct campaign_reward {
     std::array<uint8_t, 80> unlockable{};
     std::array<uint8_t, 128> name{};
     std::array<uint8_t, 512> text{};
-};
-struct v1_campaign_rewards_row {
-    uint64_t capability{};
-    uint32_t expected_pid{};
-    uint64_t expected_process_created{};
-    std::array<uint8_t, 16> expected_instance_id{};
-    uint64_t expected_generation{};
-    uint64_t request_id{};
-    std::array<uint8_t, 16> nonce{};
-    uint32_t deadline_ms{};
-    std::array<uint8_t, 65> namespace_id{};
-    uint64_t revision{};
-    uint32_t index{};
-    uint32_t count{};
-    uint32_t row_id{};
-    uint32_t row_flags{};
-    uint32_t native_index{};
-    std::array<uint8_t, 192> map{};
-    std::array<uint8_t, 96> title{};
-    uint32_t known{};
-    uint32_t found{};
-    uint32_t total{};
-    uint32_t band{};
-    std::array<uint8_t, 80> challenge_0_unlockable{};
-    uint32_t challenge_0_found{};
-    uint32_t challenge_0_required{};
-    uint32_t challenge_0_checked{};
-    std::array<uint8_t, 80> challenge_1_unlockable{};
-    uint32_t challenge_1_found{};
-    uint32_t challenge_1_required{};
-    uint32_t challenge_1_checked{};
-    std::array<uint8_t, 80> challenge_2_unlockable{};
-    uint32_t challenge_2_found{};
-    uint32_t challenge_2_required{};
-    uint32_t challenge_2_checked{};
-    uint32_t rewards_known{};
-    std::vector<campaign_reward> rewards{};
-};
-struct v1_automap_publish {
-    uint64_t capability{};
-    uint32_t expected_pid{};
-    uint64_t expected_process_created{};
-    std::array<uint8_t, 16> expected_instance_id{};
-    uint64_t expected_generation{};
-    uint64_t request_id{};
-    std::array<uint8_t, 16> nonce{};
-    uint32_t deadline_ms{};
-    std::array<uint8_t, 65> namespace_id{};
-    uint32_t kind{};
-    uint32_t known{};
-    uint64_t revision{};
-    uint64_t checked_0{};
-    uint64_t checked_1{};
-    uint64_t checked_2{};
-    uint64_t checked_3{};
-    uint64_t checked_4{};
-    uint64_t checked_5{};
-    uint64_t checked_6{};
-    uint64_t checked_7{};
-    uint64_t checked_8{};
-};
-struct v1_campaign_base {
-    uint64_t capability{};
-    uint32_t expected_pid{};
-    uint64_t expected_process_created{};
-    std::array<uint8_t, 16> expected_instance_id{};
-    uint64_t expected_generation{};
-    uint64_t request_id{};
-    std::array<uint8_t, 16> nonce{};
-    uint32_t deadline_ms{};
-    std::array<uint8_t, 65> namespace_id{};
-    uint64_t revision{};
-    uint32_t index{};
-    uint32_t count{};
-    uint32_t row_id{};
-    uint32_t row_flags{};
-    uint32_t native_index{};
-    std::array<uint8_t, 192> map{};
-    std::array<uint8_t, 96> title{};
-};
-struct v1_campaign_presentation {
-    uint64_t capability{};
-    uint32_t expected_pid{};
-    uint64_t expected_process_created{};
-    std::array<uint8_t, 16> expected_instance_id{};
-    uint64_t expected_generation{};
-    uint64_t request_id{};
-    std::array<uint8_t, 16> nonce{};
-    uint32_t deadline_ms{};
-    std::array<uint8_t, 65> namespace_id{};
-    uint64_t revision{};
-    uint32_t index{};
-    uint32_t count{};
-    uint32_t row_id{};
-    uint32_t row_flags{};
-    uint32_t native_index{};
-    std::array<uint8_t, 192> map{};
-    std::array<uint8_t, 96> title{};
-    uint32_t known{};
-    uint32_t found{};
-    uint32_t total{};
-    uint32_t band{};
-    std::array<uint8_t, 80> challenge_0_unlockable{};
-    uint32_t challenge_0_found{};
-    uint32_t challenge_0_required{};
-    uint32_t challenge_0_checked{};
-    std::array<uint8_t, 80> challenge_1_unlockable{};
-    uint32_t challenge_1_found{};
-    uint32_t challenge_1_required{};
-    uint32_t challenge_1_checked{};
-    std::array<uint8_t, 80> challenge_2_unlockable{};
-    uint32_t challenge_2_found{};
-    uint32_t challenge_2_required{};
-    uint32_t challenge_2_checked{};
-};
-struct v1_runes_request {
-    uint64_t capability{};
-    uint32_t expected_pid{};
-    uint64_t expected_process_created{};
-    std::array<uint8_t, 16> expected_instance_id{};
-    uint64_t expected_generation{};
-    uint64_t request_id{};
-    std::array<uint8_t, 16> nonce{};
-    uint32_t deadline_ms{};
-    std::array<uint8_t, 65> namespace_id{};
-    uint32_t kind{};
-    uint32_t normal_runes{};
-    uint32_t support_runes{};
-    uint8_t select_slot{};
-    int8_t select_rune{};
-    std::array<uint8_t, 2> reserved{};
 };
 struct scope {
     uint32_t pid{};
@@ -1118,12 +845,77 @@ struct command_response {
     uint32_t error{};
     sc_diagnostic_result execution{};
 };
-struct wire_header_1 {
-    uint32_t magic{};
-    uint16_t version{};
-    uint16_t operation{};
-    uint32_t payload_length{};
-    uint32_t result{};
+struct sc_evidence_scope {
+    sc_native_scope process{};
+    std::array<uint8_t, 65> namespace_id{};
+    std::array<uint8_t, 16> save_binding{};
+    std::array<uint8_t, 192> map_name{};
+    uint32_t readiness{};
+};
+struct sc_currency_result {
+    sc_diagnostic_result execution{};
+    sc_evidence_scope before_scope{};
+    sc_evidence_scope after_scope{};
+    uint32_t kind{};
+    uint32_t currency{};
+    uint32_t amount{};
+    uint32_t expected_gained{};
+    uint32_t outcome{};
+    uint32_t flags{};
+    uint32_t native_exception{};
+    uint32_t balance_before{};
+    uint32_t gained_before{};
+    uint32_t balance_after{};
+    uint32_t gained_after{};
+};
+struct currencies_observe_payload {
+    uint32_t currency{};
+};
+struct currencies_grant_payload {
+    uint32_t currency{};
+    uint32_t amount{};
+    uint32_t expected_gained{};
+};
+struct progression_observe_payload {
+};
+struct sc_progression_result {
+    sc_diagnostic_result execution{};
+    sc_evidence_scope before_scope{};
+    sc_evidence_scope after_scope{};
+    uint32_t suit_known{};
+    uint32_t suit_owned{};
+    int32_t slayer_key_quantity{};
+    uint32_t meat_hook{};
+    std::array<uint8_t, 13> mastery_proof{};
+};
+struct mission_access_observe_payload {
+    uint32_t stage_id{};
+};
+struct sc_mission_access_result {
+    sc_diagnostic_result execution{};
+    sc_evidence_scope menu_scope{};
+    sc_evidence_scope destination_scope{};
+    uint64_t revision{};
+    uint64_t destination_revision{};
+    uint32_t stage_id{};
+    uint32_t destination_stage_id{};
+    std::array<uint8_t, 192> map_name{};
+    uint32_t entry_usable{};
+    uint32_t destination_ready{};
+};
+struct campaign_row_known_rewards_payload {
+    uint64_t revision{};
+    uint32_t index{};
+    uint32_t count{};
+    sc_campaign_row row{};
+    sc_campaign_summary summary{};
+    uint32_t rewards_known{};
+    std::vector<campaign_reward> rewards{};
+};
+struct campaign_commit_selection_payload {
+    uint64_t revision{};
+    uint32_t count{};
+    uint32_t selected_id{};
 };
 struct wire_header_2 {
     uint32_t magic{};
@@ -1147,8 +939,8 @@ using save_write_payload = std::variant<save_write_save_write_payload>;
 using save_backup_payload = std::variant<save_backup_save_backup_payload>;
 using save_installation_payload = std::variant<save_installation_save_installation_payload>;
 using weapon_points_payload = std::variant<weapon_points_observe_payload, weapon_points_grant_payload>;
-using campaign_row_payload = std::variant<campaign_row_campaign_row_payload>;
-using campaign_commit_payload = std::variant<campaign_commit_campaign_commit_payload>;
+using campaign_row_payload = std::variant<campaign_row_known_rewards_payload>;
+using campaign_commit_payload = std::variant<campaign_commit_selection_payload>;
 using campaign_payload = std::variant<campaign_campaign_payload>;
 using inventory_payload = std::variant<inventory_observe_payload, inventory_ensure_payload, inventory_set_capacity_payload>;
 using arsenal_payload = std::variant<arsenal_observe_payload, arsenal_ensure_mods_payload, arsenal_select_mod_payload, arsenal_project_mastery_payload>;
@@ -1160,30 +952,15 @@ using command_payload = std::variant<command_activate_payload, command_player_pe
 using combat_payload = std::variant<combat_combat_payload>;
 using combat_presentation_payload = std::variant<combat_presentation_combat_presentation_payload>;
 using support_dump_payload = std::variant<support_dump_support_dump_payload>;
+using currencies_payload = std::variant<currencies_observe_payload, currencies_grant_payload>;
+using progression_payload = std::variant<progression_observe_payload>;
+using mission_access_payload = std::variant<mission_access_observe_payload>;
 using campaign_row_payload_revision1 = std::variant<campaign_row_base_payload>;
 using campaign_row_payload_revision2 = std::variant<campaign_row_presentation_payload>;
-bool encode(const v1_command_submit&, Bytes&);
-bool decode(const Bytes&, v1_command_submit&);
-bool encode(const v1_command_result&, Bytes&);
-bool decode(const Bytes&, v1_command_result&);
-bool encode(const v1_inventory_result&, Bytes&);
-bool decode(const Bytes&, v1_inventory_result&);
-bool encode(const v1_inspect_request&, Bytes&);
-bool decode(const Bytes&, v1_inspect_request&);
-bool encode(const v1_diagnostic_detail_submit&, Bytes&);
-bool decode(const Bytes&, v1_diagnostic_detail_submit&);
+using campaign_row_payload_revision3 = std::variant<campaign_row_campaign_row_payload>;
+using campaign_commit_payload_revision1 = std::variant<campaign_commit_campaign_commit_payload>;
 bool encode(const campaign_reward&, Bytes&);
 bool decode(const Bytes&, campaign_reward&);
-bool encode(const v1_campaign_rewards_row&, Bytes&);
-bool decode(const Bytes&, v1_campaign_rewards_row&);
-bool encode(const v1_automap_publish&, Bytes&);
-bool decode(const Bytes&, v1_automap_publish&);
-bool encode(const v1_campaign_base&, Bytes&);
-bool decode(const Bytes&, v1_campaign_base&);
-bool encode(const v1_campaign_presentation&, Bytes&);
-bool decode(const Bytes&, v1_campaign_presentation&);
-bool encode(const v1_runes_request&, Bytes&);
-bool decode(const Bytes&, v1_runes_request&);
 bool encode(const scope&, Bytes&);
 bool decode(const Bytes&, scope&);
 bool encode(const command_reference&, Bytes&);
@@ -1394,8 +1171,26 @@ bool encode(const immutable_submission&, Bytes&);
 bool decode(const Bytes&, immutable_submission&);
 bool encode(const command_response&, Bytes&);
 bool decode(const Bytes&, command_response&);
-bool encode(const wire_header_1&, Bytes&);
-bool decode(const Bytes&, wire_header_1&);
+bool encode(const sc_evidence_scope&, Bytes&);
+bool decode(const Bytes&, sc_evidence_scope&);
+bool encode(const sc_currency_result&, Bytes&);
+bool decode(const Bytes&, sc_currency_result&);
+bool encode(const currencies_observe_payload&, Bytes&);
+bool decode(const Bytes&, currencies_observe_payload&);
+bool encode(const currencies_grant_payload&, Bytes&);
+bool decode(const Bytes&, currencies_grant_payload&);
+bool encode(const progression_observe_payload&, Bytes&);
+bool decode(const Bytes&, progression_observe_payload&);
+bool encode(const sc_progression_result&, Bytes&);
+bool decode(const Bytes&, sc_progression_result&);
+bool encode(const mission_access_observe_payload&, Bytes&);
+bool decode(const Bytes&, mission_access_observe_payload&);
+bool encode(const sc_mission_access_result&, Bytes&);
+bool decode(const Bytes&, sc_mission_access_result&);
+bool encode(const campaign_row_known_rewards_payload&, Bytes&);
+bool decode(const Bytes&, campaign_row_known_rewards_payload&);
+bool encode(const campaign_commit_selection_payload&, Bytes&);
+bool decode(const Bytes&, campaign_commit_selection_payload&);
 bool encode(const wire_header_2&, Bytes&);
 bool decode(const Bytes&, wire_header_2&);
 bool encode(const inspect_payload&, Bytes&);
@@ -1448,52 +1243,33 @@ bool encode(const combat_presentation_payload&, Bytes&);
 bool decode(const Bytes&, combat_presentation_payload&);
 bool encode(const support_dump_payload&, Bytes&);
 bool decode(const Bytes&, support_dump_payload&);
+bool encode(const currencies_payload&, Bytes&);
+bool decode(const Bytes&, currencies_payload&);
+bool encode(const progression_payload&, Bytes&);
+bool decode(const Bytes&, progression_payload&);
+bool encode(const mission_access_payload&, Bytes&);
+bool decode(const Bytes&, mission_access_payload&);
 bool encode(const campaign_row_payload_revision1&, Bytes&);
 bool decode(const Bytes&, campaign_row_payload_revision1&);
 bool encode(const campaign_row_payload_revision2&, Bytes&);
 bool decode(const Bytes&, campaign_row_payload_revision2&);
-bool encode_command_submit(const v1_command_submit&, Bytes&, uint32_t result = 0);
-bool decode_command_submit(const Bytes&, v1_command_submit&, uint32_t& result);
-bool encode_command_result(const v1_command_result&, Bytes&, uint32_t result = 0);
-bool decode_command_result(const Bytes&, v1_command_result&, uint32_t& result);
-bool encode_inventory_result(const v1_inventory_result&, Bytes&, uint32_t result = 0);
-bool decode_inventory_result(const Bytes&, v1_inventory_result&, uint32_t& result);
-bool encode_inspect_request(const v1_inspect_request&, Bytes&, uint32_t result = 0);
-bool decode_inspect_request(const Bytes&, v1_inspect_request&, uint32_t& result);
-bool encode_diagnostic_detail_submit(const v1_diagnostic_detail_submit&, Bytes&, uint32_t result = 0);
-bool decode_diagnostic_detail_submit(const Bytes&, v1_diagnostic_detail_submit&, uint32_t& result);
-bool encode_campaign_rewards_row(const v1_campaign_rewards_row&, Bytes&, uint32_t result = 0);
-bool decode_campaign_rewards_row(const Bytes&, v1_campaign_rewards_row&, uint32_t& result);
-bool encode_automap_publish(const v1_automap_publish&, Bytes&, uint32_t result = 0);
-bool decode_automap_publish(const Bytes&, v1_automap_publish&, uint32_t& result);
-bool encode_campaign_base(const v1_campaign_base&, Bytes&, uint32_t result = 0);
-bool decode_campaign_base(const Bytes&, v1_campaign_base&, uint32_t& result);
-bool encode_campaign_presentation(const v1_campaign_presentation&, Bytes&, uint32_t result = 0);
-bool decode_campaign_presentation(const Bytes&, v1_campaign_presentation&, uint32_t& result);
-bool encode_runes_request(const v1_runes_request&, Bytes&, uint32_t result = 0);
-bool decode_runes_request(const Bytes&, v1_runes_request&, uint32_t& result);
-template<class C, class T> void v1_transfer_envelope(C& c, T& v) {
-    c.scalar(v.expected.pid, 4);
-    c.scalar(v.expected.process_created, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.expected.instance_id[i], 1);
-    c.scalar(v.expected.lifecycle_generation, 8);
-    c.scalar(v.request_id, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.nonce[i], 1);
-    c.scalar(v.deadline_ms, 4);
-}
-template<class C, class T> void v1_transfer_backup_request(C& c, T& v) {
+bool encode(const campaign_row_payload_revision3&, Bytes&);
+bool decode(const Bytes&, campaign_row_payload_revision3&);
+bool encode(const campaign_commit_payload_revision1&, Bytes&);
+bool decode(const Bytes&, campaign_commit_payload_revision1&);
+template<class C, class T> void native_field_backup_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.campaign, 4);
     c.scalar(v.slot, 4);
     c.scalar(v.work_deadline_ms, 4);
 }
-template<class C, class T> void v1_transfer_points_request(C& c, T& v) {
+template<class C, class T> void native_field_points_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.kind, 4);
     c.scalar(v.amount, 4);
     c.scalar(v.expected_gained, 4);
 }
-template<class C, class T> void v1_transfer_inventory_request(C& c, T& v) {
+template<class C, class T> void native_field_inventory_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.kind, 4);
     c.scalar(v.weapons, 4);
@@ -1505,7 +1281,7 @@ template<class C, class T> void v1_transfer_inventory_request(C& c, T& v) {
     c.scalar(v.ammo_tier, 1);
     c.scalar(v.reserved, 1);
 }
-template<class C, class T> void v1_transfer_arsenal_request(C& c, T& v) {
+template<class C, class T> void native_field_arsenal_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.kind, 4);
     c.scalar(v.mods, 4);
@@ -1518,7 +1294,7 @@ template<class C, class T> void v1_transfer_arsenal_request(C& c, T& v) {
     c.scalar(v.challenge_completed, 1);
     for (size_t i = 0; i < 3; ++i) c.scalar(v.reserved[i], 1);
 }
-template<class C, class T> void v1_transfer_runes_request(C& c, T& v) {
+template<class C, class T> void native_field_runes_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.kind, 4);
     c.scalar(v.normal_runes, 4);
@@ -1527,7 +1303,7 @@ template<class C, class T> void v1_transfer_runes_request(C& c, T& v) {
     c.scalar(v.select_rune, 1);
     for (size_t i = 0; i < 2; ++i) c.scalar(v.reserved[i], 1);
 }
-template<class C, class T> void v1_transfer_special_request(C& c, T& v) {
+template<class C, class T> void native_field_special_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.kind, 4);
     c.scalar(v.own_crucible, 4);
@@ -1540,7 +1316,7 @@ template<class C, class T> void v1_transfer_special_request(C& c, T& v) {
     c.scalar(v.refill_authorize, 4);
     c.scalar(v.reserved0, 4);
 }
-template<class C, class T> void v1_transfer_deathlink_request(C& c, T& v) {
+template<class C, class T> void native_field_deathlink_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.kind, 4);
     c.scalar(v.enabled, 4);
@@ -1551,19 +1327,19 @@ template<class C, class T> void v1_transfer_deathlink_request(C& c, T& v) {
     c.scalar(v.ack_sequence, 8);
     c.scalar(v.reserved0, 4);
 }
-template<class C, class T> void v1_transfer_automap_request(C& c, T& v) {
+template<class C, class T> void native_field_automap_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.kind, 4);
     c.scalar(v.known, 4);
     c.scalar(v.revision, 8);
     for (size_t i = 0; i < 9; ++i) c.scalar(v.checked_locations[i], 8);
 }
-template<class C, class T> void v1_transfer_command_request(C& c, T& v) {
+template<class C, class T> void native_field_command_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.kind, 4);
     for (size_t i = 0; i < 2048; ++i) c.scalar(v.text[i], 1);
 }
-template<class C, class T> void v1_transfer_presentation_request(C& c, T& v) {
+template<class C, class T> void native_field_presentation_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.total, 8);
     c.scalar(v.target, 8);
@@ -1572,7 +1348,7 @@ template<class C, class T> void v1_transfer_presentation_request(C& c, T& v) {
     c.scalar(v.milestone_step, 8);
     c.scalar(v.visible, 4);
 }
-template<class C, class T> void v1_transfer_campaign_request(C& c, T& v) {
+template<class C, class T> void native_field_campaign_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.revision, 8);
     c.scalar(v.index, 4);
@@ -1583,19 +1359,19 @@ template<class C, class T> void v1_transfer_campaign_request(C& c, T& v) {
     for (size_t i = 0; i < 192; ++i) c.scalar(v.row.map[i], 1);
     for (size_t i = 0; i < 96; ++i) c.scalar(v.row.title[i], 1);
 }
-template<class C, class T> void v1_transfer_campaign_summary(C& c, T& v) {
+template<class C, class T> void native_field_campaign_summary(C& c, T& v) {
     c.scalar(v.known, 4);
     c.scalar(v.found, 4);
     c.scalar(v.total, 4);
     c.scalar(v.band, 4);
 }
-template<class C, class T> void v1_transfer_campaign_challenge(C& c, T& v) {
+template<class C, class T> void native_field_campaign_challenge(C& c, T& v) {
     for (size_t i = 0; i < 80; ++i) c.scalar(v.unlockable[i], 1);
     c.scalar(v.found, 4);
     c.scalar(v.required, 4);
     c.scalar(v.checked, 4);
 }
-template<class C, class T> void v1_transfer_campaign_reward(C& c, T& v) {
+template<class C, class T> void native_field_campaign_reward(C& c, T& v) {
     c.scalar(v.location_id, 4);
     c.scalar(v.kind, 4);
     c.scalar(v.checked, 4);
@@ -1603,584 +1379,26 @@ template<class C, class T> void v1_transfer_campaign_reward(C& c, T& v) {
     for (size_t i = 0; i < 128; ++i) c.scalar(v.name[i], 1);
     for (size_t i = 0; i < 512; ++i) c.scalar(v.text[i], 1);
 }
-template<class C, class T> void v1_transfer_response_identity(C& c, T& v) {
-    c.scalar(v.pid, 4);
-    c.scalar(v.process_created, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.instance[i], 1);
-    c.scalar(v.core.abi_version, 4);
-    c.text(v.core.version);
-    c.text(v.core.build_id);
-}
-template<class C, class T> void v1_transfer_points_result_tail(C& c, T& v) {
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    c.scalar(v.kind, 4);
-    c.scalar(v.amount, 4);
-    c.scalar(v.expected_gained, 4);
-    c.scalar(v.outcome, 4);
-    c.scalar(v.flags, 4);
-    c.scalar(v.native_exception, 4);
-    c.scalar(v.balance_before, 4);
-    c.scalar(v.balance_after, 4);
-    c.scalar(v.gained_before, 4);
-    c.scalar(v.gained_after, 4);
-    c.scalar(v.suppressed_grants, 8);
-}
-template<class C, class T> void v1_transfer_inventory_result_tail(C& c, T& v) {
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    c.scalar(v.kind, 4);
-    c.scalar(v.outcome, 4);
-    c.scalar(v.flags, 4);
-    c.scalar(v.native_exception, 4);
-    c.scalar(v.weapons_before, 4);
-    c.scalar(v.weapons_after, 4);
-    c.scalar(v.equipment_before, 4);
-    c.scalar(v.equipment_after, 4);
-    c.scalar(v.special_before, 4);
-    c.scalar(v.special_after, 4);
-    c.scalar(v.upgrades_before, 4);
-    c.scalar(v.upgrades_after, 4);
-    c.scalar(v.health_tier_before, 1);
-    c.scalar(v.health_tier_after, 1);
-    c.scalar(v.armor_tier_before, 1);
-    c.scalar(v.armor_tier_after, 1);
-    c.scalar(v.ammo_tier_before, 1);
-    c.scalar(v.ammo_tier_after, 1);
-    c.scalar(v.reserved_before, 1);
-    c.scalar(v.reserved_after, 1);
-    c.scalar(v.operations_applied, 8);
-    c.scalar(v.ice_bomb_before, 1);
-    c.scalar(v.ice_bomb_after, 1);
-    c.scalar(v.dash_before, 1);
-    c.scalar(v.dash_after, 1);
-    c.scalar(v.slayer_key_before, 1);
-    c.scalar(v.slayer_key_after, 1);
-    c.scalar(v.frag_grenade_before, 1);
-    c.scalar(v.frag_grenade_after, 1);
-    c.scalar(v.flame_belch_before, 1);
-    c.scalar(v.flame_belch_after, 1);
-    c.scalar(v.blood_punch_before, 1);
-    c.scalar(v.blood_punch_after, 1);
-    c.scalar(v.perks_known, 8);
-    c.scalar(v.perks_owned, 8);
-}
-template<class C, class T> void v1_transfer_arsenal_result_tail(C& c, T& v) {
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    c.scalar(v.kind, 4);
-    c.scalar(v.outcome, 4);
-    c.scalar(v.flags, 4);
-    c.scalar(v.native_exception, 4);
-    c.scalar(v.weapons_before, 4);
-    c.scalar(v.weapons_after, 4);
-    c.scalar(v.mods_before, 4);
-    c.scalar(v.mods_after, 4);
-    for (size_t i = 0; i < 8; ++i) c.scalar(v.selected_mods_before[i], 1);
-    for (size_t i = 0; i < 8; ++i) c.scalar(v.selected_mods_after[i], 1);
-    c.scalar(v.normal_upgrades_before, 4);
-    c.scalar(v.normal_upgrades_after, 4);
-    c.scalar(v.masteries_ap_before, 2);
-    c.scalar(v.masteries_ap_after, 2);
-    c.scalar(v.mastery_challenges_active_before, 2);
-    c.scalar(v.mastery_challenges_active_after, 2);
-    c.scalar(v.mastery_challenges_completed_before, 2);
-    c.scalar(v.mastery_challenges_completed_after, 2);
-    c.scalar(v.masteries_effective_before, 2);
-    c.scalar(v.masteries_effective_after, 2);
-    c.scalar(v.mission_challenges_active_before, 4);
-    c.scalar(v.mission_challenges_active_after, 4);
-    c.scalar(v.mission_challenges_completed_before, 4);
-    c.scalar(v.mission_challenges_completed_after, 4);
-    c.scalar(v.operations_applied, 8);
-}
-template<class C, class T> void v1_transfer_runes_result_tail(C& c, T& v) {
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    c.scalar(v.kind, 4);
-    c.scalar(v.outcome, 4);
-    c.scalar(v.flags, 4);
-    c.scalar(v.native_exception, 4);
-    c.scalar(v.owned_normal_before, 4);
-    c.scalar(v.owned_normal_after, 4);
-    c.scalar(v.owned_support_before, 4);
-    c.scalar(v.owned_support_after, 4);
-    for (size_t i = 0; i < 3; ++i) c.scalar(v.selected_slots_before[i], 1);
-    for (size_t i = 0; i < 3; ++i) c.scalar(v.selected_slots_after[i], 1);
-    c.scalar(v.selected_support_before, 1);
-    c.scalar(v.selected_support_after, 1);
-    c.scalar(v.unlocked_slots_before, 1);
-    c.scalar(v.unlocked_slots_after, 1);
-    c.scalar(v.derived_pairs_before, 1);
-    c.scalar(v.derived_pairs_after, 1);
-    c.scalar(v.reserved_before, 1);
-    c.scalar(v.reserved_after, 1);
-    c.scalar(v.operations_applied, 8);
-}
-template<class C, class T> void v1_transfer_special_result_tail(C& c, T& v) {
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    c.scalar(v.kind, 4);
-    c.scalar(v.outcome, 4);
-    c.scalar(v.flags, 4);
-    c.scalar(v.native_exception, 4);
-    c.scalar(v.owns_crucible, 4);
-    c.scalar(v.owns_hammer, 4);
-    c.scalar(v.hammer_tier, 4);
-    c.scalar(v.selected, 4);
-    c.scalar(v.native_crucible, 4);
-    c.scalar(v.native_hammer, 4);
-    c.scalar(v.native_hammer_perks, 4);
-    c.scalar(v.native_selected, 4);
-    c.scalar(v.native_state_known, 4);
-    c.scalar(v.crucible_charge, 4);
-    c.scalar(v.crucible_charge_max, 4);
-    c.scalar(v.refill_balance, 4);
-    c.scalar(v.refill_flags, 4);
-    c.scalar(v.refill_request_id, 8);
-    c.scalar(v.refill_request_state, 4);
-    c.scalar(v.refill_executed, 4);
-    c.scalar(v.refill_execution_id, 8);
-    c.scalar(v.refill_sequence, 4);
-    c.scalar(v.reserved0, 4);
-    c.scalar(v.operations_applied, 8);
-}
-template<class C, class T> void v1_transfer_deathlink_result_tail(C& c, T& v) {
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    c.scalar(v.kind, 4);
-    c.scalar(v.outcome, 4);
-    c.scalar(v.flags, 4);
-    c.scalar(v.native_exception, 4);
-    c.scalar(v.enabled, 4);
-    c.scalar(v.mode, 4);
-    c.scalar(v.remote_state, 4);
-    c.scalar(v.remote_protection, 4);
-    c.scalar(v.remote_attempts, 4);
-    c.scalar(v.pending_count, 4);
-    c.scalar(v.remote_event_id, 8);
-    c.scalar(v.local_candidates, 4);
-    c.scalar(v.local_suppressed, 4);
-    c.scalar(v.local_state, 4);
-    c.scalar(v.local_death_sequence, 8);
-    c.scalar(v.local_death_time_ms, 8);
-    c.scalar(v.local_cause, 4);
-    c.scalar(v.local_protection, 4);
-    c.scalar(v.local_flags, 4);
-    c.scalar(v.reserved0, 4);
-    c.scalar(v.operations_applied, 8);
-}
-template<class C, class T> void v1_transfer_backup_result_tail(C& c, T& v) {
-    c.scalar(v.operation_id, 8);
-    c.scalar(v.flags, 4);
-    c.scalar(v.native_exception, 4);
-    c.scalar(v.storage_outcome, 4);
-    c.scalar(v.storage_error, 4);
-    c.scalar(v.files, 4);
-    c.scalar(v.bytes, 8);
-    for (size_t i = 0; i < 80; ++i) c.scalar(v.basename[i], 1);
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    c.scalar(v.campaign, 4);
-    c.scalar(v.slot, 4);
-}
-template<class C, class T> void v1_transfer_command_result_tail(C& c, T& v) {
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    c.scalar(v.kind, 4);
-    c.scalar(v.outcome, 4);
-    c.scalar(v.native_exception, 4);
-}
-template<class C, class T> void v1_transfer_scope(C& c, T& v) {
-    c.scalar(v.pid, 4);
-    c.scalar(v.process_created, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.instance_id[i], 1);
-    c.scalar(v.lifecycle_generation, 8);
-}
-template<class C, class T> void v1_transfer_diagnostic_result(C& c, T& v) {
-    c.scalar(v.state, 4);
-    c.scalar(v.reason, 4);
-    c.scalar(v.cancel_requested, 4);
-    c.scalar(v.retrieved, 4);
-    c.scalar(v.scope.pid, 4);
-    c.scalar(v.scope.process_created, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.scope.instance_id[i], 1);
-    c.scalar(v.scope.lifecycle_generation, 8);
-    c.scalar(v.request_id, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.nonce[i], 1);
-    c.scalar(v.admitted_at_ms, 8);
-    c.scalar(v.deadline_at_ms, 8);
-    c.scalar(v.claimed_at_ms, 8);
-    c.scalar(v.observed_at_ms, 8);
-    c.scalar(v.executed_at_ms, 8);
-    c.scalar(v.completed_at_ms, 8);
-    c.scalar(v.retrieved_at_ms, 8);
-    c.scalar(v.thread_id, 4);
-    c.scalar(v.site_revision, 4);
-    c.scalar(v.phase, 4);
-    c.scalar(v.lifecycle, 4);
-    c.scalar(v.game_state, 4);
-}
-template<class C, class T> void v1_transfer_detail(C& c, T& v) {
-    c.scalar(v.revision, 4);
-    c.scalar(v.stage, 4);
-    c.scalar(v.observation_attempted, 4);
-    c.scalar(v.observation_accepted, 4);
-    c.scalar(v.timing_valid, 4);
-    c.scalar(v.timing_error, 4);
-    c.scalar(v.claim_lock_missed, 4);
-    c.scalar(v.observation_started_at_ms, 8);
-    c.scalar(v.observation_elapsed_ns, 8);
-    c.scalar(v.observation_budget_ns, 8);
-    c.scalar(v.sample_reason, 4);
-    c.scalar(v.state_validity, 4);
-    c.scalar(v.state_reason, 4);
-    c.scalar(v.state_error, 4);
-    c.scalar(v.map_validity, 4);
-    c.scalar(v.map_reason, 4);
-    c.scalar(v.map_error, 4);
-    c.scalar(v.pending_before, 4);
-    c.scalar(v.pending_before_reason, 4);
-    c.scalar(v.pending_before_error, 4);
-    c.scalar(v.pending_after, 4);
-    c.scalar(v.pending_after_reason, 4);
-    c.scalar(v.pending_after_error, 4);
-}
-template<class C, class T> void v1_transfer_automap_result(C& c, T& v) {
-    c.scalar(v.abi_version, 4);
-    c.scalar(v.scope.pid, 4);
-    c.scalar(v.scope.process_created, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.scope.instance_id[i], 1);
-    c.scalar(v.scope.lifecycle_generation, 8);
-    c.scalar(v.request_id, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.nonce[i], 1);
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    c.scalar(v.kind, 4);
-    c.scalar(v.outcome, 4);
-    c.scalar(v.known, 4);
-    c.scalar(v.native_fault, 4);
-    c.scalar(v.revision, 8);
-    c.scalar(v.scanned, 8);
-    c.scalar(v.collected, 8);
-    c.scalar(v.completed_passes, 8);
-}
-template<class C, class T> void v1_transfer_presentation_result(C& c, T& v) {
-    c.scalar(v.abi_version, 4);
-    c.scalar(v.scope.pid, 4);
-    c.scalar(v.scope.process_created, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.scope.instance_id[i], 1);
-    c.scalar(v.scope.lifecycle_generation, 8);
-    c.scalar(v.request_id, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.nonce[i], 1);
-    c.scalar(v.status, 4);
-    c.scalar(v.reason, 4);
-    c.scalar(v.total, 8);
-    c.scalar(v.target, 8);
-    c.scalar(v.milestone, 8);
-    c.scalar(v.visible, 4);
-}
-template<class C, class T> void v1_transfer_campaign_result(C& c, T& v) {
-    c.scalar(v.abi_version, 4);
-    c.scalar(v.scope.pid, 4);
-    c.scalar(v.scope.process_created, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.scope.instance_id[i], 1);
-    c.scalar(v.scope.lifecycle_generation, 8);
-    c.scalar(v.request_id, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.nonce[i], 1);
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    c.scalar(v.status, 4);
-    c.scalar(v.reason, 4);
-    c.scalar(v.committed_revision, 8);
-    c.scalar(v.rendered_revision, 8);
-    c.scalar(v.selected_id, 4);
-    c.scalar(v.loaded_id, 4);
-}
-template<class C, class T> void v1_transfer_combat_result(C& c, T& v) {
-    c.scalar(v.scope.pid, 4);
-    c.scalar(v.scope.process_created, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.scope.instance_id[i], 1);
-    c.scalar(v.scope.lifecycle_generation, 8);
-    c.scalar(v.availability, 4);
-    c.scalar(v.reason, 4);
-    c.scalar(v.observation_gaps, 8);
-    c.text(v.namespace_id);
-    c.scalar(v.qualified_kills, 8);
-}
-template<class C, class T> void v1_transfer_engine_result(C& c, T& v) {
-    c.scalar(v.abi_version, 4);
-    c.scalar(v.sequence, 8);
-    c.scalar(v.sampled_at_ms, 8);
-    c.scalar(v.duration_ms, 4);
-    c.scalar(v.sample_reason, 4);
-    c.scalar(v.pe_reason, 4);
-    c.scalar(v.machine, 4);
-    c.scalar(v.timestamp, 4);
-    c.scalar(v.image_size, 4);
-    c.scalar(v.entry_rva, 4);
-    c.scalar(v.disk_hash_reason, 4);
-    for (size_t i = 0; i < 64; ++i) c.scalar(v.disk_sha256[i], 1);
-    c.scalar(v.profile, 4);
-    c.scalar(v.locator_revision, 4);
-    c.scalar(v.root_locator_reason, 4);
-    c.scalar(v.root_signature_rva, 4);
-    c.scalar(v.root_target_rva, 4);
-    c.scalar(v.profile_runtime_validated, 4);
-}
-template<class C, class T> void v1_transfer_engine_field(C& c, T& v) {
-    c.scalar(v.validity, 4);
-    c.scalar(v.reason, 4);
-    c.scalar(v.value, 4);
-    c.scalar(v.win32_error, 4);
-}
-template<class C, class T> void v1_transfer_save_result(C& c, T& v) {
-    c.scalar(v.abi_version, 4);
-    c.scalar(v.profile, 4);
-    c.scalar(v.sequence, 8);
-    c.scalar(v.sampled_at_ms, 8);
-    c.scalar(v.duration_ms, 4);
-    c.scalar(v.sample_reason, 4);
-    c.scalar(v.layout_revision, 4);
-    c.scalar(v.root_locator_reason, 4);
-    c.scalar(v.mutation_available, 4);
-    c.scalar(v.mutation_reason, 4);
-}
-template<class C, class T> void v1_transfer_save_field(C& c, T& v) {
-    c.scalar(v.validity, 4);
-    c.scalar(v.reason, 4);
-    c.scalar(v.value, 8);
-    c.scalar(v.win32_error, 4);
-}
-template<class C, class T> void v1_transfer_admission_result(C& c, T& v) {
-    c.scalar(v.abi_version, 4);
-    c.scalar(v.state, 4);
-    c.scalar(v.fault, 4);
-    c.scalar(v.prepared_routes, 4);
-    c.scalar(v.required_routes, 4);
-    c.scalar(v.flags, 4);
-    for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
-    for (size_t i = 0; i < 44; ++i) c.scalar(v.native_root[i], 1);
-}
-template<class C, class T> void v1_transfer_write_result(C& c, T& v) {
-    c.scalar(v.abi_version, 4);
-    c.scalar(v.state, 4);
-    c.scalar(v.flags, 4);
-    c.scalar(v.operation_id, 8);
-    c.scalar(v.sdk_sequence, 8);
-    c.scalar(v.file_count, 4);
-    c.scalar(v.submitted, 4);
-    c.scalar(v.completed, 4);
-    c.scalar(v.pending_handles, 4);
-    c.scalar(v.preparation_jobs, 4);
-    c.scalar(v.preflight_jobs, 4);
-    c.scalar(v.native_value, 4);
-    c.scalar(v.reserved, 4);
-    c.scalar(v.native_state, 8);
-    c.scalar(v.native_outcome, 8);
-    for (size_t i = 0; i < 64; ++i) c.scalar(v.directory[i], 1);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.reserved_bytes[i], 1);
-}
-template<class C, class T> void v1_transfer_installation_result(C& c, T& v) {
-    c.scalar(v.abi_version, 4);
-    c.scalar(v.attempt, 4);
-    c.scalar(v.phase, 4);
-    c.scalar(v.last_completed_stage, 4);
-    c.scalar(v.startup_observation, 4);
-    c.scalar(v.validated, 4);
-    c.scalar(v.created, 4);
-    c.scalar(v.enabled, 4);
-    c.scalar(v.cleanup_failures, 4);
-    c.scalar(v.gaps, 4);
-    c.scalar(v.sequence, 8);
-}
-template<class C, class T> void v1_transfer_installation_event(C& c, T& v) {
-    c.scalar(v.sequence, 8);
-    c.scalar(v.at_ms, 8);
-    c.scalar(v.duration_ms, 8);
-    c.scalar(v.stage, 4);
-    c.scalar(v.target_group, 4);
-    c.scalar(v.target_index, 4);
-    c.scalar(v.rva, 4);
-    c.scalar(v.signature_offset, 4);
-    c.scalar(v.result, 4);
-    c.scalar(v.reason, 4);
-    c.scalar(v.read_reason, 4);
-    c.scalar(v.win32_error, 4);
-    c.scalar(v.minhook_status, 4);
-    c.scalar(v.byte_count, 4);
-    c.scalar(v.collision_rva, 4);
-    c.scalar(v.byte_window_offset, 4);
-    for (size_t i = 0; i < 32; ++i) c.scalar(v.expected_bytes[i], 1);
-    for (size_t i = 0; i < 32; ++i) c.scalar(v.actual_bytes[i], 1);
-}
-template<class C, class T> void v1_transfer_context_result(C& c, T& v) {
-    c.scalar(v.abi_version, 4);
-    c.scalar(v.sequence, 8);
-    c.scalar(v.sampled_at_ms, 8);
-    c.scalar(v.duration_ms, 4);
-    c.scalar(v.sample_reason, 4);
-    c.scalar(v.profile, 4);
-    c.scalar(v.locator_revision, 4);
-    c.scalar(v.layout_revision, 4);
-    c.scalar(v.root_locator_reason, 4);
-    c.scalar(v.disk_hash_reason, 4);
-    for (size_t i = 0; i < 64; ++i) c.scalar(v.disk_sha256[i], 1);
-}
-template<class C, class T> void v1_transfer_context_map(C& c, T& v) {
-    c.scalar(v.validity, 4);
-    c.scalar(v.reason, 4);
-    c.scalar(v.win32_error, 4);
-    c.scalar(v.length, 2);
-}
-template<class C, class T> void v1_transfer_native_map(C& c, T& v) {
-    c.scalar(v.validity, 4);
-    c.scalar(v.reason, 4);
-    c.scalar(v.win32_error, 4);
-    c.scalar(v.length, 4);
-}
-template<class C, class T> void v1_transfer_native_counts(C& c, T& v) {
-    c.scalar(v.queued, 4);
-    c.scalar(v.claimed, 4);
-    c.scalar(v.retained_results, 4);
-    c.scalar(v.history_gap, 4);
-    c.scalar(v.event_count, 4);
-}
-template<class C, class T> void v1_transfer_native_event(C& c, T& v) {
-    c.scalar(v.sequence, 8);
-    c.scalar(v.generation, 8);
-    c.scalar(v.at_ms, 8);
-    c.scalar(v.kind, 4);
-    c.scalar(v.lifecycle, 4);
-    c.scalar(v.thread_id, 4);
-    c.scalar(v.depth, 4);
-}
-template<class C, class T> void v1_transfer_native_result(C& c, T& v) {
-    c.scalar(v.scope.pid, 4);
-    c.scalar(v.scope.process_created, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.scope.instance_id[i], 1);
-    c.scalar(v.scope.lifecycle_generation, 8);
-    c.scalar(v.availability, 4);
-    c.scalar(v.reason, 4);
-    c.scalar(v.site_revision, 4);
-    c.scalar(v.site_rva, 4);
-    c.scalar(v.phase, 4);
-    c.scalar(v.installed_hooks, 4);
-    for (size_t i = 0; i < 3; ++i) c.scalar(v.validator_reasons[i], 4);
-    c.scalar(v.retained_module, 4);
-    c.scalar(v.coverage, 4);
-    c.scalar(v.lifecycle, 4);
-    c.scalar(v.depth, 4);
-    c.scalar(v.checkpoint_flag_known, 4);
-    c.scalar(v.checkpoint_flag, 4);
-    c.scalar(v.event_sequence, 8);
-    c.scalar(v.event_gap_count, 8);
-    c.scalar(v.history_oldest, 8);
-    c.scalar(v.history_overwritten, 8);
-    c.scalar(v.callback_sequence, 8);
-    c.scalar(v.callback_at_ms, 8);
-    c.scalar(v.callback_thread_id, 4);
-    c.scalar(v.native_owner_thread_id, 4);
-    c.scalar(v.context_generation, 8);
-    c.scalar(v.context_sampled_at_ms, 8);
-    c.scalar(v.context_reason, 4);
-    c.scalar(v.game_state, 4);
-}
-template<class C, class T> void v1_transfer_header(C& c, T& v) {
-    c.scalar(v.magic, 4);
-    c.scalar(v.version, 2);
-    c.scalar(v.operation, 2);
-    c.scalar(v.payload_length, 4);
-    c.scalar(v.result, 4);
-}
-template<class C, class T> void v1_transfer_inspect_core(C& c, T& v) {
-    c.scalar(v.core.abi_version, 4);
-    c.scalar(v.core.capabilities, 8);
-}
-template<class C, class T> void v1_transfer_process_identity(C& c, T& v) {
-    c.scalar(v.pid, 4);
-    c.scalar(v.process_created, 8);
-    for (size_t i = 0; i < 16; ++i) c.scalar(v.instance[i], 1);
-}
-template<class C, class T> void v1_transfer_inspect_state(C& c, T& v) {
-    c.scalar(v.core.state, 4);
-    c.scalar(v.service, 4);
-    c.scalar(v.service_error, 4);
-}
-template<class C, class T> void v1_transfer_inspect_tail(C& c, T& v) {
-    c.scalar(v.core.last_result, 4);
-    c.scalar(v.core.initialization_count, 4);
-    c.text(v.core.version);
-    c.text(v.core.build_id);
-}
-template<class C, class T> void v1_transfer_combat_query(C& c, T& v) {
-    c.text(v.namespace_id);
-    c.scalar(v.map_count, 4);
-}
-template<class C, class T> void v1_transfer_campaign_rewards_header(C& c, T& v) {
+template<class C, class T> void native_field_campaign_rewards_header(C& c, T& v) {
     c.scalar(v.known, 4);
     c.scalar(v.count, 4);
 }
-template<class C, class T> void v1_transfer_campaign_intent_count(C& c, T& v) {
-    c.scalar(v.intent_count, 4);
+template<class C, class T> void native_field_currency_request(C& c, T& v) {
+    c.scalar(v.kind, 4);
+    c.scalar(v.currency, 4);
+    c.scalar(v.amount, 4);
+    c.scalar(v.expected_gained, 4);
+    c.text(v.namespace_id);
 }
-template<class C, class T> void v1_transfer_map_bytes(C& c, T& v) {
-    if (v.length > 255) { c.valid = false; return; }
-    for (size_t i = 0; i < v.length; ++i) c.scalar(v.bytes[i], 1);
+template<class C, class T> void native_field_progression_request(C& c, T& v) {
+    c.scalar(v.kind, 4);
+    c.text(v.namespace_id);
 }
-template<class C, class T> void v1_transfer_combat_maps(C& c, T& v) {
-    if (v.map_count > 64) { c.valid = false; return; }
-    for (size_t i = 0; i < v.map_count; ++i) c.text(v.maps[i]);
+template<class C, class T> void native_field_mission_access_request(C& c, T& v) {
+    c.scalar(v.kind, 4);
+    c.scalar(v.stage_id, 4);
+    c.text(v.namespace_id);
 }
-template<class C, class T> void v1_transfer_campaign_intents(C& c, T& v) {
-    if (v.intent_count > 96) { c.valid = false; return; }
-    for (size_t i = 0; i < v.intent_count; ++i) c.scalar(v.intent_ids[i], 4);
-}
-enum class V1Family { empty, cursor, diagnostic, write, backup, points, campaign, inventory, arsenal, runes, special, deathlink, automap, command, combat, presentation };
-struct V1Descriptor { uint16_t version, opcode; uint64_t capability; size_t payload; V1Family family; bool subset, envelope, allow_zero_generation; uint32_t input_abi; };
-inline constexpr V1Descriptor v1_descriptors[] = {
-    {1, 1, 1ULL, 8, V1Family::empty, true, false, false, 0},
-    {1, 2, 2ULL, 8, V1Family::empty, true, false, false, 0},
-    {1, 3, 4ULL, 8, V1Family::empty, true, false, false, 0},
-    {1, 4, 8ULL, 16, V1Family::cursor, false, false, false, 0},
-    {1, 5, 16ULL, 72, V1Family::diagnostic, false, true, false, 0},
-    {1, 6, 16ULL, 72, V1Family::diagnostic, false, true, false, 0},
-    {1, 7, 16ULL, 72, V1Family::diagnostic, false, true, false, 0},
-    {1, 8, 32ULL, 72, V1Family::diagnostic, false, true, false, 0},
-    {1, 9, 32ULL, 72, V1Family::diagnostic, false, true, false, 0},
-    {1, 10, 32ULL, 72, V1Family::diagnostic, false, true, false, 0},
-    {1, 11, 64ULL, 8, V1Family::empty, true, false, false, 0},
-    {1, 12, 128ULL, 8, V1Family::empty, true, false, false, 0},
-    {1, 13, 256ULL, 16, V1Family::write, false, false, false, 0},
-    {1, 14, 512ULL, 149, V1Family::backup, false, true, false, 0},
-    {1, 15, 512ULL, 149, V1Family::backup, false, true, false, 0},
-    {1, 16, 512ULL, 149, V1Family::backup, false, true, false, 0},
-    {1, 17, 1024ULL, 8, V1Family::empty, false, false, false, 0},
-    {1, 18, 2048ULL, 149, V1Family::points, false, true, false, 0},
-    {1, 19, 2048ULL, 149, V1Family::points, false, true, false, 0},
-    {1, 20, 2048ULL, 149, V1Family::points, false, true, false, 0},
-    {1, 21, 2048ULL, 149, V1Family::points, false, true, false, 0},
-    {1, 22, 4096ULL, 453, V1Family::campaign, false, true, true, 0},
-    {1, 23, 4096ULL, 453, V1Family::campaign, false, true, true, 0},
-    {1, 24, 4096ULL, 453, V1Family::campaign, false, true, true, 0},
-    {1, 25, 8192ULL, 161, V1Family::inventory, false, true, false, 0},
-    {1, 26, 8192ULL, 161, V1Family::inventory, false, true, false, 0},
-    {1, 27, 8192ULL, 161, V1Family::inventory, false, true, false, 0},
-    {1, 28, 8192ULL, 161, V1Family::inventory, false, true, false, 0},
-    {1, 29, 16384ULL, 165, V1Family::arsenal, false, true, false, 0},
-    {1, 30, 16384ULL, 165, V1Family::arsenal, false, true, false, 0},
-    {1, 31, 16384ULL, 165, V1Family::arsenal, false, true, false, 0},
-    {1, 32, 16384ULL, 165, V1Family::arsenal, false, true, false, 0},
-    {1, 33, 32768ULL, 153, V1Family::runes, false, true, false, 0},
-    {1, 34, 32768ULL, 153, V1Family::runes, false, true, false, 0},
-    {1, 35, 32768ULL, 153, V1Family::runes, false, true, false, 0},
-    {1, 36, 32768ULL, 153, V1Family::runes, false, true, false, 0},
-    {1, 37, 65536ULL, 181, V1Family::special, false, true, false, 0},
-    {1, 38, 65536ULL, 181, V1Family::special, false, true, false, 0},
-    {1, 39, 65536ULL, 181, V1Family::special, false, true, false, 0},
-    {1, 40, 65536ULL, 181, V1Family::special, false, true, false, 0},
-    {1, 41, 131072ULL, 189, V1Family::deathlink, false, true, false, 0},
-    {1, 42, 131072ULL, 189, V1Family::deathlink, false, true, false, 0},
-    {1, 43, 131072ULL, 189, V1Family::deathlink, false, true, false, 0},
-    {1, 44, 131072ULL, 189, V1Family::deathlink, false, true, false, 0},
-    {1, 45, 262144ULL, 225, V1Family::automap, false, true, false, 0},
-    {1, 46, 2097152ULL, 2193, V1Family::command, false, true, false, 1},
-    {1, 47, 2097152ULL, 2193, V1Family::command, false, true, false, 1},
-    {1, 48, 2097152ULL, 2193, V1Family::command, false, true, false, 1},
-    {1, 49, 2097152ULL, 2193, V1Family::command, false, true, false, 1},
-    {1, 50, 4194304ULL, 0, V1Family::combat, false, false, false, 2},
-    {1, 51, 8388608ULL, 185, V1Family::presentation, false, true, false, 1},
-};
 inline sc_status to_wire(const ::sc_status& v) {
     sc_status out{};
     out.abi_version = v.abi_version;
@@ -2193,8 +1411,29 @@ inline sc_status to_wire(const ::sc_status& v) {
     for (size_t i = 0; i < 65; ++i) out.build_id[i] = v.build_id[i];
     return out;
 }
+inline ::sc_status from_wire(const sc_status& v) {
+    ::sc_status out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.capabilities = v.capabilities;
+    out.state = v.state;
+    out.last_result = v.last_result;
+    out.initialization_count = v.initialization_count;
+    out.diagnostic_count = v.diagnostic_count;
+    for (size_t i = 0; i < 32; ++i) out.version[i] = v.version[i];
+    for (size_t i = 0; i < 65; ++i) out.build_id[i] = v.build_id[i];
+    return out;
+}
 inline sc_engine_field to_wire(const ::sc_engine_field& v) {
     sc_engine_field out{};
+    out.validity = v.validity;
+    out.reason = v.reason;
+    out.value = v.value;
+    out.win32_error = v.win32_error;
+    return out;
+}
+inline ::sc_engine_field from_wire(const sc_engine_field& v) {
+    ::sc_engine_field out{};
     out.validity = v.validity;
     out.reason = v.reason;
     out.value = v.value;
@@ -2224,6 +1463,30 @@ inline sc_engine_snapshot to_wire(const ::sc_engine_snapshot& v) {
     for (size_t i = 0; i < 6; ++i) out.fields[i] = to_wire(v.fields[i]);
     return out;
 }
+inline ::sc_engine_snapshot from_wire(const sc_engine_snapshot& v) {
+    ::sc_engine_snapshot out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.sequence = v.sequence;
+    out.sampled_at_ms = v.sampled_at_ms;
+    out.duration_ms = v.duration_ms;
+    out.sample_reason = v.sample_reason;
+    out.pe_reason = v.pe_reason;
+    out.machine = v.machine;
+    out.timestamp = v.timestamp;
+    out.image_size = v.image_size;
+    out.entry_rva = v.entry_rva;
+    out.disk_hash_reason = v.disk_hash_reason;
+    for (size_t i = 0; i < 65; ++i) out.disk_sha256[i] = v.disk_sha256[i];
+    out.profile = v.profile;
+    out.locator_revision = v.locator_revision;
+    out.root_locator_reason = v.root_locator_reason;
+    out.root_signature_rva = v.root_signature_rva;
+    out.root_target_rva = v.root_target_rva;
+    out.profile_runtime_validated = v.profile_runtime_validated;
+    for (size_t i = 0; i < 6; ++i) out.fields[i] = from_wire(v.fields[i]);
+    return out;
+}
 inline sc_context_map to_wire(const ::sc_context_map& v) {
     sc_context_map out{};
     out.validity = v.validity;
@@ -2233,8 +1496,25 @@ inline sc_context_map to_wire(const ::sc_context_map& v) {
     for (size_t i = 0; i < 256; ++i) out.bytes[i] = v.bytes[i];
     return out;
 }
+inline ::sc_context_map from_wire(const sc_context_map& v) {
+    ::sc_context_map out{};
+    out.validity = v.validity;
+    out.reason = v.reason;
+    out.win32_error = v.win32_error;
+    out.length = v.length;
+    for (size_t i = 0; i < 256; ++i) out.bytes[i] = v.bytes[i];
+    return out;
+}
 inline sc_context_field to_wire(const ::sc_context_field& v) {
     sc_context_field out{};
+    out.validity = v.validity;
+    out.reason = v.reason;
+    out.value = v.value;
+    out.win32_error = v.win32_error;
+    return out;
+}
+inline ::sc_context_field from_wire(const sc_context_field& v) {
+    ::sc_context_field out{};
     out.validity = v.validity;
     out.reason = v.reason;
     out.value = v.value;
@@ -2261,6 +1541,27 @@ inline sc_context_snapshot to_wire(const ::sc_context_snapshot& v) {
     for (size_t i = 0; i < 5; ++i) out.fields[i] = to_wire(v.fields[i]);
     return out;
 }
+inline ::sc_context_snapshot from_wire(const sc_context_snapshot& v) {
+    ::sc_context_snapshot out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.pid = v.pid;
+    out.process_created = v.process_created;
+    for (size_t i = 0; i < 16; ++i) out.instance[i] = v.instance[i];
+    out.sequence = v.sequence;
+    out.sampled_at_ms = v.sampled_at_ms;
+    out.duration_ms = v.duration_ms;
+    out.sample_reason = v.sample_reason;
+    out.profile = v.profile;
+    out.locator_revision = v.locator_revision;
+    out.layout_revision = v.layout_revision;
+    out.root_locator_reason = v.root_locator_reason;
+    out.disk_hash_reason = v.disk_hash_reason;
+    for (size_t i = 0; i < 65; ++i) out.disk_sha256[i] = v.disk_sha256[i];
+    out.current_map = from_wire(v.current_map);
+    for (size_t i = 0; i < 5; ++i) out.fields[i] = from_wire(v.fields[i]);
+    return out;
+}
 inline sc_native_scope to_wire(const ::sc_native_scope& v) {
     sc_native_scope out{};
     out.pid = v.pid;
@@ -2279,6 +1580,17 @@ inline ::sc_native_scope from_wire(const sc_native_scope& v) {
 }
 inline sc_native_event to_wire(const ::sc_native_event& v) {
     sc_native_event out{};
+    out.sequence = v.sequence;
+    out.generation = v.generation;
+    out.at_ms = v.at_ms;
+    out.kind = v.kind;
+    out.lifecycle = v.lifecycle;
+    out.thread_id = v.thread_id;
+    out.depth = v.depth;
+    return out;
+}
+inline ::sc_native_event from_wire(const sc_native_event& v) {
+    ::sc_native_event out{};
     out.sequence = v.sequence;
     out.generation = v.generation;
     out.at_ms = v.at_ms;
@@ -2326,6 +1638,45 @@ inline sc_native_snapshot to_wire(const ::sc_native_snapshot& v) {
     for (size_t i = 0; i < 6; ++i) out.events[i] = to_wire(v.events[i]);
     return out;
 }
+inline ::sc_native_snapshot from_wire(const sc_native_snapshot& v) {
+    ::sc_native_snapshot out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.scope = from_wire(v.scope);
+    out.availability = v.availability;
+    out.reason = v.reason;
+    out.site_revision = v.site_revision;
+    out.site_rva = v.site_rva;
+    out.phase = v.phase;
+    out.installed_hooks = v.installed_hooks;
+    for (size_t i = 0; i < 3; ++i) out.validator_reasons[i] = v.validator_reasons[i];
+    out.retained_module = v.retained_module;
+    out.coverage = v.coverage;
+    out.lifecycle = v.lifecycle;
+    out.depth = v.depth;
+    out.checkpoint_flag_known = v.checkpoint_flag_known;
+    out.checkpoint_flag = v.checkpoint_flag;
+    out.event_sequence = v.event_sequence;
+    out.event_gap_count = v.event_gap_count;
+    out.history_oldest = v.history_oldest;
+    out.history_overwritten = v.history_overwritten;
+    out.callback_sequence = v.callback_sequence;
+    out.callback_at_ms = v.callback_at_ms;
+    out.callback_thread_id = v.callback_thread_id;
+    out.native_owner_thread_id = v.native_owner_thread_id;
+    out.context_generation = v.context_generation;
+    out.context_sampled_at_ms = v.context_sampled_at_ms;
+    out.context_reason = v.context_reason;
+    out.game_state = v.game_state;
+    out.current_map = from_wire(v.current_map);
+    out.queued = v.queued;
+    out.claimed = v.claimed;
+    out.retained_results = v.retained_results;
+    out.history_gap = v.history_gap;
+    out.event_count = v.event_count;
+    for (size_t i = 0; i < 6; ++i) out.events[i] = from_wire(v.events[i]);
+    return out;
+}
 inline sc_diagnostic_result to_wire(const ::sc_diagnostic_result& v) {
     sc_diagnostic_result out{};
     out.state = v.state;
@@ -2350,8 +1701,41 @@ inline sc_diagnostic_result to_wire(const ::sc_diagnostic_result& v) {
     out.current_map = to_wire(v.current_map);
     return out;
 }
+inline ::sc_diagnostic_result from_wire(const sc_diagnostic_result& v) {
+    ::sc_diagnostic_result out{};
+    out.state = v.state;
+    out.reason = v.reason;
+    out.cancel_requested = v.cancel_requested;
+    out.retrieved = v.retrieved;
+    out.scope = from_wire(v.scope);
+    out.request_id = v.request_id;
+    for (size_t i = 0; i < 16; ++i) out.nonce[i] = v.nonce[i];
+    out.admitted_at_ms = v.admitted_at_ms;
+    out.deadline_at_ms = v.deadline_at_ms;
+    out.claimed_at_ms = v.claimed_at_ms;
+    out.observed_at_ms = v.observed_at_ms;
+    out.executed_at_ms = v.executed_at_ms;
+    out.completed_at_ms = v.completed_at_ms;
+    out.retrieved_at_ms = v.retrieved_at_ms;
+    out.thread_id = v.thread_id;
+    out.site_revision = v.site_revision;
+    out.phase = v.phase;
+    out.lifecycle = v.lifecycle;
+    out.game_state = v.game_state;
+    out.current_map = from_wire(v.current_map);
+    return out;
+}
 inline sc_save_field to_wire(const ::sc_save_field& v) {
     sc_save_field out{};
+    out.validity = v.validity;
+    out.reason = v.reason;
+    out.value = v.value;
+    out.win32_error = v.win32_error;
+    out.reserved = v.reserved;
+    return out;
+}
+inline ::sc_save_field from_wire(const sc_save_field& v) {
+    ::sc_save_field out{};
     out.validity = v.validity;
     out.reason = v.reason;
     out.value = v.value;
@@ -2377,6 +1761,25 @@ inline sc_save_snapshot to_wire(const ::sc_save_snapshot& v) {
     for (size_t i = 0; i < 12; ++i) out.fields[i] = to_wire(v.fields[i]);
     return out;
 }
+inline ::sc_save_snapshot from_wire(const sc_save_snapshot& v) {
+    ::sc_save_snapshot out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.pid = v.pid;
+    out.profile = v.profile;
+    out.process_created = v.process_created;
+    for (size_t i = 0; i < 16; ++i) out.instance[i] = v.instance[i];
+    out.sequence = v.sequence;
+    out.sampled_at_ms = v.sampled_at_ms;
+    out.duration_ms = v.duration_ms;
+    out.sample_reason = v.sample_reason;
+    out.layout_revision = v.layout_revision;
+    out.root_locator_reason = v.root_locator_reason;
+    out.mutation_available = v.mutation_available;
+    out.mutation_reason = v.mutation_reason;
+    for (size_t i = 0; i < 12; ++i) out.fields[i] = from_wire(v.fields[i]);
+    return out;
+}
 inline sc_save_admission_snapshot to_wire(const ::sc_save_admission_snapshot& v) {
     sc_save_admission_snapshot out{};
     out.abi_version = v.abi_version;
@@ -2391,8 +1794,45 @@ inline sc_save_admission_snapshot to_wire(const ::sc_save_admission_snapshot& v)
     for (size_t i = 0; i < 19; ++i) out.reserved_bytes[i] = v.reserved_bytes[i];
     return out;
 }
+inline ::sc_save_admission_snapshot from_wire(const sc_save_admission_snapshot& v) {
+    ::sc_save_admission_snapshot out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.state = v.state;
+    out.fault = v.fault;
+    out.prepared_routes = v.prepared_routes;
+    out.required_routes = v.required_routes;
+    out.flags = v.flags;
+    out.reserved = v.reserved;
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    for (size_t i = 0; i < 44; ++i) out.native_root[i] = v.native_root[i];
+    for (size_t i = 0; i < 19; ++i) out.reserved_bytes[i] = v.reserved_bytes[i];
+    return out;
+}
 inline sc_save_write_snapshot to_wire(const ::sc_save_write_snapshot& v) {
     sc_save_write_snapshot out{};
+    out.abi_version = v.abi_version;
+    out.state = v.state;
+    out.flags = v.flags;
+    out.operation_id = v.operation_id;
+    out.sdk_sequence = v.sdk_sequence;
+    out.file_count = v.file_count;
+    out.submitted = v.submitted;
+    out.completed = v.completed;
+    out.pending_handles = v.pending_handles;
+    out.preparation_jobs = v.preparation_jobs;
+    out.preflight_jobs = v.preflight_jobs;
+    out.native_value = v.native_value;
+    out.reserved = v.reserved;
+    out.native_state = v.native_state;
+    out.native_outcome = v.native_outcome;
+    for (size_t i = 0; i < 64; ++i) out.directory[i] = v.directory[i];
+    for (size_t i = 0; i < 16; ++i) out.reserved_bytes[i] = v.reserved_bytes[i];
+    return out;
+}
+inline ::sc_save_write_snapshot from_wire(const sc_save_write_snapshot& v) {
+    ::sc_save_write_snapshot out{};
+    out.size = sizeof(out);
     out.abi_version = v.abi_version;
     out.state = v.state;
     out.flags = v.flags;
@@ -2431,8 +1871,50 @@ inline sc_save_backup_snapshot to_wire(const ::sc_save_backup_snapshot& v) {
     out.slot = v.slot;
     return out;
 }
+inline ::sc_save_backup_snapshot from_wire(const sc_save_backup_snapshot& v) {
+    ::sc_save_backup_snapshot out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.state = v.state;
+    out.failure = v.failure;
+    out.execution = from_wire(v.execution);
+    out.operation_id = v.operation_id;
+    out.flags = v.flags;
+    out.native_exception = v.native_exception;
+    out.storage_outcome = v.storage_outcome;
+    out.storage_error = v.storage_error;
+    out.files = v.files;
+    out.bytes = v.bytes;
+    for (size_t i = 0; i < 80; ++i) out.basename[i] = v.basename[i];
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.campaign = v.campaign;
+    out.slot = v.slot;
+    return out;
+}
 inline sc_install_event to_wire(const ::sc_install_event& v) {
     sc_install_event out{};
+    out.sequence = v.sequence;
+    out.at_ms = v.at_ms;
+    out.duration_ms = v.duration_ms;
+    out.stage = v.stage;
+    out.target_group = v.target_group;
+    out.target_index = v.target_index;
+    out.rva = v.rva;
+    out.signature_offset = v.signature_offset;
+    out.result = v.result;
+    out.reason = v.reason;
+    out.read_reason = v.read_reason;
+    out.win32_error = v.win32_error;
+    out.minhook_status = v.minhook_status;
+    out.byte_count = v.byte_count;
+    out.collision_rva = v.collision_rva;
+    out.byte_window_offset = v.byte_window_offset;
+    for (size_t i = 0; i < 32; ++i) out.expected_bytes[i] = v.expected_bytes[i];
+    for (size_t i = 0; i < 32; ++i) out.actual_bytes[i] = v.actual_bytes[i];
+    return out;
+}
+inline ::sc_install_event from_wire(const sc_install_event& v) {
+    ::sc_install_event out{};
     out.sequence = v.sequence;
     out.at_ms = v.at_ms;
     out.duration_ms = v.duration_ms;
@@ -2472,10 +1954,49 @@ inline sc_save_installation_snapshot to_wire(const ::sc_save_installation_snapsh
     out.cleanup_failure = to_wire(v.cleanup_failure);
     return out;
 }
+inline ::sc_save_installation_snapshot from_wire(const sc_save_installation_snapshot& v) {
+    ::sc_save_installation_snapshot out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.attempt = v.attempt;
+    out.phase = v.phase;
+    out.last_completed_stage = v.last_completed_stage;
+    out.startup_observation = v.startup_observation;
+    out.validated = v.validated;
+    out.created = v.created;
+    out.enabled = v.enabled;
+    out.cleanup_failures = v.cleanup_failures;
+    out.gaps = v.gaps;
+    out.reserved = v.reserved;
+    out.sequence = v.sequence;
+    out.active = from_wire(v.active);
+    out.primary_failure = from_wire(v.primary_failure);
+    out.cleanup_failure = from_wire(v.cleanup_failure);
+    return out;
+}
 inline sc_weapon_points_result to_wire(const ::sc_weapon_points_result& v) {
     sc_weapon_points_result out{};
     out.abi_version = v.abi_version;
     out.execution = to_wire(v.execution);
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.kind = v.kind;
+    out.amount = v.amount;
+    out.expected_gained = v.expected_gained;
+    out.outcome = v.outcome;
+    out.flags = v.flags;
+    out.native_exception = v.native_exception;
+    out.balance_before = v.balance_before;
+    out.balance_after = v.balance_after;
+    out.gained_before = v.gained_before;
+    out.gained_after = v.gained_after;
+    out.suppressed_grants = v.suppressed_grants;
+    return out;
+}
+inline ::sc_weapon_points_result from_wire(const sc_weapon_points_result& v) {
+    ::sc_weapon_points_result out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.execution = from_wire(v.execution);
     for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
     out.kind = v.kind;
     out.amount = v.amount;
@@ -2507,10 +2028,71 @@ inline sc_campaign_result to_wire(const ::sc_campaign_result& v) {
     for (size_t i = 0; i < 96; ++i) out.intent_ids[i] = v.intent_ids[i];
     return out;
 }
+inline ::sc_campaign_result from_wire(const sc_campaign_result& v) {
+    ::sc_campaign_result out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.scope = from_wire(v.scope);
+    out.request_id = v.request_id;
+    for (size_t i = 0; i < 16; ++i) out.nonce[i] = v.nonce[i];
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.status = v.status;
+    out.reason = v.reason;
+    out.committed_revision = v.committed_revision;
+    out.rendered_revision = v.rendered_revision;
+    out.selected_id = v.selected_id;
+    out.loaded_id = v.loaded_id;
+    out.intent_count = v.intent_count;
+    for (size_t i = 0; i < 96; ++i) out.intent_ids[i] = v.intent_ids[i];
+    return out;
+}
 inline sc_inventory_result to_wire(const ::sc_inventory_result& v) {
     sc_inventory_result out{};
     out.abi_version = v.abi_version;
     out.execution = to_wire(v.execution);
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.kind = v.kind;
+    out.outcome = v.outcome;
+    out.flags = v.flags;
+    out.native_exception = v.native_exception;
+    out.weapons_before = v.weapons_before;
+    out.weapons_after = v.weapons_after;
+    out.equipment_before = v.equipment_before;
+    out.equipment_after = v.equipment_after;
+    out.special_before = v.special_before;
+    out.special_after = v.special_after;
+    out.upgrades_before = v.upgrades_before;
+    out.upgrades_after = v.upgrades_after;
+    out.health_tier_before = v.health_tier_before;
+    out.health_tier_after = v.health_tier_after;
+    out.armor_tier_before = v.armor_tier_before;
+    out.armor_tier_after = v.armor_tier_after;
+    out.ammo_tier_before = v.ammo_tier_before;
+    out.ammo_tier_after = v.ammo_tier_after;
+    out.reserved_before = v.reserved_before;
+    out.reserved_after = v.reserved_after;
+    out.operations_applied = v.operations_applied;
+    out.ice_bomb_before = v.ice_bomb_before;
+    out.ice_bomb_after = v.ice_bomb_after;
+    out.dash_before = v.dash_before;
+    out.dash_after = v.dash_after;
+    out.slayer_key_before = v.slayer_key_before;
+    out.slayer_key_after = v.slayer_key_after;
+    out.frag_grenade_before = v.frag_grenade_before;
+    out.frag_grenade_after = v.frag_grenade_after;
+    out.flame_belch_before = v.flame_belch_before;
+    out.flame_belch_after = v.flame_belch_after;
+    out.blood_punch_before = v.blood_punch_before;
+    out.blood_punch_after = v.blood_punch_after;
+    out.perks_known = v.perks_known;
+    out.perks_owned = v.perks_owned;
+    return out;
+}
+inline ::sc_inventory_result from_wire(const sc_inventory_result& v) {
+    ::sc_inventory_result out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.execution = from_wire(v.execution);
     for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
     out.kind = v.kind;
     out.outcome = v.outcome;
@@ -2581,6 +2163,39 @@ inline sc_arsenal_result to_wire(const ::sc_arsenal_result& v) {
     out.operations_applied = v.operations_applied;
     return out;
 }
+inline ::sc_arsenal_result from_wire(const sc_arsenal_result& v) {
+    ::sc_arsenal_result out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.execution = from_wire(v.execution);
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.kind = v.kind;
+    out.outcome = v.outcome;
+    out.flags = v.flags;
+    out.native_exception = v.native_exception;
+    out.weapons_before = v.weapons_before;
+    out.weapons_after = v.weapons_after;
+    out.mods_before = v.mods_before;
+    out.mods_after = v.mods_after;
+    for (size_t i = 0; i < 8; ++i) out.selected_mods_before[i] = v.selected_mods_before[i];
+    for (size_t i = 0; i < 8; ++i) out.selected_mods_after[i] = v.selected_mods_after[i];
+    out.normal_upgrades_before = v.normal_upgrades_before;
+    out.normal_upgrades_after = v.normal_upgrades_after;
+    out.masteries_ap_before = v.masteries_ap_before;
+    out.masteries_ap_after = v.masteries_ap_after;
+    out.mastery_challenges_active_before = v.mastery_challenges_active_before;
+    out.mastery_challenges_active_after = v.mastery_challenges_active_after;
+    out.mastery_challenges_completed_before = v.mastery_challenges_completed_before;
+    out.mastery_challenges_completed_after = v.mastery_challenges_completed_after;
+    out.masteries_effective_before = v.masteries_effective_before;
+    out.masteries_effective_after = v.masteries_effective_after;
+    out.mission_challenges_active_before = v.mission_challenges_active_before;
+    out.mission_challenges_active_after = v.mission_challenges_active_after;
+    out.mission_challenges_completed_before = v.mission_challenges_completed_before;
+    out.mission_challenges_completed_after = v.mission_challenges_completed_after;
+    out.operations_applied = v.operations_applied;
+    return out;
+}
 inline sc_runes_result to_wire(const ::sc_runes_result& v) {
     sc_runes_result out{};
     out.abi_version = v.abi_version;
@@ -2607,10 +2222,69 @@ inline sc_runes_result to_wire(const ::sc_runes_result& v) {
     out.operations_applied = v.operations_applied;
     return out;
 }
+inline ::sc_runes_result from_wire(const sc_runes_result& v) {
+    ::sc_runes_result out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.execution = from_wire(v.execution);
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.kind = v.kind;
+    out.outcome = v.outcome;
+    out.flags = v.flags;
+    out.native_exception = v.native_exception;
+    out.owned_normal_before = v.owned_normal_before;
+    out.owned_normal_after = v.owned_normal_after;
+    out.owned_support_before = v.owned_support_before;
+    out.owned_support_after = v.owned_support_after;
+    for (size_t i = 0; i < 3; ++i) out.selected_slots_before[i] = v.selected_slots_before[i];
+    for (size_t i = 0; i < 3; ++i) out.selected_slots_after[i] = v.selected_slots_after[i];
+    out.selected_support_before = v.selected_support_before;
+    out.selected_support_after = v.selected_support_after;
+    out.unlocked_slots_before = v.unlocked_slots_before;
+    out.unlocked_slots_after = v.unlocked_slots_after;
+    out.derived_pairs_before = v.derived_pairs_before;
+    out.derived_pairs_after = v.derived_pairs_after;
+    out.reserved_before = v.reserved_before;
+    out.reserved_after = v.reserved_after;
+    out.operations_applied = v.operations_applied;
+    return out;
+}
 inline sc_special_result to_wire(const ::sc_special_result& v) {
     sc_special_result out{};
     out.abi_version = v.abi_version;
     out.execution = to_wire(v.execution);
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.kind = v.kind;
+    out.outcome = v.outcome;
+    out.flags = v.flags;
+    out.native_exception = v.native_exception;
+    out.owns_crucible = v.owns_crucible;
+    out.owns_hammer = v.owns_hammer;
+    out.hammer_tier = v.hammer_tier;
+    out.selected = v.selected;
+    out.native_crucible = v.native_crucible;
+    out.native_hammer = v.native_hammer;
+    out.native_hammer_perks = v.native_hammer_perks;
+    out.native_selected = v.native_selected;
+    out.native_state_known = v.native_state_known;
+    out.crucible_charge = v.crucible_charge;
+    out.crucible_charge_max = v.crucible_charge_max;
+    out.refill_balance = v.refill_balance;
+    out.refill_flags = v.refill_flags;
+    out.refill_request_id = v.refill_request_id;
+    out.refill_request_state = v.refill_request_state;
+    out.refill_executed = v.refill_executed;
+    out.refill_execution_id = v.refill_execution_id;
+    out.refill_sequence = v.refill_sequence;
+    out.reserved0 = v.reserved0;
+    out.operations_applied = v.operations_applied;
+    return out;
+}
+inline ::sc_special_result from_wire(const sc_special_result& v) {
+    ::sc_special_result out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.execution = from_wire(v.execution);
     for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
     out.kind = v.kind;
     out.outcome = v.outcome;
@@ -2666,10 +2340,57 @@ inline sc_deathlink_result to_wire(const ::sc_deathlink_result& v) {
     out.operations_applied = v.operations_applied;
     return out;
 }
+inline ::sc_deathlink_result from_wire(const sc_deathlink_result& v) {
+    ::sc_deathlink_result out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.execution = from_wire(v.execution);
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.kind = v.kind;
+    out.outcome = v.outcome;
+    out.flags = v.flags;
+    out.native_exception = v.native_exception;
+    out.enabled = v.enabled;
+    out.mode = v.mode;
+    out.remote_state = v.remote_state;
+    out.remote_protection = v.remote_protection;
+    out.remote_attempts = v.remote_attempts;
+    out.pending_count = v.pending_count;
+    out.remote_event_id = v.remote_event_id;
+    out.local_candidates = v.local_candidates;
+    out.local_suppressed = v.local_suppressed;
+    out.local_state = v.local_state;
+    out.local_death_sequence = v.local_death_sequence;
+    out.local_death_time_ms = v.local_death_time_ms;
+    out.local_cause = v.local_cause;
+    out.local_protection = v.local_protection;
+    out.local_flags = v.local_flags;
+    out.reserved0 = v.reserved0;
+    out.operations_applied = v.operations_applied;
+    return out;
+}
 inline sc_automap_result to_wire(const ::sc_automap_result& v) {
     sc_automap_result out{};
     out.abi_version = v.abi_version;
     out.scope = to_wire(v.scope);
+    out.request_id = v.request_id;
+    for (size_t i = 0; i < 16; ++i) out.nonce[i] = v.nonce[i];
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.kind = v.kind;
+    out.outcome = v.outcome;
+    out.known = v.known;
+    out.native_fault = v.native_fault;
+    out.revision = v.revision;
+    out.scanned = v.scanned;
+    out.collected = v.collected;
+    out.completed_passes = v.completed_passes;
+    return out;
+}
+inline ::sc_automap_result from_wire(const sc_automap_result& v) {
+    ::sc_automap_result out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.scope = from_wire(v.scope);
     out.request_id = v.request_id;
     for (size_t i = 0; i < 16; ++i) out.nonce[i] = v.nonce[i];
     for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
@@ -2693,6 +2414,17 @@ inline sc_command_result to_wire(const ::sc_command_result& v) {
     out.native_exception = v.native_exception;
     return out;
 }
+inline ::sc_command_result from_wire(const sc_command_result& v) {
+    ::sc_command_result out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.execution = from_wire(v.execution);
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.kind = v.kind;
+    out.outcome = v.outcome;
+    out.native_exception = v.native_exception;
+    return out;
+}
 inline sc_combat_snapshot to_wire(const ::sc_combat_snapshot& v) {
     sc_combat_snapshot out{};
     out.abi_version = v.abi_version;
@@ -2704,10 +2436,37 @@ inline sc_combat_snapshot to_wire(const ::sc_combat_snapshot& v) {
     out.qualified_kills = v.qualified_kills;
     return out;
 }
+inline ::sc_combat_snapshot from_wire(const sc_combat_snapshot& v) {
+    ::sc_combat_snapshot out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.scope = from_wire(v.scope);
+    out.availability = v.availability;
+    out.reason = v.reason;
+    out.observation_gaps = v.observation_gaps;
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    out.qualified_kills = v.qualified_kills;
+    return out;
+}
 inline sc_combat_presentation_result to_wire(const ::sc_combat_presentation_result& v) {
     sc_combat_presentation_result out{};
     out.abi_version = v.abi_version;
     out.scope = to_wire(v.scope);
+    out.request_id = v.request_id;
+    for (size_t i = 0; i < 16; ++i) out.nonce[i] = v.nonce[i];
+    out.status = v.status;
+    out.reason = v.reason;
+    out.total = v.total;
+    out.target = v.target;
+    out.milestone = v.milestone;
+    out.visible = v.visible;
+    return out;
+}
+inline ::sc_combat_presentation_result from_wire(const sc_combat_presentation_result& v) {
+    ::sc_combat_presentation_result out{};
+    out.size = sizeof(out);
+    out.abi_version = v.abi_version;
+    out.scope = from_wire(v.scope);
     out.request_id = v.request_id;
     for (size_t i = 0; i < 16; ++i) out.nonce[i] = v.nonce[i];
     out.status = v.status;
@@ -2837,10 +2596,143 @@ inline sc_diagnostic_detail to_wire(const ::sc_diagnostic_detail& v) {
     out.pending_after_error = v.pending_after_error;
     return out;
 }
+inline ::sc_diagnostic_detail from_wire(const sc_diagnostic_detail& v) {
+    ::sc_diagnostic_detail out{};
+    out.revision = v.revision;
+    out.stage = v.stage;
+    out.observation_attempted = v.observation_attempted;
+    out.observation_accepted = v.observation_accepted;
+    out.timing_valid = v.timing_valid;
+    out.timing_error = v.timing_error;
+    out.claim_lock_missed = v.claim_lock_missed;
+    out.observation_started_at_ms = v.observation_started_at_ms;
+    out.observation_elapsed_ns = v.observation_elapsed_ns;
+    out.observation_budget_ns = v.observation_budget_ns;
+    out.sample_reason = v.sample_reason;
+    out.state_validity = v.state_validity;
+    out.state_reason = v.state_reason;
+    out.state_error = v.state_error;
+    out.map_validity = v.map_validity;
+    out.map_reason = v.map_reason;
+    out.map_error = v.map_error;
+    out.pending_before = v.pending_before;
+    out.pending_before_reason = v.pending_before_reason;
+    out.pending_before_error = v.pending_before_error;
+    out.pending_after = v.pending_after;
+    out.pending_after_reason = v.pending_after_reason;
+    out.pending_after_error = v.pending_after_error;
+    return out;
+}
+inline sc_evidence_scope to_wire(const ::sc_evidence_scope& v) {
+    sc_evidence_scope out{};
+    out.process = to_wire(v.process);
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    for (size_t i = 0; i < 16; ++i) out.save_binding[i] = v.save_binding[i];
+    for (size_t i = 0; i < 192; ++i) out.map_name[i] = v.map_name[i];
+    out.readiness = v.readiness;
+    return out;
+}
+inline ::sc_evidence_scope from_wire(const sc_evidence_scope& v) {
+    ::sc_evidence_scope out{};
+    out.process = from_wire(v.process);
+    for (size_t i = 0; i < 65; ++i) out.namespace_id[i] = v.namespace_id[i];
+    for (size_t i = 0; i < 16; ++i) out.save_binding[i] = v.save_binding[i];
+    for (size_t i = 0; i < 192; ++i) out.map_name[i] = v.map_name[i];
+    out.readiness = v.readiness;
+    return out;
+}
+inline sc_currency_result to_wire(const ::sc_currency_result& v) {
+    sc_currency_result out{};
+    out.execution = to_wire(v.execution);
+    out.before_scope = to_wire(v.before_scope);
+    out.after_scope = to_wire(v.after_scope);
+    out.kind = v.kind;
+    out.currency = v.currency;
+    out.amount = v.amount;
+    out.expected_gained = v.expected_gained;
+    out.outcome = v.outcome;
+    out.flags = v.flags;
+    out.native_exception = v.native_exception;
+    out.balance_before = v.balance_before;
+    out.gained_before = v.gained_before;
+    out.balance_after = v.balance_after;
+    out.gained_after = v.gained_after;
+    return out;
+}
+inline ::sc_currency_result from_wire(const sc_currency_result& v) {
+    ::sc_currency_result out{};
+    out.execution = from_wire(v.execution);
+    out.before_scope = from_wire(v.before_scope);
+    out.after_scope = from_wire(v.after_scope);
+    out.kind = v.kind;
+    out.currency = v.currency;
+    out.amount = v.amount;
+    out.expected_gained = v.expected_gained;
+    out.outcome = v.outcome;
+    out.flags = v.flags;
+    out.native_exception = v.native_exception;
+    out.balance_before = v.balance_before;
+    out.gained_before = v.gained_before;
+    out.balance_after = v.balance_after;
+    out.gained_after = v.gained_after;
+    return out;
+}
+inline sc_progression_result to_wire(const ::sc_progression_result& v) {
+    sc_progression_result out{};
+    out.execution = to_wire(v.execution);
+    out.before_scope = to_wire(v.before_scope);
+    out.after_scope = to_wire(v.after_scope);
+    out.suit_known = v.suit_known;
+    out.suit_owned = v.suit_owned;
+    out.slayer_key_quantity = v.slayer_key_quantity;
+    out.meat_hook = v.meat_hook;
+    for (size_t i = 0; i < 13; ++i) out.mastery_proof[i] = v.mastery_proof[i];
+    return out;
+}
+inline ::sc_progression_result from_wire(const sc_progression_result& v) {
+    ::sc_progression_result out{};
+    out.execution = from_wire(v.execution);
+    out.before_scope = from_wire(v.before_scope);
+    out.after_scope = from_wire(v.after_scope);
+    out.suit_known = v.suit_known;
+    out.suit_owned = v.suit_owned;
+    out.slayer_key_quantity = v.slayer_key_quantity;
+    out.meat_hook = v.meat_hook;
+    for (size_t i = 0; i < 13; ++i) out.mastery_proof[i] = v.mastery_proof[i];
+    return out;
+}
+inline sc_mission_access_result to_wire(const ::sc_mission_access_result& v) {
+    sc_mission_access_result out{};
+    out.execution = to_wire(v.execution);
+    out.menu_scope = to_wire(v.menu_scope);
+    out.destination_scope = to_wire(v.destination_scope);
+    out.revision = v.revision;
+    out.destination_revision = v.destination_revision;
+    out.stage_id = v.stage_id;
+    out.destination_stage_id = v.destination_stage_id;
+    for (size_t i = 0; i < 192; ++i) out.map_name[i] = v.map_name[i];
+    out.entry_usable = v.entry_usable;
+    out.destination_ready = v.destination_ready;
+    return out;
+}
+inline ::sc_mission_access_result from_wire(const sc_mission_access_result& v) {
+    ::sc_mission_access_result out{};
+    out.execution = from_wire(v.execution);
+    out.menu_scope = from_wire(v.menu_scope);
+    out.destination_scope = from_wire(v.destination_scope);
+    out.revision = v.revision;
+    out.destination_revision = v.destination_revision;
+    out.stage_id = v.stage_id;
+    out.destination_stage_id = v.destination_stage_id;
+    for (size_t i = 0; i < 192; ++i) out.map_name[i] = v.map_name[i];
+    out.entry_usable = v.entry_usable;
+    out.destination_ready = v.destination_ready;
+    return out;
+}
 struct NativeRead { uint64_t cursor = 0; };
 struct NativeCampaign { ::sc_campaign_request request{}; ::sc_campaign_summary summary{}; ::sc_campaign_rewards rewards{}; };
-using NativeRequest = std::variant<std::monostate, NativeRead, ::sc_diagnostic_request, ::sc_save_backup_request, ::sc_weapon_points_request, NativeCampaign, ::sc_inventory_request, ::sc_arsenal_request, ::sc_runes_request, ::sc_special_request, ::sc_deathlink_request, ::sc_automap_request, ::sc_command_request, ::sc_combat_query, ::sc_combat_presentation_request>;
-using NativeResult = std::variant<std::monostate, ::sc_status, ::sc_engine_snapshot, ::sc_context_snapshot, ::sc_native_snapshot, ::sc_diagnostic_result, ::sc_save_snapshot, ::sc_save_admission_snapshot, ::sc_save_write_snapshot, ::sc_save_backup_snapshot, ::sc_save_installation_snapshot, ::sc_weapon_points_result, ::sc_campaign_result, ::sc_inventory_result, ::sc_arsenal_result, ::sc_runes_result, ::sc_special_result, ::sc_deathlink_result, ::sc_automap_result, ::sc_command_result, ::sc_combat_snapshot, ::sc_combat_presentation_result>;
+using NativeRequest = std::variant<std::monostate, NativeRead, ::sc_diagnostic_request, ::sc_save_backup_request, ::sc_weapon_points_request, NativeCampaign, ::sc_inventory_request, ::sc_arsenal_request, ::sc_runes_request, ::sc_special_request, ::sc_deathlink_request, ::sc_automap_request, ::sc_command_request, ::sc_combat_query, ::sc_combat_presentation_request, ::sc_currency_request, ::sc_progression_request, ::sc_mission_access_request>;
+using NativeResult = std::variant<std::monostate, ::sc_status, ::sc_engine_snapshot, ::sc_context_snapshot, ::sc_native_snapshot, ::sc_diagnostic_result, ::sc_save_snapshot, ::sc_save_admission_snapshot, ::sc_save_write_snapshot, ::sc_save_backup_snapshot, ::sc_save_installation_snapshot, ::sc_weapon_points_result, ::sc_campaign_result, ::sc_inventory_result, ::sc_arsenal_result, ::sc_runes_result, ::sc_special_result, ::sc_deathlink_result, ::sc_automap_result, ::sc_command_result, ::sc_combat_snapshot, ::sc_combat_presentation_result, ::sc_currency_result, ::sc_progression_result, ::sc_mission_access_result>;
 template<class T> struct NativeBinding;
 template<> struct NativeBinding<NativeRead> { using Result = ::sc_status; static constexpr CommandId id = CommandId::inspect; };
 template<> struct NativeBinding<::sc_diagnostic_request> { using Result = ::sc_diagnostic_result; static constexpr CommandId id = CommandId::diagnostic; };
@@ -2869,11 +2761,11 @@ template<class C> void native_transfer(C& c, const NativeCampaign& v) {
     for (size_t i = 0; i < 192; ++i) c.scalar(v.request.row.map[i], 1);
     for (size_t i = 0; i < 96; ++i) c.scalar(v.request.row.title[i], 1);
     c.scalar(v.request.reward_presentation, 4);
-    v1_transfer_campaign_summary(c, v.summary);
-    for (const auto& challenge : v.summary.challenges) v1_transfer_campaign_challenge(c, challenge);
-    v1_transfer_campaign_rewards_header(c, v.rewards);
+    native_field_campaign_summary(c, v.summary);
+    for (const auto& challenge : v.summary.challenges) native_field_campaign_challenge(c, challenge);
+    native_field_campaign_rewards_header(c, v.rewards);
     if (v.rewards.count > std::size(v.rewards.entries)) { c.valid = false; return; }
-    for (size_t i = 0; i < v.rewards.count; ++i) v1_transfer_campaign_reward(c, v.rewards.entries[i]);
+    for (size_t i = 0; i < v.rewards.count; ++i) native_field_campaign_reward(c, v.rewards.entries[i]);
 }
 inline const char* native_namespace(const NativeCampaign& v) { return v.request.namespace_id; }
 template<> struct NativeBinding<::sc_inventory_request> { using Result = ::sc_inventory_result; static constexpr CommandId id = CommandId::inventory; };
@@ -2964,8 +2856,27 @@ template<class C> void native_transfer(C& c, const ::sc_combat_presentation_requ
     c.scalar(v.visible, 4);
 }
 inline const char* native_namespace(const ::sc_combat_presentation_request& v) { return v.namespace_id; }
-using Payload = std::variant<inspect_payload, engine_payload, context_payload, native_payload, diagnostic_payload, diagnostic_detail_payload, save_payload, save_admission_payload, save_write_payload, save_backup_payload, save_installation_payload, weapon_points_payload, campaign_row_payload_revision1, campaign_row_payload_revision2, campaign_row_payload, campaign_commit_payload, campaign_payload, inventory_payload, arsenal_payload, runes_payload, special_payload, deathlink_payload, automap_payload, command_payload, combat_payload, combat_presentation_payload, support_dump_payload>;
-using Result = std::variant<sc_status, sc_engine_snapshot, sc_context_snapshot, sc_native_snapshot, sc_diagnostic_result, diagnostic_detail_result, sc_save_snapshot, save_admission_result, sc_save_write_snapshot, sc_save_backup_snapshot, sc_save_installation_snapshot, sc_weapon_points_result, sc_campaign_result, sc_inventory_result, sc_arsenal_result, sc_runes_result, sc_special_result, sc_deathlink_result, sc_automap_result, sc_command_result, sc_combat_snapshot, sc_combat_presentation_result>;
+template<> struct NativeBinding<::sc_currency_request> { using Result = ::sc_currency_result; static constexpr CommandId id = CommandId::currencies; };
+template<class C> void native_transfer(C& c, const ::sc_currency_request& v) {
+    c.scalar(v.kind, 4);
+    c.scalar(v.currency, 4);
+    c.scalar(v.amount, 4);
+    c.scalar(v.expected_gained, 4);
+}
+inline const char* native_namespace(const ::sc_currency_request& v) { return v.namespace_id; }
+template<> struct NativeBinding<::sc_progression_request> { using Result = ::sc_progression_result; static constexpr CommandId id = CommandId::progression; };
+template<class C> void native_transfer(C& c, const ::sc_progression_request& v) {
+    c.scalar(v.kind, 4);
+}
+inline const char* native_namespace(const ::sc_progression_request& v) { return v.namespace_id; }
+template<> struct NativeBinding<::sc_mission_access_request> { using Result = ::sc_mission_access_result; static constexpr CommandId id = CommandId::mission_access; };
+template<class C> void native_transfer(C& c, const ::sc_mission_access_request& v) {
+    c.scalar(v.kind, 4);
+    c.scalar(v.stage_id, 4);
+}
+inline const char* native_namespace(const ::sc_mission_access_request& v) { return v.namespace_id; }
+using Payload = std::variant<inspect_payload, engine_payload, context_payload, native_payload, diagnostic_payload, diagnostic_detail_payload, save_payload, save_admission_payload, save_write_payload, save_backup_payload, save_installation_payload, weapon_points_payload, campaign_row_payload_revision1, campaign_row_payload_revision2, campaign_row_payload_revision3, campaign_row_payload, campaign_commit_payload_revision1, campaign_commit_payload, campaign_payload, inventory_payload, arsenal_payload, runes_payload, special_payload, deathlink_payload, automap_payload, command_payload, combat_payload, combat_presentation_payload, support_dump_payload, currencies_payload, progression_payload, mission_access_payload>;
+using Result = std::variant<sc_status, sc_engine_snapshot, sc_context_snapshot, sc_native_snapshot, sc_diagnostic_result, diagnostic_detail_result, sc_save_snapshot, save_admission_result, sc_save_write_snapshot, sc_save_backup_snapshot, sc_save_installation_snapshot, sc_weapon_points_result, sc_campaign_result, sc_inventory_result, sc_arsenal_result, sc_runes_result, sc_special_result, sc_deathlink_result, sc_automap_result, sc_command_result, sc_combat_snapshot, sc_combat_presentation_result, sc_currency_result, sc_progression_result, sc_mission_access_result>;
 enum class Admission { P, G, S, D };
 enum class Scope { process, gameplay, save, gameplay_diagnostic };
 enum class NamespaceRule { process_zero, admitted_save, none };
@@ -3011,5 +2922,8 @@ template<class Factory> auto registry_handlers(Factory factory) { return std::ar
     factory.template entry<CommandId::combat>(),
     factory.template entry<CommandId::combat_presentation>(),
     factory.template entry<CommandId::support_dump>(),
+    factory.template entry<CommandId::currencies>(),
+    factory.template entry<CommandId::progression>(),
+    factory.template entry<CommandId::mission_access>(),
 }; }
 }

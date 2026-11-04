@@ -1,3 +1,4 @@
+#include "engine/builds/build_descriptor.h"
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 // Locator/layout facts adapted from DoomEternal-AP-Mod native/client/game_state_probe.cpp
 // at 760b7d98e22a6aa67db36dd0533c794e9dd14032 (MIT, same copyright).
@@ -14,9 +15,6 @@ constexpr size_t chunk_size = Memory::maximum_copy;
 constexpr uintptr_t highest_address = 0x00007FFFFFFFFFFFULL;
 constexpr uint32_t readable = IMAGE_SCN_MEM_READ, writable = IMAGE_SCN_MEM_WRITE;
 constexpr uint32_t executable = IMAGE_SCN_MEM_EXECUTE;
-constexpr char known_hash[] = "9809708c823f8db4304201ab0006ff2395d0d484ae9c846d98a56ce8c87c1247";
-constexpr uint8_t signature[] = {0x48,0x8d,0x0d,0,0,0,0,0xe8,0,0,0,0,0x84,0xc0,0x48,0x8d,0x0d,0,0,0,0,0x49,0x8b,0xd4};
-constexpr char mask[] = "xxx????x????xxxxx????xxx";
 uint32_t interrupted(HANDLE stop, uint64_t deadline) {
     if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return SC_REASON_CANCELLED;
     return GetTickCount64() >= deadline ? SC_REASON_BUDGET : SC_REASON_NONE;
@@ -178,38 +176,48 @@ sc_engine_snapshot freshness(sc_engine_snapshot s, uint64_t now) {
     }
     return s;
 }
+void bind_globals(Binding& b, const builds::BuildDescriptor& descriptor) {
+    const auto& s = b.metadata;
+    const auto& rvas = descriptor.globals;
+    for (size_t i = 0; i < b.globals.size(); ++i) {
+        b.global_reasons[i] =
+            s.profile == SC_PROFILE_NONE
+                ? SC_REASON_PROFILE_UNRECOGNIZED
+                : (b.image.contains(rvas[i], i == 2 ? 4 : 1, readable | writable, executable) ? SC_REASON_NONE
+                                                                                              : SC_REASON_OUT_OF_RANGE);
+        if (b.global_reasons[i] == SC_REASON_NONE) b.globals[i] = b.image.base + rvas[i];
+    }
+}
 Binding bind(Memory& memory, Image image, const char* hash, uint32_t hash_reason, HANDLE stop, uint64_t deadline, bool exact_layout) {
+    const auto& descriptor = builds::steam_20260818();
+    const auto& signature = descriptor.signature;
+    const auto mask = descriptor.mask;
     Binding b{}; b.image = std::move(image);
     auto& s = b.metadata; s = unavailable(SC_REASON_NOT_SAMPLED);
     s.pe_reason = SC_REASON_NONE; s.machine = b.image.machine; s.timestamp = b.image.timestamp;
     s.image_size = b.image.size; s.entry_rva = b.image.entry;
     s.disk_hash_reason = hash_reason; s.locator_revision = 1;
     if (hash_reason == SC_REASON_NONE) strcpy_s(s.disk_sha256, hash);
-    const bool layout = b.image.machine == IMAGE_FILE_MACHINE_AMD64 && b.image.size == 0x7431000 &&
-        b.image.timestamp == 0x6a7b9b8c && b.image.entry == 0x286caa8;
+    const bool layout = b.image.machine == descriptor.machine && b.image.size == descriptor.image_size &&
+        b.image.timestamp == descriptor.timestamp && b.image.entry == descriptor.entry;
     if (layout && exact_layout) {
-        constexpr uint8_t expected[] = {0x48,0x8d,0x0d,0x79,0xb3,0x1b,0x04,0xe8,0xa4,0x5f,0x23,0,0x84,0xc0,0x48,0x8d,0x0d,3,0xca,0x63,2,0x49,0x8b,0xd4};
+        const auto& expected = descriptor.locator_bytes;
         std::array<uint8_t, sizeof(expected)> actual{};
-        if (!interrupted(stop, deadline) && b.image.contains(0x42f370, actual.size(), readable | executable, writable) &&
-            !memory.copy(b.image.base + 0x42f370, actual.data(), actual.size()).reason &&
+        if (!interrupted(stop, deadline) && b.image.contains(descriptor.locator_rva, actual.size(), readable | executable, writable) &&
+            !memory.copy(b.image.base + descriptor.locator_rva, actual.data(), actual.size()).reason &&
             std::equal(actual.begin(), actual.end(), std::begin(expected)))
             s.profile = SC_PROFILE_STEAM_20260818;
-    } else if (layout && hash_reason == SC_REASON_NONE && std::strcmp(hash, known_hash) == 0)
+    } else if (layout && hash_reason == SC_REASON_NONE && std::strcmp(hash, descriptor.hash) == 0)
         s.profile = SC_PROFILE_STEAM_20260818;
-    constexpr uint32_t rvas[] = {0x5477298, 0x6b92f18, 0x5412948};
-    for (size_t i = 0; i < b.globals.size(); ++i) {
-        b.global_reasons[i] = s.profile == SC_PROFILE_NONE ? SC_REASON_PROFILE_UNRECOGNIZED :
-            (b.image.contains(rvas[i], i == 2 ? 4 : 1, readable | writable, executable) ? SC_REASON_NONE : SC_REASON_OUT_OF_RANGE);
-        if (b.global_reasons[i] == SC_REASON_NONE) b.globals[i] = b.image.base + rvas[i];
-    }
+    if (s.profile != SC_PROFILE_NONE) b.descriptor = &descriptor;
+    bind_globals(b, descriptor);
     s.root_locator_reason = SC_REASON_SIGNATURE_MISSING;
     if (exact_layout) {
-        s.locator_revision = 2;
         if (s.profile == SC_PROFILE_STEAM_20260818 &&
-            b.image.contains(0x45ea6f0, 8, readable | writable, executable) &&
+            b.image.contains(descriptor.root_rva, 8, readable | writable, executable) &&
             std::all_of(b.global_reasons.begin(), b.global_reasons.end(), [](auto reason) { return reason == SC_REASON_NONE; })) {
-            s.root_signature_rva = 0x42f370;
-            s.root_target_rva = 0x45ea6f0;
+            s.root_signature_rva = descriptor.locator_rva;
+            s.root_target_rva = descriptor.root_rva;
             s.root_locator_reason = SC_REASON_NONE;
             b.root = b.image.base + s.root_target_rva;
         }
@@ -245,7 +253,7 @@ Binding bind(Memory& memory, Image image, const char* hash, uint32_t hash_reason
     }
     if (!matches) return b;
     if (s.profile == SC_PROFILE_STEAM_20260818 &&
-        (s.root_signature_rva != 0x42f370 || s.root_target_rva != 0x45ea6f0)) {
+        (s.root_signature_rva != descriptor.locator_rva || s.root_target_rva != descriptor.root_rva)) {
         s.root_locator_reason = SC_REASON_INVALID_VALUE; return b;
     }
     if (!b.image.contains(s.root_target_rva, 8, readable | writable, executable) || s.root_target_rva % 8)
@@ -319,7 +327,7 @@ Frame frame(Memory& memory, const Binding& b) {
         return f;
     }
     uintptr_t address = 0;
-    if (!add(b.root, 0x50, 8, address) || !image_pointer(b.image, address, 8, readable | writable, executable)) {
+    if (!add(b.root, b.descriptor->map_offset, 8, address) || !image_pointer(b.image, address, 8, readable | writable, executable)) {
         fail(SC_ENGINE_MAP_PRESENT, {SC_REASON_OUT_OF_RANGE, 0}); return f;
     }
     status = read(memory, address, f.map);
@@ -327,7 +335,7 @@ Frame frame(Memory& memory, const Binding& b) {
     if (f.map && !pointer(f.map)) { fail(SC_ENGINE_MAP_PRESENT, {SC_REASON_INVALID_VALUE, 0}); return f; }
     f.fields[SC_ENGINE_MAP_PRESENT] = observed(f.map ? 1 : 0);
     if (!f.map) { f.fields[SC_ENGINE_PLAYER_PRESENT] = unknown(SC_REASON_PARENT_NULL); return f; }
-    if (!add(f.map, 0x1af8, 8, address)) { fail(SC_ENGINE_PLAYER_PRESENT, {SC_REASON_OUT_OF_RANGE, 0}); return f; }
+    if (!add(f.map, b.descriptor->player_offset, 8, address)) { fail(SC_ENGINE_PLAYER_PRESENT, {SC_REASON_OUT_OF_RANGE, 0}); return f; }
     status = read(memory, address, f.player);
     if (status.reason) { fail(SC_ENGINE_PLAYER_PRESENT, status); return f; }
     if (f.player && !pointer(f.player)) { fail(SC_ENGINE_PLAYER_PRESENT, {SC_REASON_INVALID_VALUE, 0}); return f; }

@@ -13,17 +13,31 @@
 #include "save_readback.h"
 #include "native_target.h"
 #include "native_runtime.h"
-#include "MinHook.h"
+#include "save_hook_call.h"
 #include <intrin.h>
 #include <cstring>
 
 namespace sentinel::save {
 namespace {
+MH_STATUS WINAPI enable_root_hook(void*);
+MH_STATUS WINAPI disable_root_hook(void*);
+hooks::HookSet root_hooks("save_root", {MH_CreateHook, enable_root_hook, disable_root_hook, MH_RemoveHook},
+                          &session().installation, 2);
+MH_STATUS WINAPI enable_save_hook(void*);
+MH_STATUS WINAPI disable_save_hook(void*);
+MH_STATUS WINAPI remove_save_hook(void*);
+hooks::HookSet save_hooks("save", {MH_CreateHook, enable_save_hook, disable_save_hook, remove_save_hook},
+                          &session().installation, 2);
+std::array<native::Target, 45> save_targets{};
+engine::Binding save_binding{};
+uintptr_t save_initializer = 0;
+void* save_originals[30]{};
 SubmissionCalls submission_calls{};
 NativeSaveFactory original_save_factory = nullptr;
-SaveReference* save_factory_detour(uintptr_t manager, SaveReference* out, uint32_t user, uintptr_t request) {
-    return campaign_save_factory(reinterpret_cast<uintptr_t>(_ReturnAddress()),
-        submission_calls.factory_caller, manager, out, user, request, original_save_factory);
+SaveReference* save_factory_detour(uintptr_t manager, SaveReference* out, uint32_t user, uintptr_t request,
+                                   uintptr_t caller) {
+    return campaign_save_factory(caller, submission_calls.factory_caller, manager, out, user, request,
+                                 original_save_factory);
 }
 using RootInit = void (*)(uintptr_t);
 RootInit original_root = nullptr;
@@ -35,8 +49,8 @@ DeleteCalls delete_calls{};
 DeleteCalls scoped_delete_calls{};
 DeleteOperation original_auxiliary_operation = nullptr;
 ProviderCalls provider_calls{};
-DeleteOperationResult* auxiliary_operation_detour(uintptr_t context, DeleteOperationResult* out) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+DeleteOperationResult* auxiliary_operation_detour(uintptr_t context, DeleteOperationResult* out, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return delete_auxiliary_scoped(session(), memory, context, out, original_auxiliary_operation);
 }
@@ -71,15 +85,15 @@ void observe_provider_invalidation(uintptr_t manager, uintptr_t caller, uint32_t
     invalidate_provider(session(),memory,manager,provider_calls.image_base,caller,origin,
         reinterpret_cast<const uintptr_t*>(frames),count);
 }
-void account_removed_detour(uintptr_t callback, uintptr_t manager, uintptr_t user) {
+void account_removed_detour(uintptr_t callback, uintptr_t manager, uintptr_t user, uintptr_t caller) {
     // A removed native account may later reuse an identity address. Refuse the
     // transition before the manager releases its cached references, even if the
     // process-wide Steam RemoteStorage singleton has not changed address.
-    observe_provider_invalidation(manager,reinterpret_cast<uintptr_t>(_ReturnAddress()),2);
+    observe_provider_invalidation(manager, caller, 2);
     original_account_removed(callback, manager, user);
 }
-void provider_reset_detour(uintptr_t manager) {
-    observe_provider_invalidation(manager,reinterpret_cast<uintptr_t>(_ReturnAddress()),1);
+void provider_reset_detour(uintptr_t manager, uintptr_t caller) {
+    observe_provider_invalidation(manager, caller, 1);
     original_provider_reset(manager);
 }
 WritePreflight original_preflight = nullptr;
@@ -89,20 +103,22 @@ DestroySdkVector original_sdk_vector = nullptr;
 PrepareWriteJob original_prepare_job = nullptr;
 CreateWriteContext original_write_context = nullptr;
 DestroySdkVector original_destroy_preparation = nullptr, original_destroy_preflight = nullptr;
-uintptr_t* prepare_job_detour(const SaveReference* source, uintptr_t* out, const SaveReference* identity) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+uintptr_t* prepare_job_detour(const SaveReference* source, uintptr_t* out, const SaveReference* identity,
+                              uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return prepare_write_job(session(), memory, source, out, identity, original_prepare_job, sdk_calls.image_base);
 }
-SaveFuture** write_context_detour(SaveFuture** out, SaveReference* identity, const char* name, uint8_t clear, uint64_t* files) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+SaveFuture** write_context_detour(SaveFuture** out, SaveReference* identity, const char* name, uint8_t clear,
+                                  uint64_t* files, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return create_write_context(session(), memory, out, identity, name, clear, files, original_write_context, sdk_calls.image_base);
 }
 void destroy_preparation_detour(uintptr_t object) { destroy_write_job(session(), object, original_destroy_preparation); }
 void destroy_preflight_detour(uintptr_t object) { destroy_write_job(session(), object, original_destroy_preflight); }
-SdkWriteResult* sdk_poll_detour(uintptr_t context, SdkWriteResult* out, void* executor) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+SdkWriteResult* sdk_poll_detour(uintptr_t context, SdkWriteResult* out, void* executor, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return poll_sdk_write(session(), memory, context, out, executor, sdk_calls);
 }
@@ -123,20 +139,21 @@ void clear_data_detour(uintptr_t data) {
 void destroy_data_detour(uintptr_t data) {
     session().forget_save_data(data); original_destroy_data(data);
 }
-void prepare_profile_detour(SaveReference* profile, SaveReference* data, uintptr_t native_user, const char* suffix) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+void prepare_profile_detour(SaveReference* profile, SaveReference* data, uintptr_t native_user, const char* suffix,
+                            uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     prepare_profile_write(session(), memory, profile, data, native_user, suffix, original_prepare_profile,
         catalog_calls.retain, profile_calls);
 }
-WritePreflightResult* preflight_detour(uintptr_t context, WritePreflightResult* out) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+WritePreflightResult* preflight_detour(uintptr_t context, WritePreflightResult* out, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return preflight_scoped(session(), memory, context, out, original_preflight, sdk_calls.image_base);
 }
 std::atomic<bool> owner_pinned{false};
-SaveFuture** existence_detour(SaveFuture** out, SaveReference* identity, const char* name) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+SaveFuture** existence_detour(SaveFuture** out, SaveReference* identity, const char* name, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return query_exists_scoped(session(), memory, out, identity, name, existence_calls);
 }
@@ -144,12 +161,15 @@ void root_provider_ready() {
     engine::LocalMemory memory;
     bind_root_provider(session(), memory, provider_calls);
 }
-void invoke_root(uintptr_t root,bool entered) {
-    __try { original_root(root); if (entered) root_provider_ready(); }
-    __finally { if (entered) session().startup_leave(AbnormalTermination() != FALSE); }
+void invoke_root(uintptr_t root, bool entered, RootInit original) {
+    __try {
+        original(root);
+        if (entered) root_provider_ready();
+    } __finally {
+        if (entered) session().startup_leave(AbnormalTermination() != FALSE);
+    }
 }
-void root_detour(uintptr_t root) {
-    const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
+void root_detour(uintptr_t root, uintptr_t caller, RootInit original) {
     NativeRouteScope route(caller,startup_image);
     startup_gate.entered(root==startup_expected_root,caller==startup_expected_caller,
         caller>=startup_image?caller-startup_image:0);
@@ -160,45 +180,46 @@ void root_detour(uintptr_t root) {
         ready?"startup_gate_root_released":"startup_gate_root_installation_unavailable",result.state,result.error);
     if (!ready) session().reject(SessionFault::installation);
     const bool entered=ready && session().startup_enter(root,caller,GetCurrentThreadId());
-    // RootInit has a void ABI, so installation refusal cannot fabricate a native
-    // success by skipping initialization. Existing lower routing guards remain.
-    invoke_root(root,entered);
+    // RootInit must initialize the native manager even after startup refusal.
+    invoke_root(root, entered, original);
 }
 void provider_detour(uintptr_t manager) {
     original_provider(manager);
     engine::LocalMemory memory;
     provider_initialized(session(), memory, manager, provider_calls);
 }
-CollectorResult* collector_detour(const CollectorContext* context, CollectorResult* out) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+CollectorResult* collector_detour(const CollectorContext* context, CollectorResult* out, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return collect_scoped(session(), memory, context, out, calls);
 }
-DeleteResult* delete_detour(DeleteFuture* future, DeleteResult* out, void* executor) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+DeleteResult* delete_detour(DeleteFuture* future, DeleteResult* out, void* executor, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return refuse_unscoped_delete(session(), memory, future, out, executor, delete_calls);
 }
-DeleteResult* scoped_delete_detour(DeleteFuture* future, DeleteResult* out, void* executor) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+DeleteResult* scoped_delete_detour(DeleteFuture* future, DeleteResult* out, void* executor, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return poll_scoped_delete(session(), memory, future, out, executor, scoped_delete_calls);
 }
-SaveFuture** write_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+SaveFuture** write_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data,
+                          uintptr_t caller) {
     NativeRouteScope route(caller, provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return campaign_write_provider(caller, memory, provider, out, identity, data, write_calls);
 }
-SaveFuture** read_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+SaveFuture** read_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data,
+                         uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return read_scoped(session(), memory, provider, out, identity, data, read_calls);
 }
-SaveFuture** catalog_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data, const char* prefix) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+SaveFuture** catalog_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data,
+                            const char* prefix, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return enumerate_provider(session(), memory, provider, out, identity, data, prefix, catalog_calls);
@@ -207,35 +228,321 @@ SaveFuture** prerequisite_detour(uintptr_t provider, SaveFuture** out, uintptr_t
     engine::LocalMemory memory;
     return profile_read_prerequisite(session(), memory, provider, out, identity, data, prerequisite_calls);
 }
-SaveFuture** erase_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+SaveFuture** erase_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data,
+                          uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return delete_scoped(session(), memory, provider, out, identity, data, erase_calls, false);
 }
-SaveFuture** auxiliary_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+SaveFuture** auxiliary_detour(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data,
+                              uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     if (session().routed()) session().provider_operation(provider, identity);
     engine::LocalMemory memory;
     return delete_scoped(session(), memory, provider, out, identity, data, auxiliary_calls, true);
 }
-EnumerationFuture** enumeration_detour(EnumerationFuture** out, SaveReference* identity, const char* root, const char* prefix) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+EnumerationFuture** enumeration_detour(EnumerationFuture** out, SaveReference* identity, const char* root,
+                                       const char* prefix, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return enumerate_scoped(session(), memory, out, identity, root, prefix, original_enumeration);
 }
-uint64_t profile_read_detour(SaveReference* profile, SaveReference* data) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+uint64_t profile_read_detour(SaveReference* profile, SaveReference* data, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return read_profile(session(), memory, profile, data, profile_calls);
 }
-uint32_t profile_serialize_detour(uintptr_t manager, uintptr_t profile, ProfileHolder* holder) {
-    NativeRouteScope route(reinterpret_cast<uintptr_t>(_ReturnAddress()), provider_calls.image_base);
+uint32_t profile_serialize_detour(uintptr_t manager, uintptr_t profile, ProfileHolder* holder, uintptr_t caller) {
+    NativeRouteScope route(caller, provider_calls.image_base);
     engine::LocalMemory memory;
     return serialize_profile(session(), memory, manager, profile, holder, profile_calls);
 }
 bool profile_payload(Session& owner, engine::Memory& memory, uintptr_t data) {
     return profile_payload_valid(owner, memory, data, profile_calls);
+}
+void root_detour_entry(uintptr_t root) {
+    const auto lease = root_hooks.enter(0);
+    __try {
+        root_detour(root, reinterpret_cast<uintptr_t>(_ReturnAddress()), reinterpret_cast<RootInit>(lease.original));
+    } __finally {
+        root_hooks.leave(lease);
+    }
+}
+
+CollectorResult* collector_detour_entry(const CollectorContext* context, CollectorResult* out) {
+    const auto lease = save_hooks.enter(0);
+    __try {
+        return collector_detour(context, out, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+DeleteResult* delete_detour_entry(DeleteFuture* future, DeleteResult* out, void* executor) {
+    const auto lease = save_hooks.enter(1);
+    __try {
+        return delete_detour(future, out, executor, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+SaveFuture** write_detour_entry(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    const auto lease = save_hooks.enter(2);
+    __try {
+        return write_detour(provider, out, identity, data, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+uint64_t profile_read_detour_entry(SaveReference* profile, SaveReference* data) {
+    const auto lease = save_hooks.enter(3);
+    __try {
+        return profile_read_detour(profile, data, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+uint32_t profile_serialize_detour_entry(uintptr_t manager, uintptr_t profile, ProfileHolder* holder) {
+    const auto lease = save_hooks.enter(4);
+    __try {
+        return profile_serialize_detour(manager, profile, holder, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+SaveFuture** read_detour_entry(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    const auto lease = save_hooks.enter(5);
+    __try {
+        return read_detour(provider, out, identity, data, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+EnumerationFuture** enumeration_detour_entry(EnumerationFuture** out, SaveReference* identity, const char* root,
+                                             const char* prefix) {
+    const auto lease = save_hooks.enter(6);
+    __try {
+        return enumeration_detour(out, identity, root, prefix, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+SaveFuture** erase_detour_entry(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    const auto lease = save_hooks.enter(7);
+    __try {
+        return erase_detour(provider, out, identity, data, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+SaveFuture** auxiliary_detour_entry(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data) {
+    const auto lease = save_hooks.enter(8);
+    __try {
+        return auxiliary_detour(provider, out, identity, data, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+void provider_detour_entry(uintptr_t manager) {
+    const auto lease = save_hooks.enter(9);
+    __try {
+        return provider_detour(manager);
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+SaveFuture** catalog_detour_entry(uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* data,
+                                  const char* prefix) {
+    const auto lease = save_hooks.enter(10);
+    __try {
+        return catalog_detour(provider, out, identity, data, prefix, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+WritePreflightResult* preflight_detour_entry(uintptr_t context, WritePreflightResult* out) {
+    const auto lease = save_hooks.enter(11);
+    __try {
+        return preflight_detour(context, out, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+void prepare_profile_detour_entry(SaveReference* profile, SaveReference* data, uintptr_t native_user,
+                                  const char* suffix) {
+    const auto lease = save_hooks.enter(12);
+    __try {
+        return prepare_profile_detour(profile, data, native_user, suffix,
+                                      reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+void clear_data_detour_entry(uintptr_t data) {
+    const auto lease = save_hooks.enter(13);
+    __try {
+        return clear_data_detour(data);
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+void destroy_data_detour_entry(uintptr_t data) {
+    const auto lease = save_hooks.enter(14);
+    __try {
+        return destroy_data_detour(data);
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+SaveFuture** existence_detour_entry(SaveFuture** out, SaveReference* identity, const char* name) {
+    const auto lease = save_hooks.enter(15);
+    __try {
+        return existence_detour(out, identity, name, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+SdkWriteResult* sdk_poll_detour_entry(uintptr_t context, SdkWriteResult* out, void* executor) {
+    const auto lease = save_hooks.enter(16);
+    __try {
+        return sdk_poll_detour(context, out, executor, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+void sdk_callback_detour_entry(uintptr_t callback, const int32_t* result, bool failed) {
+    const auto lease = save_hooks.enter(17);
+    __try {
+        return sdk_callback_detour(callback, result, failed);
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+void sdk_vector_detour_entry(uintptr_t vector) {
+    const auto lease = save_hooks.enter(18);
+    __try {
+        return sdk_vector_detour(vector);
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+uintptr_t* prepare_job_detour_entry(const SaveReference* source, uintptr_t* out, const SaveReference* identity) {
+    const auto lease = save_hooks.enter(19);
+    __try {
+        return prepare_job_detour(source, out, identity, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+void destroy_preparation_detour_entry(uintptr_t object) {
+    const auto lease = save_hooks.enter(20);
+    __try {
+        return destroy_preparation_detour(object);
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+SaveFuture** write_context_detour_entry(SaveFuture** out, SaveReference* identity, const char* name, uint8_t clear,
+                                        uint64_t* files) {
+    const auto lease = save_hooks.enter(21);
+    __try {
+        return write_context_detour(out, identity, name, clear, files, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+void destroy_preflight_detour_entry(uintptr_t object) {
+    const auto lease = save_hooks.enter(22);
+    __try {
+        return destroy_preflight_detour(object);
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+ReadWorkerResult* read_preparation_detour_entry(uintptr_t context, ReadWorkerResult* out, SaveReference* waiter) {
+    const auto lease = save_hooks.enter(23);
+    __try {
+        return read_preparation_detour(context, out, waiter);
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+ReadWorkerResult* read_decode_detour_entry(uintptr_t context, ReadWorkerResult* out) {
+    const auto lease = save_hooks.enter(24);
+    __try {
+        return read_decode_detour(context, out);
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+SaveReference* save_factory_detour_entry(uintptr_t manager, SaveReference* out, uint32_t user, uintptr_t request) {
+    const auto lease = save_hooks.enter(25);
+    __try {
+        return save_factory_detour(manager, out, user, request, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+DeleteResult* scoped_delete_detour_entry(DeleteFuture* future, DeleteResult* out, void* executor) {
+    const auto lease = save_hooks.enter(26);
+    __try {
+        return scoped_delete_detour(future, out, executor, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+DeleteOperationResult* auxiliary_operation_detour_entry(uintptr_t context, DeleteOperationResult* out) {
+    const auto lease = save_hooks.enter(27);
+    __try {
+        return auxiliary_operation_detour(context, out, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+void provider_reset_detour_entry(uintptr_t manager) {
+    const auto lease = save_hooks.enter(28);
+    __try {
+        return provider_reset_detour(manager, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
+}
+
+void account_removed_detour_entry(uintptr_t callback, uintptr_t manager, uintptr_t user) {
+    const auto lease = save_hooks.enter(29);
+    __try {
+        return account_removed_detour(callback, manager, user, reinterpret_cast<uintptr_t>(_ReturnAddress()));
+    } __finally {
+        save_hooks.leave(lease);
+    }
 }
 bool checked_bytes(engine::Memory& memory, uintptr_t address, const uint8_t* expected, size_t count, sc_install_event& event) {
 #ifdef SC_NATIVE_TESTING
@@ -280,6 +587,106 @@ bool reference_copy_entry(engine::Memory& memory, const engine::Image& image, sc
         body[i] = static_cast<uint8_t>(digit(hex[2 * i]) * 16 + digit(hex[2 * i + 1]));
     event.rva = 0x367510;
     return checked_bytes(memory, image.base + event.rva, body.data(), body.size(), event);
+}
+void configure_save_calls() {
+    const auto& binding = save_binding;
+    const auto& targets = save_targets;
+    const auto context_init = reinterpret_cast<InitializeSteamContext>(save_initializer);
+    original_provider = HookOriginal<save_hooks, 9, InitializeProvider>::call;
+    original_preflight = HookOriginal<save_hooks, 11, WritePreflight>::call;
+    original_prepare_profile = HookOriginal<save_hooks, 12, PrepareProfile>::call;
+    original_clear_data = HookOriginal<save_hooks, 13, ClearSaveData>::call;
+    original_destroy_data = HookOriginal<save_hooks, 14, ClearSaveData>::call;
+    provider_calls = {binding.image.base, context_init};
+    sdk_calls = {HookOriginal<save_hooks, 16, PollSdkWrite>::call, binding.image.base, context_init};
+    original_sdk_callback = HookOriginal<save_hooks, 17, SdkWriteCallback>::call;
+    original_sdk_vector = HookOriginal<save_hooks, 18, DestroySdkVector>::call;
+    original_prepare_job = HookOriginal<save_hooks, 19, PrepareWriteJob>::call;
+    original_destroy_preparation = HookOriginal<save_hooks, 20, DestroySdkVector>::call;
+    original_write_context = HookOriginal<save_hooks, 21, CreateWriteContext>::call;
+    original_destroy_preflight = HookOriginal<save_hooks, 22, DestroySdkVector>::call;
+    original_read_preparation = HookOriginal<save_hooks, 23, PrepareRead>::call;
+    original_read_decode = HookOriginal<save_hooks, 24, DecodeRead>::call;
+    original_save_factory = HookOriginal<save_hooks, 25, NativeSaveFactory>::call;
+    existence_calls = {provider_calls, HookOriginal<save_hooks, 15, QueryExists>::call,
+                       reinterpret_cast<ReleaseSaveReference>(targets[5].address)};
+    calls = {HookOriginal<save_hooks, 0, Collect>::call, reinterpret_cast<AssignString>(targets[2].address),
+             reinterpret_cast<ReleaseVector>(targets[3].address)};
+    delete_calls = {HookOriginal<save_hooks, 1, PollDelete>::call, reinterpret_cast<ReleaseDelete>(targets[5].address)};
+    scoped_delete_calls = {HookOriginal<save_hooks, 26, PollDelete>::call, delete_calls.release};
+    original_auxiliary_operation = HookOriginal<save_hooks, 27, DeleteOperation>::call;
+    original_provider_reset = HookOriginal<save_hooks, 28, InitializeProvider>::call;
+    original_account_removed = HookOriginal<save_hooks, 29, AccountRemoved>::call;
+    write_calls = {HookOriginal<save_hooks, 2, CreateWrite>::call, reinterpret_cast<SetSaveName>(targets[7].address),
+                   reinterpret_cast<ReleaseSaveReference>(targets[5].address), profile_payload, binding.image.base};
+    submission_calls = {reinterpret_cast<NativeSave>(targets[39].address), write_calls.release, binding.root,
+                        binding.image.base + 0x674744};
+    read_calls = {HookOriginal<save_hooks, 5, CreateWrite>::call, write_calls.set_name, write_calls.release, nullptr,
+                  binding.image.base};
+    catalog_calls = {HookOriginal<save_hooks, 10, EnumerateProvider>::call,
+                     reinterpret_cast<RetainSaveReference>(binding.image.base + 0x367510),
+                     write_calls.release,
+                     write_calls.set_name,
+                     calls.assign,
+                     binding.image.base};
+    prerequisite_calls = {reinterpret_cast<AllocateNative>(targets[20].address),
+                          reinterpret_cast<ConstructSaveData>(targets[21].address),
+                          reinterpret_cast<DestroySaveData>(targets[22].address), catalog_calls, read_calls.create};
+    readback_calls = {prerequisite_calls,
+                      reinterpret_cast<decltype(ReadbackCalls::construct_stream)>(targets[36].address)};
+    write_calls.readback = &readback_calls;
+    read_calls.profile_read = prerequisite_detour;
+    original_enumeration = HookOriginal<save_hooks, 6, CreateEnumeration>::call;
+    erase_calls = {HookOriginal<save_hooks, 7, CreateWrite>::call, write_calls.set_name, write_calls.release, nullptr,
+                   binding.image.base};
+    auxiliary_calls = {HookOriginal<save_hooks, 8, CreateWrite>::call, write_calls.set_name, write_calls.release,
+                       nullptr, binding.image.base};
+    profile_calls = {HookOriginal<save_hooks, 3, ReadProfile>::call,
+                     HookOriginal<save_hooks, 4, SerializeProfile>::call,
+                     reinterpret_cast<LookupProfileValue>(targets[10].address),
+                     reinterpret_cast<DestroyProfileValue>(targets[11].address),
+                     reinterpret_cast<ProfileChecksum>(targets[12].address),
+                     reinterpret_cast<ReleaseSaveReference>(targets[5].address),
+                     binding.image.base};
+}
+MH_STATUS WINAPI enable_save_hook(void* site) {
+    engine::LocalMemory memory;
+    const auto address = reinterpret_cast<uintptr_t>(site);
+    const auto target =
+        std::find_if(save_targets.begin(), save_targets.end(), [&](const auto& t) { return t.address == address; });
+    auto event =
+        session().installation.begin(SC_INSTALL_SAVE_ENABLE, 2, static_cast<uint32_t>(target - save_targets.begin()),
+                                     static_cast<uint32_t>(address - save_binding.image.base));
+    if (!checked_bytes(memory, address, target->bytes.data(), 32, event)) {
+        session().installation.finish(event, SC_NATIVE_TARGET_BYTES);
+        return MH_ERROR_UNSUPPORTED_FUNCTION;
+    }
+    session().installation.finish(event);
+    return MH_EnableHook(site);
+}
+MH_STATUS WINAPI enable_root_hook(void* site) {
+    engine::LocalMemory memory;
+    auto event = session().installation.begin(SC_INSTALL_SAVE_ENABLE, 2, 0,
+                                              static_cast<uint32_t>(save_targets[0].address - save_binding.image.base));
+    if (!checked_bytes(memory, save_targets[0].address, save_targets[0].bytes.data(), 32, event)) {
+        session().installation.finish(event, SC_NATIVE_TARGET_BYTES);
+        return MH_ERROR_UNSUPPORTED_FUNCTION;
+    }
+    session().installation.finish(event);
+    return MH_EnableHook(site);
+}
+MH_STATUS WINAPI disable_root_hook(void* site) {
+    session().reject(SessionFault::installation);
+    {
+        StartupGate::Completion completion(startup_gate, &session().btrace);
+    }
+    return MH_DisableHook(site);
+}
+MH_STATUS WINAPI disable_save_hook(void* site) {
+    return drain_native_startup() ? MH_DisableHook(site) : MH_ERROR_MEMORY_PROTECT;
+}
+MH_STATUS WINAPI remove_save_hook(void* site) {
+    return drain_native_startup() ? MH_RemoveHook(site) : MH_ERROR_MEMORY_PROTECT;
 }
 }
 void configure_prelaunch() {
@@ -361,14 +768,14 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     }
     record.finish(event);
     engine::LocalMemory memory;
-    std::array<native::Target, 45> targets;
-    // RootInit must become reachable before the remaining save/campaign scans.
-    // native::start already pins this module before entering this installer.
+    auto& targets = save_targets;
+    save_binding = binding;
     if (!startup_gate.arm()) {
         session().btrace.record(BStage::startup_gate,BStatus::refused,"startup_gate_event_creation_failed",0,
             {{"win32",GetLastError()}});
         session().reject(SessionFault::installation); return;
     }
+    hooks::Transaction attempt;
     StartupGate::Completion gate_completion(startup_gate,&session().btrace);
     const auto cancelled=[&] {
         if (!stop || WaitForSingleObject(stop,0)==WAIT_TIMEOUT) return false;
@@ -380,13 +787,8 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     if (native::validate_recorded(record,memory,binding.image,targets[0],stop,GetTickCount64()+3000,2,0)) {
         cancelled(); session().reject(SessionFault::installation); return;
     }
-    void* root_original=nullptr;
-    if (record.hook(SC_INSTALL_SAVE_CREATE,2,0,static_cast<uint32_t>(targets[0].address-binding.image.base),[&] {
-            return MH_CreateHook(reinterpret_cast<void*>(targets[0].address),reinterpret_cast<void*>(root_detour),&root_original); })!=MH_OK) {
-        session().reject(SessionFault::installation); return;
-    }
-    original_root=reinterpret_cast<RootInit>(root_original);
-    StartupGate::Arm arm{}; arm.at_ms=GetTickCount64();
+    StartupGate::Arm arm{};
+    arm.at_ms = GetTickCount64();
     uintptr_t manager=0,dispatch_root=0,dispatch_vtable=0,dispatch_init=0;
     const auto manager_read=memory.copy(binding.root+0x9b38,&manager,sizeof(manager));
     arm.manager_read_reason=manager_read.reason; arm.manager_present=!manager_read.reason && manager!=0;
@@ -407,157 +809,116 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     // can retrospectively qualify a native startup that already passed.
     startup_gate.record(session().btrace,BStatus::pending,arm.manager_present?
         "startup_gate_manager_already_published":"startup_gate_arming",StartupGate::State::pending);
-    event=record.begin(SC_INSTALL_SAVE_ENABLE,2,0,static_cast<uint32_t>(targets[0].address-binding.image.base));
-    const bool root_cancelled=cancelled();
-    if (root_cancelled || !checked_bytes(memory,targets[0].address,targets[0].bytes.data(),32,event)) {
-        record.finish(event,root_cancelled?SC_NATIVE_CANCELLED:SC_NATIVE_TARGET_BYTES);
-        record.hook(SC_INSTALL_REMOVE,2,0,static_cast<uint32_t>(targets[0].address-binding.image.base),[&] {
-            return MH_RemoveHook(reinterpret_cast<void*>(targets[0].address)); });
+    const hooks::HookSpec root_spec[]{hooks::bind(targets[0].address, root_detour_entry, original_root)};
+    if (cancelled() || !root_hooks.install(root_spec, stop)) {
         session().reject(SessionFault::installation); return;
     }
-    const auto root_enabled=MH_EnableHook(reinterpret_cast<void*>(targets[0].address));
-    record.finish(event,root_enabled==MH_OK?SC_NATIVE_NONE:SC_NATIVE_HOOK_FAILED,static_cast<uint32_t>(root_enabled));
-    if (root_enabled!=MH_OK) {
-        record.hook(SC_INSTALL_REMOVE,2,0,static_cast<uint32_t>(targets[0].address-binding.image.base),[&] {
-            return MH_RemoveHook(reinterpret_cast<void*>(targets[0].address)); });
-        session().reject(SessionFault::installation); return;
-    }
-    // from this point rootinit/trampoline/event remain process-lifetime objects. no early-return cleanup may remove this reachable gate
     for (unsigned i = 1; i < targets.size(); ++i) {
         targets[i] = native::save_target(binding.image.base, i);
         if (native::validate_recorded(record, memory, binding.image, targets[i], stop, GetTickCount64() + 3000, 2, i)) {
             cancelled(); session().reject(SessionFault::installation); return;
         }
     }
-    uintptr_t initializer = 0;
+    save_initializer = 0;
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets())
 #endif
-    if (!validate_native_helpers(record, memory, binding.image, initializer)) { session().reject(SessionFault::installation); return; }
-    const auto context_init = reinterpret_cast<InitializeSteamContext>(initializer);
-    constexpr unsigned hooks[] = {0, 1, 4, 6, 8, 9, 13, 14, 15, 16, 17, 18, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34, 35, 37, 38, 40, 41, 42, 43, 44};
-    void* originals[std::size(hooks)]{};
-    originals[0]=root_original;
-    void* detours[] = {reinterpret_cast<void*>(root_detour), reinterpret_cast<void*>(collector_detour),
-        reinterpret_cast<void*>(delete_detour), reinterpret_cast<void*>(write_detour),
-        reinterpret_cast<void*>(profile_read_detour), reinterpret_cast<void*>(profile_serialize_detour),
-        reinterpret_cast<void*>(read_detour), reinterpret_cast<void*>(enumeration_detour),
-        reinterpret_cast<void*>(erase_detour), reinterpret_cast<void*>(auxiliary_detour),
-        reinterpret_cast<void*>(provider_detour), reinterpret_cast<void*>(catalog_detour),
-        reinterpret_cast<void*>(preflight_detour), reinterpret_cast<void*>(prepare_profile_detour),
-        reinterpret_cast<void*>(clear_data_detour), reinterpret_cast<void*>(destroy_data_detour),
-        reinterpret_cast<void*>(existence_detour), reinterpret_cast<void*>(sdk_poll_detour),
-        reinterpret_cast<void*>(sdk_callback_detour), reinterpret_cast<void*>(sdk_vector_detour),
-        reinterpret_cast<void*>(prepare_job_detour), reinterpret_cast<void*>(destroy_preparation_detour),
-        reinterpret_cast<void*>(write_context_detour), reinterpret_cast<void*>(destroy_preflight_detour),
-        reinterpret_cast<void*>(read_preparation_detour), reinterpret_cast<void*>(read_decode_detour),
-        reinterpret_cast<void*>(save_factory_detour), reinterpret_cast<void*>(scoped_delete_detour),
-        reinterpret_cast<void*>(auxiliary_operation_detour), reinterpret_cast<void*>(provider_reset_detour),
-        reinterpret_cast<void*>(account_removed_detour)};
-    static_assert(std::size(detours) == std::size(hooks));
-    unsigned created = 1;
-    for (; created < std::size(hooks); ++created) {
-        const auto index = hooks[created];
-        if (record.hook(SC_INSTALL_SAVE_CREATE, 2, index, static_cast<uint32_t>(targets[index].address - binding.image.base), [&] {
-                return MH_CreateHook(reinterpret_cast<void*>(targets[index].address), detours[created], &originals[created]); }) != MH_OK) break;
+        if (!validate_native_helpers(record, memory, binding.image, save_initializer)) {
+            session().reject(SessionFault::installation);
+            return;
+        }
+    constexpr unsigned hooked[] = {1,  4,  6,  8,  9,  13, 14, 15, 16, 17, 18, 23, 24, 25, 26,
+                                   27, 28, 29, 30, 32, 33, 34, 35, 37, 38, 40, 41, 42, 43, 44};
+    void* detours[] = {reinterpret_cast<void*>(collector_detour_entry),
+                       reinterpret_cast<void*>(delete_detour_entry),
+                       reinterpret_cast<void*>(write_detour_entry),
+                       reinterpret_cast<void*>(profile_read_detour_entry),
+                       reinterpret_cast<void*>(profile_serialize_detour_entry),
+                       reinterpret_cast<void*>(read_detour_entry),
+                       reinterpret_cast<void*>(enumeration_detour_entry),
+                       reinterpret_cast<void*>(erase_detour_entry),
+                       reinterpret_cast<void*>(auxiliary_detour_entry),
+                       reinterpret_cast<void*>(provider_detour_entry),
+                       reinterpret_cast<void*>(catalog_detour_entry),
+                       reinterpret_cast<void*>(preflight_detour_entry),
+                       reinterpret_cast<void*>(prepare_profile_detour_entry),
+                       reinterpret_cast<void*>(clear_data_detour_entry),
+                       reinterpret_cast<void*>(destroy_data_detour_entry),
+                       reinterpret_cast<void*>(existence_detour_entry),
+                       reinterpret_cast<void*>(sdk_poll_detour_entry),
+                       reinterpret_cast<void*>(sdk_callback_detour_entry),
+                       reinterpret_cast<void*>(sdk_vector_detour_entry),
+                       reinterpret_cast<void*>(prepare_job_detour_entry),
+                       reinterpret_cast<void*>(destroy_preparation_detour_entry),
+                       reinterpret_cast<void*>(write_context_detour_entry),
+                       reinterpret_cast<void*>(destroy_preflight_detour_entry),
+                       reinterpret_cast<void*>(read_preparation_detour_entry),
+                       reinterpret_cast<void*>(read_decode_detour_entry),
+                       reinterpret_cast<void*>(save_factory_detour_entry),
+                       reinterpret_cast<void*>(scoped_delete_detour_entry),
+                       reinterpret_cast<void*>(auxiliary_operation_detour_entry),
+                       reinterpret_cast<void*>(provider_reset_detour_entry),
+                       reinterpret_cast<void*>(account_removed_detour_entry)};
+    hooks::HookSpec specs[std::size(hooked)]{};
+    static_assert(std::size(detours) == std::size(hooked) && std::size(save_originals) == std::size(hooked));
+    for (size_t i = 0; i < std::size(hooked); ++i) {
+        const auto index = hooked[i];
+        specs[i] = {targets[index].address, detours[i], &save_originals[i], index,
+                    static_cast<uint32_t>(targets[index].address - binding.image.base)};
     }
-    if (created != std::size(hooks)) {
-        for (unsigned i = 1; i < created; ++i) record.hook(SC_INSTALL_REMOVE, 2, hooks[i],
-            static_cast<uint32_t>(targets[hooks[i]].address - binding.image.base), [&] {
-                return MH_RemoveHook(reinterpret_cast<void*>(targets[hooks[i]].address)); });
-        session().reject(SessionFault::installation); return;
-    }
-    original_provider = reinterpret_cast<InitializeProvider>(originals[10]);
-    original_preflight = reinterpret_cast<WritePreflight>(originals[12]);
-    original_prepare_profile = reinterpret_cast<PrepareProfile>(originals[13]);
-    original_clear_data = reinterpret_cast<ClearSaveData>(originals[14]);
-    original_destroy_data = reinterpret_cast<ClearSaveData>(originals[15]);
-    provider_calls = {binding.image.base, context_init};
-    sdk_calls = {reinterpret_cast<PollSdkWrite>(originals[17]), binding.image.base, context_init};
-    original_sdk_callback = reinterpret_cast<SdkWriteCallback>(originals[18]);
-    original_sdk_vector = reinterpret_cast<DestroySdkVector>(originals[19]);
-    original_prepare_job = reinterpret_cast<PrepareWriteJob>(originals[20]);
-    original_destroy_preparation = reinterpret_cast<DestroySdkVector>(originals[21]);
-    original_write_context = reinterpret_cast<CreateWriteContext>(originals[22]);
-    original_destroy_preflight = reinterpret_cast<DestroySdkVector>(originals[23]);
-    original_read_preparation = reinterpret_cast<PrepareRead>(originals[24]);
-    original_read_decode = reinterpret_cast<DecodeRead>(originals[25]);
-    original_save_factory = reinterpret_cast<NativeSaveFactory>(originals[26]);
-    existence_calls = {provider_calls, reinterpret_cast<QueryExists>(originals[16]),
-        reinterpret_cast<ReleaseSaveReference>(targets[5].address)};
-    calls = {reinterpret_cast<Collect>(originals[1]),
-        reinterpret_cast<AssignString>(targets[2].address), reinterpret_cast<ReleaseVector>(targets[3].address)};
-    delete_calls = {reinterpret_cast<PollDelete>(originals[2]), reinterpret_cast<ReleaseDelete>(targets[5].address)};
-    scoped_delete_calls = {reinterpret_cast<PollDelete>(originals[27]), delete_calls.release};
-    original_auxiliary_operation = reinterpret_cast<DeleteOperation>(originals[28]);
-    original_provider_reset = reinterpret_cast<InitializeProvider>(originals[29]);
-    original_account_removed = reinterpret_cast<AccountRemoved>(originals[30]);
-    write_calls = {reinterpret_cast<CreateWrite>(originals[3]), reinterpret_cast<SetSaveName>(targets[7].address),
-        reinterpret_cast<ReleaseSaveReference>(targets[5].address), profile_payload, binding.image.base};
-    submission_calls = {reinterpret_cast<NativeSave>(targets[39].address), write_calls.release,
-        binding.root, binding.image.base + 0x674744};
-    read_calls = {reinterpret_cast<CreateWrite>(originals[6]), write_calls.set_name, write_calls.release, nullptr, binding.image.base};
-    catalog_calls = {reinterpret_cast<EnumerateProvider>(originals[11]),
-        reinterpret_cast<RetainSaveReference>(binding.image.base + 0x367510), write_calls.release,
-        write_calls.set_name, calls.assign, binding.image.base};
-    prerequisite_calls = {reinterpret_cast<AllocateNative>(targets[20].address),
-        reinterpret_cast<ConstructSaveData>(targets[21].address), reinterpret_cast<DestroySaveData>(targets[22].address),
-        catalog_calls, read_calls.create};
-    readback_calls = {prerequisite_calls,
-        reinterpret_cast<decltype(ReadbackCalls::construct_stream)>(targets[36].address)};
-    write_calls.readback = &readback_calls;
-    read_calls.profile_read = prerequisite_detour;
-    original_enumeration = reinterpret_cast<CreateEnumeration>(originals[7]);
-    erase_calls = {reinterpret_cast<CreateWrite>(originals[8]), write_calls.set_name, write_calls.release, nullptr, binding.image.base};
-    auxiliary_calls = {reinterpret_cast<CreateWrite>(originals[9]), write_calls.set_name, write_calls.release, nullptr, binding.image.base};
-    profile_calls = {reinterpret_cast<ReadProfile>(originals[4]), reinterpret_cast<SerializeProfile>(originals[5]),
-        reinterpret_cast<LookupProfileValue>(targets[10].address), reinterpret_cast<DestroyProfileValue>(targets[11].address),
-        reinterpret_cast<ProfileChecksum>(targets[12].address), reinterpret_cast<ReleaseSaveReference>(targets[5].address), binding.image.base};
-    // The installed production modules determine the gate, never configuration or
-    // IPC. Unsupported provider/reset transitions retain AP ownership and fail.
+    configure_save_calls();
     event = record.begin(SC_INSTALL_POLICY);
     session().install(binding.root, binding.image.base + 0x4323fc, steam_20260818_routes);
     const bool published = session().inspect().prepared_routes == steam_20260818_routes;
     record.finish(event, published ? SC_NATIVE_NONE : SC_NATIVE_CANCELLED);
-    if (!published) { session().reject(SessionFault::installation); return; }
-    if (!install_campaign_hooks(binding, stop)) { cancelled(); session().reject(SessionFault::installation); return; }
-    // Publish every immutable pointer/policy/hook before releasing RootInit.
-    // Target0 is already patched: do not revalidate or enable it a second time.
-    for (unsigned index : {1u, 4u, 6u, 8u, 9u, 13u, 14u, 15u, 16u, 17u, 18u, 23u, 24u, 25u, 26u, 27u, 28u, 29u, 30u, 32u, 33u, 34u, 35u, 37u, 38u, 40u, 41u, 42u, 43u, 44u}) {
-        if (cancelled()) { session().reject(SessionFault::installation); return; }
-        event = record.begin(SC_INSTALL_SAVE_ENABLE, 2, index, static_cast<uint32_t>(targets[index].address - binding.image.base));
-        if (!checked_bytes(memory, targets[index].address, targets[index].bytes.data(), 32, event)) {
-            record.finish(event, SC_NATIVE_TARGET_BYTES);
-            session().reject(SessionFault::installation); return;
-        }
-        const auto enabled = MH_EnableHook(reinterpret_cast<void*>(targets[index].address));
-        record.finish(event, enabled == MH_OK ? SC_NATIVE_NONE : SC_NATIVE_HOOK_FAILED, static_cast<uint32_t>(enabled));
-        if (enabled != MH_OK) {
-            // reachable trampolines stay pinned. no partial install can admit
-            session().reject(SessionFault::installation); return;
-        }
+    if (!published || !save_hooks.install(specs, stop) || !install_campaign_hooks(binding, stop) || cancelled()) {
+        session().reject(SessionFault::installation);
+        return;
     }
-    if (cancelled()) { session().reject(SessionFault::installation); return; }
     startup_gate_deferred = true;
+    attempt.commit();
     gate_completion.disarm();
 }
-void complete_native_installation(bool native_ready, HANDLE stop) {
-    if (!startup_gate_deferred) return;
+bool complete_native_installation(bool native_ready, HANDLE stop) {
+    if (!startup_gate_deferred) {
+        if (!native_ready && session().campaign_requested()) session().reject(SessionFault::installation);
+        return native_ready && (!session().campaign_requested() || session().state() == SessionState::prepared);
+    }
     startup_gate_deferred = false;
-    StartupGate::Completion gate_completion(startup_gate, &session().btrace);
-    if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) {
-        gate_completion.cancel();
-        session().reject(SessionFault::installation);
-        return;
+    {
+        StartupGate::Completion gate_completion(startup_gate, &session().btrace);
+        if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) {
+            gate_completion.cancel();
+            session().reject(SessionFault::installation);
+            return false;
+        }
+        if (!native_ready || session().state() != SessionState::prepared) {
+            session().reject(SessionFault::installation);
+            return false;
+        }
+        auto& record = session().installation;
+        record.finish(record.begin(SC_INSTALL_READY));
+        gate_completion.ready();
     }
-    if (!native_ready || session().state() != SessionState::prepared) {
-        session().reject(SessionFault::installation);
-        return;
-    }
-    auto& record = session().installation;
-    record.finish(record.begin(SC_INSTALL_READY));
-    gate_completion.ready();
+    const bool ready = startup_gate.wait().state == StartupGate::State::ready;
+    if (!ready) session().reject(SessionFault::installation);
+    return ready;
 }
+bool drain_native_startup() {
+    if (root_hooks.inspect().state == hooks::State::empty) return true;
+    session().reject(SessionFault::installation);
+    {
+        StartupGate::Completion completion(startup_gate, &session().btrace);
+    }
+    // RootInit must finish with the lower save guards still reachable.
+    return root_hooks.uninstall();
+}
+#ifdef SC_NATIVE_TESTING
+uint32_t test_startup_waiting() { return startup_gate.waiting(); }
+bool test_startup_drained() { return root_hooks.inspect().state == hooks::State::empty && !startup_gate.waiting(); }
+void test_startup_root(uintptr_t root) { root_detour_entry(root); }
+#endif
+void cancel_native_installation() { startup_gate.cancel(); }
 SubmissionResult submit_native_backup(const std::shared_ptr<BackupJob>& job, std::string_view directory) {
     return submit_native_save(session().native_writes, job, directory, submission_calls);
 }

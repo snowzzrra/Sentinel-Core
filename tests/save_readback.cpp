@@ -2,7 +2,7 @@
 // Controlled native layouts and owned synthetic bytes; no game/Steam/save access.
 #include "save_readback.h"
 #include "native_model.h"
-#include "protocol.h"
+#include "sentinel_protocol_generated.h"
 #include "save_backup.h"
 #include "save_submission.h"
 #include <windows.h>
@@ -477,19 +477,6 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
             const auto record = queue.backup_result(request, false, GetTickCount64() + 3);
             CHECK(record.state == SC_BACKUP_COMPLETE && record.operation_id == owner->native_writes.snapshot().operation_id);
             CHECK(record.files == 1 && record.bytes == m.bytes.size() && record.basename[0]);
-            Snapshot host{}; host.pid = request.execution.expected.pid; host.process_created = 123456; host.instance[0] = 1;
-            host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.7.0"); std::memset(host.core.build_id, 'a', 64);
-            Message wire{}; WireResult code{}; Snapshot decoded_host{}; sc_save_backup_snapshot decoded{};
-            const auto length = encode_backup_response(wire, WireResult::ok, save_backup_result_operation, host, record);
-            CHECK(length && decode_backup_response(wire, length, code, save_backup_result_operation, decoded_host, decoded));
-            CHECK(decoded.state == SC_BACKUP_COMPLETE && decoded.operation_id == record.operation_id &&
-                !std::strcmp(decoded.basename, record.basename));
-            auto missing = record; missing.flags &= ~SC_BACKUP_SOURCE_MATCHED;
-            CHECK(!encode_backup_response(wire, WireResult::ok, save_backup_result_operation, host, missing));
-            missing = record; missing.flags &= ~SC_BACKUP_READ_SUCCESS;
-            CHECK(!encode_backup_response(wire, WireResult::ok, save_backup_result_operation, host, missing));
-            missing = record; missing.flags &= ~SC_BACKUP_STORAGE_COMPLETE;
-            CHECK(!encode_backup_response(wire, WireResult::ok, save_backup_result_operation, host, missing));
         }
     }
     active = nullptr; backup_worker_contracts(make); run_submission_contracts();

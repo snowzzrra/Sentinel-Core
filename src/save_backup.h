@@ -19,14 +19,15 @@ struct BackupProgress {
     bool storage_attempted = false, storage_complete = false;
     storage::Result storage_result{};
     storage::Backup output;
+    uint64_t copy_us = 0;
 };
 // One explicit request, attached before its provider factory starts. The native
 // read worker owns its private SaveData throughout copy(); no engine pointer is
 // retained in this request or its progress. Completion also needs the outer read.
 class BackupJob final {
 public:
-    BackupJob(uint32_t pid, uint64_t created, uint64_t deadline, SteamOwner owner = current_steam_owner)
-        : pid_(pid), created_(created), deadline_(deadline), owner_(owner) {}
+    BackupJob(uint32_t pid, uint64_t created, uint64_t deadline, SteamOwner owner = current_steam_owner, bool automatic = false)
+        : pid_(pid), created_(created), deadline_(deadline), owner_(owner), automatic_(automatic) {}
     bool bind(uint64_t operation);
     void cancel() { cancel_.store(true, std::memory_order_release); }
     void readback_finished(bool success);
@@ -40,6 +41,7 @@ private:
     const uint32_t pid_;
     const uint64_t created_, deadline_;
     const SteamOwner owner_;
+    const bool automatic_;
     std::atomic<bool> cancel_{false}, abandoned_{false};
     mutable std::mutex mutex_;
     BackupProgress progress_;

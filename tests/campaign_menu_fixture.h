@@ -31,14 +31,6 @@ void encounter_projection() {
     ++request.revision; commit(true);
     CHECK(model.encounter_reward(map,ns,since,observed) && observed.location_id==reward.location_id);
     CHECK(!std::strcmp(observed.text,"Your Ballista"));
-    Message wire{}; sc_campaign_request decoded{}; sc_campaign_rewards decoded_rewards{};
-    request.execution.request_id=1; request.execution.nonce[0]=1; request.execution.deadline_ms=1000;
-    request.execution.expected.pid=1; request.execution.expected.process_created=1;
-    request.execution.expected.instance_id[0]=1;
-    const auto size=encode_campaign_request(wire,campaign_row_operation,request,&summary,&rewards);
-    CHECK(size && decode_request(wire,size,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&decoded,
-        nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&decoded_rewards)==WireResult::ok);
-    CHECK(decoded_rewards.count==1 && decoded_rewards.entries[0].kind==SC_REWARD_ENCOUNTER);
     CHECK(model.encounter_reward(map,ns,since+3000,observed) && !observed.location_id);
     CHECK(!model.encounter_reward(map,std::string(64,'b'),since,observed));
     sc_campaign_summary hub{};
@@ -253,11 +245,7 @@ void exercise() {
     request.execution.nonce[0]=1; request.execution.deadline_ms=2000;
     std::memcpy(request.namespace_id,session().namespace_id().c_str(),65); request.revision=1; request.count=3;
     const auto exchange=[&](uint16_t op) {
-        Message bytes{}; sc_campaign_request decoded{}; uint16_t operation=0;
-        const auto size=encode_campaign_request(bytes,op,request);
-        CHECK(size==469 && decode_request(bytes,size,&operation,nullptr,nullptr,nullptr,nullptr,nullptr,&decoded)==WireResult::ok);
-        CHECK(operation==op);
-        return native::campaign_request(operation,decoded);
+        return native::campaign_request(op,request);
     };
     request.namespace_id[0]=request.namespace_id[0]=='a'?'b':'a';
     CHECK(exchange(campaign_inspect_operation).reason==SC_CAMPAIGN_SCOPE);

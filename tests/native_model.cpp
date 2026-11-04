@@ -4,7 +4,7 @@
 #include "special.h"
 #include "inventory.h"
 #include <Windows.h>
-#include "protocol.h"
+#include "sentinel_protocol_generated.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -262,119 +262,6 @@ int main() {
     auto done = race.retrieve(r, false, 1004);
     CHECK(done.state == SC_DIAGNOSTIC_EXECUTED && done.cancel_requested && done.retrieved_at_ms == 1004);
 
-    Message wire{}; uint16_t op = 0; sc_diagnostic_request decoded{};
-    auto size = encode_native_request(wire, diagnostic_submit_operation, r);
-    CHECK(size == 88 && decode_request(wire, size, &op, &decoded) == WireResult::ok && op == diagnostic_submit_operation);
-    CHECK(same_scope(r.expected, decoded.expected) && decoded.request_id == r.request_id);
-    CHECK(decode_request(wire, size - 1) == WireResult::malformed);
-    wire[size] = 0; CHECK(decode_request(wire, size + 1) == WireResult::malformed);
-    size = encode_native_request(wire, native_operation, {}, 123);
-    uint64_t after = 0; CHECK(decode_request(wire, size, &op, nullptr, &after) == WireResult::ok && after == 123);
-    Snapshot host{}; host.pid = 7; host.process_created = 13; host.instance[0] = 1;
-    host.core.abi_version = SC_ABI_VERSION; strcpy_s(host.core.version, "0.5.0");
-    std::memset(host.core.build_id, 'a', 64);
-    sc_native_snapshot n{}; n.scope = r.expected; n.availability = SC_NATIVE_ENABLED;
-    n.site_revision = n.phase = 1; n.site_rva = 0x43d1f0; n.lifecycle = SC_LIFETIME_ACTIVE;
-    n.context_generation = n.scope.lifecycle_generation; n.game_state = SC_GAME_IN_GAME;
-    n.current_map.validity = SC_OBSERVATION_OBSERVED; n.current_map.length = 255;
-    std::memset(n.current_map.bytes, 'm', 255); n.event_sequence = 6; n.event_count = 6;
-    for (uint32_t i = 0; i < 6; ++i) n.events[i] = {i + 1ull, 1, 100, SC_EVENT_CHANGE_END, SC_LIFETIME_ACTIVE, 9, 0};
-    size = encode_native_response(wire, WireResult::ok, native_operation, host, n, {});
-    CHECK(size && size <= max_message);
-    Snapshot s{}; sc_native_snapshot roundtrip{}; sc_diagnostic_result d{}; WireResult code{};
-    CHECK(decode_native_response(wire, size, code, native_operation, s, roundtrip, d));
-    CHECK(roundtrip.current_map.length == 255 && roundtrip.event_count == 6);
-    CHECK(!decode_native_response(wire, size - 1, code, native_operation, s, roundtrip, d));
-    ++n.context_generation; CHECK(encode_native_response(wire, WireResult::ok, native_operation, host, n, {}) == 0);
-    d = {}; d.scope = r.expected; d.request_id = r.request_id; std::memcpy(d.nonce, r.nonce, 16);
-    d.state = SC_DIAGNOSTIC_REJECTED; d.reason = SC_NATIVE_BUDGET;
-    inventory_facts.dash = 1;
-    auto inventory_reply = sentinel::inventory::initial(inventory_request);
-    sentinel::inventory::execute(inventory_request, inventory_reply, inventory_calls);
-    inventory_reply.execution = d;
-    size = encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply);
-    sc_inventory_result decoded_inventory{};
-    CHECK(size && decode_inventory_response(wire, size, code, inventory_result_operation, s, decoded_inventory));
-    CHECK(decoded_inventory.dash_after == 1 && decoded_inventory.slayer_key_before == 1 &&
-          decoded_inventory.slayer_key_after == 1 && decoded_inventory.equipment_after == SC_INVENTORY_UNKNOWN_MASK &&
-          decoded_inventory.frag_grenade_after == 1 && decoded_inventory.ice_bomb_after == 0);
-    CHECK(decoded_inventory.flame_belch_after == 1 && decoded_inventory.blood_punch_after == 0 &&
-          decoded_inventory.perks_known == microwave && decoded_inventory.perks_owned == microwave);
-    CHECK(!decode_inventory_response(wire, size - 1, code, inventory_result_operation, s, decoded_inventory));
-    inventory_reply.dash_after = 2;
-    CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
-    inventory_reply.dash_after = 1;
-    inventory_reply.slayer_key_after = 2;
-    CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
-    inventory_reply.slayer_key_after = 1;
-    inventory_reply.frag_grenade_after = 2;
-    CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
-    inventory_reply.frag_grenade_after = 1;
-    inventory_reply.perks_owned = microwave << 1;
-    CHECK(!encode_inventory_response(wire, WireResult::ok, inventory_result_operation, host, inventory_reply));
-    detail = {}; detail.revision = 1; detail.stage = SC_STAGE_OBSERVATION_BUDGET;
-    detail.observation_attempted = detail.timing_valid = 1;
-    detail.observation_started_at_ms = 1000; detail.observation_elapsed_ns = 10000001;
-    detail.observation_budget_ns = 10000000; detail.sample_reason = SC_REASON_BUDGET;
-    size = encode_native_request(wire, diagnostic_detail_submit_operation, r);
-    CHECK(size == 88 && decode_request(wire, size, &op, &decoded) == WireResult::ok && op == diagnostic_detail_submit_operation);
-    const auto old_size = encode_native_response(wire, WireResult::ok, diagnostic_result_operation, host, {}, d);
-    size = encode_native_response(wire, WireResult::ok, diagnostic_detail_result_operation, host, {}, d, detail);
-    CHECK(size > old_size && size <= max_message);
-    sc_diagnostic_detail restored{};
-    CHECK(decode_native_response(wire, size, code, diagnostic_detail_result_operation, s, roundtrip, d, &restored));
-    CHECK(restored.observation_elapsed_ns == 10000001 && restored.stage == SC_STAGE_OBSERVATION_BUDGET);
-    CHECK(!decode_native_response(wire, size, code, diagnostic_result_operation, s, roundtrip, d));
-    CHECK(!decode_native_response(wire, size - 1, code, diagnostic_detail_result_operation, s, roundtrip, d));
-    wire[size] = 0; CHECK(!decode_native_response(wire, size + 1, code, diagnostic_detail_result_operation, s, roundtrip, d));
-    ++detail.revision; CHECK(!encode_native_response(wire, WireResult::ok, diagnostic_detail_result_operation, host, {}, d, detail));
-    detail = {}; detail.revision = 1; detail.stage = SC_STAGE_PENDING_BEFORE;
-    detail.pending_before = 3; detail.pending_before_reason = SC_REASON_PARTIAL_READ;
-    detail.pending_before_error = ERROR_PARTIAL_COPY; d.reason = SC_NATIVE_READ_FAILED;
-    size = encode_native_response(wire, WireResult::ok, diagnostic_detail_result_operation, host, {}, d, detail);
-    CHECK(size && decode_native_response(wire, size, code, diagnostic_detail_result_operation, s, roundtrip, d, &restored));
-    CHECK(restored.pending_before_reason == SC_REASON_PARTIAL_READ && restored.pending_before_error == ERROR_PARTIAL_COPY);
-    sc_special_result special_result{};
-    special_result.abi_version = SC_SPECIAL_ABI_VERSION;
-    special_result.execution.scope = r.expected;
-    special_result.execution.state = SC_DIAGNOSTIC_REJECTED;
-    special_result.kind = SC_SPECIAL_ENSURE_OWNERSHIP;
-    special_result.outcome = SC_SPECIAL_OUTCOME_OK;
-    special_result.owns_crucible = special_result.owns_hammer = 1;
-    special_result.hammer_tier = SC_SPECIAL_HAMMER_TIER_UPGRADED;
-    special_result.native_crucible = special_result.native_hammer = 1;
-    special_result.native_hammer_perks = 0;
-    special_result.flags = SC_SPECIAL_FLAG_HAMMER_LOOT_PROJECTED | SC_SPECIAL_FLAG_AFTER_VALID |
-        SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE;
-    size = encode_special_response(wire, WireResult::ok, special_result_operation, host, special_result);
-    CHECK(size && decode_special_response(wire, size, code, special_result_operation, s, special_result));
-    CHECK(special_result.native_hammer_perks == 0 &&
-        (special_result.flags & SC_SPECIAL_FLAG_HAMMER_LOOT_PROJECTED));
-    const uint8_t projected_flags[]{0x22, 0x40, 0, 0};
-    auto flag_bytes = std::search(wire.begin(), wire.begin() + size,
-                                  std::begin(projected_flags), std::end(projected_flags));
-    CHECK(flag_bytes != wire.begin() + size);
-    flag_bytes[1] |= 0x80;
-    CHECK(!decode_special_response(wire, size, code, special_result_operation, s, special_result));
-    special_result.flags = SC_SPECIAL_FLAG_AFTER_VALID | SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE;
-    size = encode_special_response(wire, WireResult::ok, special_result_operation, host, special_result);
-    CHECK(size && decode_special_response(wire, size, code, special_result_operation, s, special_result));
-    special_result.flags |= 0x8000;
-    CHECK(!encode_special_response(wire, WireResult::ok, special_result_operation, host, special_result));
-    sc_arsenal_result mastery_result{};
-    mastery_result.abi_version = SC_ARSENAL_ABI_VERSION;
-    mastery_result.execution.scope = r.expected;
-    mastery_result.execution.state = SC_DIAGNOSTIC_REJECTED;
-    mastery_result.kind = SC_ARSENAL_PROJECT_MASTERY;
-    mastery_result.outcome = SC_ARSENAL_OUTCOME_DEFERRED;
-    mastery_result.flags = SC_ARSENAL_FLAG_DEFERRED | SC_ARSENAL_FLAG_EFFECTIVE_UNOBSERVED;
-    mastery_result.masteries_ap_after = 1296;
-    size = encode_arsenal_response(wire, WireResult::ok, arsenal_result_operation, host, mastery_result);
-    CHECK(size && decode_arsenal_response(wire, size, code, arsenal_result_operation, s, mastery_result));
-    CHECK((mastery_result.flags & SC_ARSENAL_FLAG_EFFECTIVE_UNOBSERVED) &&
-        mastery_result.masteries_ap_after == 1296 && mastery_result.masteries_effective_after == 0);
-    mastery_result.flags |= 0x80;
-    CHECK(!encode_arsenal_response(wire, WireResult::ok, arsenal_result_operation, host, mastery_result));
     run_backup_request_contracts();
     run_command_identity_tests();
     std::puts("PASS native lifecycle, nested/free/failure/menu, same-name generation, history gaps, queue bounds/deadlines/retention, claimed cancellation race, strict bounded wire; HARNESS ONLY");

@@ -143,7 +143,7 @@ def validate(schema):
             raise ValueError("invalid native request type")
         if not re.fullmatch(r"::sc_[a-z_]+", binding["result"]):
             raise ValueError("invalid native result type")
-        if "transfer" in binding and binding["transfer"] not in {t["name"] for t in schema["v1_transfers"]}:
+        if "transfer" in binding and binding["transfer"] not in {t["name"] for t in schema["native_fields"]}:
             raise ValueError("unknown native transfer")
     unique(schema["protocol"]["versions"], "version")
     unique(schema["protocol"]["operations"], "id")
@@ -159,15 +159,12 @@ def validate(schema):
         for revision in command["payload_revisions"]:
             for variant in variant_types(command, revision):
                 type_size(variant["type"], types)
-    for layout in schema["v1_layouts"]:
-        if minimum_size(layout["type"], types) + 16 > schema["protocol"]["max_frame"]:
-            raise ValueError("impossible frame size")
-    validate_v1_transfers(schema)
+    validate_native_fields(schema)
 
 
-def validate_v1_transfers(schema):
-    unique(schema["v1_transfers"], "name")
-    for entry in schema["v1_transfers"]:
+def validate_native_fields(schema):
+    unique(schema["native_fields"], "name")
+    for entry in schema["native_fields"]:
         identifier(entry["name"])
         unique(entry["fields"], "member")
         for field in entry["fields"]:
@@ -179,13 +176,6 @@ def validate_v1_transfers(schema):
                     raise ValueError("impossible array size")
             elif field["type"] != "text":
                 field_size(dict(name=field["member"], **field), {}, ())
-    operations = schema["compatibility"]["operations"]
-    unique(operations, "opcode")
-    if [op["opcode"] for op in operations] != schema["compatibility"]["v1_operations"]:
-        raise ValueError("incomplete v1 operations")
-    for op in operations:
-        if op["family"] not in schema["compatibility"]["families"]:
-            raise ValueError("unknown v1 family")
 
 
 def validate_headers(protocol):
@@ -430,37 +420,6 @@ bool decode(const Bytes& in, {name}& out) {{
 }}'''
 
 
-def cpp_frame_api(layout):
-    name, t = layout["name"], layout["type"]
-    return [f"bool encode_{name}(const {t}&, Bytes&, uint32_t result = 0);", f"bool decode_{name}(const Bytes&, {t}&, uint32_t& result);"]
-
-
-def cpp_frame_body(layout, schema):
-    name, t, op = layout["name"], layout["type"], layout["operation"]
-    response = str(layout["response"]).lower()
-    magic = schema["protocol"]["magic"]
-    max_error = max(e["id"] for e in schema["protocol"]["wire_errors"])
-    return f'''bool encode_{name}(const {t}& value, Bytes& out, uint32_t result) {{
-    if (result > {max_error} || (!{response} && result)) return false;
-    Bytes payload;
-    if (!result && !encode(value, payload)) return false;
-    if (payload.size() + header_size_1 > max_frame) return false;
-    Writer c; wire_header_1 header{{}}; header.magic = {magic}; header.version = 1;
-    header.operation = {op}; header.payload_length = static_cast<uint32_t>(payload.size()); header.result = result;
-    if (!transfer(c, header)) return false;
-    c.data.insert(c.data.end(), payload.begin(), payload.end()); out = std::move(c.data); return true;
-}}
-bool decode_{name}(const Bytes& in, {t}& out, uint32_t& result) {{
-    if (in.size() < header_size_1 || in.size() > max_frame) return false;
-    Reader c{{in}}; wire_header_1 header{{}};
-    if (!transfer(c, header)) return false;
-    if (header.operation != {op} || header.payload_length != in.size() - header_size_1 || (!{response} && header.result)) return false;
-    if (header.result) {{ if (header.payload_length) return false; out = {{}}; result = header.result; return true; }}
-    if (!decode(Bytes(in.begin() + header_size_1, in.end()), out)) return false;
-    result = header.result; return true;
-}}'''
-
-
 def cpp_constants(schema):
     protocol = schema["protocol"]
     lines = [f"inline constexpr uint32_t wire_magic = {protocol['magic']};"]
@@ -480,10 +439,10 @@ def cpp_constants(schema):
     return lines
 
 
-def cpp_v1_transfers(schema):
+def cpp_native_fields(schema):
     lines = []
-    for entry in schema.get("v1_transfers", []):
-        lines.append(f"template<class C, class T> void v1_transfer_{entry['name']}(C& c, T& v) {{")
+    for entry in schema["native_fields"]:
+        lines.append(f"template<class C, class T> void native_field_{entry['name']}(C& c, T& v) {{")
         for field in entry["fields"]:
             value = "v." + field["member"]
             if "count_member" in field:
@@ -499,20 +458,6 @@ def cpp_v1_transfers(schema):
                 lines.append(f"    c.scalar({value}, {WIDTHS[field['type']]});")
         lines.append("}")
     return lines
-
-
-def cpp_v1_descriptors(schema):
-    compatibility = schema["compatibility"]
-    families = compatibility["families"]
-    lines = ["enum class V1Family { " + ", ".join(families) + " };",
-             "struct V1Descriptor { uint16_t version, opcode; uint64_t capability; size_t payload; V1Family family; bool subset, envelope, allow_zero_generation; uint32_t input_abi; };",
-             "inline constexpr V1Descriptor v1_descriptors[] = {"]
-    for op in compatibility["operations"]:
-        payload = op["payload_bytes"] if isinstance(op["payload_bytes"], int) else 0
-        flags = [op["capability_rule"] == "subset", op["envelope"], op["allow_zero_generation"]]
-        values = ", ".join(str(flag).lower() for flag in flags)
-        lines.append(f"    {{1, {op['opcode']}, {op['capability']}ULL, {payload}, V1Family::{op['family']}, {values}, {op['input_abi']}}},")
-    return lines + ["};"]
 
 
 def cpp_native_variants(schema):
@@ -531,7 +476,7 @@ def cpp_native_variants(schema):
         seen.add(b["request"])
         lines.append(f"template<> struct NativeBinding<{b['request']}> {{ using Result = {b['result']}; static constexpr CommandId id = CommandId::{b['command']}; }};")
         if "transfer" in b:
-            fields = next(t["fields"] for t in schema["v1_transfers"] if t["name"] == b["transfer"])
+            fields = next(t["fields"] for t in schema["native_fields"] if t["name"] == b["transfer"])
             lines.append(f"template<class C> void native_transfer(C& c, const {b['request']}& v) {{")
             prefix = "v.request." if b["request"] == "NativeCampaign" else "v."
             for f in fields:
@@ -546,22 +491,29 @@ def cpp_native_variants(schema):
                     lines.append(f"    c.scalar({value}, {WIDTHS[f['type']]});")
             if b["request"] == "NativeCampaign":
                 lines += ["    c.scalar(v.request.reward_presentation, 4);",
-                          "    v1_transfer_campaign_summary(c, v.summary);",
-                          "    for (const auto& challenge : v.summary.challenges) v1_transfer_campaign_challenge(c, challenge);",
-                          "    v1_transfer_campaign_rewards_header(c, v.rewards);",
+                          "    native_field_campaign_summary(c, v.summary);",
+                          "    for (const auto& challenge : v.summary.challenges) native_field_campaign_challenge(c, challenge);",
+                          "    native_field_campaign_rewards_header(c, v.rewards);",
                           "    if (v.rewards.count > std::size(v.rewards.entries)) { c.valid = false; return; }",
-                          "    for (size_t i = 0; i < v.rewards.count; ++i) v1_transfer_campaign_reward(c, v.rewards.entries[i]);"]
+                          "    for (size_t i = 0; i < v.rewards.count; ++i) native_field_campaign_reward(c, v.rewards.entries[i]);"]
             lines.append("}")
             lines.append(f"inline const char* native_namespace(const {b['request']}& v) {{ return {prefix}namespace_id; }}")
     return lines
+
+
+def cpp_payload_name(command, revision):
+    variants = variant_types(command, revision)
+    if variants == command["payload"]["variants"]:
+        return command["name"] + "_payload"
+    first = next(r for r in command["payload_revisions"] if variant_types(command, r) == variants)
+    return command["name"] + f"_payload_revision{first}"
 
 
 def cpp_registry(schema):
     payloads, results = [], []
     for command in schema["commands"]:
         for revision in command["payload_revisions"]:
-            suffix = f"_revision{revision}" if variant_types(command, revision) != command["payload"]["variants"] else ""
-            payloads.append(command["name"] + "_payload" + suffix)
+            payloads.append(cpp_payload_name(command, revision))
         results.append(command["result"])
     header = ["using Payload = std::variant<" + ", ".join(dict.fromkeys(payloads)) + ">;",
               "using Result = std::variant<" + ", ".join(dict.fromkeys(results)) + ">;",
@@ -597,8 +549,7 @@ def cpp_registry(schema):
     for c in schema["commands"]:
         metadata = json.dumps(json.dumps(c, separators=(",", ":")))
         for revision in c["payload_revisions"]:
-            suffix = f"_revision{revision}" if variant_types(c, revision) != c["payload"]["variants"] else ""
-            payload = c["name"] + "_payload" + suffix
+            payload = cpp_payload_name(c, revision)
             native = next(b["request"] for b in schema["native_bindings"] if b["command"] == c["name"])
             source.append(f'    {{{c["id"]}, {revision}, "{c["name"]}", {metadata}, Admission::{c["admission"]}, Execution::{c["execution"]}, Evidence::{c["evidence"]}, Ack::{c["ack"]}, policies_{c["name"]}, std::size(policies_{c["name"]}), &decode_variant<{payload}, Payload>, &encode_variant<{payload}, Payload>, &decode_variant<{c["result"]}, Result>, &encode_variant<{c["result"]}, Result>, &native_matches<{native}>}},')
     source += ["};", "const size_t descriptor_count = std::size(descriptors);"]
@@ -611,13 +562,12 @@ def cpp_native_projections(schema):
         name = item["name"]
         if not name.startswith("sc_"):
             continue
-        directions = ("to_wire", "from_wire") if name in {
-            "sc_native_scope", "sc_diagnostic_request", "sc_combat_presentation_request",
-            "sc_campaign_row", "sc_physical_challenge", "sc_campaign_summary",
-        } else ("to_wire",)
+        directions = ("to_wire", "from_wire")
         for direction in directions:
             source, target = (f"::{name}", name) if direction == "to_wire" else (name, f"::{name}")
             lines += [f"inline {target} {direction}(const {source}& v) {{", f"    {target} out{{}};"]
+            if direction == "from_wire" and item.get("native_size"):
+                lines.append("    out.size = sizeof(out);")
             for field in item["fields"]:
                 member = field["name"]
                 value = f"{direction}(v.{member})" if field["type"].startswith("sc_") else f"v.{member}"
@@ -636,20 +586,19 @@ def render_cpp(schema, notice):
     names = [t["name"] for t in types] + [c["name"] + "_payload" for c in schema["commands"]]
     for command in schema["commands"]:
         for revision in command["payload_revisions"]:
-            if variant_types(command, revision) != command["payload"]["variants"]:
+            name = cpp_payload_name(command, revision)
+            if name not in names:
                 unions.append(cpp_unions(command, revision))
-                names.append(command["name"] + f"_payload_revision{revision}")
+                names.append(name)
     header = [notice, "#pragma once", '#include "sentinel_inspection.h"', "#include <array>\n#include <cstdint>\n#include <string>\n#include <variant>\n#include <vector>", "namespace sentinel::generated {", "using Bytes = std::vector<uint8_t>;", f"inline constexpr size_t max_frame = {schema['protocol']['max_frame']};"]
     header += cpp_constants(schema) + [cpp_struct(t) for t in types] + [u[0] for u in unions]
     header += [line for name in names for line in cpp_api(name)]
-    header += [line for layout in schema["v1_layouts"] for line in cpp_frame_api(layout)]
-    header += cpp_v1_transfers(schema) + cpp_v1_descriptors(schema)
+    header += cpp_native_fields(schema)
     registry_header, registry_source = cpp_registry(schema)
     header += cpp_native_projections(schema) + cpp_native_variants(schema) + registry_header + ["}"]
     forward = [f"template<class C> bool transfer(C&, {name}&);" for name in names]
     source = [notice, '#include "sentinel_protocol_generated.h"', "#include <algorithm>\n#include <cstring>\n#include <type_traits>\n#include <utility>", "namespace sentinel::generated {", "namespace {", *forward, "}", CPP_RUNTIME, "namespace {", *[cpp_codec(t) for t in types], *[u[1] for u in unions], "}"]
     source += [cpp_api_body(n) for n in names]
-    source += [cpp_frame_body(layout, schema) for layout in schema["v1_layouts"]]
     source += registry_source + ["}"]
     return "\n".join(header) + "\n", "\n".join(source) + "\n"
 
@@ -657,7 +606,6 @@ def render_cpp(schema, notice):
 PY_RUNTIME = r'''
 TYPES = {entry["name"]: entry for entry in SCHEMA["types"]}
 COMMANDS = {entry["id"]: entry for entry in SCHEMA["commands"]}
-LAYOUTS = {entry["name"]: entry for entry in SCHEMA["v1_layouts"]}
 WIDTHS = {f"{sign}{bits}": bits // 8 for sign in "ui" for bits in (8, 16, 32, 64)}
 
 
@@ -833,28 +781,6 @@ def _variant_type(command, revision, variant):
     return mapping["payload_variants"][index]
 
 
-def encode_frame(layout_name, value, result=0):
-    layout = LAYOUTS[layout_name]
-    if result not in {e["id"] for e in SCHEMA["protocol"]["wire_errors"]} or (result and not layout["response"]):
-        raise ValueError("invalid result")
-    body = b"" if result else encode(layout["type"], value)
-    header = encode("wire_header_1", dict(magic=SCHEMA["protocol"]["magic"], version=1, operation=layout["operation"], payload_length=len(body), result=result))
-    if len(header) + len(body) > SCHEMA["protocol"]["max_frame"]:
-        raise ValueError("oversized frame")
-    return header + body
-
-
-def decode_frame(layout_name, data):
-    layout = LAYOUTS[layout_name]
-    if not 16 <= len(data) <= SCHEMA["protocol"]["max_frame"]:
-        raise ValueError("frame size")
-    header, pos = _decode_type("wire_header_1", data, 0)
-    length, result = header["payload_length"], header["result"]
-    if header["operation"] != layout["operation"] or length != len(data) - pos:
-        raise ValueError("frame header")
-    if result and (not layout["response"] or length):
-        raise ValueError("invalid result")
-    return ({} if result else decode(layout["type"], data[pos:])), result
 '''
 
 
@@ -870,28 +796,14 @@ def format_schema(value, depth=0):
     return json.dumps(value, ensure_ascii=False)
 
 
-def projection_schema(schema):
-    # Keep the published projection metadata order independent of the source's v1 section.
-    v1 = schema["v1"]
-    before = {"types": "compatibility", "constraint_vocabulary": "v1_layouts", "native_bindings": "v1_transfers"}
-    projection = {}
-    for name, value in schema.items():
-        if name in before:
-            projection[before[name]] = v1[before[name]]
-        if name != "v1":
-            projection[name] = value
-    return projection
-
-
 def render(schema_bytes):
     schema = json.loads(schema_bytes)
     digest = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    schema = projection_schema(schema)
     validate(schema)
     schema = with_headers(schema)
     notice = f"Generated from protocol/schema.json; regenerate: python -B tools/generate_protocol.py; schema-sha256: {digest}; generator-format: {FORMAT_REVISION}. DO NOT EDIT."
     header, source = render_cpp(schema, "// " + notice)
-    python = "# " + notice + "\nimport json\n\nSCHEMA = json.loads(" + repr(json.dumps(schema, separators=(",", ":"))) + ")\n" + PY_RUNTIME
+    python = "# " + notice + "\nimport json\n\nSCHEMA = json.loads(" + repr(json.dumps(schema, separators=(",", ":"))) + ")\n" + PY_RUNTIME.rstrip() + "\n"
     return {"include/sentinel_protocol_generated.h": header.encode(), "src/protocol_generated.cpp": source.encode(), "protocol/generated/sentinel_protocol.py": python.encode()}
 
 

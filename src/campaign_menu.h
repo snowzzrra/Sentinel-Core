@@ -1,5 +1,6 @@
 #pragma once
 #include "sentinel_campaign_menu.h"
+#include "sentinel_evidence.h"
 #include <array>
 #include <mutex>
 #include <vector>
@@ -29,9 +30,15 @@ public:
     void selected(uint32_t id);
     uint32_t focus_id();
     void loaded(const char* map);
+    void entries_usable(const Projection&, const sc_evidence_scope&);
+    void load_requested(uint32_t id, const Projection&, const sc_evidence_scope&);
+    void destination_ready(const sc_evidence_scope&);
+    sc_mission_access_result access(uint32_t id, const sc_evidence_scope&);
     void hint_intent(const char* namespace_id,uint32_t location_id);
 private:
     std::mutex mutex_;
+    std::map<uint32_t, sc_mission_access_result> access_;
+    uint32_t pending_access_ = 0;
     Projection staged_{},committed_{};
     std::array<bool,SC_CAMPAIGN_MENU_MAX_ROWS> received_{};
     uint64_t rendered_=0;
