@@ -1,4 +1,4 @@
-// GENERATED from DoomEternal-AP-Mod/data/player_strings.json; do not edit.
+// GENERATED from DoomEternal-AP-Mod/data/strings/en.json; do not edit.
 // regenerate in DoomEternal-AP-Mod: python -m tools.content.compile_player_strings
 #pragma once
 #include <string>
