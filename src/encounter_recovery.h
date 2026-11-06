@@ -24,7 +24,10 @@ struct Manager {
     std::string name, kind, wait;
     std::vector<Actor> actors;
     bool recipe_blocked = false;
+    bool event_blocked = false;
+    std::string exclusion;
 };
+const char* rejection(const std::string& map, const Manager&);
 struct Context {
     sc_native_scope scope{};
     uint64_t stamp = 0;

@@ -1155,6 +1155,40 @@ uint32_t refill_crucible(uintptr_t p) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return finish(GetExceptionCode()); }
 }
 
+const char* refill_pool(const char* weapon) {
+    const struct { const char* weapon; const char* pool; } pools[]{
+        {"weapon/player/shotgun", "shells"}, {"weapon/player/double_barrel", "shells"},
+        {"weapon/player/heavy_cannon", "bullets"}, {"weapon/player/chaingun", "bullets"},
+        {"weapon/player/plasma_rifle", "cells"}, {"weapon/player/gauss_rifle", "cells"},
+        {"weapon/player/rocket_launcher", "rockets"}, {"weapon/player/chainsaw", "fuel"},
+        {"weapon/player/bfg", "bfg"}, {"weapon/player/unmaykr", "bfg"}
+    };
+    for (const auto& entry : pools) if (!std::strcmp(weapon, entry.weapon)) return entry.pool;
+    return nullptr;
+}
+
+bool refill_shared_pool(uintptr_t inv, uintptr_t p, RefillPool& diagnostic) {
+    const auto ammo_decl = diagnostic.ammo_decl;
+    if (!ammo_decl) { diagnostic.step = "pool_missing"; record_refill(diagnostic); return false; }
+    diagnostic.step = "quantity_before";
+    const auto before_item = find_item(inv, ammo_decl);
+    diagnostic.quantity_before = item_count(before_item);
+    diagnostic.capacity_before = refill_capacity(before_item);
+    diagnostic.step = "writer";
+    diagnostic.writer_result = give_item(inv, p, ammo_decl, 999, 1);
+    diagnostic.writer_result_known = true;
+    diagnostic.step = "quantity_after";
+    const auto after_item = find_item(inv, ammo_decl);
+    diagnostic.quantity_after = item_count(after_item);
+    diagnostic.capacity_after = refill_capacity(after_item);
+    const bool full = after_item && diagnostic.capacity_after != UINT32_MAX &&
+        diagnostic.quantity_after == diagnostic.capacity_after;
+    diagnostic.step = !diagnostic.writer_result ? "writer_refused" : !after_item ? "after_item_missing" :
+        full ? "confirmed" : "quantity_confirmation";
+    record_refill(diagnostic);
+    return diagnostic.writer_result && full;
+}
+
 uint32_t refill(void*, uintptr_t p) {
     uint32_t error = 0;
     RefillPool diagnostic{};
@@ -1167,6 +1201,7 @@ uint32_t refill(void*, uintptr_t p) {
         const auto at_fn = reinterpret_cast<ItemAt>(image_base + rva_item_at);
 
         uint32_t attempted = 0, confirmed = 0;
+        std::array<const char*, 6> written{};
         const auto inventory_count = count_fn(inv);
         if (inventory_count > 4096) { diagnostic.step = "inventory_count"; diagnostic.error = 3; record_refill(diagnostic); return 3; }
         // ordinary pools use the inventory writer; crucible charges use their native judgement meter. hammer resources are not ammo pools
@@ -1182,56 +1217,15 @@ uint32_t refill(void*, uintptr_t p) {
             diagnostic.weapon_decl = decl;
             refill_name(diagnostic.weapon, path);
 
-            const auto give_list = [&](uintptr_t list_decl) {
-                diagnostic.list_decl = list_decl; diagnostic.step = "ammo_list";
-                diagnostic.ammo_decl = diagnostic.writer_result = 0;
-                diagnostic.writer_result_known = false;
-                refill_name(diagnostic.declaration, nullptr);
-                diagnostic.quantity_before = diagnostic.quantity_after = UINT32_MAX;
-                diagnostic.capacity_before = diagnostic.capacity_after = UINT32_MAX;
-                if (!list_decl) return;
-                const auto ammo_count = *reinterpret_cast<int*>(list_decl + 0x810);
-                const auto ammo_list = *reinterpret_cast<uintptr_t*>(list_decl + 0x808);
-                if (!ammo_list || ammo_count <= 0 || ammo_count > 64) { record_refill(diagnostic); return; }
-                for (int j = 0; j < ammo_count; ++j) {
-                    diagnostic.ammo_decl = 0; diagnostic.writer_result = 0;
-                    diagnostic.writer_result_known = false;
-                    diagnostic.declaration[0] = 0;
-                    diagnostic.quantity_before = diagnostic.quantity_after = UINT32_MAX;
-                    diagnostic.capacity_before = diagnostic.capacity_after = UINT32_MAX;
-                    diagnostic.step = "ammo_decl";
-                    const auto ammo_decl = *reinterpret_cast<uintptr_t*>(ammo_list + static_cast<size_t>(j) * 0x28);
-                    diagnostic.ammo_decl = ammo_decl;
-                    if (!ammo_decl) continue;
-                    const auto ammo_path = decl_path(ammo_decl);
-                    refill_name(diagnostic.declaration, ammo_path);
-                    if (ammo_path && std::strstr(ammo_path, "crucible")) continue;
-                    ++attempted;
-                    diagnostic.step = "quantity_before";
-                    const auto before_item = find_item(inv, ammo_decl);
-                    const auto before_count = before_item ? item_count(before_item) : 0;
-                    diagnostic.quantity_before = before_count;
-                    diagnostic.capacity_before = refill_capacity(before_item);
-                    diagnostic.step = "writer";
-                    const auto granted = give_item(inv, p, ammo_decl, 999, 1);
-                    diagnostic.writer_result = granted;
-                    diagnostic.writer_result_known = true;
-                    diagnostic.step = "quantity_after";
-                    const auto after_item = find_item(inv, ammo_decl);
-                    diagnostic.capacity_after = refill_capacity(after_item);
-                    if (granted && after_item && item_count(after_item) >= before_count && item_count(after_item) > 0) {
-                        ++confirmed;
-                        diagnostic.step = "confirmed";
-                    } else diagnostic.step = !granted ? "writer_refused" : !after_item ? "after_item_missing" : "quantity_confirmation";
-                    __try { diagnostic.quantity_after = after_item ? item_count(after_item) : 0; }
-                    __except(EXCEPTION_EXECUTE_HANDLER) {}
-                    record_refill(diagnostic);
-                }
-            };
-            give_list(decl);
-            diagnostic.list_source = 1; diagnostic.step = "nested_list";
-            const auto nested = *reinterpret_cast<uintptr_t*>(decl + 0x7f0);
-            if (nested) give_list(nested);
+            const auto pool = refill_pool(path);
+            if (!pool || std::any_of(written.begin(), written.end(), [&](const char* prior) {
+                    return prior && !std::strcmp(prior, pool);
+                })) continue;
+            written[attempted++] = pool;
+            diagnostic.step = "shared_pool";
+            sprintf_s(diagnostic.declaration, "ammo/sharedammopool/%s", pool);
+            diagnostic.ammo_decl = find_decl(diagnostic.declaration);
+            if (refill_shared_pool(inv, p, diagnostic)) ++confirmed;
         }
         if (!attempted || confirmed != attempted) return 4;
         const auto crucible = find_decl(CRUCIBLE_PATH);
@@ -2188,12 +2182,176 @@ bool test_native_pointer_guards() {
     }
     return true;
 }
-bool test_refill_pool(const RefillPool& pool, uintptr_t nested_decl, uintptr_t ammo_decl, uintptr_t ammo_item) {
-    return pool.list_source == 1 && pool.list_decl == nested_decl && pool.ammo_decl == ammo_decl &&
-           pool.quantity_before == 50 && pool.quantity_after == 50 && pool.writer_result == ammo_item &&
-           pool.capacity_before == 50 && pool.capacity_after == 50 &&
-           !std::strcmp(pool.weapon, "weapon/player/shotgun") &&
-           !std::strcmp(pool.declaration, "ammo/sharedammopool/shells") && !std::strcmp(pool.step, "confirmed");
+RefillPool latest_refill_pool() {
+    const auto h = refill_history();
+    return h.pools[(h.sequence - 1) % h.pools.size()];
+}
+
+bool test_refill_confirmation(uintptr_t p, uintptr_t ammo_decl, uintptr_t ammo_item,
+                              unsigned& writes, unsigned& writer_mode, int& ammo_capacity) {
+    const auto put = [](uintptr_t base, size_t offset, auto value) { std::memcpy(reinterpret_cast<void*>(base + offset), &value, sizeof(value)); };
+    bool ok = true;
+    ok &= !refill(nullptr, p);
+    ok &= writes == 1;
+    auto pool = latest_refill_pool();
+    ok &= pool.quantity_before == 0;
+    ok &= pool.quantity_after == 50;
+    ok &= pool.capacity_after == 50 &&
+        pool.ammo_decl == ammo_decl;
+    ok &= !std::strcmp(pool.step, "confirmed");
+    writer_mode = 1;
+    put(ammo_item, 0x40, int32_t{0});
+    ok &= refill(nullptr, p) == 4;
+    ok &= writes == 2;
+    pool = latest_refill_pool();
+    ok &= !pool.writer_result;
+    ok &= pool.quantity_before == 0;
+    ok &= pool.quantity_after == 0;
+    ok &= !std::strcmp(pool.step, "writer_refused");
+    writer_mode = 2;
+    ok &= refill(nullptr, p) == 0xe0700010;
+    ok &= writes == 3;
+    pool = latest_refill_pool();
+    ok &= pool.error == 0xe0700010;
+    ok &= !std::strcmp(pool.step, "writer");
+    writer_mode = 0;
+    ammo_capacity = 75;
+    ok &= !refill(nullptr, p);
+    pool = latest_refill_pool();
+    ok &= pool.capacity_before == 75;
+    ok &= pool.capacity_after == 75;
+    ok &= pool.quantity_after == 75;
+    for (size_t i = 0; i < refill_history().pools.size(); ++i) ok &= !refill(nullptr, p);
+    ok &= refill_history().count == refill_history().pools.size();
+    writer_mode = 3;
+    ok &= refill(nullptr, p) == 4;
+    pool = latest_refill_pool();
+    ok &= pool.capacity_before == UINT32_MAX;
+    ok &= pool.capacity_after == UINT32_MAX;
+    ok &= pool.quantity_after == 75;
+    writer_mode = 5;
+    ok &= refill(nullptr, p) == 4;
+    ok &= latest_refill_pool().quantity_after == 1;
+    return ok;
+}
+
+bool test_refill_mapping(uintptr_t p, uintptr_t decl, uintptr_t other_decl, uintptr_t ammo_item,
+                         const char*& pool_path, bool& present, const unsigned& writes) {
+    const auto put = [](uintptr_t base, size_t offset, auto value) { std::memcpy(reinterpret_cast<void*>(base + offset), &value, sizeof(value)); };
+    bool ok = true;
+    for (const auto& pair : {std::array<const char*, 3>{"heavy_cannon", "chaingun", "bullets"},
+            {"shotgun", "double_barrel", "shells"}, {"plasma_rifle", "gauss_rifle", "cells"},
+            {"bfg", "unmaykr", "bfg"}, {"rocket_launcher", "rocket_launcher", "rockets"},
+            {"chainsaw", "chainsaw", "fuel"}}) {
+        const auto first_path = std::string("weapon/player/") + pair[0];
+        const auto second_path = std::string("weapon/player/") + pair[1];
+        const auto shared_path = std::string("ammo/sharedammopool/") + pair[2];
+        pool_path = shared_path.c_str();
+        put(decl, 8, first_path.c_str()); put(other_decl, 8, second_path.c_str());
+        for (const bool absent : {false, true}) {
+            present = !absent;
+            put(ammo_item, 0x40, int32_t{0});
+            const auto before_writes = writes;
+            ok &= !refill(nullptr, p) && writes == before_writes + 1 && latest_refill_pool().quantity_after == 75;
+        }
+    }
+    put(decl, 8, "weapon/player/equipment_flame_belch");
+    put(other_decl, 8, "weapon/player/hammer");
+    const auto before_writes = writes;
+    ok &= refill(nullptr, p) == 4 && writes == before_writes;
+    put(decl, 8, "weapon/player/shotgun"); pool_path = "ammo/sharedammopool/shells";
+    return ok;
+}
+
+bool test_refill_native(uintptr_t p, uintptr_t weapon, uintptr_t decl, uint8_t* image, size_t fixture_image_size) {
+    const auto put = [](uintptr_t base, size_t offset, auto value) { std::memcpy(reinterpret_cast<void*>(base + offset), &value, sizeof(value)); };
+    const auto stub = [&](uint32_t rva, auto fn) {
+        const uint8_t jump[]{0x48, 0xb8};
+        const auto target = reinterpret_cast<uintptr_t>(fn);
+        std::memcpy(image + rva, jump, sizeof(jump));
+        std::memcpy(image + rva + 2, &target, sizeof(target));
+        image[rva + 10] = 0xff; image[rva + 11] = 0xe0;
+    };
+    static uintptr_t first_weapon;
+    first_weapon = weapon;
+    bool ok = true;
+    std::array<uint8_t, 0x20> ammo_declaration{};
+    std::array<uint8_t, 0x48> ammo_storage{};
+    std::array<uintptr_t, 0xe0 / 8> ammo_table{};
+    static uintptr_t ammo_decl, ammo_item;
+    static unsigned writes, writer_mode;
+    static int ammo_capacity;
+    static bool present;
+    static const char* pool_path;
+    present = true; pool_path = "ammo/sharedammopool/shells";
+    ammo_decl = reinterpret_cast<uintptr_t>(ammo_declaration.data());
+    ammo_item = reinterpret_cast<uintptr_t>(ammo_storage.data());
+    writes = writer_mode = 0;
+    ammo_capacity = 50;
+    put(weapon, 0x38, decl); put(decl, 8, "weapon/player/shotgun");
+    put(ammo_decl, 8, "ammo/sharedammopool/shells");
+    ammo_table[0xd0 / 8] = reinterpret_cast<uintptr_t>(+[](uintptr_t item) { return *reinterpret_cast<int*>(item + 0x40); });
+    ammo_table[0xd8 / 8] = reinterpret_cast<uintptr_t>(+[](uintptr_t) {
+        if (writer_mode == 3) RaiseException(0xe0700011, 0, 0, nullptr);
+        return ammo_capacity;
+    });
+    put(ammo_item, 0, reinterpret_cast<uintptr_t>(ammo_table.data()));
+    stub(rva_find_decl, +[](uintptr_t, const char* path, int) -> uintptr_t {
+        return !std::strcmp(path, pool_path) ? ammo_decl : 0;
+    });
+    stub(rva_item_count, +[](uintptr_t) -> uint32_t { return 1; });
+    stub(rva_item_at, +[](uintptr_t, int) { return first_weapon; });
+    stub(rva_find_item, +[](uintptr_t, uintptr_t value) -> uintptr_t { return value == ammo_decl && present ? ammo_item : 0; });
+    stub(rva_give_item, +[](uintptr_t, uintptr_t, uintptr_t, int amount, uint8_t, uint8_t, uint8_t, uint8_t) -> uintptr_t {
+        ++writes;
+        if (writer_mode == 2) RaiseException(0xe0700010, 0, 0, nullptr);
+        if (writer_mode == 1) return 0;
+        present = true;
+        *reinterpret_cast<int*>(ammo_item + 0x40) = writer_mode == 5 ? 1 : (std::min)(amount, ammo_capacity);
+        return ammo_item;
+    });
+    ok &= FlushInstructionCache(GetCurrentProcess(), image, fixture_image_size) != 0;
+    ok &= test_refill_confirmation(p, ammo_decl, ammo_item, writes, writer_mode, ammo_capacity);
+    writer_mode = 0;
+    std::array<uint8_t, 0x48> second_weapon{};
+    std::array<uint8_t, 0x20> second_decl{};
+    static uintptr_t other_weapon;
+    other_weapon = reinterpret_cast<uintptr_t>(second_weapon.data());
+    put(other_weapon, 0x38, reinterpret_cast<uintptr_t>(second_decl.data()));
+    stub(rva_item_count, +[](uintptr_t) -> uint32_t { return 2; });
+    stub(rva_item_at, +[](uintptr_t, int i) { return i ? other_weapon : first_weapon; });
+    ok &= FlushInstructionCache(GetCurrentProcess(), image, fixture_image_size) != 0;
+    ok &= test_refill_mapping(p, decl, reinterpret_cast<uintptr_t>(second_decl.data()), ammo_item, pool_path, present, writes);
+    writer_mode = 0;
+    static uintptr_t crucible_decl;
+    static float meter_amount;
+    crucible_decl = reinterpret_cast<uintptr_t>(ammo_declaration.data()); meter_amount = 0;
+    stub(rva_find_decl, +[](uintptr_t, const char* path, int) -> uintptr_t {
+        return !std::strcmp(path, pool_path) ? ammo_decl : !std::strcmp(path, CRUCIBLE_PATH) ? crucible_decl : 0;
+    });
+    put(p + judgement_meter_offset, 0, image_base + rva_judgement_meter_vtable);
+    put(image_base + rva_judgement_meter_vtable, 0x20, +[](uintptr_t) { return meter_amount; });
+    put(image_base + rva_judgement_meter_vtable, 0x28, +[](uintptr_t) { return 3.0f; });
+    stub(rva_meter_set, +[](uintptr_t, float amount) {
+        if (writer_mode == 4) RaiseException(0xe0700012, 0, 0, nullptr);
+        meter_amount = amount;
+    });
+    ok &= FlushInstructionCache(GetCurrentProcess(), image, fixture_image_size) != 0;
+    ok &= !refill(nullptr, p);
+    ok &= meter_amount == 3;
+    auto pool = latest_refill_pool();
+    ok &= pool.list_source == 2;
+    ok &= pool.quantity_before == 0;
+    ok &= pool.quantity_after == 3 &&
+        pool.capacity_before == 3;
+    ok &= pool.capacity_after == 3;
+    ok &= !pool.writer_result_known;
+    writer_mode = 4;
+    ok &= refill(nullptr, p) == 0xe0700012;
+    pool = latest_refill_pool();
+    ok &= pool.error == 0xe0700012;
+    ok &= !std::strcmp(pool.step, "meter_writer");
+    return ok;
 }
 bool test_hands_restore() {
     if (!test_native_pointer_guards()) return false;
@@ -2250,90 +2408,7 @@ bool test_hands_restore() {
     }
     original_best_weapon = [](uintptr_t, bool, uintptr_t) { return weapon; };
     ok &= best_weapon_detour(p, false, 0) == weapon;
-    std::array<uint8_t, 0x820> nested{};
-    std::array<uint8_t, 0x20> ammo_declaration{};
-    std::array<uint8_t, 0x48> ammo_storage{};
-    std::array<uintptr_t, 0xe0 / 8> ammo_table{};
-    std::array<uint8_t, 0x28> ammo_list{};
-    static uintptr_t ammo_decl, ammo_item;
-    static unsigned writes, writer_mode;
-    static int ammo_capacity;
-    ammo_decl = reinterpret_cast<uintptr_t>(ammo_declaration.data());
-    ammo_item = reinterpret_cast<uintptr_t>(ammo_storage.data());
-    writes = writer_mode = 0;
-    ammo_capacity = 50;
-    put(weapon, 0x38, decl); put(decl, 8, "weapon/player/shotgun");
-    put(ammo_decl, 8, "ammo/sharedammopool/shells");
-    const auto nested_decl = reinterpret_cast<uintptr_t>(nested.data());
-    put(decl, 0x7f0, nested_decl);
-    put(reinterpret_cast<uintptr_t>(ammo_list.data()), 0, ammo_decl);
-    for (const auto source : {decl, nested_decl}) {
-        put(source, 0x808, reinterpret_cast<uintptr_t>(ammo_list.data())); put(source, 0x810, int32_t{1});
-    }
-    ammo_table[0xd0 / 8] = reinterpret_cast<uintptr_t>(+[](uintptr_t item) { return *reinterpret_cast<int*>(item + 0x40); });
-    ammo_table[0xd8 / 8] = reinterpret_cast<uintptr_t>(+[](uintptr_t) {
-        if (writer_mode == 3) RaiseException(0xe0700011, 0, 0, nullptr);
-        return ammo_capacity;
-    });
-    put(ammo_item, 0, reinterpret_cast<uintptr_t>(ammo_table.data()));
-    stub(rva_item_count, +[](uintptr_t) -> uint32_t { return 1; });
-    stub(rva_item_at, +[](uintptr_t, int) { return weapon; });
-    stub(rva_find_item, +[](uintptr_t, uintptr_t value) -> uintptr_t { return value == decl ? weapon : value == ammo_decl ? ammo_item : 0; });
-    stub(rva_give_item, +[](uintptr_t, uintptr_t, uintptr_t, int amount, uint8_t, uint8_t, uint8_t, uint8_t) -> uintptr_t {
-        ++writes;
-        if (writer_mode == 2) RaiseException(0xe0700010, 0, 0, nullptr);
-        if (writer_mode == 1 && writes % 2 == 0) return 0;
-        *reinterpret_cast<int*>(ammo_item + 0x40) = (std::min)(amount, ammo_capacity);
-        return ammo_item;
-    });
-    ok &= FlushInstructionCache(GetCurrentProcess(), image, fixture_image_size) != 0;
-    const auto latest_pool = [] { const auto h = refill_history(); return h.pools[(h.sequence - 1) % h.pools.size()]; };
-    ok &= !refill(nullptr, p) && writes == 2;
-    auto pool = latest_pool();
-    ok &= test_refill_pool(pool, nested_decl, ammo_decl, ammo_item);
-    writer_mode = 1;
-    put(ammo_item, 0x40, int32_t{0});
-    ok &= refill(nullptr, p) == 4 && writes == 4;
-    pool = latest_pool();
-    ok &= !pool.writer_result && pool.quantity_before == 50 && pool.quantity_after == 50 && !std::strcmp(pool.step, "writer_refused");
-    writer_mode = 2;
-    ok &= refill(nullptr, p) == 0xe0700010 && writes == 5;
-    pool = latest_pool();
-    ok &= pool.error == 0xe0700010 && !std::strcmp(pool.step, "writer");
-    writer_mode = 0;
-    ammo_capacity = 75;
-    ok &= !refill(nullptr, p);
-    pool = latest_pool();
-    ok &= pool.capacity_before == 75 && pool.capacity_after == 75 && pool.quantity_after == 75;
-    for (unsigned i = 0; i < 20; ++i) ok &= !refill(nullptr, p);
-    ok &= refill_history().count == refill_history().pools.size();
-    writer_mode = 3;
-    ok &= !refill(nullptr, p);
-    pool = latest_pool();
-    ok &= pool.capacity_before == UINT32_MAX && pool.capacity_after == UINT32_MAX && pool.quantity_after == 75;
-    writer_mode = 0;
-    static uintptr_t crucible_decl;
-    static float meter_amount;
-    crucible_decl = reinterpret_cast<uintptr_t>(ammo_declaration.data()); meter_amount = 0;
-    stub(rva_find_decl, +[](uintptr_t, const char* path, int) -> uintptr_t {
-        return !std::strcmp(path, "weapon/player/shotgun") ? decl : !std::strcmp(path, CRUCIBLE_PATH) ? crucible_decl : 0;
-    });
-    put(p + judgement_meter_offset, 0, image_base + rva_judgement_meter_vtable);
-    put(image_base + rva_judgement_meter_vtable, 0x20, +[](uintptr_t) { return meter_amount; });
-    put(image_base + rva_judgement_meter_vtable, 0x28, +[](uintptr_t) { return 3.0f; });
-    stub(rva_meter_set, +[](uintptr_t, float amount) {
-        if (writer_mode == 4) RaiseException(0xe0700012, 0, 0, nullptr);
-        meter_amount = amount;
-    });
-    ok &= FlushInstructionCache(GetCurrentProcess(), image, fixture_image_size) != 0;
-    ok &= !refill(nullptr, p) && meter_amount == 3;
-    pool = latest_pool();
-    ok &= pool.list_source == 2 && pool.quantity_before == 0 && pool.quantity_after == 3 &&
-        pool.capacity_before == 3 && pool.capacity_after == 3 && !pool.writer_result_known;
-    writer_mode = 4;
-    ok &= refill(nullptr, p) == 0xe0700012;
-    pool = latest_pool();
-    ok &= pool.error == 0xe0700012 && !std::strcmp(pool.step, "meter_writer");
+    ok &= test_refill_native(p, weapon, decl, image, fixture_image_size);
     original_best_weapon = saved_best; image_base = saved_image;
     ok &= VirtualFree(image, 0, MEM_RELEASE) != 0;
     return ok;

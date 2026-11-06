@@ -293,7 +293,7 @@ void install_native(const engine::Binding& binding, HANDLE stop) {
     require(VirtualFree(bytes, 0, MEM_RELEASE) != FALSE);
 }
 bool needs_session(const std::wstring& name) {
-    return name == L"ap_controls" || name == L"expanded" || name == L"save" || name == L"save_campaign";
+    return name == L"ap_controls" || name == L"expanded" || name == L"save" || name == L"save_campaign" || name == L"deathlink";
 }
 void prepare_session() {
     wchar_t temp[MAX_PATH]{};
@@ -302,6 +302,7 @@ void prepare_session() {
     require(CreateDirectoryW(root.c_str(), nullptr) != FALSE);
     storage::Descriptor descriptor{{"hook-fixture", 0, 1, std::string(64, 'a')}, root,
                                   {storage::CampaignIntent::create, 1}};
+    if (hook_installer==L"deathlink") { descriptor.campaign.difficulty=3; descriptor.campaign.restart_stage=true; }
     std::unique_ptr<storage::Namespace> lease;
     require(storage::prepare(descriptor, lease).ok());
     if (hook_installer == L"save_campaign") descriptor.campaign.intent = storage::CampaignIntent::recover;
@@ -388,7 +389,7 @@ void hook_cleanup(const std::wstring& name) {
     }
     const std::map<std::wstring, unsigned> expected{
         {L"native", 3}, {L"ap_controls", 11}, {L"arsenal", 11}, {L"campaign_menu", 33},
-        {L"challenge", 3}, {L"combat", 3}, {L"deathlink", 2}, {L"enemy_checkpoint", 2},
+        {L"challenge", 3}, {L"combat", 3}, {L"deathlink", 3}, {L"enemy_checkpoint", 2},
         {L"expanded", 49}, {L"save", 39}, {L"save_campaign", 8}, {L"special", 14}, {L"weapon_points", 5}};
     const auto baseline = hook_child(name, 0, 0);
     require(baseline == 1000 + expected.at(name));

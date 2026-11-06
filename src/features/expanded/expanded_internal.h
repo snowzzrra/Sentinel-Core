@@ -127,7 +127,7 @@ struct RecipeCreation {
     struct PointState { uintptr_t definitions; int32_t count, index, animation; uint32_t state; } original{}, suspended{};
     uintptr_t active_point = 0, selecting_manager = 0;
     RecipeCreation* suspended_by = nullptr;
-    bool creating = false, override_active = false, restoring = false;
+    bool creating = false, override_active = false, restoring = false, failed = false;
 };
 extern thread_local RecipeCreation* recipe_creation;
 extern thread_local const std::string* worker_recipe;
@@ -257,14 +257,15 @@ struct TraversalEntry {
 extern thread_local TraversalEntry* traversal_entry;
 extern std::atomic<bool> recipe_fault;
 extern SRWLOCK recipe_fault_lock;
-extern char first_recipe_fault[768];
-void set_recipe_fault(const char* function, const char* reason, const char* key = nullptr,
+extern char first_recipe_fault[1536];
+void set_recipe_fault(const char* function, unsigned line, const char* reason, const char* key = nullptr,
                       uintptr_t actor = 0, uintptr_t manager = 0) noexcept;
+void recipe_creation_failed(RecipeCreation& creation, const char* function, unsigned line, const char* reason) noexcept;
 extern std::map<std::string, uint8_t> recipe_spawn_traces;
 extern std::map<std::tuple<uintptr_t, char, uint64_t, uint32_t>, uint8_t> quantity_wait_traces;
 struct RemainingWait { uint64_t started; uintptr_t table; };
 extern std::map<uintptr_t, RemainingWait> remaining_wait_started;
-extern std::map<uintptr_t, const char*> recovery_rejections;
+extern std::map<uintptr_t, std::string> recovery_rejections;
 using AllocateWorker = uintptr_t(*)(size_t, uint32_t);
 using ConstructStagger = uintptr_t(*)(uintptr_t, int32_t, uint64_t, uint64_t, uintptr_t, uint64_t, const char*);
 using AssignManager = void(*)(uintptr_t, uintptr_t);
@@ -373,7 +374,7 @@ void suspend_recipe_points(RecipeCreation* creation);
 void resume_recipe_points(RecipeCreation* creation);
 void initialize_physical_recipe(RecipeCreation* creation, uintptr_t actor);
 bool synchronize_point_credits(uintptr_t point, PointCredits& credits);
-bool recipe_landing_pose(const RecipeCreation&, float*);
+bool recipe_landing_pose(RecipeCreation&, float*);
 uint64_t point_available_detour(uintptr_t point, uintptr_t group, uint8_t time, uint8_t player, uint8_t fov, uint8_t los);
 void trace_recipe_spawn(const RecipeCreation& creation, uintptr_t body, uintptr_t point, uint8_t stage);
 uintptr_t recipe_factory(uintptr_t point, uintptr_t group);
@@ -383,7 +384,6 @@ uint64_t create_tracked(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, u
 uint64_t invoke_recipe_creation(RecipeCreation* creation, uintptr_t manager, uintptr_t record,
                                 uintptr_t fourth, uintptr_t fifth, bool group, std::unique_lock<std::recursive_mutex>& admission);
 uint64_t create_special_recipe(uintptr_t manager, std::string_view origin, std::string_view label);
-bool recipe_landing_pose(const RecipeCreation& creation, float* pose);
 uintptr_t actor_factory_detour(uintptr_t info);
 void role_text_detour(uintptr_t destination, const char* text);
 void samuel_setup_detour(uintptr_t component, uintptr_t actor);

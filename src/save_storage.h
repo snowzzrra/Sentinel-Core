@@ -19,8 +19,9 @@ struct Identity {
 enum class CampaignIntent { none, create, resume, recover };
 struct CampaignOptions {
     CampaignIntent intent = CampaignIntent::none;
-    uint32_t difficulty = 4; // no default gameplay difficulty; 4 is unsupported ultra-nightmare
+    uint32_t difficulty = 4;
     std::string recovery_basename; // explicit kept transport archive; never latest
+    bool restart_stage = false;
 };
 struct Descriptor { Identity identity; std::wstring root; CampaignOptions campaign; };
 enum class Outcome {
@@ -71,6 +72,7 @@ enum class CheckpointRecovery { none, pending, restored, promoted };
 struct CheckpointRecord {
     uint64_t number = 0;
     uint32_t subtype = 1;
+    uint32_t stage_id = 0;
     std::string map;
     std::vector<TransportFile> files;
 };
@@ -147,6 +149,8 @@ public:
     // reopen. This is continuity metadata, never native payload or an archive.
     Result campaign_record(bool checkpoint, std::string& text) const;
     Result publish_campaign_record(bool checkpoint, std::string_view text, bool create);
+    Result restart_record(bool confirmed, std::string& text) const;
+    Result publish_restart_record(bool confirmed, std::string_view text);
     Result checkpoint_plan(const Descriptor&, CheckpointPlan&);
     Result begin_checkpoint(const Descriptor&, uint64_t steam_user, CheckpointWrite&);
     Result stage_checkpoint(CheckpointWrite&, std::wstring_view archive);

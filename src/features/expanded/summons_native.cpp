@@ -218,9 +218,9 @@ float summon_create_detour(uintptr_t component, uintptr_t entry, uintptr_t posit
     if (!summon_collection) return original_summon_create(component, entry, positions, mask, label);
     if (protected_summon_definition(entry)) return original_summon_create(component, entry, positions, mask, label);
     bool accepted = false;
-    try { accepted = collect_summon(component, entry, positions, mask, label); } catch (...) { set_recipe_fault(__func__, "exception"); }
+    try { accepted = collect_summon(component, entry, positions, mask, label); } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
     destroy_native_text(label);
-    if (!accepted) set_recipe_fault(__func__, "summon_collection_failed");
+    if (!accepted) set_recipe_fault(__func__, __LINE__, "summon_collection_failed");
     return 1.0f;
 }
 
@@ -275,7 +275,7 @@ void summon_request_complete_detour(uintptr_t target) {
     if (stopped.load(std::memory_order_acquire)) { original_summon_request_complete(target); return; }
     if (!summon_collection) { original_summon_request_complete(target); return; }
     char name[512];
-    if (!read_definition_name(target, name)) { set_recipe_fault(__func__, "definition_unreadable", nullptr, target); return; }
+    if (!read_definition_name(target, name)) { set_recipe_fault(__func__, __LINE__, "definition_unreadable", nullptr, target); return; }
     summon_collection->notifications.emplace_back(name);
 }
 
@@ -377,7 +377,7 @@ void invoke_summon_creation(RecipeCreation* creation, uintptr_t component, const
     __try {
         const auto name = *reinterpret_cast<const char**>(creation->body + 8);
         const auto definition = lookup_definition(definition_database(), name, 1);
-        if (!definition) { set_recipe_fault(__func__, "definition_missing", creation->key.c_str()); return; }
+        if (!definition) { recipe_creation_failed(*creation, __func__, __LINE__, "definition_missing"); return; }
         *reinterpret_cast<uintptr_t*>(entry.data()) = definition;
         creation->creating = true;
         original_summon_create(component, reinterpret_cast<uintptr_t>(entry.data()), reinterpret_cast<uintptr_t>(&positions),
@@ -503,7 +503,7 @@ void invoke_checkpoint_actor(RecipeCreation* creation, const RecipeNativeCheckpo
     __try {
         const auto name = *reinterpret_cast<const char**>(creation->body + 8);
         const auto definition = lookup_definition(definition_database(), name, 1);
-        if (!definition) { set_recipe_fault(__func__, "definition_missing", creation->key.c_str()); return; }
+        if (!definition) { recipe_creation_failed(*creation, __func__, __LINE__, "definition_missing"); return; }
         const auto address = reinterpret_cast<uintptr_t>(info.data());
         construct_native_string(address + 0x10); strings = 1;
         construct_native_string(address + 0x78); strings = 2;
@@ -730,14 +730,14 @@ void summon_start_detour(uintptr_t component) {
     if (recipe_checkpoint_root(root) && !root) { original_summon_start(component); return; }
     try {
         if ((restored_independent && !load_native_recipes()) ||
-            !restore_autonomous_summons(*reinterpret_cast<const uintptr_t*>(world_global))) { set_recipe_fault(__func__, "summon_restore_failed"); return; }
-    } catch (...) { set_recipe_fault(__func__, "exception"); return; }
+            !restore_autonomous_summons(*reinterpret_cast<const uintptr_t*>(world_global))) { set_recipe_fault(__func__, __LINE__, "summon_restore_failed"); return; }
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); return; }
     SummonCollection collection{component, {}};
     invoke_summon_start(component, &collection);
     try {
         if (!recipe_fault.load(std::memory_order_acquire) && open_component_summons(collection) && drain_component_summons(component)) return;
-    } catch (...) { set_recipe_fault(__func__, "exception"); }
-    set_recipe_fault(__func__, "summon_drain_failed");
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
+    set_recipe_fault(__func__, __LINE__, "summon_drain_failed");
 }
 
 void summon_complete_detour(uintptr_t component) {
@@ -756,14 +756,14 @@ void summon_update_detour(uintptr_t component, uintptr_t frame) {
         std::lock_guard<std::recursive_mutex> lock(admission_mutex);
         try {
             if ((restored_independent && !load_native_recipes()) ||
-                !restore_autonomous_summons(*reinterpret_cast<const uintptr_t*>(world_global))) { set_recipe_fault(__func__, "summon_restore_failed"); return; }
-        } catch (...) { set_recipe_fault(__func__, "exception"); return; }
+                !restore_autonomous_summons(*reinterpret_cast<const uintptr_t*>(world_global))) { set_recipe_fault(__func__, __LINE__, "summon_restore_failed"); return; }
+        } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); return; }
     }
     original_summon_update(component, frame);
     if (stopped.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(admission_mutex);
-    try { if (drain_component_summons(component)) return; } catch (...) { set_recipe_fault(__func__, "exception"); }
-    set_recipe_fault(__func__, "summon_drain_failed");
+    try { if (drain_component_summons(component)) return; } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
+    set_recipe_fault(__func__, __LINE__, "summon_drain_failed");
 }
 
 uint64_t invoke_suspended_recipe(RecipeCreation* scope, uintptr_t manager, uintptr_t record,
@@ -793,7 +793,7 @@ uint64_t create_from_recipe(uintptr_t manager, uintptr_t record, uintptr_t fourt
     try {
         std::string label;
         ready = native_text(record + 0x28, label, 1024) && begin_recipe_creation(creation, manager, origin, label);
-    } catch (...) { set_recipe_fault(__func__, "exception", creation.key.c_str(), creation.actor, manager); }
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception", creation.key.c_str(), creation.actor, manager); }
     if (!ready) { admission.unlock(); return 0; }
     return invoke_recipe_creation(&creation, manager, record, fourth, fifth, group, admission);
 }
@@ -804,7 +804,7 @@ uintptr_t possessed_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t 
     const auto host_recipe = native_recipes.find(host_origin), spirit_recipe = native_recipes.find(spirit_origin);
     if (host_recipe == native_recipes.end() || spirit_recipe == native_recipes.end() ||
         host_recipe->second.definition.family != 'p' || spirit_recipe->second.definition.family != 's') {
-        set_recipe_fault(__func__, "possessed_recipe_invalid", nullptr, 0, manager); retry_immediate(manager); return output;
+        set_recipe_fault(__func__, __LINE__, "possessed_recipe_invalid", nullptr, 0, manager); retry_immediate(manager); return output;
     }
     auto& child = pending_recipes[{manager, spirit_origin}];
     if (child.empty()) {
@@ -822,7 +822,7 @@ uintptr_t possessed_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t 
         dispatch_recipe_locked(manager, output, type, host, label, false, host_origin, result);
         if (pending_recipes.find({manager, host_origin}) != pending_recipes.end()) return output;
     }
-    if (!recipe_state.requests().count(parent)) { set_recipe_fault(__func__, "parent_request_missing", parent.c_str(), 0, manager); retry_immediate(manager); return output; }
+    if (!recipe_state.requests().count(parent)) { set_recipe_fault(__func__, __LINE__, "parent_request_missing", parent.c_str(), 0, manager); retry_immediate(manager); return output; }
     const auto& progress = recipe_state.requests().at(child);
     if (!progress.request.physical_units) recipe_state.complete_empty(child);
     else if (!progress.emitted) create_special_recipe(manager, spirit_origin, "");
@@ -851,7 +851,7 @@ uintptr_t possessed_detour(uintptr_t manager, uintptr_t output, uint64_t type, u
     const auto marked_host = recipe_origin(host, host_origin), marked_spirit = recipe_origin(spirit, spirit_origin);
     if (stopped.load(std::memory_order_acquire) || (!marked_host && !marked_spirit))
         return original_possessed(manager, output, type, host, label, spirit, hosts, filter, flag);
-    if (!marked_host || !marked_spirit) { set_recipe_fault(__func__, "possessed_pair_incomplete", nullptr, 0, manager); retry_immediate(manager); return output; }
+    if (!marked_host || !marked_spirit) { set_recipe_fault(__func__, __LINE__, "possessed_pair_incomplete", nullptr, 0, manager); retry_immediate(manager); return output; }
     std::unique_lock<std::recursive_mutex> admission(admission_mutex);
     return invoke_possessed_recipe(manager, output, type, host, label, spirit, &host_origin, &spirit_origin, admission);
 }
@@ -879,7 +879,7 @@ uintptr_t resurrect_locked(uintptr_t component, int32_t index, const float* posi
     if (actor && credit) {
         char name[512], instance[512];
         if (!read_recipe_definition(actor, name) || name != body || !read_instance_name(actor, instance)) {
-            set_recipe_fault(__func__, "body_identity_mismatch", nullptr, actor); return actor;
+            set_recipe_fault(__func__, __LINE__, "body_identity_mismatch", nullptr, actor); return actor;
         }
         credit->identifier = actor_identifier(actor); credit->name = instance;
         recipe_actor_credits[actor] = std::move(*credit);

@@ -860,6 +860,8 @@ MH_STATUS WINAPI enable_lifecycle(void* site) {
 }
 void install_world_domains(uint32_t why, HANDLE stop_event) {
     if (!why && !stopping.load(std::memory_order_acquire)) deathlink::install(binding, stop_event);
+    if (!why && save::session().campaign_run.snapshot().restart_enabled && !deathlink::available())
+        save::session().campaign_run.restart_failed("restart_death_hook_unavailable");
     if (!why && !stopping.load(std::memory_order_acquire)) combat::install(binding, stop_event);
     if (!why && !stopping.load(std::memory_order_acquire)) install_automap(binding);
     if (!why && !stopping.load(std::memory_order_acquire)) install_fast_travel(binding);

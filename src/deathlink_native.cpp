@@ -2,6 +2,8 @@
 #include "deathlink.h"
 #include "native_target.h"
 #include "save_session.h"
+#include "save_campaign_native.h"
+#include "campaign_menu.h"
 #include "MinHook.h"
 #include "engine/hooks/hook_set.h"
 #include <atomic>
@@ -43,6 +45,8 @@ using PlayerHealth = float(*)(uintptr_t);
 
 PlayerDeath original_player_death = nullptr;
 TryExtraLife original_extra_life = nullptr;
+using ReloadCheckpoint=void(*)();
+ReloadCheckpoint original_reload_checkpoint=nullptr;
 
 std::atomic<bool> application_active{false};
 std::atomic<uint32_t> application_deaths{0};
@@ -65,6 +69,9 @@ void player_death_detour(uintptr_t self) {
         return;
     }
     const auto now = GetTickCount64();
+    const auto campaign=save::session().campaign_run.snapshot();
+    if (campaign.restart_enabled) campaign_menu::menu().loaded(campaign.map.c_str(),campaign.stage_id);
+    save::session().campaign_run.final_death(campaign_menu::menu().loaded_id());
     if (application_active.load(std::memory_order_acquire)) {
         application_deaths.fetch_add(1, std::memory_order_relaxed);
         // causal suppression: this true death belongs to the remote logical event
@@ -196,6 +203,13 @@ char extra_life_detour_entry(uintptr_t entity, uintptr_t parm) {
         return extra_life_detour(entity, parm);
     } __finally { hook_set.leave(lease); }
 }
+void reload_checkpoint_entry() {
+    const auto lease=hook_set.enter(2);
+    __try {
+        if (lease.committed && save::restart_checkpoint_reload()) return;
+        reinterpret_cast<ReloadCheckpoint>(lease.original)();
+    } __finally { hook_set.leave(lease); }
+}
 
 native::Target target(uintptr_t base, uint32_t offset, const char* hex) {
     native::Target out{}; out.address = base + offset;
@@ -230,7 +244,7 @@ bool admitted(const char* id) {
         save::session().accepts_requests() && !std::memcmp(id, save::session().namespace_id().c_str(), 65);
 }
 
-void tick_native() { tick(calls); }
+void tick_native() { save::session().campaign_run.restart_tick(GetTickCount64()); tick(calls); }
 
 void execute_native(const sc_deathlink_request& request, sc_deathlink_result& out) {
     if (!admitted(request.namespace_id)) { out.outcome = SC_DEATHLINK_OUTCOME_UNAVAILABLE; return; }
@@ -239,6 +253,13 @@ void execute_native(const sc_deathlink_request& request, sc_deathlink_result& ou
 }
 
 #ifdef SC_NATIVE_TESTING
+void test_terminal_death() { player_death_detour(0); }
+char test_extra_life() {
+    const auto previous=original_extra_life;
+    original_extra_life=+[](uintptr_t,uintptr_t)->char { return 1; };
+    const auto result=extra_life_detour(0,0);
+    original_extra_life=previous; return result;
+}
 void use_fixture(Calls value, const char* id) {
     calls = value;
     std::memcpy(fixture_namespace, id, 65);
@@ -272,11 +293,17 @@ void install(const engine::Binding& binding, HANDLE stop) {
         target(image_base, builds::steam_20260818().deathlink[8].rva, builds::steam_20260818().deathlink[8].prefix),
     };
     for (const auto& t : hooks) if (native::validate_target(memory, binding.image, t, stop, deadline)) return;
-
-    const hooks::HookSpec specs[]{
+    hooks::HookSpec specs[3]{
         hooks::bind(image_base + rva_player_death, player_death_detour_entry, original_player_death),
         hooks::bind(image_base + rva_extra_life, extra_life_detour_entry, original_extra_life)};
-    if (!hook_set.install(specs, stop)) return;
+    size_t count=2;
+    if (save::session().campaign_run.snapshot().restart_enabled) {
+        const auto& site=builds::steam_20260818().deathlink[9];
+        const auto reload=target(image_base,site.rva,site.prefix);
+        if (native::validate_target(memory,binding.image,reload,stop,deadline)) return;
+        specs[count++]=hooks::bind(reload.address,reload_checkpoint_entry,original_reload_checkpoint);
+    }
+    if (!hook_set.install(specs,count,stop)) return;
     ready.store(true, std::memory_order_release);
 }
 

@@ -25,19 +25,19 @@ void encounter_projection() {
     commit(true);
     sc_campaign_reward observed{};
     const std::string ns(64,'a'),map="game/dlc2/e5m1_spear/e5m1_spear";
-    CHECK(model.encounter_reward(map,ns,GetTickCount64(),observed) && !observed.location_id);
+    CHECK(model.encounter_reward(2,ns,GetTickCount64(),observed) && !observed.location_id);
     ++request.revision; commit(false);
     const auto since=GetTickCount64();
     ++request.revision; commit(true);
-    CHECK(model.encounter_reward(map,ns,since,observed) && observed.location_id==reward.location_id);
+    CHECK(model.encounter_reward(2,ns,since,observed) && observed.location_id==reward.location_id);
     CHECK(!std::strcmp(observed.text,"Your Ballista"));
-    CHECK(model.encounter_reward(map,ns,since+3000,observed) && !observed.location_id);
-    CHECK(!model.encounter_reward(map,std::string(64,'b'),since,observed));
+    CHECK(model.encounter_reward(2,ns,since+3000,observed) && !observed.location_id);
+    CHECK(!model.encounter_reward(2,std::string(64,'b'),since,observed));
     sc_campaign_summary hub{};
-    CHECK(model.summary("game/hub/hub",ns,hub) && hub.found==2 && hub.total==20);
-    CHECK(!model.summary("game/hub/hub",std::string(64,'b'),hub));
+    CHECK(model.summary(1,ns,hub) && hub.found==2 && hub.total==20);
+    CHECK(!model.summary(1,std::string(64,'b'),hub));
     std::memset(request.namespace_id,'b',64); request.revision=1; commit(true);
-    CHECK(model.encounter_reward(map,std::string(64,'b'),since,observed) && !observed.location_id);
+    CHECK(model.encounter_reward(2,std::string(64,'b'),since,observed) && !observed.location_id);
 }
 uintptr_t screen=0,list=0,details=0,campaign=0;
 uintptr_t source_list=0;

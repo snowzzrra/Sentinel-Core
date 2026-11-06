@@ -12,6 +12,7 @@ namespace sentinel::expanded::detail {
 std::map<std::string, RecipeNativeCheckpoint::Identity> restored_actor_identities;
 
 bool recipe_checkpoint_root(uintptr_t& root) noexcept {
+    if ([] { return save::session().campaign_run.snapshot().native_subtype==6; }()) { root=0; return true; }
     __try {
         const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
         if (!world) return false;
@@ -220,7 +221,7 @@ bool synchronize_independent_memberships(uintptr_t world) {
 
 bool synchronize_independent_memberships_safe(uintptr_t world) noexcept {
     __try { return synchronize_independent_memberships(world); }
-    __except(EXCEPTION_EXECUTE_HANDLER) { set_recipe_fault(__func__, "native_exception"); return false; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { set_recipe_fault(__func__, __LINE__, "native_exception"); return false; }
 }
 
 void reconcile_recipe_memberships(const std::string& actor, const std::vector<RecipeMembership>& memberships) {

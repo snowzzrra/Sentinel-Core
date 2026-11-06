@@ -2,6 +2,7 @@
 #include "campaign_menu_native.h"
 #include "player_strings_generated.h"
 #include "campaign_menu.h"
+#include "campaign_stages_generated.h"
 #include "fast_travel.h"
 #include "special.h"
 #include "native_target.h"
@@ -88,6 +89,7 @@ SwfLabel swf_label=nullptr;
 SwfFrame swf_frame=nullptr;
 FindMaterial find_material=nullptr;
 uintptr_t material_manager=0;
+uintptr_t mapload_registry=0;
 uintptr_t end_items_category_vtable=0;
 MapManager map_manager=nullptr;
 MapLookup map_lookup=nullptr;
@@ -277,7 +279,7 @@ void present_save_preview(uintptr_t screen,const save::CampaignSnapshot& snapsho
     const auto row_projection=menu().projection();
     const char* title=nullptr;
     for (uint32_t i=0;i<row_projection.count;++i) {
-        if (!std::strcmp(row_projection.rows[i].map,snapshot.map.c_str())) {
+        if (row_projection.rows[i].id==snapshot.stage_id) {
             title=row_projection.rows[i].title;
             break;
         }
@@ -417,6 +419,7 @@ uintptr_t question_material(uintptr_t sprite) {
 struct EncounterPopup {
     uintptr_t screen=0,widget=0;
     std::string map,namespace_id;
+    uint32_t stage_id=0;
     uint64_t since=0;
 };
 std::array<EncounterPopup,2> encounter_popups;
@@ -430,9 +433,9 @@ void capture_encounter_popup(uintptr_t screen,bool escalation) {
     sc_campaign_reward reward{};
     uintptr_t widget=0;
     const auto now=GetTickCount64();
-    const bool known=menu().encounter_reward(campaign.map,ns,now,reward);
+    const bool known=menu().encounter_reward(campaign.stage_id,ns,now,reward);
     if (known && read(screen,0x158,widget) && widget)
-        popup={screen,widget,campaign.map,ns,now};
+        popup={screen,widget,campaign.map,ns,campaign.stage_id,now};
     save::session().btrace.record(save::BStage::encounter_rewards,
         popup.screen ? save::BStatus::succeeded : save::BStatus::pending,"encounter_popup_binding",0,
         {{"projection",known},{"widget",widget},{"location",reward.location_id}},screen);
@@ -443,8 +446,8 @@ bool popup_reward(uintptr_t owner,bool screen,sc_campaign_reward& reward) {
     if (!active() || !save::session().accepts_requests()) return false;
     for (const auto& popup:encounter_popups)
         if (owner==(screen ? popup.screen : popup.widget) && popup.since &&
-            GetTickCount64()-popup.since<15000 && campaign.map==popup.map && ns==popup.namespace_id)
-            return menu().encounter_reward(popup.map,ns,popup.since,reward);
+            GetTickCount64()-popup.since<15000 && campaign.stage_id==popup.stage_id && ns==popup.namespace_id)
+            return menu().encounter_reward(popup.stage_id,ns,popup.since,reward);
     return false;
 }
 const char* encounter_text(const sc_campaign_reward& reward) {
@@ -834,7 +837,7 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     }
     sc_campaign_summary summary{};
     uint64_t revision=0;
-    const bool row_found=menu().summary(campaign.map,save::session().namespace_id(),summary,&revision);
+    const bool row_found=menu().summary(campaign.stage_id,save::session().namespace_id(),summary,&revision);
     if (summary.known!=1) {
         original_sprite_visibility(label,0,1);
         special::present_combat_progress(root,label,false);
@@ -1292,6 +1295,18 @@ void populate_owned(uintptr_t screen,uintptr_t list,uintptr_t campaign,uintptr_t
     __try { original_populate(screen,list); }
     __finally { *reinterpret_cast<uintptr_t*>(campaign+0x1a8)=previous; building=false; }
 }
+bool bind_campaign_source(const sc_campaign_row& row,Entry& entry,uintptr_t source_entries,int32_t source_count) {
+    uintptr_t source=0; save::NativeString name{}; char map[192]{};
+    const auto route=stage_route(row.id);
+    const auto source_index=route?route->mission_index:row.native_index;
+    if (source_index>=static_cast<uint32_t>(source_count) ||
+        !engine::add(source_entries,static_cast<size_t>(source_index)*sizeof(Entry),sizeof(Entry),source) ||
+        !read(source,0,name) || name.length<1 || name.length>=192 ||
+        memory.copy(reinterpret_cast<uintptr_t>(name.data),map,static_cast<size_t>(name.length)+1).reason ||
+        map[name.length] || std::strcmp(map,row.map) || !read(source,0x30,entry.dependencies)) return false;
+    if (route && route->variant==6) entry.dependencies={};
+    return true;
+}
 void populate(uintptr_t screen,uintptr_t list) {
     shown_verified = false;
     if (!active()) { original_populate(screen,list); return; }
@@ -1314,17 +1329,10 @@ void populate(uintptr_t screen,uintptr_t list) {
         entries[i].dependencies={};
         const auto& row=projection.rows[i];
         if (row.flags&SC_CAMPAIGN_REVEALED) {
-            uintptr_t source=0; save::NativeString name{}; char map[192]{};
-            if (row.native_index>=static_cast<uint32_t>(source_count) ||
-                !engine::add(source_entries,static_cast<size_t>(row.native_index)*sizeof(Entry),sizeof(Entry),source) ||
-                !read(source,0,name) || name.length<1 || name.length>=192 ||
-                memory.copy(reinterpret_cast<uintptr_t>(name.data),map,static_cast<size_t>(name.length)+1).reason ||
-                map[name.length] || std::strcmp(map,row.map) || !read(source,0x30,entries[i].dependencies)) {
+            if (!bind_campaign_source(row,entries[i],source_entries,source_count)) {
                 fault("native_campaign_source_entry_mismatch"); return;
             }
         }
-        // Borrow the native DECL's persistent active-layer list. LaunchMission
-        // copies it into its own request; no AP policy or guessed layer names.
         string_assign(reinterpret_cast<uintptr_t>(&entries[i].name),projection.rows[i].map);
     }
     map_list.entries.data=reinterpret_cast<uintptr_t>(entries.data());
@@ -1382,7 +1390,12 @@ void load(uintptr_t screen,int index) {
         return;
     }
     bool completion_known=false,completed=false;
-    __try { completed=native_completed(screen,reinterpret_cast<uintptr_t>(&entries[index])); completion_known=true; }
+    __try {
+        const auto* route=stage_route(shown.rows[index].id);
+        completed=route && route->variant==6 ? (shown.rows[index].flags&SC_CAMPAIGN_COMPLETED)!=0 :
+            native_completed(screen,reinterpret_cast<uintptr_t>(&entries[index]));
+        completion_known=true;
+    }
     __except(EXCEPTION_EXECUTE_HANDLER) {}
     const auto& namespace_id=session.namespace_id();
     fast_travel::entry_policy().selected(namespace_id.c_str(),shown.rows[index].map,
@@ -1477,29 +1490,124 @@ bool request_map(uintptr_t request,const std::string& map) {
         !memory.copy(reinterpret_cast<uintptr_t>(value.data),bytes,map.size()+1).reason &&
         !std::strcmp(bytes,map.c_str());
 }
-bool mission_request(uintptr_t request,std::string& destination) {
-    int32_t subtype=0;
-    if (!read(request,0x98,subtype)) return false;
-    if (subtype!=2) return true; // ordinary continue keeps its saved destination
-    uintptr_t entry=0;
-    save::NativeString name{};
-    char map[192]{};
-    if (!read(request,0xa8,entry) || !read(request,0x30,name) || name.length<1 || name.length>=192 ||
-        memory.copy(reinterpret_cast<uintptr_t>(name.data),map,size_t(name.length)+1).reason || map[name.length]) return false;
-    const auto selected=menu().focus_id();
-    for (uint32_t i=0;i<shown.count;++i) {
-        if (entry==reinterpret_cast<uintptr_t>(&entries[i]) && shown.rows[i].id==selected &&
-            (shown.rows[i].flags&SC_CAMPAIGN_UNLOCKED) && !std::strcmp(map,shown.rows[i].map)) {
-            destination=map; return true;
-        }
+uintptr_t mapload_for(const StageRoute& route) {
+    return find_material(mapload_registry,route.entry,0);
+}
+void configure_stage_request(uintptr_t request,uint32_t variant,uintptr_t entry) {
+    string_assign(request+0x60,"");
+    *reinterpret_cast<uint32_t*>(request+0x90)=0;
+    *reinterpret_cast<uint32_t*>(request+0x94)=1;
+    *reinterpret_cast<uint32_t*>(request+0x98)=variant;
+    *reinterpret_cast<uintptr_t*>(request+0xa8)=variant==6?0:entry;
+    *reinterpret_cast<uintptr_t*>(request+0xb0)=variant==6?entry:0;
+    *reinterpret_cast<uint16_t*>(request+0xb8)=0;
+}
+bool checkpoint_request(uintptr_t request,uint32_t stage_id) {
+    const auto route=stage_route(stage_id);
+    if (!route || route->variant!=6) return false;
+    const auto declaration=mapload_for(*route);
+    if (!declaration || !request_map(request,route->map)) return false;
+    configure_stage_request(request,6,declaration);
+    return true;
+}
+uint32_t descriptor_stage(uintptr_t descriptor,const std::string& map,uint32_t variant) {
+    if (map=="game/hub/hub" && variant!=6) return 1;
+    uintptr_t declaration=0;
+    if (variant==6 && (!read(descriptor,0x19d8,declaration) || !declaration)) return 0;
+    for (const auto& route:stage_routes) {
+        if (map!=route.map || (route.variant==6)!=(variant==6)) continue;
+        if (variant!=6 || declaration==mapload_for(route)) return route.id;
+    }
+    return 0;
+}
+uintptr_t restart_entry(const sc_campaign_row& row) {
+    uintptr_t campaign=0,list=0,source=0; int32_t count=0;
+    const auto definitions=campaign_definitions();
+    if (!definitions || !read(definitions,0x148,campaign) || !read(campaign,0x1a8,list) ||
+        !read(list,0x88,source) || !read(list,0x90,count) || count<1) return 0;
+    if (row.native_index>=static_cast<uint32_t>(count)) return 0;
+    const auto entry=source+static_cast<size_t>(row.native_index)*sizeof(Entry);
+    const std::string map=row.map;
+    save::NativeString native_name{}; char actual[192]{};
+    if (!read(entry,0,native_name) || native_name.length!=static_cast<int32_t>(map.size()) ||
+        memory.copy(reinterpret_cast<uintptr_t>(native_name.data),actual,map.size()+1).reason ||
+        std::strcmp(actual,map.c_str())) return 0;
+    return entry;
+}
+bool restart_request(uintptr_t request,uint32_t stage_id,const std::string& map) {
+    if (!available()) return false;
+    const auto projection=menu().projection();
+    if (projection.namespace_id!=save::session().namespace_id()) return false;
+    for (uint32_t i=0;i<projection.count;++i) {
+        const auto& row=projection.rows[i];
+        if (row.id!=stage_id || map!=row.map || !(row.flags&SC_CAMPAIGN_UNLOCKED)) continue;
+        const auto route=stage_route(stage_id);
+        const bool master=route && route->variant==6;
+        const auto entry=master?mapload_for(*route):restart_entry(row);
+        if (!entry || !request_map(request,map)) return false;
+        configure_stage_request(request,master?6:2,entry);
+        return true;
     }
     return false;
+}
+uintptr_t restart_load_request() {
+    if (!available()) return 0;
+    alignas(16) static std::array<uint8_t,192> request{};
+    static bool request_initialized=false;
+    const auto address=reinterpret_cast<uintptr_t>(request.data());
+    if (!request_initialized) {
+        for (size_t offset:{size_t(0),size_t(0x30),size_t(0x60)}) string_init(address+offset);
+        string_assign(address,"AUTOSAVE0");
+        request_initialized=true;
+    }
+    return address;
+}
+bool restart_mission_request(uintptr_t request,std::string& destination,uint32_t* stage_id) {
+    const auto restart=save::session().campaign_run.snapshot();
+    if (!restart_request(request,restart.restart_stage_id,restart.restart_map)) return false;
+    destination=restart.restart_map;
+    if (stage_id) *stage_id=restart.restart_stage_id;
+    return true;
+}
+bool admit_mission_entry(uintptr_t request,int32_t subtype,uintptr_t entry,uint32_t index,const sc_campaign_row& row) {
+    const auto route=stage_route(row.id);
+    if (subtype==6) return route && route->variant==6 && entry==mapload_for(*route);
+    if (entry!=reinterpret_cast<uintptr_t>(&entries[index])) return false;
+    return !route || route->variant!=6 || checkpoint_request(request,row.id);
+}
+bool read_mission_destination(uintptr_t request,int32_t subtype,uintptr_t& entry,char (&map)[192]) {
+    save::NativeString name{};
+    if (!read(request,subtype==6?0xb0:0xa8,entry) || !read(request,0x30,name) || name.length<1 || name.length>=192 ||
+        memory.copy(reinterpret_cast<uintptr_t>(name.data),map,size_t(name.length)+1).reason || map[name.length]) return false;
+    return true;
+}
+bool mission_request(uintptr_t request,std::string& destination,uint32_t* stage_id) {
+    int32_t subtype=0;
+    if (!read(request,0x98,subtype)) return false;
+    if (subtype!=2 && subtype!=6) return true;
+    uintptr_t entry=0;
+    char map[192]{};
+    if (!read_mission_destination(request,subtype,entry,map)) return false;
+    const auto selected=menu().focus_id();
+    for (uint32_t i=0;i<shown.count;++i) {
+        const auto& row=shown.rows[i];
+        if (row.id!=selected || !(row.flags&SC_CAMPAIGN_UNLOCKED) || std::strcmp(map,row.map)) continue;
+        if (!admit_mission_entry(request,subtype,entry,i,row)) return false;
+        if (stage_id) *stage_id=row.id;
+        destination=map; return true;
+    }
+    return false;
+}
+const char* resume_label(const save::CampaignSnapshot& snapshot) {
+    if (snapshot.restart_pending) return player_strings::menu_restart_stage;
+    return snapshot.map=="game/hub/hub"?player_strings::menu_return_to_fortress:player_strings::menu_resume_checkpoint;
 }
 void present_campaign_actions(uintptr_t screen,bool entered) {
     if (!available() || !active() || !save::session().accepts_requests()) return;
     int32_t state=-1;
     if (!read(screen,0x108,state) || state!=2) return;
-    const auto snapshot=save::session().campaign_run.snapshot();
+    auto snapshot=save::session().campaign_run.snapshot();
+    if (snapshot.restart_pending) snapshot.map=snapshot.restart_map;
     safe_present_save_preview(screen,snapshot);
     if (!snapshot.checkpoint) return;
     const auto list=list_for(screen);
@@ -1523,7 +1631,7 @@ void present_campaign_actions(uintptr_t screen,bool entered) {
             !std::strcmp(text,wanted)) return;
         string_assign(widget+0x188,wanted);
     };
-    label(resume,hub?player_strings::menu_return_to_fortress:player_strings::menu_resume_checkpoint);
+    label(resume,resume_label(snapshot));
     label(choose,player_strings::menu_choose_mission);
     const bool projected=menu().projection().count!=0;
     if (!read(choose,0x154,choose_state)) return;
@@ -1638,6 +1746,7 @@ void test_calls(const NativeCalls& c) {
     original_sprite_visibility=c.sprite_visibility;
     original_meter_update=c.meter_update;
     test_pump=c.campaign_pump;
+    if (c.find_decl) find_material=c.find_decl;
     ready.store(true,std::memory_order_release);
 }
 void test_populate(uintptr_t screen,uintptr_t list) { populate(screen,list); }
@@ -2024,6 +2133,7 @@ static bool install_hooks(const engine::Binding& binding,HANDLE stop,
     swf_frame=reinterpret_cast<SwfFrame>(targets[37].address);
     find_material=reinterpret_cast<FindMaterial>(targets[33].address);
     material_manager=binding.image.base+0x5e05200;
+    mapload_registry=binding.image.base+builds::steam_20260818().mapload_registry;
     swf_create_material=reinterpret_cast<SwfCreateMaterial>(targets[43].address);
     swf_color=reinterpret_cast<SwfColor>(targets[44].address);
 

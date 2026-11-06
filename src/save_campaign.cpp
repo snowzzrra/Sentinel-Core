@@ -1,5 +1,6 @@
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #include "save_campaign.h"
+#include "campaign_stages_generated.h"
 #include "save_session.h"
 #include "save_catalog.h"
 #include "save_provider.h"
@@ -24,6 +25,15 @@ bool text(engine::Memory& m, uintptr_t p, size_t offset, std::string& value) {
 std::string hex(const std::array<unsigned char,32>& bytes) {
     constexpr char chars[]="0123456789abcdef"; std::string out;
     for (auto c:bytes) { out+=chars[c>>4]; out+=chars[c&15]; } return out;
+}
+uint32_t default_stage(const std::string& map,uint32_t native_subtype) {
+    uint32_t stage_id=0;
+    if (native_subtype!=6) {
+        if (map=="game/hub/hub") stage_id=1;
+        for (const auto& route:campaign_menu::stage_routes)
+            if (route.variant!=6 && map==route.map) { stage_id=route.id; break; }
+    }
+    return stage_id;
 }
 uint32_t phase_id(std::string_view phase) {
     constexpr std::string_view names[]={"disabled","armed","create_requested","native_start_queued","resume_requested",
@@ -65,12 +75,13 @@ bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,st
     if (descriptor.campaign.intent==storage::CampaignIntent::none) return true;
     owner.btrace.record(BStage::creation,BStatus::entered,"campaign_configure",0,
         {{"intent",descriptor.campaign.intent},{"difficulty",descriptor.campaign.difficulty},{"already_configured",owner_!=nullptr}});
-    if (descriptor.campaign.difficulty>3 || owner_) {
+    if (descriptor.campaign.difficulty>3 || owner_ || (descriptor.campaign.restart_stage && descriptor.campaign.difficulty!=3)) {
         owner.btrace.record(BStage::creation,BStatus::refused,"campaign_configuration_invalid",0,
             {{"difficulty",descriptor.campaign.difficulty},{"already_configured",owner_!=nullptr}}); return false;
     }
     owner_=&owner; lease_=&lease; options_=descriptor.campaign; descriptor_=descriptor; state_.enabled=true;
     state_.difficulty=options_.difficulty; state_.resumed=options_.intent==storage::CampaignIntent::resume;
+    state_.restart_enabled=options_.restart_stage;
     // exact native suffix, never an index inferred from directory enumeration
     state_.slot="AUTOSAVE0"; directory_=owner.native_root()+"/GAME-"+state_.slot;
     contract_=campaign_contract(descriptor,owner.namespace_id());
@@ -87,6 +98,7 @@ bool Campaign::configure(Session& owner,const storage::Descriptor& descriptor,st
     } else {
         if (!configure_resume(record, r)) return false;
     }
+    if (options_.restart_stage && !read_restart()) return false;
     state_.phase="armed";
     owner.btrace.record(diagnostic_stage_,BStatus::succeeded,"campaign_armed",0,
         {{"resumed",state_.resumed},{"checkpoint",state_.checkpoint},{"expected_files",expected_.size()},{"difficulty",state_.difficulty}});
@@ -98,14 +110,16 @@ bool Campaign::refresh_checkpoint() {
     storage::CheckpointPlan plan;
     if (!lease_->checkpoint_plan(descriptor_,plan).ok() || plan.state!=storage::CheckpointState::confirmed || !parse_checkpoint(plan.text))
         return reject("checkpoint_recovery_required");
+    if (options_.restart_stage && !read_restart()) return false;
     state_.source_checkpoint=state_.checkpoint; state_.phase="armed"; return true;
 }
 bool Campaign::restoring_mission_checkpoint() const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    return state_.enabled && state_.native_subtype==2 && mission_destination_.empty();
+    return state_.enabled && (state_.native_subtype==2 || state_.native_subtype==6) && mission_destination_.empty() && !restart_loading_;
 }
 CampaignSnapshot Campaign::snapshot() const { std::lock_guard<std::recursive_mutex> lock(mutex_); return state_; }
 bool Campaign::reject(const char* reason,std::initializer_list<BFact> facts) {
+    if (state_.restart_pending) { state_.restart_status=3; state_.restart_reason=reason; }
     const auto prior=owner_->btrace.snapshot().stages[static_cast<size_t>(diagnostic_stage_)];
     std::array<BFact,16> detail{{{"phase",phase_id(state_.phase)},{"session_state",owner_->state()},{"session_fault",owner_->fault()}}};
     size_t count=3;
@@ -174,27 +188,35 @@ void Campaign::cancel_menu_save() {
     menu_save_generation_=0;
     owner_->btrace.record(BStage::checkpoint_factory,BStatus::pending,"native_mission_presave_cancelled",state_.operation);
 }
-bool Campaign::begin_resume(const std::string& mission_destination) {
+bool Campaign::resume_slot_matches() {
+    ProfileChoice choice{};
+    const bool valid=owner_->profile_choice(choice);
+    return (valid && choice.name.data()==state_.slot) || reject("resume_selection_mismatch",
+        {{"choice_valid",valid},{"slot_equal",choice.name.data()==state_.slot},{"index",choice.index}});
+}
+bool Campaign::resume_source_available() const {
+    const bool first=state_.resumed && !initiated_;
+    const bool menu=(menu_active_ || (menu_save_source_==MenuSaveSource::active_fortress &&
+        state_.map_active && !menu_save_pending_)) && state_.continuity_persisted && !map_pending_;
+    return first || menu;
+}
+bool Campaign::begin_resume(const std::string& mission_destination,uint32_t stage_id,uint32_t variant) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled) return true;
+    if (state_.restart_pending && (!restart_loading_ || mission_destination!=state_.restart_map))
+        return reject("restart_required_before_resume");
     diagnostic_stage_=BStage::resume;
     owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_selection_validate",0,
         {{"accepting",owner_->accepts_requests()},{"resumed",state_.resumed},{"initiated",initiated_},
          {"checkpoint_exists",checkpoint_exists_},{"expected_files",expected_.size()}});
-    const bool first_resume=state_.resumed && !initiated_;
     if (menu_save_source_==MenuSaveSource::active_fortress && mission_destination.empty()) {
         owner_->btrace.record(diagnostic_stage_,BStatus::blocked,"mission_destination_missing",state_.operation);
         return false;
     }
-    const bool menu_resume=(menu_active_ || (menu_save_source_==MenuSaveSource::active_fortress &&
-        state_.map_active && !menu_save_pending_)) && state_.continuity_persisted && !map_pending_;
-    if (!owner_->accepts_requests() || (!first_resume && !menu_resume) || !checkpoint_exists_ || expected_.empty())
+    if (!owner_->accepts_requests() || !resume_source_available() || !checkpoint_exists_ || expected_.empty())
         return reject("explicit_resume_source_required",{{"accepting",owner_->accepts_requests()},{"resumed",state_.resumed},
             {"initiated",initiated_},{"checkpoint_exists",checkpoint_exists_},{"expected_files",expected_.size()}});
-    ProfileChoice choice{};
-    const bool choice_valid=owner_->profile_choice(choice);
-    if (!choice_valid || choice.name.data()!=state_.slot) return reject("resume_selection_mismatch",
-        {{"choice_valid",choice_valid},{"slot_equal",choice.name.data()==state_.slot},{"index",choice.index}});
+    if (!resume_slot_matches()) return false;
     initiated_=true; menu_active_=false; state_.resumed=true; state_.phase="resume_requested";
     menu_save_pending_=false;
     if (menu_save_source_!=MenuSaveSource::active_fortress) menu_save_source_=MenuSaveSource::none;
@@ -206,7 +228,7 @@ bool Campaign::begin_resume(const std::string& mission_destination) {
     load_data_=0; state_.source_verified=false; state_.parser_completed=false;
     metadata_data_=0; metadata_verified_=false; catalog_hydrated_=false;
     mission_destination_=mission_destination;
-    if (!mission_destination.empty()) state_.native_subtype=2;
+    if (!mission_destination.empty()) { state_.native_subtype=variant; state_.stage_id=stage_id; }
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"resume_requested",0,{{"source_checkpoint",state_.source_checkpoint},{"expected_files",expected_.size()}});
     return true;
 }
@@ -296,7 +318,8 @@ std::vector<SdkFileWrite> Campaign::readback_baseline(uint64_t operation) const 
 }
 std::string Campaign::checkpoint_text(const SdkWriteObservation& observation) const {
     std::string value=contract_+"checkpoint="+std::to_string(state_.checkpoint)+"\nmap="+state_.map+
-        "\nsubtype="+std::to_string(state_.native_subtype)+"\nfiles="+std::to_string(observation.payloads.size())+"\n";
+        "\nsubtype="+std::to_string(state_.native_subtype)+"\nstage="+std::to_string(state_.stage_id)+
+        "\nfiles="+std::to_string(observation.payloads.size())+"\n";
     for (const auto& f:observation.payloads) value+="file="+std::string(f.name.data())+","+std::to_string(f.size)+","+hex(f.sha256)+"\n";
     return value+"state=native_saved_readback_verified\n";
 }
@@ -319,7 +342,14 @@ bool Campaign::parse_checkpoint(std::string_view value) {
     const auto result = storage::parse_checkpoint(value,contract_,directory_,record);
     if (!result.ok()) return reject(result.outcome==storage::Outcome::interrupted_preparation ?
         "checkpoint_save_interrupted" : "checkpoint_metadata_invalid",{{"outcome",result.outcome}});
+    if (!record.stage_id) record.stage_id=default_stage(record.map,record.subtype);
+    if (record.stage_id && record.stage_id!=1) {
+        const auto route=campaign_menu::stage_route(record.stage_id);
+        if (!route || record.map!=route->map || (record.subtype==6)!=(route->variant==6))
+            return reject("checkpoint_stage_mismatch");
+    }
     state_.checkpoint=record.number; state_.map=record.map; state_.native_subtype=record.subtype;
+    state_.stage_id=record.stage_id;
     expected_.clear();
     for (const auto& file:record.files) {
         SdkFileWrite native{}; const auto name=directory_+"/"+file.name;
@@ -552,11 +582,34 @@ bool Campaign::menu_begin() {
     // Keep the last gameplay checkpoint/map; a native menu is not a new AP map.
     // An already-owned SDK operation can finish, but no new save may start here.
     state_.map_active=false; state_.save_ready=false; menu_active_=true;
+    if (!restart_record_.empty() && state_.checkpoint<=restart_checkpoint_) {
+        state_.restart_pending=true; state_.restart_status=1;
+    }
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"native_menu_admitted",state_.operation,
         {{"map_active",state_.map_active},{"save_ready",state_.save_ready},{"continuity_persisted",state_.continuity_persisted},{"checkpoint",state_.checkpoint}});
     return true;
 }
-bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,uint32_t native_subtype) {
+bool Campaign::admit_generation(uint64_t generation,bool mission_launch,bool continuing) {
+    if (mission_launch && generation!=state_.generation_after) return reject("lifecycle_mission_generation_mismatch",
+        {{"generation",generation},{"expected_generation",state_.generation_after}});
+    if (continuing) {
+        if (generation!=state_.generation_after) return reject("lifecycle_continuation_generation_mismatch",
+            {{"generation",generation},{"expected_generation",state_.generation_after}});
+        if (state_.phase=="native_save_pending") return reject("lifecycle_continuation_save_pending");
+    } else if (!state_.resumed && state_.phase!="native_start_queued") return reject("lifecycle_create_phase_mismatch");
+    return true;
+}
+bool Campaign::admit_resume_map(const std::string& map,bool continuing,uint32_t stage_id,uint32_t native_subtype) {
+    if (!continuing && state_.resumed) {
+        if (!state_.parser_completed) return reject("lifecycle_resume_parser_incomplete");
+        if (state_.loaded_difficulty!=options_.difficulty) return reject("lifecycle_resume_difficulty_mismatch");
+        if (map!=(mission_destination_.empty()?state_.map:mission_destination_)) return reject("lifecycle_resume_map_mismatch");
+        if (state_.stage_id && (stage_id!=state_.stage_id || native_subtype!=state_.native_subtype))
+            return reject("lifecycle_resume_stage_mismatch");
+    }
+    return true;
+}
+bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,uint32_t native_subtype,uint32_t stage_id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_); if (!state_.enabled) return true;
     menu_active_=false;
     diagnostic_stage_=BStage::transition;
@@ -568,23 +621,14 @@ bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,u
     if (!initiated_) return reject("lifecycle_before_campaign_request");
     if (map_pending_) return reject("lifecycle_previous_transition_pending");
     if (map.empty() || map.size()>191) return reject("lifecycle_map_name_length");
+    if (!stage_id) stage_id=default_stage(map,native_subtype);
     // Create/Continue constrain the first gameplay entry in this process.
     // Later native travel belongs to the completed active generation, not to
     // the original NewGame phase or the original Continue map/parser payload.
     const bool mission_launch=menu_save_source_==MenuSaveSource::active_fortress && !mission_destination_.empty();
     const bool continuing=state_.map_active && !mission_launch;
-    if (mission_launch && generation!=state_.generation_after) return reject("lifecycle_mission_generation_mismatch",
-        {{"generation",generation},{"expected_generation",state_.generation_after}});
-    if (continuing) {
-        if (generation!=state_.generation_after) return reject("lifecycle_continuation_generation_mismatch",
-            {{"generation",generation},{"expected_generation",state_.generation_after}});
-        if (state_.phase=="native_save_pending") return reject("lifecycle_continuation_save_pending");
-    } else if (!state_.resumed && state_.phase!="native_start_queued") return reject("lifecycle_create_phase_mismatch");
-    if (!continuing && state_.resumed) {
-        if (!state_.parser_completed) return reject("lifecycle_resume_parser_incomplete");
-        if (state_.loaded_difficulty!=options_.difficulty) return reject("lifecycle_resume_difficulty_mismatch");
-        if (map!=(mission_destination_.empty()?state_.map:mission_destination_)) return reject("lifecycle_resume_map_mismatch");
-    }
+    if (!admit_generation(generation,mission_launch,continuing) ||
+        !admit_resume_map(map,continuing,stage_id,native_subtype)) return false;
     if (map.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.")!=std::string::npos)
         return reject("unsupported_native_map_name");
     if (continuing || !mission_destination_.empty()) {
@@ -595,6 +639,7 @@ bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,u
     prior_map_=state_.map;
     state_.map=std::move(map); state_.generation_before=generation; map_pending_=true;
     state_.native_subtype=native_subtype;
+    state_.stage_id=stage_id;
     mission_destination_.clear();
     menu_save_source_=MenuSaveSource::none;
     state_.transition.event_id=event_id; state_.transition.generation_before=generation;
@@ -647,6 +692,7 @@ void Campaign::map_end(const CampaignTransition& result) {
     complete_map();
 }
 void Campaign::complete_map() {
+    if (!confirm_restart()) return;
     map_pending_=false; state_.map_active=true; state_.save_ready=true;
     if (state_.map=="game/hub/hub" && !prior_map_.empty() && prior_map_!="game/hub/hub")
         state_.end_summary_map=prior_map_;

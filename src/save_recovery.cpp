@@ -4,7 +4,6 @@
 #include "save_sdk_write.h"
 #include <windows.h>
 #include <algorithm>
-#include <charconv>
 #include <cstring>
 #include <map>
 
@@ -36,11 +35,6 @@ bool take(std::string_view& in,std::string_view key,std::string_view& value) {
     in.remove_prefix(key.size()); const auto end=in.find('\n');
     if (end==in.npos) return false; value=in.substr(0,end); in.remove_prefix(end+1); return true;
 }
-bool number(std::string_view value,uint64_t& out) {
-    if (value.empty() || (value.size()>1 && value[0]=='0')) return false;
-    const auto r=std::from_chars(value.data(),value.data()+value.size(),out);
-    return r.ec==std::errc{} && r.ptr==value.data()+value.size();
-}
 bool payload_name(std::string_view name) {
     return name=="game.details" || name=="game_duration.dat" ||
         name=="game.details-BACKUP" || name=="game_duration.dat-BACKUP";
@@ -52,25 +46,13 @@ std::string canonical(std::string name) {
 }
 struct Checkpoint { uint64_t number=0; std::map<std::string,std::pair<uint32_t,std::string>> files; };
 bool checkpoint(std::string_view value,const std::string& contract,const std::string& directory,Checkpoint& out) {
-    if (value.substr(0,contract.size())!=contract) return false;
-    value.remove_prefix(contract.size()); std::string_view part; uint64_t count=0;
-    if (!take(value,"checkpoint=",part) || !number(part,out.number) || !out.number ||
-        !take(value,"map=",part) || part.empty() || part.size()>191 ||
-        part.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/.-")!=part.npos) return false;
-    if(value.substr(0,8)=="subtype=") {
-        if(!take(value,"subtype=",part) || (part!="1" && part!="2")) return false;
+    storage::CheckpointRecord record;
+    if (!storage::parse_checkpoint(value,contract,directory,record).ok() || record.files.size()>4) return false;
+    out.number=record.number;
+    for (const auto& file:record.files) {
+        if (!payload_name(file.name) || !out.files.emplace(file.name,std::make_pair(file.size,hash(file))).second) return false;
     }
-    if(!take(value,"files=",part) || !number(part,count) || !count || count>4) return false;
-    for (uint64_t i=0;i<count;++i) {
-        if (!take(value,"file=",part)) return false;
-        const auto first=part.find(','),last=part.rfind(','); uint64_t size=0;
-        if (first==part.npos || first==last || part.substr(0,directory.size()+1)!=directory+"/" ||
-            !number(part.substr(first+1,last-first-1),size) || !size || size>100u*1024u*1024u ||
-            part.size()-last-1!=64 || part.substr(last+1).find_first_not_of("0123456789abcdef")!=part.npos) return false;
-        const std::string name(part.substr(directory.size()+1,first-directory.size()-1));
-        if (!payload_name(name) || !out.files.emplace(name,std::make_pair(static_cast<uint32_t>(size),std::string(part.substr(last+1)))).second) return false;
-    }
-    return value=="state=native_saved_readback_verified\n";
+    return true;
 }
 bool matches(const Checkpoint& record,const storage::TransportMetadata& metadata) {
     if (record.files.size()!=metadata.files.size()) return false;

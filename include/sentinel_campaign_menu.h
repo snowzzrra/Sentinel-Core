@@ -5,7 +5,7 @@
 // sentinel.campaign_menu.v1: caller-owned presentation, never AP progression.
 // Committed is an admission fact. Rendered/loaded require native observations.
 #define SC_CAMPAIGN_MENU_ABI_VERSION 1u
-#define SC_CAMPAIGN_MENU_MAX_ROWS 21u
+#define SC_CAMPAIGN_MENU_MAX_ROWS 27u
 enum { SC_CAMPAIGN_REVEALED=1, SC_CAMPAIGN_UNLOCKED=2, SC_CAMPAIGN_COMPLETED=4,
        SC_CAMPAIGN_GOAL=8, SC_CAMPAIGN_HUB=16, SC_CAMPAIGN_DETAILS=32,
        SC_CAMPAIGN_SLAYER_GATE=64, SC_CAMPAIGN_GATE_KEY=128, SC_CAMPAIGN_GATE_COMPLETE=256 };

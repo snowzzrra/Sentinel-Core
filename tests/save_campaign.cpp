@@ -18,6 +18,7 @@
 #include "expanded_native.h"
 #include "enemy_checkpoint_native.h"
 #include "combat_native.h"
+#include "deathlink.h"
 #include <windows.h>
 #include <array>
 #include <cstdio>
@@ -166,6 +167,7 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
     std::memcpy(root+0x50,&map_address,sizeof(map_address)); store(cvar,8,defect==L"difficulty"?(difficulty+1)%4:difficulty);
     store(request,0x10,native_name);
     store(request,0x19c0,session().campaign_run.snapshot().native_subtype);
+    store(request,0x19d8,uintptr_t{0x1234});
     std::memcpy(map.data()+0x9a060,&native_name,sizeof(native_name));
     engine::Binding binding{}; binding.root=reinterpret_cast<uintptr_t>(root);
     binding.image.base=reinterpret_cast<uintptr_t>(&setting)-0x45f8590;
@@ -238,6 +240,7 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
 #include "campaign_menu_fixture.h"
 #include "campaign_writer_fixture.h"
 #include "campaign_travel_fixture.h"
+#include "stage_restart_fixture.h"
 }
 #include "startup_route_fixture.h"
 void test_campaign_hook_cleanup();
@@ -374,6 +377,21 @@ int recover_campaign_fixture(Session& owner, Remote& remote, uintptr_t provider,
     persist_remote(remote);
     return completed ? 0 : 2;
 }
+bool recovery_fixture_case(const std::wstring& defect) {
+    return defect.rfind(L"native_read_c",0)==0 || defect.rfind(L"native_read_delta",0)==0 ||
+        defect.rfind(L"native_read_shell",0)==0 || defect==L"native_read_hash" ||
+        defect.rfind(L"native_read_mission",0)==0 || defect.rfind(L"native_read_menu_cycle",0)==0;
+}
+bool transition_failure_case(const std::wstring& defect) {
+    return defect==L"native_return" || defect==L"abnormal" || defect==L"state_read" ||
+        defect==L"generation" || defect==L"difficulty" || defect==L"terminal_cleanup";
+}
+bool configured_fixture(bool recovery_case,storage::Result configured) {
+    if (recovery_case && !configured.ok()) {
+        std::puts("REFUSED interrupted recovery or invalid campaign admission"); return false;
+    }
+    return true;
+}
 int wmain(int argc,wchar_t** argv) {
     CHECK(argc==4 || argc==5);
     std::filesystem::create_directories(argv[2]);
@@ -389,9 +407,7 @@ int wmain(int argc,wchar_t** argv) {
     const bool profile_lifecycle=defect==L"profile_lifecycle";
     const bool native_read=defect.rfind(L"native_read",0)==0;
     const bool profile_overlap=defect.rfind(L"cross_map_profile_overlap",0)==0;
-    const bool recovery_case=defect.rfind(L"native_read_c",0)==0 || defect.rfind(L"native_read_delta",0)==0 ||
-        defect.rfind(L"native_read_shell",0)==0 || defect==L"native_read_hash" ||
-        defect.rfind(L"native_read_mission",0)==0 || defect.rfind(L"native_read_menu_cycle",0)==0;
+    const bool recovery_case=recovery_fixture_case(defect);
     const auto retail_marker=std::filesystem::path(argv[2])/"retail-pair.fixture";
     const bool retail_pair=defect==L"native_read_c_retail_pair" || std::filesystem::exists(retail_marker);
     if(retail_pair && !resume && !recover) { std::filesystem::create_directories(argv[2]); std::ofstream(retail_marker)<<"primary operation; preserved rotation pair\n"; }
@@ -399,6 +415,7 @@ int wmain(int argc,wchar_t** argv) {
     navigation_fixture::vanilla();
     storage::Descriptor descriptor{{"synthetic-campaign-host",0,1,std::string(64,'b')},argv[2],
         {recover?storage::CampaignIntent::recover:resume?storage::CampaignIntent::resume:storage::CampaignIntent::create,difficulty,{}}};
+    descriptor.campaign.restart_stage=defect.rfind(L"restart_",0)==0;
     if(recover) {
         std::ifstream selected(std::filesystem::path(argv[2])/"selected-backup.txt");
         std::getline(selected,descriptor.campaign.recovery_basename); CHECK(!descriptor.campaign.recovery_basename.empty());
@@ -409,7 +426,7 @@ int wmain(int argc,wchar_t** argv) {
     CHECK(opened.ok());
     recovery_namespace=lease->metadata().path;
     auto& owner=session(); const auto configured=owner.configure(descriptor,std::move(lease));
-    if(recovery_case && !configured.ok()) { std::puts("REFUSED interrupted recovery or invalid campaign admission"); return 2; }
+    if(!configured_fixture(recovery_case,configured)) return 2;
     if (defect==L"refuse_configuration") {
         if (configured.ok()) {
             CHECK(!owner.campaign_run.enabled() && !owner.accepts_requests());
@@ -480,6 +497,12 @@ int wmain(int argc,wchar_t** argv) {
         if (resume && !recovery_case) remote.files[directory+"/game.details"]=payload;
     }
     engine::LocalMemory memory;
+    if (descriptor.campaign.restart_stage) {
+        return restart_fixture::run(owner,resume,defect,source,directory,memory,[&] {
+            writer_fixture::Model restart_writer{remote,source,files,payload,directory};
+            profile_write(); writer_fixture::save(restart_writer,L"queued_checkpoint");
+        });
+    }
     // A later save owns a different native SaveData/file and different bytes;
     // reopening checkpoint2 must not accidentally validate checkpoint1.
     std::string next_payload=resume?"third encoded checkpoint payload":"second encoded checkpoint payload";
@@ -853,7 +876,7 @@ int wmain(int argc,wchar_t** argv) {
         CHECK(!owner.campaign_run.snapshot().map_active && owner.campaign_run.snapshot().phase=="native_start_queued");
         write_profile(); // new game's profile save precedes map readiness
     }
-    const bool transition_failure=defect==L"native_return" || defect==L"abnormal" || defect==L"state_read" || defect==L"generation" || defect==L"difficulty" || defect==L"terminal_cleanup";
+    const bool transition_failure=transition_failure_case(defect);
     if(transition_failure) { CHECK(native_transition(difficulty,defect)==0); return 0; }
     writer_fixture::Model writer{remote,source,files,payload,directory};
     std::shared_ptr<BackupJob> c_backup;

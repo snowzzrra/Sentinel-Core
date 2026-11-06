@@ -5,9 +5,9 @@
 // matching MultiServer.register_location_checks. Regressions are refused, never
 // silently unioned. known=0 suspends projection; it does not clear that history.
 // ACCEPTED acknowledges copied input, not native convergence or save persistence.
-#define SC_AUTOMAP_ABI_VERSION 2u
+#define SC_AUTOMAP_ABI_VERSION 3u
 #define SC_AUTOMAP_LOCATION_BASE 7770000u
-#define SC_AUTOMAP_LOCATION_BITS 576u
+#define SC_AUTOMAP_LOCATION_BITS 5056u
 enum { SC_AUTOMAP_PUBLISH=1, SC_AUTOMAP_OBSERVE=2 };
 enum { SC_AUTOMAP_ACCEPTED, SC_AUTOMAP_REFUSED, SC_AUTOMAP_UNAVAILABLE, SC_AUTOMAP_REGRESSION };
 typedef struct sc_automap_request {

@@ -92,11 +92,12 @@ class GeneratorTests(unittest.TestCase):
         codec = load_projection()
         command = codec.COMMANDS[22]
         variants = [r["payload_variants"][0] for r in command["revision_types"]]
-        self.assertEqual(len(set(variants)), 4)
+        self.assertEqual(len(set(variants)), 5)
         fields = [{f["name"] for f in codec.TYPES[name]["fields"]} for name in variants]
         self.assertEqual(fields[1] - fields[0], {"summary"})
         self.assertEqual(fields[2] - fields[1], {"rewards"})
         self.assertEqual(fields[3] - fields[2], {"rewards_known"})
+        self.assertEqual(fields[4], fields[3])
 
 
     def test_check_reports_drift_without_writing(self):

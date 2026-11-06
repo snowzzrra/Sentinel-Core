@@ -1,9 +1,105 @@
+#include <filesystem>
+#include <fstream>
+
+namespace sentinel::expanded::detail {
+void invoke_summon_creation(RecipeCreation*, uintptr_t, const SummonSource*);
+}
+namespace sentinel::commands {
+void report_recovery_selection(const recovery::Attempt&);
+}
+
 namespace sentinel::expanded {
 using namespace detail;
 
 #ifdef SC_NATIVE_TESTING
 
+std::filesystem::path recipe_fault_fixture_log() {
+    wchar_t temporary[32768]{}, previous[32768]{};
+    GetTempPathW(32768, temporary);
+    GetEnvironmentVariableW(L"LOCALAPPDATA", previous, 32768);
+    const auto root = std::filesystem::path(temporary) / ("sentinel-recipe-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
+    std::filesystem::create_directories(root);
+    SetEnvironmentVariableW(L"LOCALAPPDATA", root.c_str());
+    Snapshot identity; identity.pid = GetCurrentProcessId(); identity.process_created = 123456;
+    startup_log::record(identity);
+    SetEnvironmentVariableW(L"LOCALAPPDATA", *previous ? previous : nullptr);
+    return root / "SentinelCore/diagnostics" / (std::to_string(identity.pid) + "-123456.recipe.log");
+}
+
+bool test_recovery_selection_log(const std::filesystem::path& directory) {
+    recovery::Attempt attempt; attempt.id = 1; attempt.started = true;
+    recovery::Manager manager; manager.name = "arena"; manager.exclusion = "request_closed";
+    attempt.context.managers.push_back(manager);
+    manager.name = "other"; manager.exclusion = "outside_empty_encounter";
+    attempt.context.managers.push_back(manager);
+    commands::report_recovery_selection(attempt);
+    commands::report_recovery_selection(attempt);
+    std::ifstream input(directory / (std::to_string(GetCurrentProcessId()) + "-123456.recovery.log"));
+    const std::string persisted{std::istreambuf_iterator<char>(input), {}};
+    bool ok = persisted.find("manager=arena reason=request_closed") != std::string::npos;
+    ok &= persisted.find("manager=other reason=outside_empty_encounter") != std::string::npos;
+    ok &= std::count(persisted.begin(), persisted.end(), '\n') == 2;
+    return ok;
+}
+
+bool test_recipe_failure_policy() {
+    const auto log = recipe_fault_fixture_log();
+    const bool recovery_log_ok = test_recovery_selection_log(log.parent_path());
+    map_freed();
+    bool ok = recipe_state.reset(std::string(64, 'a'), "game/test");
+    ok &= recipe_state.request("retry", {"arena", "origin", "", 1, 1, 2, 2, 2, 1});
+    RecipeCreation creation; creation.key = "retry";
+    creation.emission = *recipe_state.reserve(creation.key);
+    const std::string name = "ai/test/body";
+    auto body = recipe_text(name); creation.body = reinterpret_cast<uintptr_t>(&body);
+    recipe_creation = &creation;
+    const auto database = definition_database;
+    const auto lookup = lookup_definition;
+    definition_database = []() -> uintptr_t { return 1; };
+    lookup_definition = [](uintptr_t, const char*, int32_t) -> uintptr_t { return 0; };
+    const auto reservations = reserved_actors;
+    reserve_admission(creation.limits); creation.reserved = true;
+    SummonSource source;
+    invoke_summon_creation(&creation, 0, &source);
+    definition_database = database; lookup_definition = lookup;
+    ok &= !recipe_fault.load();
+    ok &= creation.failed;
+    ok &= !recipe_state.requests().at("retry").reserved;
+    ok &= !recipe_state.requests().at("retry").emitted;
+    ok &= reserved_actors == reservations;
+    ok &= recipe_creation == nullptr;
+    const auto retry = recipe_state.reserve("retry");
+    ok &= retry.has_value();
+    ok &= retry->ordinal == creation.emission.ordinal;
+    ok &= recipe_state.created("retry", *retry);
+    recipe_creation = &creation;
+    recipe_creation_failed(creation, __func__, __LINE__, "credit_inconsistent");
+    ok &= recipe_fault.load();
+    const auto first = recipe_fault_diagnostic();
+    set_recipe_fault(__func__, __LINE__, "later_fault", "retry");
+    ok &= recipe_fault_diagnostic() == first;
+    recipe_creation = nullptr;
+    map_freed();
+    std::ifstream input(log);
+    const std::string persisted{std::istreambuf_iterator<char>(input), {}};
+    for (const auto* field : {"function=test_recipe_failure_policy", "reason=credit_inconsistent", "request=retry", "actor=0",
+            "body=ai/test/body", "map=game/test", "generation=", "stamp=", "line="}) ok &= persisted.find(field) != std::string::npos;
+    ok &= persisted.find("later_fault") == std::string::npos;
+    ok &= recipe_fault_diagnostic().empty();
+    creation.restoring = true;
+    recipe_creation_failed(creation, __func__, __LINE__, "checkpoint_inconsistent");
+    ok &= recipe_fault.load();
+    map_freed();
+    creation.restoring = false; creation.actor = 0x1234;
+    recipe_creation_failed(creation, __func__, __LINE__, "actor_inconsistent");
+    ok &= recipe_fault.load();
+    ok &= recovery_log_ok;
+    map_freed();
+    return ok;
+}
+
 bool test_recipe_transport() {
+    const bool policy_ok = test_recipe_failure_policy();
     static uintptr_t root, library;
     static std::vector<std::array<uint8_t, 0xbe0 + sizeof(save::NativeString)>> chunks;
     static bool missing = false;
@@ -65,8 +161,8 @@ bool test_recipe_transport() {
     transport = metadata.substr(0, 2046); publish(); map_freed(); session_recipe_plan.clear();
     ok &= !load_native_recipes() && recipe_fault.load() && !capture_recipe_checkpoint(checkpoint);
     const auto first_fault = recipe_fault_diagnostic();
-    ok &= first_fault.find("function=load_native_recipes reason=metadata_invalid") != std::string::npos;
-    set_recipe_fault(__func__, "later_failure");
+    ok &= first_fault.find("function=load_recipe_metadata reason=metadata_invalid") != std::string::npos;
+    set_recipe_fault(__func__, __LINE__, "later_failure");
     ok &= recipe_fault_diagnostic() == first_fault;
     uintptr_t result = 0;
     ok &= dispatch_recipe_locked(0, 0x1234, 0, 0, 0, false, "unused", result) && result == 0x1234;
@@ -76,6 +172,7 @@ bool test_recipe_transport() {
     map_freed(); session_recipe_plan.clear();
     world_global = previous_world; find_entity = previous_find; definition_name = previous_name;
     chunks.clear();
+    ok &= policy_ok;
     return ok && test_darklord_summon_scope() && test_darklord_telemetry();
 }
 

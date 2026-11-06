@@ -38,7 +38,7 @@ src/deathlink.cpp::sentinel::deathlink::execute(const sc_deathlink_request & r ,
 src/deathlink.cpp::sentinel::deathlink::tick(const Calls & c) 31 26
 src/deathlink.cpp::sentinel::deathlink::valid(const sc_deathlink_request & r) 17 28
 src/deathlink_native.cpp::sentinel::deathlink::(anonymous)::apply_lethal(void * , uintptr_t p , ApplicationOutcome & outcome) 24 20
-src/encounter_recovery.cpp::sentinel::recovery::Queue::tick(uint64_t stamp , uint64_t now , Drain drain) 59 52
+src/encounter_recovery.cpp::sentinel::recovery::Queue::tick(uint64_t stamp , uint64_t now , Drain drain) 52 47
 src/enemy_checkpoint_native.cpp::sentinel::expanded::test_recipe_checkpoint() 29 42
 src/enemy_recipe_state.cpp::sentinel::expanded::(anonymous)::valid(const RecipeRequest & value) 10 24
 src/enemy_recipe_state.cpp::sentinel::expanded::RecipeNativeCheckpoint::capture(std :: string & out) const 41 36
@@ -77,10 +77,9 @@ src/features/expanded/recipes_native.cpp::sentinel::expanded::detail::functional
 src/features/expanded/recipes_native.cpp::sentinel::expanded::detail::load_native_recipes() 319 194
 src/features/expanded/recipes_native.cpp::sentinel::expanded::detail::prepare_recipe_worker(uintptr_t worker , bool maintenance , bool & marked) 47 26
 src/features/expanded/recipes_native.cpp::sentinel::expanded::detail::read_recipe_metadata(uintptr_t world , uintptr_t root , std :: string & metadata) 12 18
-src/features/expanded/recipes_native.cpp::sentinel::expanded::detail::set_recipe_fault(const char * function , const char * reason , const char * key , uintptr_t actor , uintptr_t manager) noexcept 29 14
 src/features/expanded/recipes_native.cpp::sentinel::expanded::detail::settle_recipe_creation(RecipeCreation & creation) noexcept 20 17
 src/features/expanded/recipes_native.cpp::sentinel::expanded::detail::trace_actor(uintptr_t actor , const char * reason , uintptr_t source , bool position) noexcept 16 17
-src/features/expanded/recovery_native.cpp::sentinel::expanded::detail::scan_recovery_impl(uintptr_t world , recovery :: Context & context) 115 63
+src/features/expanded/recovery_native.cpp::sentinel::expanded::detail::scan_recovery_impl(uintptr_t world , recovery :: Context & context) 43 30
 src/features/expanded/recovery_native.cpp::sentinel::expanded::detail::stop_recovery_producers(recovery :: Attempt & attempt , const recovery :: Manager & target) 69 37
 src/features/expanded/spawn_native.cpp::sentinel::expanded::detail::drain_direct_point(uintptr_t point) 39 21
 src/features/expanded/spawn_native.cpp::sentinel::expanded::detail::finish_independent_show(uintptr_t actor , IndependentShow & show) noexcept 31 19
@@ -128,15 +127,13 @@ src/runes_native.cpp::sentinel::runes::(anonymous)::ensure_support_runes(void * 
 src/runes_native.cpp::sentinel::runes::(anonymous)::read(void * , uintptr_t p , SnapshotFacts & facts) 69 38
 src/save_backup.cpp::sentinel::save::BackupJob::copy(Session & owner , engine :: Memory & memory , const SdkWriteObservation & manifest , const std :: vector < uintptr_t > & buffers) 34 22
 src/save_campaign.cpp::sentinel::save::Campaign::allow_access(uintptr_t data , const std :: string & directory , bool write , bool erase) 17 25
-src/save_campaign.cpp::sentinel::save::Campaign::begin_resume(const std :: string & mission_destination) 15 20
 src/save_campaign.cpp::sentinel::save::Campaign::checkpoint_ready(const CampaignTransition & result) 24 36
-src/save_campaign.cpp::sentinel::save::Campaign::map_begin(std :: string map , uint64_t generation , uint64_t event_id , uint32_t native_subtype) 31 25
 src/save_campaign.cpp::sentinel::save::Campaign::map_end(const CampaignTransition & result) 25 34
 src/save_campaign.cpp::sentinel::save::Campaign::prepare_menu_save(const CampaignTransition & boundary) 14 24
 src/save_campaign.cpp::sentinel::save::Campaign::verify_source(engine :: Memory & memory , uintptr_t data , uintptr_t image) 44 31
 src/save_campaign_native.cpp::sentinel::save::(anonymous)::campaign_action(uintptr_t screen , uintptr_t action) 16 38
 src/save_campaign_native.cpp::sentinel::save::(anonymous)::new_game(uintptr_t menu , uint32_t requested , uint8_t extra_life) 12 21
-src/save_campaign_native.cpp::sentinel::save::(anonymous)::parse_game_at(uintptr_t caller , SaveReference * data , uintptr_t files , uintptr_t prepared , uintptr_t request) 40 32
+src/save_campaign_native.cpp::sentinel::save::(anonymous)::parse_game_at(uintptr_t caller , SaveReference * data , uintptr_t files , uintptr_t prepared , uintptr_t request) 39 30
 src/save_campaign_native.cpp::sentinel::save::campaign_change_begin(uintptr_t self , uintptr_t descriptor , CampaignTransition & transition) 17 19
 src/save_catalog.cpp::sentinel::save::(anonymous)::CatalogFuture::reconcile() 30 30
 src/save_catalog.cpp::sentinel::save::enumerate_provider(Session & owner , engine :: Memory & memory , uintptr_t provider , SaveFuture * * out , uintptr_t identity , SaveReference * data , const char * prefix , const CatalogCalls & calls) 13 16
@@ -164,7 +161,6 @@ src/save_provider.cpp::sentinel::save::snapshot_campaign_manifest(Session & owne
 src/save_readback.cpp::sentinel::save::(anonymous)::ordinary_directory(Session & owner , engine :: Memory & memory , uintptr_t data , BIoTrace trace) 12 19
 src/save_readback.cpp::sentinel::save::prepare_readback(Session & owner , engine :: Memory & memory , uintptr_t context , ReadWorkerResult * out , SaveReference * waiter , PrepareRead original) 29 24
 src/save_readback.cpp::sentinel::save::verify_readback(Session & owner , engine :: Memory & memory , uintptr_t context , ReadWorkerResult * out , DecodeRead original , uintptr_t image) 55 54
-src/save_recovery.cpp::sentinel::save::(anonymous)::checkpoint(std :: string_view value , const std :: string & contract , const std :: string & directory , Checkpoint & out) 19 29
 src/save_recovery.cpp::sentinel::save::recover_campaign(storage :: Namespace & lease , const storage :: Descriptor & descriptor , const RecoveryTransport & t) 87 101
 src/save_sdk_write.cpp::sentinel::save::NativeWrites::begin(uintptr_t remote , uintptr_t files , uint64_t count , const std :: string & directory) 18 21
 src/save_sdk_write.cpp::sentinel::save::NativeWrites::poll_released(uintptr_t utilities , bool ( * completed ) ( uintptr_t , uint64_t , bool * )) 32 17
@@ -188,7 +184,7 @@ src/save_storage.cpp::sentinel::storage::(anonymous)::transport_name(std :: stri
 src/save_storage.cpp::sentinel::storage::(anonymous)::verify_transport_file(HANDLE file , const TransportFile & expected , uint64_t deadline) 19 17
 src/save_storage.cpp::sentinel::storage::Namespace::backup_offline(Backup & backup) 31 18
 src/save_storage.cpp::sentinel::storage::Namespace::reopen_transport(std :: wstring_view basename , std :: unique_ptr < TransportArchive > & archive) 27 24
-src/save_storage.cpp::sentinel::storage::parse_descriptor(std :: string_view text , Descriptor & descriptor) 34 39
+src/save_storage.cpp::sentinel::storage::parse_descriptor(std :: string_view text , Descriptor & descriptor) 29 35
 src/save_write.cpp::sentinel::save::(anonymous)::access_scoped(Session & owner , engine :: Memory & memory , uintptr_t provider , SaveFuture * * out , uintptr_t identity , SaveReference * reference , const WriteCalls & calls , Access access , bool native_checkpoint = false) 47 29
 src/save_write.cpp::sentinel::save::(anonymous)::poll_access(SaveFuture * base , SaveResult * out , void * task) 25 24
 src/save_write.cpp::sentinel::save::(anonymous)::prepare_name(Session & owner , engine :: Memory & memory , SaveReference * reference , const WriteCalls & calls , Access access , bool & profile , ProfileWrite & selection , uintptr_t & data , std :: string & name) 28 23
@@ -210,9 +206,8 @@ src/special_native.cpp::sentinel::special::ensure(void * , uintptr_t p , uint32_
 src/special_native.cpp::sentinel::special::install(const engine :: Binding & binding , HANDLE stop) 171 108
 src/special_native.cpp::sentinel::special::poll_input(uintptr_t p , bool safe_gameplay) 72 48
 src/special_native.cpp::sentinel::special::present_selection(uintptr_t p) 23 22
-src/special_native.cpp::sentinel::special::refill(void * , uintptr_t p) 62 32
+src/special_native.cpp::sentinel::special::refill(void * , uintptr_t p) 24 19
 src/special_native.cpp::sentinel::special::select(void * , uintptr_t p , uint32_t selected) 12 16
-src/special_native.cpp::sentinel::special::test_hands_restore() 40 41
 src/special_native.cpp::sentinel::special::test_hud_source() 11 20
 src/startup_log.cpp::sentinel::startup_log::record(const Snapshot & core , uint32_t engine_reason) noexcept 54 21
 src/weapon_points_native.cpp::sentinel::weapon_points::install(const engine :: Binding & binding , HANDLE stop) 26 16
@@ -242,7 +237,7 @@ tests/native_host.cpp::wmain(int argc , wchar_t * * argv) 119 78
 tests/native_model.cpp::main() 28 50
 tests/save_campaign.cpp::(anonymous)::native_load(uintptr_t self , uintptr_t descriptor , uintptr_t files) 19 21
 tests/save_campaign.cpp::(anonymous)::native_transition(uint32_t difficulty , const std :: wstring & defect = "literal" , std :: function < void ( ) > checkpoint = { } , std :: function < void ( ) > after_ready = { } , std :: function < void ( ) > on_menu = { } , std :: string destination = { } , std :: function < void ( ) > after_menu = { }) 35 42
-tests/save_campaign.cpp::wmain(int argc , wchar_t * * argv) 497 233
+tests/save_campaign.cpp::wmain(int argc , wchar_t * * argv) 497 223
 tests/save_observer.cpp::main() 31 22
 tests/save_profile.cpp::(anonymous)::frame(Frame & f , const std :: string & name , int index , unsigned variant = 0 , size_t target_size = 0) 34 23
 tests/save_profile.cpp::exercise_profile_caller(Session & owner , const std :: function < bool ( SaveReference & ) > & provider , bool malformed) 21 17

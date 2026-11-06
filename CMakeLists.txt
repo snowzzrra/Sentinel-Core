@@ -73,7 +73,7 @@ set(identity_inputs include/sentinel_evidence.h src/currencies.h src/currencies.
   include/sentinel_weapon_points.h src/weapon_points.h src/weapon_points.cpp src/weapon_points_native.cpp
   tools/weapon_points_probe.cpp
   src/challenge_match.h src/challenge_seam_layout.h src/challenge_suppression.h src/challenge_suppression.cpp
-  include/sentinel_campaign_menu.h src/campaign_menu.h src/campaign_menu.cpp src/fast_travel.h tools/campaign_menu_probe.cpp
+  include/sentinel_campaign_menu.h src/campaign_menu.h src/campaign_menu.cpp src/campaign_stages_generated.h src/fast_travel.h tools/campaign_menu_probe.cpp
   src/campaign_menu_native.h src/campaign_menu_native.cpp src/physical_contact_observer.h
   include/sentinel_inventory.h src/inventory.h src/inventory.cpp src/inventory_native.cpp
   tools/inventory_probe.cpp
@@ -102,7 +102,7 @@ set(identity_inputs include/sentinel_evidence.h src/currencies.h src/currencies.
   include/sentinel_save_installation.h src/save_installation.h src/save_installation.cpp
   tools/prepare_vanilla_backup.py tools/compare_vanilla_campaign.py
   src/save_profile.h src/save_profile.cpp
-  src/save_campaign.h src/save_campaign.cpp src/save_campaign_native.h src/save_campaign_native.cpp
+  src/save_campaign.h src/save_campaign.cpp src/save_restart.cpp src/save_campaign_native.h src/save_campaign_native.cpp
   src/save_provider.h src/save_provider.cpp
   src/save_catalog.h src/save_catalog.cpp
   src/save_profile_prerequisite.h src/save_profile_prerequisite.cpp
@@ -175,6 +175,7 @@ add_test(NAME native_enemy_recipe_state COMMAND sentinel_enemy_recipe_tests)
 set_tests_properties(native_expanded_movement PROPERTIES TIMEOUT 10)
 add_library(sentinel_save_session STATIC src/save_session.cpp src/save_installation.cpp src/save_collector.cpp src/save_delete.cpp src/save_write.cpp src/save_sdk_write.cpp src/save_profile.cpp src/save_provider.cpp src/save_catalog.cpp src/save_profile_prerequisite.cpp src/save_readback.cpp src/save_backup.cpp src/save_submission.cpp src/save_campaign.cpp)
 target_link_libraries(sentinel_save_session PUBLIC sentinel_save_storage sentinel_observer)
+target_sources(sentinel_save_session PRIVATE src/save_restart.cpp)
 target_sources(sentinel_save_session PRIVATE src/save_recovery.cpp)
 # Fault controls and the storage copy belong only to synthetic test targets.
 add_library(sentinel_fault_storage STATIC src/save_storage.cpp src/prelaunch.cpp)

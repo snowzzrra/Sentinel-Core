@@ -176,10 +176,18 @@ bool deathlink(const ::sc_deathlink_request& v, Bytes& bytes) {
     default: return false;
     }
 }
-bool automap(const ::sc_automap_request& v, Bytes& bytes) {
+bool automap(const ::sc_automap_request& v, uint16_t revision, Bytes& bytes) {
     switch (v.kind) {
     case 1: {
-        automap_publish_payload out{};
+        if (revision == 1) {
+            automap_publish_payload out{};
+            if (std::any_of(std::begin(v.checked_locations) + out.checked_locations.size(),
+                    std::end(v.checked_locations), [](uint64_t bits) { return bits != 0; })) return false;
+            out.known = v.known; out.revision = v.revision;
+            std::copy_n(v.checked_locations, out.checked_locations.size(), out.checked_locations.begin());
+            return pack<automap_payload_revision1>(out, bytes);
+        }
+        automap_publish_arena_payload out{};
         out.known = v.known;
         out.revision = v.revision;
         std::copy(std::begin(v.checked_locations), std::end(v.checked_locations), out.checked_locations.begin());
@@ -211,11 +219,16 @@ bool command(const ::sc_command_request& v, Bytes& bytes) {
     default: return false;
     }
 }
+bool campaign_commit(uint16_t revision,const sc_campaign_request& request,Bytes& bytes) {
+    if (revision<=3) return pack<campaign_commit_payload_revision1>(campaign_commit_campaign_commit_payload{request.revision},bytes);
+    if (revision==4) return pack<campaign_commit_payload_revision4>(campaign_commit_selection_payload{request.revision,request.count,request.row.id},bytes);
+    return pack<campaign_commit_payload>(campaign_commit_stage_payload{request.revision,request.count,request.row.id},bytes);
+}
 bool campaign(uint16_t type, uint16_t revision, const NativeCampaign& v, Bytes& bytes) {
     const auto& r = v.request;
     if (type == 24) return pack<campaign_payload>(campaign_campaign_payload{r.revision}, bytes);
-    if (type == 23) return pack<campaign_commit_payload>(campaign_commit_selection_payload{r.revision, r.count, r.row.id}, bytes);
-    campaign_row_known_rewards_payload out{r.revision, r.index, r.count, to_wire(r.row), to_wire(v.summary), v.rewards.known, {}};
+    if (type == 23) return campaign_commit(revision,r,bytes);
+    campaign_row_stage_payload out{r.revision, r.index, r.count, to_wire(r.row), to_wire(v.summary), v.rewards.known, {}};
     if (v.rewards.count > std::size(v.rewards.entries)) return false;
     for (size_t i = 0; i < v.rewards.count; ++i) {
         const auto& from = v.rewards.entries[i]; campaign_reward reward{};
@@ -227,6 +240,7 @@ bool campaign(uint16_t type, uint16_t revision, const NativeCampaign& v, Bytes& 
     if (revision == 1) return pack<campaign_row_payload_revision1>(campaign_row_base_payload{r.revision,r.index,r.count,to_wire(r.row)}, bytes);
     if (revision == 2) return pack<campaign_row_payload_revision2>(campaign_row_presentation_payload{r.revision,r.index,r.count,to_wire(r.row),to_wire(v.summary)}, bytes);
     if (revision == 3) return pack<campaign_row_payload_revision3>(campaign_row_campaign_row_payload{r.revision,r.index,r.count,to_wire(r.row),to_wire(v.summary),out.rewards}, bytes);
+    if (revision == 4) return pack<campaign_row_payload_revision4>(campaign_row_known_rewards_payload{r.revision,r.index,r.count,to_wire(r.row),to_wire(v.summary),out.rewards_known,out.rewards}, bytes);
     return pack<campaign_row_payload>(out, bytes);
 }
 template<class T> bool restore(const Bytes& bytes, T& out) {
@@ -309,7 +323,7 @@ const Encoder encoders[] = {
         (void)type; (void)revision; (void)value; return deathlink(std::get<::sc_deathlink_request>(value), bytes);
     }},
     {45, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return automap(std::get<::sc_automap_request>(value), bytes);
+        (void)type; return automap(std::get<::sc_automap_request>(value), revision, bytes);
     }},
     {46, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
         (void)type; (void)revision; (void)value; return command(std::get<::sc_command_request>(value), bytes);

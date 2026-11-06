@@ -369,6 +369,10 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro","ap_automap_location_7770001"));
     CHECK(!native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro","ap_location_visual_7770001"));
     CHECK(!native::test_automap_checked(automap,"game/sp/e1m2_battle/e1m2_battle","ap_automap_location_7770001"));
+    const auto arena_bit = 7773001u - SC_AUTOMAP_LOCATION_BASE;
+    automap.checked_locations[arena_bit/64] |= uint64_t{1} << (arena_bit%64);
+    CHECK(native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro","ap_automap_location_7773001"));
+    CHECK(!native::test_automap_checked(automap,"game/sp/e1m2_battle/e1m2_battle","ap_automap_location_7773001"));
     for (uint32_t id=7770249;id<=7770252;++id) {
         char name[64]{}; std::snprintf(name,sizeof(name),"ap_automap_location_%u",id);
         const auto bit=id-SC_AUTOMAP_LOCATION_BASE;

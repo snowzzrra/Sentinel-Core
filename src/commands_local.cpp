@@ -152,6 +152,20 @@ bool execute_boon(const char* text, sc_command_result& result, uintptr_t player)
         error ? "failed" : "created", request.position[0], request.position[1], request.position[2], error ? error : "ok");
     return true;
 }
+void report_recovery_selection(const recovery::Attempt& attempt) {
+    static uint64_t reported = 0;
+    if (!attempt.started || attempt.id == reported) return;
+    reported = attempt.id;
+    for (const auto& manager : attempt.context.managers) {
+        char line[1536];
+        std::snprintf(line, sizeof(line),
+            "AP_ENCOUNTER_RECOVERY id=%llu map=%.191s generation=%llu manager=%.511s reason=%.240s wait=%.400s",
+            attempt.id, attempt.context.map.c_str(), attempt.context.scope.lifecycle_generation, manager.name.c_str(),
+            manager.exclusion.empty() ? "selected" : manager.exclusion.c_str(), manager.wait.c_str());
+        const auto error = startup_log::encounter_recovery(line);
+        diagnostic_trace("%.700s log_io_error=%u", line, error);
+    }
+}
 void diagnostic_trace(const char* format, ...) noexcept {
     char line[768];
     va_list args; va_start(args, format);
@@ -281,6 +295,7 @@ void manual_tick(uintptr_t player, uint64_t epoch, uint64_t (*current)(), bool r
                 static_cast<unsigned long long>(attempt.kills_suppressed), static_cast<unsigned long long>(attempt.elapsed), attempt.wait.c_str());
             for (const auto& manager : attempt.targets)
                 diagnostic_trace("AP_ENCOUNTER_RECOVERY manager=%s kind=%s", manager.name.c_str(), manager.kind.c_str());
+            report_recovery_selection(attempt);
         }
     }
     if (!TryAcquireSRWLockExclusive(&manual_lock)) return;

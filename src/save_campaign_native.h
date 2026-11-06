@@ -9,6 +9,7 @@ std::array<native::Target,14> campaign_targets(uintptr_t image);
 bool campaign_change_begin(uintptr_t root, uintptr_t descriptor, CampaignTransition&);
 void campaign_change_end(CampaignTransition&);
 void campaign_checkpoint_boundary(CampaignTransition);
+bool restart_checkpoint_reload();
 SaveFuture** campaign_write_provider(uintptr_t caller, engine::Memory&, uintptr_t provider,
     SaveFuture**, uintptr_t identity, SaveReference*, const WriteCalls&);
 SaveReference* campaign_save_factory(uintptr_t caller,uintptr_t expected_caller,uintptr_t manager,

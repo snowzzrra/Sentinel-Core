@@ -2,6 +2,7 @@
 #include "combat_native.h"
 #include "native_runtime.h"
 #include "native_target.h"
+#include "save_session.h"
 #include "engine/hooks/hook_set.h"
 #include <MinHook.h>
 #include <atomic>
@@ -60,7 +61,7 @@ void register_detour(uintptr_t world, uintptr_t object, int32_t requested_slot,
 }
 Capture capture(uintptr_t compiler, uintptr_t victim) {
     Capture value{};
-    if (!enabled.load(std::memory_order_acquire)) return value;
+    if (!enabled.load(std::memory_order_acquire) || save::session().campaign_run.snapshot().native_subtype==6) return value;
     const auto world = primary_world();
     if (!world || compiler != world + 0xac660) {
         death_trace.record(save::BStage::combat_capture, save::BStatus::pending, "death_compiler_scope",

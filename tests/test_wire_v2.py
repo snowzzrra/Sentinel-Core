@@ -77,6 +77,19 @@ class WireV2Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             codec.encode_variant(22, 4, tag, payload)
 
+    def test_campaign_master_level_bounds(self):
+        item = self.fixtures['campaign_row_unknown']
+        data = b''.join(bytes.fromhex(f['hex']) for f in item['fields'])[165:]
+        tag, payload = codec.decode_variant(22, 4, data)
+        payload.update(index=26, count=27)
+        encoded = codec.encode_variant(22, 5, tag, payload)
+        self.assertEqual(codec.decode_variant(22, 5, encoded), (tag, payload))
+        with self.assertRaises(ValueError):
+            codec.encode_variant(22, 4, tag, payload)
+        payload['count'] = 28
+        with self.assertRaises(ValueError):
+            codec.encode_variant(22, 5, tag, payload)
+
     def test_requests_and_hello(self):
         for name, item in self.fixtures.items():
             data = b''.join(bytes.fromhex(f['hex']) for f in item['fields'])[32:]

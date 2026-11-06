@@ -30,8 +30,34 @@ Context context() {
                       {4, 14, true, true, false, false, "complete", "manager", "", {{40, 5}}}};
     return value;
 }
+void empty_flag_selection() {
+    auto current = context();
+    current.managers[0].actors.clear();
+    current.managers[0].event_blocked = true;
+    current.managers[0].wait = "WaitForEventFlag soldier_awareness";
+    Queue queue;
+    const auto bodies = killed;
+    queue.enqueue_console(8, 100); queue.observe(current, 100);
+    assert(queue.tick(8, 100, drain) == std::vector<Outcome>{pending});
+    const auto attempt = queue.history().back();
+    assert(attempt.targets.size() == 1 && attempt.targets[0].address == 1 && killed == bodies);
+    assert(attempt.context.managers[1].exclusion == "outside_empty_encounter");
+    assert(attempt.context.managers[2].exclusion == "inactive_flags");
+    assert(attempt.context.managers[3].exclusion == "complete");
+    current.managers[0].complete = true;
+    queue.observe(current, 200);
+    assert(queue.tick(8, 200, drain) == std::vector<Outcome>{finished});
+    Queue ambiguous;
+    current.managers[0].complete = false;
+    current.managers[1].actors.clear(); current.managers[1].event_blocked = true;
+    ambiguous.enqueue_console(8, 100); ambiguous.observe(current, 100);
+    assert(ambiguous.tick(8, 100, drain) == std::vector<Outcome>{no_active});
+    for (const auto i : {0, 1}) assert(ambiguous.history().back().context.managers[i].exclusion == "ambiguous_empty_encounters");
+}
 }
 int main() {
+    empty_flag_selection();
+    calls = 0; killed.clear();
     Queue queue;
     auto current = context();
     assert(!queue.has_pending() && queue.tick(8, 100, drain).empty() && !calls);
@@ -107,7 +133,10 @@ int main() {
     assert(!protected_actor("regular_doomhunter", ".?AVidAI2_DoomHunter@@"));
     for (const bool empty : {false, true}) for (unsigned path = 0; path < 7; ++path) {
         Queue attempt; current = context();
-        if (empty) for (auto& manager : current.managers) { manager.actors.clear(); manager.recipe_blocked = true; }
+        if (empty) {
+            for (auto& manager : current.managers) { manager.actors.clear(); manager.recipe_blocked = true; }
+            current.managers[1].recipe_blocked = false;
+        }
         attempt.enqueue_console(8, 100); attempt.observe(current, 100); attempt.tick(8, 100, drain);
         switch (path) {
         case 0: current.gameplay = false; break;

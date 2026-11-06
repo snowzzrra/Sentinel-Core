@@ -24,8 +24,39 @@ sc_evidence_scope scope(uint64_t generation = 5) {
     std::memset(out.namespace_id, 'a', 64); out.save_binding[0] = 1;
     out.readiness = SC_EVIDENCE_READY; strcpy_s(out.map_name, "game/sp/hub/hub"); return out;
 }
+void shared_map_identity() {
+    campaign_menu::Menu menu;
+    sc_campaign_request request{}; std::memset(request.namespace_id,'a',64);
+    request.revision=1; request.count=3;
+    request.row.id=1; request.row.flags=SC_CAMPAIGN_HUB|SC_CAMPAIGN_REVEALED|SC_CAMPAIGN_UNLOCKED;
+    strcpy_s(request.row.map,"game/hub/hub");
+    assert(!menu.request(campaign_row_operation,request,true).status);
+    sc_campaign_summary summary{}; summary.known=1;
+    for (uint32_t index=0;index<2;++index) {
+        request.index=index+1; request.row.id=index?7776001:7771004;
+        request.row.flags=SC_CAMPAIGN_REVEALED|SC_CAMPAIGN_UNLOCKED;
+        strcpy_s(request.row.map,"game/sp/e2m1_nest/e2m1_nest");
+        summary.total=index?33:22;
+        assert(!menu.request(campaign_row_operation,request,true,&summary).status);
+    }
+    assert(!menu.request(campaign_commit_operation,request,true).status);
+    auto before=scope(), destination=scope(6);
+    strcpy_s(destination.map_name,request.row.map);
+    const auto projection=menu.projection();
+    menu.entries_usable(projection,before);
+    menu.load_requested(7776001,projection,before);
+    menu.loaded(destination.map_name,7771004); menu.destination_ready(destination);
+    assert(!menu.access(7776001,destination).destination_ready);
+    menu.load_requested(7776001,projection,before);
+    menu.loaded(destination.map_name,7776001); menu.destination_ready(destination);
+    assert(menu.access(7776001,destination).destination_stage_id==7776001);
+    assert(!menu.access(7771004,destination).destination_ready);
+    assert(menu.summary(7776001,std::string(64,'a'),summary) && summary.total==33);
+    assert(menu.summary(7771004,std::string(64,'a'),summary) && summary.total==22);
+}
 }
 int main() {
+    shared_map_identity();
     campaign_menu::Menu menu; publish(menu, 1);
     auto before = scope(), destination = scope(6);
     strcpy_s(destination.map_name, "game/sp/destination/destination");

@@ -101,10 +101,39 @@ std::atomic<bool> recipe_fault{false};
 
 SRWLOCK recipe_fault_lock = SRWLOCK_INIT;
 
-char first_recipe_fault[768]{};
+char first_recipe_fault[1536]{};
 
-void set_recipe_fault(const char* function, const char* reason, const char* key,
+void recipe_fault_body(uintptr_t actor, char (&body)[192]) noexcept {
+    strcpy_s(body, "unknown");
+    char observed[512];
+    if (actor && read_recipe_definition(actor, observed)) strncpy_s(body, observed, _TRUNCATE);
+    __try {
+        if (recipe_creation && recipe_creation->body) {
+            const auto name = *reinterpret_cast<const char**>(recipe_creation->body + 8);
+            if (name) strncpy_s(body, name, _TRUNCATE);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+void format_recipe_fault(const char* function, unsigned line, const char* reason, const char* key,
+                         uintptr_t actor, uintptr_t manager) noexcept {
+    const char* origin = "";
+    const char* owner = "";
+    for (const auto& request : recipe_state.requests()) if (request.first == key) {
+        origin = request.second.request.origin.c_str(); owner = request.second.request.owner.c_str(); break;
+    }
+    char body[192]; recipe_fault_body(actor, body);
+    const auto scope = native::inspect();
+    std::snprintf(first_recipe_fault, sizeof(first_recipe_fault),
+        "function=%.80s reason=%.96s request=%.160s actor=%llx recipe=%.80s manager=%llx owner=%.160s body=%.191s map=%.191s generation=%llu stamp=%llu at_ms=%llu line=%u",
+        function, reason, key, actor, origin, manager, owner, body,
+        recipe_state.map().empty() ? scope.current_map.bytes : recipe_state.map().c_str(),
+        scope.scope.lifecycle_generation, native::observation_stamp(), GetTickCount64(), line);
+}
+
+void set_recipe_fault(const char* function, unsigned line, const char* reason, const char* key,
                       uintptr_t actor, uintptr_t manager) noexcept {
+    recipe_fault.store(true, std::memory_order_release);
     AcquireSRWLockExclusive(&recipe_fault_lock);
     if (!first_recipe_fault[0]) {
         if (!key) key = recipe_creation ? recipe_creation->key.c_str() : worker_recipe ? worker_recipe->c_str() : "";
@@ -115,17 +144,25 @@ void set_recipe_fault(const char* function, const char* reason, const char* key,
             if (!*key) key = diagnostic->second.encounter.c_str();
             if (!manager) manager = diagnostic->second.manager_address;
         }
-        const char* origin = "";
-        const char* owner = "";
-        for (const auto& request : recipe_state.requests()) if (request.first == key) {
-            origin = request.second.request.origin.c_str(); owner = request.second.request.owner.c_str(); break;
-        }
-        std::snprintf(first_recipe_fault, sizeof(first_recipe_fault),
-            "function=%.80s reason=%.96s request=%.160s actor=%llx recipe=%.80s manager=%llx owner=%.160s stamp=%llu",
-            function, reason, key, actor, origin, manager, owner, native::observation_stamp());
+        format_recipe_fault(function, line, reason, key, actor, manager);
+        const auto error = startup_log::recipe_fault(first_recipe_fault);
+        commands::diagnostic_trace("AP_RECIPE_FAULT %.600s log_io_error=%u", first_recipe_fault, error);
     }
-    recipe_fault.store(true, std::memory_order_release);
     ReleaseSRWLockExclusive(&recipe_fault_lock);
+}
+
+void recipe_creation_failed(RecipeCreation& creation, const char* function, unsigned line, const char* reason) noexcept {
+    creation.failed = true;
+    const auto found = recipe_state.requests().find(creation.key);
+    const bool retryable = !creation.actor && !creation.restoring && found != recipe_state.requests().end() &&
+        found->second.reserved && found->second.emitted == creation.emission.ordinal &&
+        !found->second.actors.count(creation.emission.actor);
+    if (!retryable) {
+        set_recipe_fault(function, line, reason, creation.key.c_str(), creation.actor, creation.selecting_manager);
+        return;
+    }
+    commands::diagnostic_trace("AP_RECIPE_RETRY function=%s reason=%s request=%.160s ordinal=%llu stamp=%llu",
+        function, reason, creation.key.c_str(), creation.emission.ordinal, native::observation_stamp());
 }
 
 std::map<std::string, uint8_t> recipe_spawn_traces;
@@ -288,21 +325,27 @@ bool read_recipe_metadata(uintptr_t world, uintptr_t root, std::string& metadata
     return true;
 }
 
-bool load_native_recipes() {
-    if (!native_recipes.empty() && !restored_independent) return true;
-    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
-    const auto root = find_entity(world, "ap_v070_recipe_plan");
+bool load_recipe_metadata(uintptr_t world,uintptr_t root,RecipeLibrary& parsed) {
     std::string metadata;
-    RecipeLibrary parsed;
-    if (!root) return false;
     if (!read_recipe_metadata(world, root, metadata) || !parse_recipe_library(metadata, parsed)) {
-        set_recipe_fault(__func__, "metadata_invalid");
+        set_recipe_fault(__func__, __LINE__, "metadata_invalid");
         if (save::session().campaign_run.enabled()) save::session().campaign_run.refuse("native_enemy_recipe_metadata_invalid");
         return false;
     }
+    return true;
+}
+
+bool load_native_recipes() {
+    if (save::session().campaign_run.snapshot().native_subtype==6) return false;
+    if (!native_recipes.empty() && !restored_independent) return true;
+    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
+    const auto root = find_entity(world, "ap_v070_recipe_plan");
+    RecipeLibrary parsed;
+    if (!root) return false;
+    if (!load_recipe_metadata(world,root,parsed)) return false;
     if (checkpoint_recipe_missing || (!checkpoint_recipe_plan.empty() && parsed.plan != checkpoint_recipe_plan) ||
         (!session_recipe_plan.empty() && parsed.plan != session_recipe_plan)) {
-        set_recipe_fault(__func__, "checkpoint_plan_mismatch");
+        set_recipe_fault(__func__, __LINE__, "checkpoint_plan_mismatch");
         if (save::session().campaign_run.enabled()) save::session().campaign_run.refuse("native_enemy_checkpoint_plan_mismatch");
         return false;
     }
@@ -394,7 +437,7 @@ bool load_native_recipes() {
     if (!loaded.reset(parsed.plan, parsed.map)) return false;
     if (restored_independent) {
         const auto invalid = [] {
-            set_recipe_fault(__func__, "checkpoint_invalid");
+            set_recipe_fault(__func__, __LINE__, "checkpoint_invalid");
             if (save::session().campaign_run.enabled()) save::session().campaign_run.refuse("native_enemy_checkpoint_invalid");
             return false;
         };
@@ -704,16 +747,16 @@ bool settle_recipe_creation(RecipeCreation& creation) noexcept {
             }
         } catch (...) {}
         return true;
-    } catch (...) { set_recipe_fault(__func__, "exception", creation.key.c_str(), creation.actor, creation.selecting_manager); return false; }
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception", creation.key.c_str(), creation.actor, creation.selecting_manager); return false; }
 }
 
 void end_recipe_creation(RecipeCreation& creation) noexcept {
     try {
         if (!creation.actor) trace_recipe_spawn(creation, creation.body, creation.source, 2);
         if (creation.actor && creation.active_point && !record_point_credit(creation.active_point, &creation))
-            set_recipe_fault(__func__, "point_credit_failed", creation.key.c_str(), creation.actor, creation.selecting_manager);
-    } catch (...) { set_recipe_fault(__func__, "exception", creation.key.c_str(), creation.actor, creation.selecting_manager); }
-    if (!settle_recipe_creation(creation)) set_recipe_fault(__func__, "settlement_failed", creation.key.c_str(), creation.actor, creation.selecting_manager);
+            set_recipe_fault(__func__, __LINE__, "point_credit_failed", creation.key.c_str(), creation.actor, creation.selecting_manager);
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception", creation.key.c_str(), creation.actor, creation.selecting_manager); }
+    if (!settle_recipe_creation(creation)) set_recipe_fault(__func__, __LINE__, "settlement_failed", creation.key.c_str(), creation.actor, creation.selecting_manager);
     if (creation.reserved) release_admission(creation.limits);
     recipe_creation = creation.previous;
 }
@@ -783,7 +826,7 @@ uintptr_t functional_body(RecipeCreation* creation, uintptr_t group) {
     }
     commands::enemy_spawn_trace("functional_missing", creation->recipe->definition.origin.c_str(), variant, source_name.c_str(), 0,
         creation->key.c_str(), recipe_state.requests().at(creation->key).request.parent_actor.c_str(), creation->emission.ordinal);
-    set_recipe_fault(__func__, "functional_body_missing", creation->key.c_str()); return 0;
+    return 0;
 }
 
 void suspend_recipe_points(RecipeCreation* creation) {
@@ -804,7 +847,7 @@ void resume_recipe_points(RecipeCreation* creation) {
 void initialize_physical_recipe(RecipeCreation* creation, uintptr_t actor) {
     if (creation->limits.kind != 2 || creation->recipe->definition.family == 's') return;
     const auto spirit = *reinterpret_cast<const uintptr_t*>(actor + 0x165d8);
-    if (!spirit) { set_recipe_fault(__func__, "spirit_missing", creation->key.c_str(), actor); return; }
+    if (!spirit) { set_recipe_fault(__func__, __LINE__, "spirit_missing", creation->key.c_str(), actor); return; }
     *reinterpret_cast<uint64_t*>(spirit + 0x80) = encounter_ai_mask;
     assign_native_text(spirit + 0x88, "");
     *reinterpret_cast<uint8_t*>(spirit + 0xb8) = 0;
@@ -931,12 +974,12 @@ uint64_t create_special_recipe(uintptr_t manager, std::string_view origin, std::
     RecipeCreation creation;
     std::unique_lock<std::recursive_mutex> admission(admission_mutex);
     bool ready = false;
-    try { ready = begin_recipe_creation(creation, manager, origin, label); } catch (...) { set_recipe_fault(__func__, "exception", creation.key.c_str(), creation.actor, manager); }
+    try { ready = begin_recipe_creation(creation, manager, origin, label); } catch (...) { set_recipe_fault(__func__, __LINE__, "exception", creation.key.c_str(), creation.actor, manager); }
     if (!ready) { admission.unlock(); return 0; }
     return invoke_recipe_creation(&creation, manager, 0, 0, 0, false, admission);
 }
 
-bool recipe_landing_pose(const RecipeCreation& creation, float* pose) {
+bool recipe_landing_pose(RecipeCreation& creation, float* pose) {
     if (!creation.active_point || creation.restoring) return false;
     char point[512], marker[64];
     if (!read_definition_name(creation.active_point, point)) return false;
@@ -947,12 +990,12 @@ bool recipe_landing_pose(const RecipeCreation& creation, float* pose) {
     const auto helper = find_entity(world, marker);
     if (!helper) return false;
     std::string target_name;
-    if (!native_text(helper + 0xbe0, target_name, 191)) { set_recipe_fault(__func__, "source_name_unreadable"); return false; }
+    if (!native_text(helper + 0xbe0, target_name, 191)) { recipe_creation_failed(creation, __func__, __LINE__, "source_name_unreadable"); return false; }
     const auto target = find_entity(world, target_name.c_str());
-    if (!target) { set_recipe_fault(__func__, "source_missing"); return false; }
+    if (!target) { recipe_creation_failed(creation, __func__, __LINE__, "source_missing"); return false; }
     std::memcpy(pose, reinterpret_cast<const void*>(target + 0x74), 12 * sizeof(float));
     if (!std::all_of(pose, pose + 12, [](float value) { return std::isfinite(value); })) {
-        set_recipe_fault(__func__, "source_pose_invalid"); return false;
+        recipe_creation_failed(creation, __func__, __LINE__, "source_pose_invalid"); return false;
     }
     return true;
 }
@@ -1068,7 +1111,7 @@ void recipe_worker_tick(uintptr_t worker, bool maintenance) {
     const auto previous = worker_recipe;
     worker_recipe = nullptr;
     bool marked = false, ready = false;
-    try { ready = prepare_recipe_worker(worker, maintenance, marked); } catch (...) { set_recipe_fault(__func__, "worker_prepare_exception"); }
+    try { ready = prepare_recipe_worker(worker, maintenance, marked); } catch (...) { set_recipe_fault(__func__, __LINE__, "worker_prepare_exception"); }
     if (!ready) { worker_recipe = previous; admission.unlock(); return; }
     invoke_recipe_worker(worker, maintenance, previous, marked, admission);
 }
@@ -1083,7 +1126,7 @@ void prepare_queued_recipe(uintptr_t command) {
     try {
         if (const auto worker = cast_maintain ? cast_maintain(command) : 0) prepare_recipe_worker(worker, true, marked);
         else if (const auto staggered = cast_stagger ? cast_stagger(command) : 0) prepare_recipe_worker(staggered, false, marked);
-    } catch (...) { set_recipe_fault(__func__, "worker_prepare_exception"); }
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "worker_prepare_exception"); }
     worker_recipe = previous;
 }
 

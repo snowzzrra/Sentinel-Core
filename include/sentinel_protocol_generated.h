@@ -1,4 +1,4 @@
-// Generated from protocol/schema.json; regenerate: python -B tools/generate_protocol.py; schema-sha256: 66a34aae75c217461b96c927e8d182027d9c237d88fd31b91c74490418d5b177; generator-format: 1. DO NOT EDIT.
+// Generated from protocol/schema.json; regenerate: python -B tools/generate_protocol.py; schema-sha256: 2062c83280da66d6ae7d1a06da556754246b18c84df95cc76690c40cb597a584; generator-format: 1. DO NOT EDIT.
 #pragma once
 #include "sentinel_inspection.h"
 #include <array>
@@ -33,11 +33,11 @@ inline constexpr uint64_t limit_runes_normal_mask = 511ULL;
 inline constexpr uint64_t limit_runes_support_mask = 7ULL;
 inline constexpr std::array<int64_t, 2> limit_rune_selection = {-1, 8};
 inline constexpr uint64_t limit_special_balance_max = 1000ULL;
-inline constexpr uint64_t limit_campaign_rows = 21ULL;
+inline constexpr uint64_t limit_campaign_rows = 27ULL;
 inline constexpr uint64_t limit_campaign_challenges = 3ULL;
 inline constexpr uint64_t limit_campaign_rewards = 17ULL;
-inline constexpr uint64_t limit_automap_bits = 576ULL;
-inline constexpr uint64_t limit_automap_words = 9ULL;
+inline constexpr uint64_t limit_automap_bits = 5056ULL;
+inline constexpr uint64_t limit_automap_words = 79ULL;
 inline constexpr uint64_t limit_combat_maps = 64ULL;
 inline constexpr uint64_t limit_console_text_bytes = 2047ULL;
 inline constexpr size_t execution_slots = 8;
@@ -711,6 +711,11 @@ struct automap_publish_payload {
     uint64_t revision{};
     std::array<uint64_t, 9> checked_locations{};
 };
+struct automap_publish_arena_payload {
+    uint32_t known{};
+    uint64_t revision{};
+    std::array<uint64_t, 79> checked_locations{};
+};
 struct automap_observe_payload {
 };
 struct command_activate_payload {
@@ -917,6 +922,20 @@ struct campaign_commit_selection_payload {
     uint32_t count{};
     uint32_t selected_id{};
 };
+struct campaign_row_stage_payload {
+    uint64_t revision{};
+    uint32_t index{};
+    uint32_t count{};
+    sc_campaign_row row{};
+    sc_campaign_summary summary{};
+    uint32_t rewards_known{};
+    std::vector<campaign_reward> rewards{};
+};
+struct campaign_commit_stage_payload {
+    uint64_t revision{};
+    uint32_t count{};
+    uint32_t selected_id{};
+};
 struct wire_header_2 {
     uint32_t magic{};
     uint16_t version{};
@@ -939,15 +958,15 @@ using save_write_payload = std::variant<save_write_save_write_payload>;
 using save_backup_payload = std::variant<save_backup_save_backup_payload>;
 using save_installation_payload = std::variant<save_installation_save_installation_payload>;
 using weapon_points_payload = std::variant<weapon_points_observe_payload, weapon_points_grant_payload>;
-using campaign_row_payload = std::variant<campaign_row_known_rewards_payload>;
-using campaign_commit_payload = std::variant<campaign_commit_selection_payload>;
+using campaign_row_payload = std::variant<campaign_row_stage_payload>;
+using campaign_commit_payload = std::variant<campaign_commit_stage_payload>;
 using campaign_payload = std::variant<campaign_campaign_payload>;
 using inventory_payload = std::variant<inventory_observe_payload, inventory_ensure_payload, inventory_set_capacity_payload>;
 using arsenal_payload = std::variant<arsenal_observe_payload, arsenal_ensure_mods_payload, arsenal_select_mod_payload, arsenal_project_mastery_payload>;
 using runes_payload = std::variant<runes_observe_payload, runes_ensure_normal_payload, runes_ensure_support_payload, runes_select_normal_payload, runes_select_support_payload>;
 using special_payload = std::variant<special_observe_payload, special_ensure_ownership_payload, special_select_payload, special_refill_status_payload, special_refill_publish_payload, special_refill_take_payload, special_refill_execute_payload>;
 using deathlink_payload = std::variant<deathlink_observe_payload, deathlink_configure_payload, deathlink_apply_remote_payload, deathlink_poll_local_payload, deathlink_ack_local_payload, deathlink_cancel_remote_payload>;
-using automap_payload = std::variant<automap_publish_payload, automap_observe_payload>;
+using automap_payload = std::variant<automap_publish_arena_payload, automap_observe_payload>;
 using command_payload = std::variant<command_activate_payload, command_player_perk_payload, command_ammo_refill_payload, command_crucible_refill_payload, command_echo_payload, command_condump_payload, command_list_inventory_payload, command_transient_policy_payload>;
 using combat_payload = std::variant<combat_combat_payload>;
 using combat_presentation_payload = std::variant<combat_presentation_combat_presentation_payload>;
@@ -958,7 +977,10 @@ using mission_access_payload = std::variant<mission_access_observe_payload>;
 using campaign_row_payload_revision1 = std::variant<campaign_row_base_payload>;
 using campaign_row_payload_revision2 = std::variant<campaign_row_presentation_payload>;
 using campaign_row_payload_revision3 = std::variant<campaign_row_campaign_row_payload>;
+using campaign_row_payload_revision4 = std::variant<campaign_row_known_rewards_payload>;
 using campaign_commit_payload_revision1 = std::variant<campaign_commit_campaign_commit_payload>;
+using campaign_commit_payload_revision4 = std::variant<campaign_commit_selection_payload>;
+using automap_payload_revision1 = std::variant<automap_publish_payload, automap_observe_payload>;
 bool encode(const campaign_reward&, Bytes&);
 bool decode(const Bytes&, campaign_reward&);
 bool encode(const scope&, Bytes&);
@@ -1119,6 +1141,8 @@ bool encode(const deathlink_cancel_remote_payload&, Bytes&);
 bool decode(const Bytes&, deathlink_cancel_remote_payload&);
 bool encode(const automap_publish_payload&, Bytes&);
 bool decode(const Bytes&, automap_publish_payload&);
+bool encode(const automap_publish_arena_payload&, Bytes&);
+bool decode(const Bytes&, automap_publish_arena_payload&);
 bool encode(const automap_observe_payload&, Bytes&);
 bool decode(const Bytes&, automap_observe_payload&);
 bool encode(const command_activate_payload&, Bytes&);
@@ -1191,6 +1215,10 @@ bool encode(const campaign_row_known_rewards_payload&, Bytes&);
 bool decode(const Bytes&, campaign_row_known_rewards_payload&);
 bool encode(const campaign_commit_selection_payload&, Bytes&);
 bool decode(const Bytes&, campaign_commit_selection_payload&);
+bool encode(const campaign_row_stage_payload&, Bytes&);
+bool decode(const Bytes&, campaign_row_stage_payload&);
+bool encode(const campaign_commit_stage_payload&, Bytes&);
+bool decode(const Bytes&, campaign_commit_stage_payload&);
 bool encode(const wire_header_2&, Bytes&);
 bool decode(const Bytes&, wire_header_2&);
 bool encode(const inspect_payload&, Bytes&);
@@ -1255,8 +1283,14 @@ bool encode(const campaign_row_payload_revision2&, Bytes&);
 bool decode(const Bytes&, campaign_row_payload_revision2&);
 bool encode(const campaign_row_payload_revision3&, Bytes&);
 bool decode(const Bytes&, campaign_row_payload_revision3&);
+bool encode(const campaign_row_payload_revision4&, Bytes&);
+bool decode(const Bytes&, campaign_row_payload_revision4&);
 bool encode(const campaign_commit_payload_revision1&, Bytes&);
 bool decode(const Bytes&, campaign_commit_payload_revision1&);
+bool encode(const campaign_commit_payload_revision4&, Bytes&);
+bool decode(const Bytes&, campaign_commit_payload_revision4&);
+bool encode(const automap_payload_revision1&, Bytes&);
+bool decode(const Bytes&, automap_payload_revision1&);
 template<class C, class T> void native_field_backup_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
     c.scalar(v.campaign, 4);
@@ -1332,7 +1366,7 @@ template<class C, class T> void native_field_automap_request(C& c, T& v) {
     c.scalar(v.kind, 4);
     c.scalar(v.known, 4);
     c.scalar(v.revision, 8);
-    for (size_t i = 0; i < 9; ++i) c.scalar(v.checked_locations[i], 8);
+    for (size_t i = 0; i < 79; ++i) c.scalar(v.checked_locations[i], 8);
 }
 template<class C, class T> void native_field_command_request(C& c, T& v) {
     for (size_t i = 0; i < 65; ++i) c.scalar(v.namespace_id[i], 1);
@@ -2836,7 +2870,7 @@ template<class C> void native_transfer(C& c, const ::sc_automap_request& v) {
     c.scalar(v.kind, 4);
     c.scalar(v.known, 4);
     c.scalar(v.revision, 8);
-    for (size_t i = 0; i < 9; ++i) c.scalar(v.checked_locations[i], 8);
+    for (size_t i = 0; i < 79; ++i) c.scalar(v.checked_locations[i], 8);
 }
 inline const char* native_namespace(const ::sc_automap_request& v) { return v.namespace_id; }
 template<> struct NativeBinding<::sc_command_request> { using Result = ::sc_command_result; static constexpr CommandId id = CommandId::command; };
@@ -2875,7 +2909,7 @@ template<class C> void native_transfer(C& c, const ::sc_mission_access_request& 
     c.scalar(v.stage_id, 4);
 }
 inline const char* native_namespace(const ::sc_mission_access_request& v) { return v.namespace_id; }
-using Payload = std::variant<inspect_payload, engine_payload, context_payload, native_payload, diagnostic_payload, diagnostic_detail_payload, save_payload, save_admission_payload, save_write_payload, save_backup_payload, save_installation_payload, weapon_points_payload, campaign_row_payload_revision1, campaign_row_payload_revision2, campaign_row_payload_revision3, campaign_row_payload, campaign_commit_payload_revision1, campaign_commit_payload, campaign_payload, inventory_payload, arsenal_payload, runes_payload, special_payload, deathlink_payload, automap_payload, command_payload, combat_payload, combat_presentation_payload, support_dump_payload, currencies_payload, progression_payload, mission_access_payload>;
+using Payload = std::variant<inspect_payload, engine_payload, context_payload, native_payload, diagnostic_payload, diagnostic_detail_payload, save_payload, save_admission_payload, save_write_payload, save_backup_payload, save_installation_payload, weapon_points_payload, campaign_row_payload_revision1, campaign_row_payload_revision2, campaign_row_payload_revision3, campaign_row_payload_revision4, campaign_row_payload, campaign_commit_payload_revision1, campaign_commit_payload_revision4, campaign_commit_payload, campaign_payload, inventory_payload, arsenal_payload, runes_payload, special_payload, deathlink_payload, automap_payload_revision1, automap_payload, command_payload, combat_payload, combat_presentation_payload, support_dump_payload, currencies_payload, progression_payload, mission_access_payload>;
 using Result = std::variant<sc_status, sc_engine_snapshot, sc_context_snapshot, sc_native_snapshot, sc_diagnostic_result, diagnostic_detail_result, sc_save_snapshot, save_admission_result, sc_save_write_snapshot, sc_save_backup_snapshot, sc_save_installation_snapshot, sc_weapon_points_result, sc_campaign_result, sc_inventory_result, sc_arsenal_result, sc_runes_result, sc_special_result, sc_deathlink_result, sc_automap_result, sc_command_result, sc_combat_snapshot, sc_combat_presentation_result, sc_currency_result, sc_progression_result, sc_mission_access_result>;
 enum class Admission { P, G, S, D };
 enum class Scope { process, gameplay, save, gameplay_diagnostic };

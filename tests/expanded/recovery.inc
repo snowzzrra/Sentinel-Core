@@ -73,6 +73,47 @@ bool test_recovery_kill(uintptr_t world, uintptr_t actor, TestRecoveryDeath deat
     return ok;
 }
 
+bool test_empty_flag_wait(uintptr_t world, uintptr_t owner, uintptr_t other, uintptr_t image) {
+    map_freed();
+    const auto put = [](uintptr_t base, size_t offset, auto value) { std::memcpy(reinterpret_cast<void*>(base + offset), &value, sizeof(value)); };
+    std::array<std::array<uint8_t, 0x140>, 2> waits{};
+    std::array<uintptr_t, 2> workers{};
+    const char type[] = ".?AVidEncounterEvent_WaitForEventFlag@@";
+    std::memcpy(reinterpret_cast<void*>(image + 0x110), type, sizeof(type));
+    for (size_t i = 0; i < workers.size(); ++i) {
+        const auto manager = i ? other : owner;
+        workers[i] = reinterpret_cast<uintptr_t>(waits[i].data());
+        put(workers[i], 0, image + 0x200); put(workers[i], 0x40, manager); put(workers[i], 0xa8, int32_t{4});
+        put(manager, 0xcc0, reinterpret_cast<uintptr_t>(&workers[i])); put(manager, 0xcc8, int32_t{1});
+        put(manager, 0xc88, int32_t{0});
+    }
+    bool ok = recipe_state.reset(std::string(64, 'a'), "game/test");
+    RecipeRequest request{"arena", "origin", "", 1, 1, 3, 3, 3, 1};
+    ok &= recipe_state.request("blocked", request);
+    request.owner = "other"; ok &= recipe_state.request("unrelated", request);
+    recovery::Context context; context.map = "game/test"; context.stamp = native::observation_stamp();
+    ok &= scan_recovery(world, context);
+    ok &= context.managers.at(0).event_blocked;
+    const auto other_before = waits[1];
+    recovery::Attempt attempt; attempt.stamp = context.stamp; attempt.targets = {context.managers[0]};
+    ok &= drain_recovery_impl(attempt, context);
+    ok &= waits[0][0xac] == 1;
+    ok &= waits[1] == other_before;
+    ok &= !*reinterpret_cast<const uint8_t*>(owner + 0xdb3);
+    ok &= !attempt.actors_killed && !attempt.kills_suppressed;
+    ok &= recipe_state.requests().at("blocked").closed;
+    ok &= !recipe_state.requests().at("unrelated").closed;
+    put(workers[0], 0xac, uint8_t{0}); put(workers[0], 0xa8, int32_t{3});
+    recovery::Context commit; commit.map = "game/test";
+    ok &= scan_recovery(world, commit);
+    ok &= commit.managers.at(0).exclusion == "commit_wait_requires_producers";
+    put(workers[0], 0xa8, int32_t{4}); put(workers[0], 0x40, other);
+    recovery::Context wrong_owner; wrong_owner.map = "game/test";
+    ok &= scan_recovery(world, wrong_owner);
+    ok &= wrong_owner.managers.at(0).exclusion == "wait_owner_mismatch";
+    return ok;
+}
+
 bool test_recovery_inputs() {
     const auto saved_name = definition_name;
     const auto saved_identifier = actor_identifier;
@@ -231,17 +272,18 @@ bool test_recovery_inputs() {
         recovery::Context boss; boss.map = "game/sp/e1m4_boss/e1m4_boss";
         ok &= scan_recovery(address, boss);
         const auto diagnostics = commands::diagnostic_history();
-        for (const auto* reason : {"inactive_flags", "no_live_ai_or_owned_combat_request", "boss"})
+        for (const auto* reason : {"inactive_flags", "request_closed", "boss"})
             ok &= std::any_of(diagnostics.begin(), diagnostics.end(), [&](const auto& line) {
                 return line.find(std::string("reason=") + reason) != std::string::npos;
             });
-        set_recipe_fault(__func__, "request_unavailable", "blocked", 0x1234, owner);
+        set_recipe_fault(__func__, __LINE__, "request_unavailable", "blocked", 0x1234, owner);
         const auto first = recipe_fault_diagnostic();
         ok &= first.find("request=blocked actor=1234 recipe=origin") != std::string::npos &&
             first.find("owner=arena") != std::string::npos;
-        set_recipe_fault(__func__, "later_failure", "unrelated");
+        set_recipe_fault(__func__, __LINE__, "later_failure", "unrelated");
         ok &= recipe_fault_diagnostic() == first;
     }
+    ok &= test_empty_flag_wait(address, owner, other, recovery_image);
     map_freed();
     definition_name = saved_name; actor_identifier = saved_identifier;
     cast_maintain = saved_maintain; cast_stagger = saved_stagger;

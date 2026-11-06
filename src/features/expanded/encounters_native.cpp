@@ -180,12 +180,12 @@ uintptr_t post_death_target(uintptr_t target, uintptr_t event, int32_t delay, ui
         char name[512];
         const std::string identity = read_instance_name(target, name) && *name ? name : "#" + std::to_string(identifier);
         if (context.request.rfind("independent/", 0) == 0 && identity.front() == '#') {
-            set_recipe_fault(__func__, "death_target_identity_missing", context.request.c_str(), target); return 0;
+            set_recipe_fault(__func__, __LINE__, "death_target_identity_missing", context.request.c_str(), target); return 0;
         }
         auto& credit = death_action_credits[{context.request, identity}];
         if ((credit.denominator && credit.denominator != context.credit.denominator) ||
             !context.credit.denominator || credit.units > UINT64_MAX - context.credit.numerator) {
-            set_recipe_fault(__func__, "death_credit_invalid", context.request.c_str(), target); return 0;
+            set_recipe_fault(__func__, __LINE__, "death_credit_invalid", context.request.c_str(), target); return 0;
         }
         credit.denominator = context.credit.denominator; credit.units += context.credit.numerator;
         const auto due = credit.units / credit.denominator;
@@ -197,7 +197,7 @@ uintptr_t post_death_target(uintptr_t target, uintptr_t event, int32_t delay, ui
             ++credit.sent;
         }
         return result;
-    } catch (...) { set_recipe_fault(__func__, "exception"); }
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
     return 0;
 }
 
@@ -245,11 +245,11 @@ void death_actions_detour(uintptr_t action, uintptr_t context, uintptr_t state, 
             if (!projection.request.empty()) projection.credit = weight.credit;
             else {
                 projection.request = "invalid"; projection.credit = {0, 1};
-                set_recipe_fault(__func__, "death_request_missing", nullptr, actor);
+                set_recipe_fault(__func__, __LINE__, "death_request_missing", nullptr, actor);
             }
             record_recipe_death(actor);
         }
-    } catch (...) { set_recipe_fault(__func__, "exception"); }
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
     invoke_death_actions(action, context, state, frame, tracked ? &projection : nullptr, admission);
 }
 
@@ -268,7 +268,7 @@ bool cache_remaining(uintptr_t command, uintptr_t record) {
 
 bool try_cache_remaining(uintptr_t command, uintptr_t record) {
     try { return cache_remaining(command, record); }
-    catch (...) { set_recipe_fault(__func__, "exception"); return false; }
+    catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); return false; }
 }
 
 void __fastcall remaining_added_detour(uintptr_t command, uintptr_t record) {
@@ -675,7 +675,7 @@ uint64_t __fastcall remaining_detour(uintptr_t command) {
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> lock(quantity_mutex);
     try { const auto result = remaining_result(command); trace_quantity_wait(command, 'r', result); return result; }
-    catch (...) { set_recipe_fault(__func__, "exception"); return 0; }
+    catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); return 0; }
 }
 
 void initialize_kill(uintptr_t command, uintptr_t manager) {
@@ -861,7 +861,7 @@ uint64_t kill_detour(uintptr_t command) {
                 *reinterpret_cast<const int32_t*>(command + 0xac), progress.seen, stage == 2);
         }
         return result;
-    } catch (...) { set_recipe_fault(__func__, "exception"); return 0; }
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); return 0; }
 }
 
 RemainingWeight health_weight(uintptr_t command, uintptr_t record) {
@@ -979,7 +979,7 @@ uint64_t health_detour(uintptr_t command) {
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> lock(quantity_mutex);
     try { const auto result = health_result(command); trace_quantity_wait(command, 'h', result); return result; }
-    catch (...) { set_recipe_fault(__func__, "exception"); return 0; }
+    catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); return 0; }
 }
 
 uint64_t __fastcall remaining_detour_entry(uintptr_t command) {

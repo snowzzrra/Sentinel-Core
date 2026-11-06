@@ -388,11 +388,17 @@ void client_execution(uint16_t type, const sc_diagnostic_result& execution, Insp
     }
 }
 namespace {
+uint16_t client_revision(uint16_t type) {
+    uint16_t revision = 1;
+    for (size_t i = 0; i < generated::descriptor_count; ++i)
+        if (generated::descriptors[i].id == type) revision = std::max(revision, generated::descriptors[i].revision);
+    return revision;
+}
 bool prepare_client(uint16_t type, uint32_t pid, const sc_native_scope& scope, const sc_diagnostic_request& execution,
         uint64_t cursor, generated::NativeRequest value, const sc_campaign_summary* summary,
         const sc_campaign_rewards* rewards, Inspection& out, generated::submission& input, generated::Bytes& payload) {
     input.reference.scope = {pid, scope.process_created, out.snapshot.instance, scope.lifecycle_generation};
-    input.reference.namespace_id.fill('0'); input.reference.command_type = type; input.reference.payload_revision = 1;
+    input.reference.namespace_id.fill('0'); input.reference.command_type = type; input.reference.payload_revision = client_revision(type);
     input.deadline_ms = execution.deadline_ms ? execution.deadline_ms : 1000;
     std::array<uint8_t,16> nonce{}; std::copy(std::begin(execution.nonce), std::end(execution.nonce), nonce.begin());
     input.reference.command_id = instance_text(nonce) + ":" + std::to_string(execution.request_id);
@@ -402,7 +408,6 @@ bool prepare_client(uint16_t type, uint32_t pid, const sc_native_scope& scope, c
     if (auto* campaign = std::get_if<CampaignRequest>(&value)) {
         if (summary) campaign->summary = *summary;
         if (rewards) campaign->rewards = *rewards;
-        input.reference.payload_revision = 4;
     }
     std::visit([&](const auto& v) {
         using T = std::decay_t<decltype(v)>;

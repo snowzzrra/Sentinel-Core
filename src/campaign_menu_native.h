@@ -20,8 +20,12 @@ sc_campaign_reward mastery_reward(const char* perk);
 void reward_scroll(uintptr_t text);
 void present_campaign_actions(uintptr_t screen, bool entered);
 void pump_campaign(uintptr_t screen, void (*pump)(uintptr_t));
-bool mission_request(uintptr_t request, std::string& destination);
+bool mission_request(uintptr_t request, std::string& destination, uint32_t* stage_id=nullptr);
 bool request_map(uintptr_t request, const std::string& map);
+bool checkpoint_request(uintptr_t request,uint32_t stage_id);
+uint32_t descriptor_stage(uintptr_t descriptor,const std::string& map,uint32_t variant);
+uintptr_t restart_load_request();
+bool restart_mission_request(uintptr_t request,std::string& destination,uint32_t* stage_id=nullptr);
 struct MeterDiagnostics {
     uint64_t update_ticks{0};
     uint64_t update_suppressed{0};
@@ -55,6 +59,7 @@ struct NativeCalls {
     void (*sprite_visibility)(uintptr_t,uint32_t,uint32_t);
     void (*meter_update)(uintptr_t);
     void (*campaign_pump)(uintptr_t);
+    uintptr_t (*find_decl)(uintptr_t,const char*,int);
 };
 void test_calls(const NativeCalls&);
 void test_populate(uintptr_t,uintptr_t);

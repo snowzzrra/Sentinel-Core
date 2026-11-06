@@ -12,6 +12,15 @@ import unittest
 EXE = Path(os.environ.get('SC_BUILD_DIR', Path(__file__).resolve().parents[1] / 'build')) / 'bin/sentinel_campaign_tests.exe'
 
 
+def test_master_level_checkpoint_and_restart_keep_stage_identity(tmp_path):
+    for action, defect in [('create', 'restart_master_postsave'), ('resume', 'restart_master_loaded')]:
+        result = subprocess.run([str(EXE), action, str(tmp_path), '3', defect], capture_output=True, timeout=15)
+        assert result.returncode == 0, (result.stdout + result.stderr).decode(errors='replace')
+    checkpoint, = tmp_path.rglob('campaign.checkpoint')
+    record = checkpoint_text(checkpoint)
+    assert '\nsubtype=6\nstage=7776006\n' in record
+
+
 def checkpoint_text(path):
     records = []
     for pending in path.parent.glob('checkpoint-*.pending'):
@@ -24,6 +33,26 @@ def checkpoint_text(path):
 
 @unittest.skipUnless(os.name == 'nt', 'Windows native contracts')
 class CampaignContinuity(unittest.TestCase):
+    def test_final_death_survives_exit_and_only_confirmed_load_clears_restart(self):
+        for mode in ('restart_pending', 'restart_postsave', 'restart_recovered'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix='sentinel-restart-') as root:
+                self.stage('create', root, 3, mode)
+                pending, = Path(root).rglob('stage.restart.pending')
+                if mode == 'restart_recovered':
+                    head, _, tail = pending.read_bytes().partition(b'\ncheckpoint=')
+                    checkpoint, separator, rest = tail.partition(b'\n')
+                    pending.write_bytes(head + b'\ncheckpoint=' + str(int(checkpoint) + 1).encode() + separator + rest)
+                marker = pending.read_bytes()
+                self.stage('resume', root, 3, 'restart_failed')
+                self.assertEqual(pending.read_bytes().split(b'\ncheckpoint=')[0], marker.split(b'\ncheckpoint=')[0])
+                marker = pending.read_bytes()
+                self.assertFalse(pending.with_name('stage.restart.loaded').exists())
+                pending.with_name('stage.restart.loaded').write_bytes(b'')
+                self.stage('resume', root, 3, 'restart_loaded')
+                self.assertEqual(pending.with_name('stage.restart.loaded').read_bytes(), marker)
+                self.stage('resume', root, 3, 'restart_save')
+                self.stage('resume', root, 3, 'restart_normal')
+
     def test_cross_map_save_and_wup_share_the_admitted_session(self):
         # Stable native ownership regression: the second map must not re-enter
         # NewGame/Continue admission. The fixture exercises the real dispatch,

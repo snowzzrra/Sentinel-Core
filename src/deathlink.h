@@ -51,5 +51,7 @@ void bind_run_state_if_needed(uintptr_t player);
 
 #ifdef SC_NATIVE_TESTING
 void use_fixture(Calls, const char* namespace_id);
+void test_terminal_death();
+char test_extra_life();
 #endif
 }

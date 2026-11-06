@@ -40,7 +40,7 @@
     "framing": {"partial_frame_deadline_ms": 1000, "connection_workers": 4, "outstanding_per_connection": 1, "pipelining": false, "fragmentation": false},
     "v2_bodies": {"submit": ["submission", "typed_payload"], "read": ["read_envelope", "typed_payload"], "command_response": ["command_response", "optional_typed_result"], "read_response": ["scope", "typed_result"], "command_error": ["none", "duplicate_mismatch", "identity_capacity", "unsupported_revision", "not_found", "malformed", "not_terminal", "token_mismatch", "effect_unknown"]}
   },
-  "limits": {"execution_deadline_ms": [1, 5000], "command_id_bytes": [1, 128], "namespace_bytes": 64, "process_namespace": "0000000000000000000000000000000000000000000000000000000000000000", "backup_campaign": [0, 2], "backup_slot": [0, 11], "backup_work_ms": [1, 60000], "weapon_grant": [1, 117], "signed_balance_max": 2147483647, "inventory_weapons_mask": 1023, "inventory_equipment_mask": 31, "capacity_tier": [0, 4], "arsenal_mods_mask": 8191, "arsenal_masteries_mask": 8191, "arsenal_upgrade_mask": 268435455, "runes_normal_mask": 511, "runes_support_mask": 7, "rune_selection": [-1, 8], "special_balance_max": 1000, "campaign_rows": 21, "campaign_challenges": 3, "campaign_rewards": 17, "automap_bits": 576, "automap_words": 9, "combat_maps": 64, "console_text_bytes": 2047},
+  "limits": {"execution_deadline_ms": [1, 5000], "command_id_bytes": [1, 128], "namespace_bytes": 64, "process_namespace": "0000000000000000000000000000000000000000000000000000000000000000", "backup_campaign": [0, 2], "backup_slot": [0, 11], "backup_work_ms": [1, 60000], "weapon_grant": [1, 117], "signed_balance_max": 2147483647, "inventory_weapons_mask": 1023, "inventory_equipment_mask": 31, "capacity_tier": [0, 4], "arsenal_mods_mask": 8191, "arsenal_masteries_mask": 8191, "arsenal_upgrade_mask": 268435455, "runes_normal_mask": 511, "runes_support_mask": 7, "rune_selection": [-1, 8], "special_balance_max": 1000, "campaign_rows": 27, "campaign_challenges": 3, "campaign_rewards": 17, "automap_bits": 5056, "automap_words": 79, "combat_maps": 64, "console_text_bytes": 2047},
   "identity": {"owner": "caller_durably_before_transmission", "key": ["instance_id", "command_id"], "immutable": ["command_type", "payload_revision", "namespace", "pid", "process_created", "instance_id", "generation", "save_binding", "execution_deadline", "payload"], "fingerprint": "sha256_canonical_immutable_submission", "excluded": ["correlation_id", "arrival_timestamp"], "same_fingerprint": "return_existing_state", "different_fingerprint": "duplicate_mismatch_preserve_existing", "restart": "effect_unknown_no_cross_process_exactly_once"},
   "retention": {
     "execution_slots": 8,
@@ -889,6 +889,14 @@
         {"name": "checked_locations", "type": "u64", "count": 9}
       ]
     },
+    {
+      "name": "automap_publish_arena_payload",
+      "fields": [
+        {"name": "known", "type": "u32", "max": 1},
+        {"name": "revision", "type": "u64"},
+        {"name": "checked_locations", "type": "u64", "count": 79}
+      ]
+    },
     {"name": "automap_observe_payload", "fields": []},
     {
       "name": "command_activate_payload",
@@ -1223,6 +1231,29 @@
         {"name": "count", "type": "u32", "min": 1, "max": 21},
         {"name": "selected_id", "type": "u32"}
       ]
+    },
+    {
+      "name": "campaign_row_stage_payload",
+      "fields": [
+        {"name": "revision", "type": "u64"},
+        {"name": "index", "type": "u32", "max": 26},
+        {"name": "count", "type": "u32", "min": 1, "max": 27},
+        {"name": "row", "type": "sc_campaign_row"},
+        {"name": "summary", "type": "sc_campaign_summary"},
+        {"name": "rewards_known", "type": "u32", "enum": [0, 1]},
+        {"name": "rewards", "type": "campaign_reward", "max_count": 17}
+      ],
+      "constraints": [
+        {"kind": "uniqueness", "field": "rewards", "keys": ["location_id", "unlockable"]}
+      ]
+    },
+    {
+      "name": "campaign_commit_stage_payload",
+      "fields": [
+        {"name": "revision", "type": "u64"},
+        {"name": "count", "type": "u32", "min": 1, "max": 27},
+        {"name": "selected_id", "type": "u32"}
+      ]
     }
   ],
   "commands": [
@@ -1486,12 +1517,12 @@
     {
       "id": 22,
       "name": "campaign_row",
-      "payload_revisions": [1, 2, 3, 4],
+      "payload_revisions": [1, 2, 3, 4, 5],
       "operations": ["ack", "cancel", "query", "submit"],
       "payload": {
         "tag_type": "u32",
         "variants": [
-          {"tag": 0, "name": "campaign_row", "type": "campaign_row_known_rewards_payload", "operation": "submit", "admission": "S", "effect": "accepted_publication", "execution": "publication", "availability": "campaign_row"}
+          {"tag": 0, "name": "campaign_row", "type": "campaign_row_stage_payload", "operation": "submit", "admission": "S", "effect": "accepted_publication", "execution": "publication", "availability": "campaign_row"}
         ]
       },
       "result": "sc_campaign_result",
@@ -1504,18 +1535,19 @@
         {"revision": 1, "payload_variants": ["campaign_row_base_payload"]},
         {"revision": 2, "payload_variants": ["campaign_row_presentation_payload"]},
         {"revision": 3, "payload_variants": ["campaign_row_campaign_row_payload"]},
-        {"revision": 4, "payload_variants": ["campaign_row_known_rewards_payload"]}
+        {"revision": 4, "payload_variants": ["campaign_row_known_rewards_payload"]},
+        {"revision": 5, "payload_variants": ["campaign_row_stage_payload"]}
       ]
     },
     {
       "id": 23,
       "name": "campaign_commit",
-      "payload_revisions": [1, 2, 3, 4],
+      "payload_revisions": [1, 2, 3, 4, 5],
       "operations": ["ack", "cancel", "query", "submit"],
       "payload": {
         "tag_type": "u32",
         "variants": [
-          {"tag": 0, "name": "campaign_commit", "type": "campaign_commit_selection_payload", "operation": "submit", "admission": "S", "effect": "accepted_publication", "execution": "publication", "availability": "campaign_commit"}
+          {"tag": 0, "name": "campaign_commit", "type": "campaign_commit_stage_payload", "operation": "submit", "admission": "S", "effect": "accepted_publication", "execution": "publication", "availability": "campaign_commit"}
         ]
       },
       "result": "sc_campaign_result",
@@ -1528,13 +1560,14 @@
         {"revision": 1, "payload_variants": ["campaign_commit_campaign_commit_payload"]},
         {"revision": 2, "payload_variants": ["campaign_commit_campaign_commit_payload"]},
         {"revision": 3, "payload_variants": ["campaign_commit_campaign_commit_payload"]},
-        {"revision": 4, "payload_variants": ["campaign_commit_selection_payload"]}
+        {"revision": 4, "payload_variants": ["campaign_commit_selection_payload"]},
+        {"revision": 5, "payload_variants": ["campaign_commit_stage_payload"]}
       ]
     },
     {
       "id": 24,
       "name": "campaign",
-      "payload_revisions": [1, 2, 3, 4],
+      "payload_revisions": [1, 2, 3, 4, 5],
       "operations": ["read"],
       "payload": {
         "tag_type": "u32",
@@ -1552,7 +1585,8 @@
         {"revision": 1, "payload_variants": ["campaign_campaign_payload"]},
         {"revision": 2, "payload_variants": ["campaign_campaign_payload"]},
         {"revision": 3, "payload_variants": ["campaign_campaign_payload"]},
-        {"revision": 4, "payload_variants": ["campaign_campaign_payload"]}
+        {"revision": 4, "payload_variants": ["campaign_campaign_payload"]},
+        {"revision": 5, "payload_variants": ["campaign_campaign_payload"]}
       ]
     },
     {
@@ -1684,12 +1718,12 @@
     {
       "id": 45,
       "name": "automap",
-      "payload_revisions": [1],
+      "payload_revisions": [1, 2],
       "operations": ["ack", "cancel", "query", "read", "submit"],
       "payload": {
         "tag_type": "u32",
         "variants": [
-          {"tag": 1, "name": "publish", "type": "automap_publish_payload", "operation": "submit", "admission": "S", "effect": "accepted_publication", "execution": "publication", "availability": "automap"},
+          {"tag": 1, "name": "publish", "type": "automap_publish_arena_payload", "operation": "submit", "admission": "S", "effect": "accepted_publication", "execution": "publication", "availability": "automap"},
           {"tag": 2, "name": "observe", "type": "automap_observe_payload", "operation": "read", "admission": "S", "effect": "observation", "execution": "snapshot", "availability": "automap"}
         ]
       },
@@ -1700,7 +1734,8 @@
       "evidence": "accepted_publication",
       "ack": "terminal_consumed",
       "revision_types": [
-        {"revision": 1, "payload_variants": ["automap_publish_payload", "automap_observe_payload"]}
+        {"revision": 1, "payload_variants": ["automap_publish_payload", "automap_observe_payload"]},
+        {"revision": 2, "payload_variants": ["automap_publish_arena_payload", "automap_observe_payload"]}
       ]
     },
     {
@@ -1993,7 +2028,7 @@
         {"member": "kind", "type": "u32"},
         {"member": "known", "type": "u32"},
         {"member": "revision", "type": "u64"},
-        {"member": "checked_locations", "type": "u64", "count": 9}
+        {"member": "checked_locations", "type": "u64", "count": 79}
       ]
     },
     {

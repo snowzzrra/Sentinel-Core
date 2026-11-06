@@ -119,10 +119,10 @@ sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r
                         for (const auto& reward:staged_.rewards[i]) {
                             if (reward.kind!=SC_REWARD_ENCOUNTER || !reward.checked) continue;
                             for (uint32_t j=0;j<committed_.count;++j)
-                                if (!std::strcmp(staged_.rows[i].map,committed_.rows[j].map))
+                                if (staged_.rows[i].id==committed_.rows[j].id)
                                     for (const auto& previous:committed_.rewards[j])
                                         if (previous.location_id==reward.location_id && previous.kind==reward.kind && !previous.checked)
-                                            encounter_edges_[staged_.rows[i].map]={GetTickCount64(),reward};
+                                            encounter_edges_[staged_.rows[i].id]={GetTickCount64(),reward};
                         }
                     staged_.focus_id=r.row.id; committed_=staged_; access_.clear(); pending_access_=0;
                 }
@@ -141,23 +141,24 @@ sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r
     return out;
 }
 Projection Menu::projection() { std::lock_guard<std::mutex> guard(mutex_); return committed_; }
-bool Menu::summary(const std::string& map,const std::string& namespace_id,sc_campaign_summary& out,uint64_t* revision) {
+uint32_t Menu::loaded_id() { std::lock_guard<std::mutex> guard(mutex_); return loaded_; }
+bool Menu::summary(uint32_t stage_id,const std::string& namespace_id,sc_campaign_summary& out,uint64_t* revision) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (revision) *revision=committed_.revision;
     if (committed_.namespace_id!=namespace_id) return false;
     for (uint32_t i=0;i<committed_.count;++i)
-        if (map==committed_.rows[i].map && (committed_.rows[i].flags&SC_CAMPAIGN_REVEALED)) {
+        if (stage_id==committed_.rows[i].id && (committed_.rows[i].flags&SC_CAMPAIGN_REVEALED)) {
             out=committed_.summaries[i]; return true;
         }
     return false;
 }
-bool Menu::encounter_reward(const std::string& map,const std::string& namespace_id,uint64_t since,sc_campaign_reward& out) {
+bool Menu::encounter_reward(uint32_t stage_id,const std::string& namespace_id,uint64_t since,sc_campaign_reward& out) {
     std::lock_guard<std::mutex> guard(mutex_);
-    const auto found=encounter_edges_.find(map);
+    const auto found=encounter_edges_.find(stage_id);
     if (committed_.namespace_id!=namespace_id) return false;
     if (found!=encounter_edges_.end() && found->second.first+2000>=since) { out=found->second.second; return true; }
     for (uint32_t i=0;i<committed_.count;++i)
-        if (map==committed_.rows[i].map)
+        if (stage_id==committed_.rows[i].id)
             for (const auto& entry:committed_.rewards[i])
                 if (entry.kind==SC_REWARD_ENCOUNTER) { out={}; return true; }
     return false;
@@ -181,8 +182,19 @@ void Menu::selected(uint32_t id) {
 uint32_t Menu::focus_id() {
     std::lock_guard<std::mutex> guard(mutex_); return selected_ ? selected_ : committed_.focus_id;
 }
-void Menu::loaded(const char* map) {
+void Menu::loaded(const char* map,uint32_t stage_id) {
     std::lock_guard<std::mutex> guard(mutex_); loaded_=0;
+    if (stage_id) {
+        for (uint32_t i=0;i<committed_.count;++i)
+            if (committed_.rows[i].id==stage_id && !std::strcmp(committed_.rows[i].map,map)) {
+                loaded_=stage_id; return;
+            }
+        return;
+    }
+    for (uint32_t i=0;i<committed_.count;++i)
+        if (committed_.rows[i].id==selected_ && !std::strcmp(committed_.rows[i].map,map)) {
+            loaded_=selected_; return;
+        }
     for (uint32_t i=0;i<committed_.count;++i)
         if (!std::strcmp(committed_.rows[i].map,map)) { loaded_=committed_.rows[i].id; break; }
 }

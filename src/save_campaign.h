@@ -26,6 +26,10 @@ struct ParserObservation {
     bool directory_read=false, prefix_read=false, native_completion=false, exact_resume=false;
 };
 struct CampaignSnapshot {
+    uint64_t restart_sequence=0;
+    uint32_t restart_status=0, restart_stage_id=0;
+    std::string restart_map, restart_reason;
+    bool restart_pending=false, restart_enabled=false;
     ParserObservation parser_observation;
     bool enabled = false, resumed = false, source_verified = false, parser_completed = false;
     bool native_saved = false, readback_verified = false, continuity_persisted = false, map_active = false, native_factory_matched = false;
@@ -36,6 +40,7 @@ struct CampaignSnapshot {
     uint64_t failure_at_ms=0;
     bool save_ready=false;
     uint32_t native_subtype=1;
+    uint32_t stage_id=0;
     bool archive_complete=false;
     uint64_t archive_bytes=0, archive_copy_us=0;
 };
@@ -48,10 +53,14 @@ public:
     bool refresh_checkpoint();
     bool enabled() const;
     bool begin_create(bool clean_native_history, const std::string& slot, int32_t index, bool prospective);
-    bool begin_resume(const std::string& mission_destination = {});
+    bool begin_resume(const std::string& mission_destination = {}, uint32_t stage_id=0, uint32_t variant=2);
     bool prepare_menu_save(const CampaignTransition&);
     void cancel_menu_save();
     bool restoring_mission_checkpoint() const;
+    bool final_death(uint32_t stage_id);
+    bool begin_restart();
+    void restart_failed(const char* reason);
+    void restart_tick(uint64_t now);
     bool start_internal(uint32_t difficulty, bool extra_life);
     bool allow_difficulty(uint32_t difficulty);
     bool allow_access(uintptr_t data, const std::string& directory, bool write, bool erase);
@@ -63,7 +72,7 @@ public:
     bool parser_enter(uintptr_t data, bool metadata_only = false);
     void observe_parser(ParserObservation, bool metadata_only = false);
     void parser_leave(uint32_t result, bool metadata_only = false);
-    bool map_begin(std::string map, uint64_t generation, uint64_t event_id=0, uint32_t native_subtype=1);
+    bool map_begin(std::string map, uint64_t generation, uint64_t event_id=0, uint32_t native_subtype=1, uint32_t stage_id=0);
     bool menu_begin();
     void map_end(const CampaignTransition&);
     bool checkpoint_ready(const CampaignTransition&);
@@ -71,6 +80,13 @@ public:
     CampaignSnapshot snapshot() const;
     bool backup_continuity(const SdkWriteObservation&, storage::TransportMetadata&) const;
 private:
+    bool admit_generation(uint64_t generation,bool mission_launch,bool continuing);
+    bool admit_resume_map(const std::string& map,bool continuing,uint32_t stage_id,uint32_t native_subtype);
+    bool read_restart();
+    bool confirm_restart();
+    bool persist_restart();
+    bool resume_slot_matches();
+    bool resume_source_available() const;
     bool configure_resume(std::string record, storage::Result);
     void observe_receipt(const sc_save_write_snapshot&, uint64_t operation, bool terminal, bool successful);
     enum class MenuSaveSource { none, cold_catalog, persisted_gameplay, active_fortress };
@@ -98,5 +114,9 @@ private:
     uint64_t menu_save_generation_ = 0;
     bool contract_created_ = false, checkpoint_exists_ = false, initiated_ = false, map_pending_ = false;
     std::optional<SdkWriteObservation> checkpoint_awaiting_transition_;
+    std::string restart_record_;
+    uint64_t restart_checkpoint_=0;
+    bool restart_loading_=false;
+    uint64_t restart_deadline_=0;
 };
 }

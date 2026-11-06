@@ -296,10 +296,14 @@ void load_game(uintptr_t self,uintptr_t request) {
     }
     if (self!=root) session().btrace.record(BStage::resume,BStatus::refused,"native_load_root_mismatch",0,{{"root_equal",false}},request);
     std::string destination;
-    if (!campaign_menu::mission_request(request,destination)) {
+    uint32_t stage_id=0,variant=2;
+    const bool restart=session().campaign_run.snapshot().restart_pending;
+    const auto select=restart?campaign_menu::restart_mission_request:campaign_menu::mission_request;
+    if (!select(request,destination,&stage_id) || !read(request,0x98,variant)) {
         session().campaign_run.refuse("native_mission_request_not_selected",BStage::resume); return;
     }
-    if (self!=root || !session().campaign_run.begin_resume(destination)) return;
+    if (session().campaign_run.snapshot().restart_pending && !session().campaign_run.begin_restart()) return;
+    if (self!=root || !session().campaign_run.begin_resume(destination,stage_id,variant)) return;
     set_difficulty();
     session().btrace.record(BStage::resume,BStatus::entered,"native_load_game_call",0,{{"root_equal",true}},request);
     original_load(self,request);
@@ -325,7 +329,7 @@ bool restore_mission_spawn(uintptr_t prepared,uintptr_t request) {
     uintptr_t map=0,table=0,serializer=0;
     if (!prepared || !spawn_read || !spawn_serialize || !read(root,0x50,map) ||
         !read(map,0,table) || table!=image+0x2ab30c8 || !read(map,0xae5e0,serializer) || !serializer) return false;
-    const std::string key_text="missionSelectSpawnInfo_"+checkpoint.map;
+    const std::string key_text=checkpoint.native_subtype==6?"masterLevel":"missionSelectSpawnInfo_"+checkpoint.map;
     NativeString key{};
     if (!read(request,0,key.vtable)) return false;
     key.data=const_cast<char*>(key_text.c_str()); key.length=static_cast<int32_t>(key_text.size());
@@ -339,8 +343,24 @@ bool restore_mission_spawn(uintptr_t prepared,uintptr_t request) {
     session().btrace.record(BStage::parser,same?BStatus::succeeded:BStatus::refused,"native_mission_checkpoint_restore",0,
         {{"restored",restored},{"map_equal",same},{"subtype",checkpoint.native_subtype},{"checkpoint_name_bytes",checkpoint_name.size()}});
     if (!same) return false;
-    *reinterpret_cast<uint32_t*>(prepared+0x19c0)=2;
+    *reinterpret_cast<uint32_t*>(prepared+0x19c0)=checkpoint.native_subtype;
     return true;
+}
+bool prepare_checkpoint_request(uintptr_t request) {
+    const auto checkpoint=session().campaign_run.snapshot();
+    if (!assign_request_map(request,checkpoint.map)) {
+        session().campaign_run.refuse("native_resume_request_map_failed",BStage::parser); return false;
+    }
+    if (checkpoint.native_subtype==6) {
+        if (!campaign_menu::checkpoint_request(request,checkpoint.stage_id)) {
+            session().campaign_run.refuse("native_master_entry_missing",BStage::parser); return false;
+        }
+    } else *reinterpret_cast<uint32_t*>(request+0x98)=2;
+    return true;
+}
+bool restore_enemies(uint64_t result,bool metadata_only) {
+    const auto campaign=session().campaign_run.snapshot();
+    return !result && !metadata_only && !campaign.restart_pending && campaign.native_subtype!=6 && expanded::recipe_checkpoint_enabled();
 }
 uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uintptr_t prepared,uintptr_t request) {
     uintptr_t object=0; const bool reference_valid=data && read(data->control,8,object);
@@ -372,19 +392,12 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
     session().btrace.record(BStage::parser,BStatus::entered,"native_parser_call",0,
         {{"reference_valid",reference_valid},{"files_present",files!=0},{"prepared_present",prepared!=0},{"request_present",request!=0}},object);
     const bool mission_checkpoint=!metadata_only && session().campaign_run.restoring_mission_checkpoint();
-    if (mission_checkpoint && !assign_request_map(request,session().campaign_run.snapshot().map)) {
-        parser_release(data); session().campaign_run.refuse("native_resume_request_map_failed",BStage::parser); return 0x10;
-    }
-    // Subtype2 prepares the correct map/resource path and clears requested layers.
-    // It deliberately skips campaignSpawnInfo; restore the persisted mission
-    // descriptor below, after the parser's fresh-entry checkpoint initialization.
-    // Merely changing subtype would restart the mission and lose its checkpoint.
-    if (mission_checkpoint) *reinterpret_cast<uint32_t*>(request+0x98)=2;
+    if (mission_checkpoint && !prepare_checkpoint_request(request)) { parser_release(data); return 0x10; }
     auto result=original_parse(data,files,prepared,request);
     if (!result && mission_checkpoint && !restore_mission_spawn(prepared,request)) {
         session().campaign_run.refuse("native_mission_checkpoint_missing",BStage::parser); result=0x10;
     }
-    if (!result && !metadata_only && expanded::recipe_checkpoint_enabled()) {
+    if (restore_enemies(result,metadata_only)) {
         const auto checkpoint=session().campaign_run.snapshot();
         if (checkpoint.resumed && (checkpoint.native_subtype==1 || mission_checkpoint)) {
             uintptr_t map=0,table=0,serializer=0;
@@ -473,6 +486,16 @@ void devmenu_command_entry(uintptr_t arguments) {
     }
 }
 }
+bool admit_stage_descriptor(uintptr_t descriptor,const std::string& map,uint32_t& subtype,uint32_t& stage_id) {
+    if (!read(descriptor,0x19c0,subtype) || (subtype!=1 && subtype!=2 && subtype!=6)) {
+        session().campaign_run.refuse("native_checkpoint_subtype_unsupported",BStage::transition); return false;
+    }
+    stage_id=campaign_menu::descriptor_stage(descriptor,map,subtype);
+    if (subtype==6 && !stage_id) {
+        session().campaign_run.refuse("native_master_descriptor_mismatch",BStage::transition); return false;
+    }
+    return true;
+}
 bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransition& transition) {
     if (!session().campaign_run.enabled()) return true;
     session().btrace.record(BStage::transition,BStatus::entered,"native_transition_enter",0,
@@ -511,11 +534,9 @@ bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransitio
     if (!campaign.resumed && campaign.phase=="native_start_queued" && map!="game/hub/hub") {
         session().campaign_run.refuse("native_bootstrap_source_unexpected",BStage::transition); return false;
     }
-    uint32_t subtype=0;
-    if (!read(descriptor,0x19c0,subtype) || (subtype!=1 && subtype!=2)) {
-        session().campaign_run.refuse("native_checkpoint_subtype_unsupported",BStage::transition); return false;
-    }
-    transition.campaign=session().campaign_run.map_begin(map,transition.generation_before,transition.event_id,subtype);
+    uint32_t subtype=0,stage_id=0;
+    if (!admit_stage_descriptor(descriptor,map,subtype,stage_id)) return false;
+    transition.campaign=session().campaign_run.map_begin(map,transition.generation_before,transition.event_id,subtype,stage_id);
     const auto& namespace_id=session().namespace_id();
     fast_travel::entry_policy().bind(namespace_id.c_str(),map.c_str(),transition.generation_before,transition.campaign);
     if (transition.campaign) session().btrace.record(BStage::transition,BStatus::entered,"native_gameplay_transition_call",0,
@@ -544,7 +565,7 @@ void campaign_change_end(CampaignTransition& transition) {
     prior_campaign=true; map_facts(transition);
     session().campaign_run.map_end(transition);
     const auto observed=session().campaign_run.snapshot();
-    if (observed.map_active) campaign_menu::menu().loaded(observed.map.c_str());
+    if (observed.map_active) campaign_menu::menu().loaded(observed.map.c_str(),observed.stage_id);
 }
 void campaign_checkpoint_boundary(CampaignTransition transition) {
     if (!session().campaign_run.enabled()) return;
@@ -581,6 +602,21 @@ SaveFuture** campaign_write_provider(uintptr_t caller, engine::Memory& source_me
         {{"caller_equal",checkpoint},{"result_present",result!=nullptr},{"result_out_equal",result==out},
          {"session_state",session().state()},{"session_fault",session().fault()}},reinterpret_cast<uintptr_t>(data));
     return result;
+}
+bool restart_checkpoint_reload() {
+    if (!session().campaign_run.snapshot().restart_pending) return false;
+    const auto request=campaign_menu::restart_load_request();
+    if (!request) session().campaign_run.restart_failed("restart_mission_entry_unavailable");
+    else {
+        uintptr_t map=0,info=0;
+        if (!read(root,0x50,map) || !read(map,0x19d8,info) || !info)
+            session().campaign_run.restart_failed("restart_campaign_info_unavailable");
+        else {
+            *reinterpret_cast<uintptr_t*>(request+0xa0)=info;
+            load_game(root,request);
+        }
+    }
+    return true;
 }
 std::array<native::Target,14> campaign_targets(uintptr_t base) {
     const auto& rvas = builds::steam_20260818().campaign_save_rvas;

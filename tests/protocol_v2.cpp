@@ -243,9 +243,10 @@ void transient_model() {
     CHECK(reply.execution.state == SC_DIAGNOSTIC_EXECUTED && queue.identity_count() == 0 && !queue.claim(104));
     CHECK(std::get<::sc_weapon_points_result>(reply.value).execution.state == SC_DIAGNOSTIC_EXECUTED);
 }
-template<class Native, class Payload> Native converted(V2Connection& connection, uint16_t id, generated::Operation operation, const Payload& payload) {
+template<class Native, class Payload> Native converted(V2Connection& connection, uint16_t id, generated::Operation operation, const Payload& payload, uint16_t revision = 1) {
     auto envelope = submission(connection, "adapter"); envelope.reference.command_type = id;
-    const auto* descriptor = registry::descriptor(id, 1); CHECK(descriptor);
+    envelope.reference.payload_revision = revision;
+    const auto* descriptor = registry::descriptor(id, revision); CHECK(descriptor);
     generated::NativeRequest native;
     CHECK(v2::native_payload(*descriptor, encode(payload), envelope, native, operation));
     return std::get<Native>(native);
@@ -261,6 +262,14 @@ void adapters(V2Connection& c) {
     CHECK(converted<::sc_special_request>(c, 37, submit, generated::special_payload{generated::special_refill_execute_payload{17,1}}).refill_request_id == 17);
     CHECK(converted<::sc_deathlink_request>(c, 41, submit, generated::deathlink_payload{generated::deathlink_ack_local_payload{17}}).ack_sequence == 17);
     CHECK(converted<::sc_automap_request>(c, 45, read, generated::automap_payload{generated::automap_observe_payload{}}).kind == SC_AUTOMAP_OBSERVE);
+    generated::automap_publish_payload legacy{1, 7, {1}};
+    const auto legacy_request = converted<::sc_automap_request>(c, 45, submit, generated::automap_payload_revision1{legacy});
+    CHECK(legacy_request.checked_locations[0] == 1 && legacy_request.checked_locations[78] == 0);
+    generated::automap_publish_arena_payload arenas{}; arenas.known = 1; arenas.revision = 8;
+    const auto arena_bit = 7774901u - SC_AUTOMAP_LOCATION_BASE;
+    arenas.checked_locations[arena_bit/64] = uint64_t{1} << (arena_bit%64);
+    const auto arena_request = converted<::sc_automap_request>(c, 45, submit, generated::automap_payload{arenas}, 2);
+    CHECK(arena_request.revision == 8 && arena_request.checked_locations[arena_bit/64] == arenas.checked_locations[arena_bit/64]);
     CHECK(commands::valid(converted<::sc_command_request>(c, 46, submit, generated::command_payload{generated::command_echo_payload{"fixture"}})));
     CHECK(commands::process_scoped(converted<::sc_command_request>(c, 52, submit, generated::support_dump_payload{generated::support_dump_support_dump_payload{}})));
 }

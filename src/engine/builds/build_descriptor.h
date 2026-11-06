@@ -47,11 +47,12 @@ struct SpecialLayout {
 };
 struct BuildDescriptor {
     static const SpecialLayout special;
+    static const uint32_t mapload_registry;
     static const std::array<Site,15> arsenal;
     static const std::array<Site,8> weapon_points;
     static const std::array<Site,27> controls;
     static const std::array<Site,3> combat;
-    static const std::array<Site,9> deathlink;
+    static const std::array<Site,10> deathlink;
     static const std::array<HandsSite,6> hands;
     static const std::array<OffsetSite,12> special_required;
     static const std::array<OffsetSite,3> special_upgrade;

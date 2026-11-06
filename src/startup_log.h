@@ -2,6 +2,8 @@
 #include "sentinel_inspection.h"
 namespace sentinel::startup_log {
 uint32_t darklord(const char* line) noexcept;
+uint32_t recipe_fault(const char* line) noexcept;
+uint32_t encounter_recovery(const char* line) noexcept;
 // Diagnostic observer only, never DllMain or a hook callback. History rotates
 // at 1 MiB (current + previous); Special events drain by sequence.
 void record(const Snapshot&, uint32_t engine_reason = 0) noexcept;

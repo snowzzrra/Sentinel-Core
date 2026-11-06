@@ -214,11 +214,19 @@ NativeRequest backup(const Bytes& bytes, const submission& input) {
     out.campaign = v.campaign; out.slot = v.slot; out.work_deadline_ms = v.work_deadline_ms; return out;
 }
 NativeRequest automap(const Bytes& bytes, const submission& input) {
-    automap_payload payload; decode(bytes, payload);
     auto out = request<::sc_automap_request>(input, number(bytes, 0, 4));
-    if (const auto* v = std::get_if<automap_publish_payload>(&payload)) {
-        out.known = v->known; out.revision = v->revision;
-        std::copy(v->checked_locations.begin(), v->checked_locations.end(), out.checked_locations);
+    const auto copy = [&](const auto& value) {
+        if constexpr (!std::is_same_v<std::decay_t<decltype(value)>, automap_observe_payload>) {
+            out.known = value.known; out.revision = value.revision;
+            std::copy(value.checked_locations.begin(), value.checked_locations.end(), out.checked_locations);
+        }
+    };
+    if (input.reference.payload_revision == 1) {
+        automap_payload_revision1 payload; decode(bytes, payload);
+        std::visit(copy, payload);
+    } else {
+        automap_payload payload; decode(bytes, payload);
+        std::visit(copy, payload);
     }
     return out;
 }

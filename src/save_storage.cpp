@@ -512,6 +512,20 @@ Result random_suffix(std::wstring& output) {
 }
 } // namespace
 
+namespace {
+bool restart_option(std::string_view& text,CampaignOptions& options) {
+    if (text.substr(0,13)!="death_policy=") return true;
+    std::string_view value;
+    if (!line(text,"death_policy=",value) || value!="restart_stage" || options.difficulty!=3) return false;
+    options.restart_stage=true; return true;
+}
+bool intent_option(std::string_view& text,CampaignOptions& options) {
+    std::string_view value;
+    if (!line(text,"intent=",value) || (value!="create" && value!="resume" && value!="recover")) return false;
+    options.intent=value=="create"?CampaignIntent::create:value=="resume"?CampaignIntent::resume:CampaignIntent::recover;
+    return true;
+}
+}
 bool Result::ok() const {
     return outcome == Outcome::ok || outcome == Outcome::storage_prepared ||
         outcome == Outcome::storage_reopened || outcome == Outcome::offline_backup_complete ||
@@ -552,8 +566,8 @@ Result parse_descriptor(std::string_view text, Descriptor& descriptor) {
             !line(text, "difficulty=", value) || value.size() != 1 || value[0] < '0' || value[0] > '3')
             return {Outcome::invalid_descriptor};
         parsed.campaign.difficulty = static_cast<uint32_t>(value[0] - '0');
-        if (!line(text, "intent=", value) || (value != "create" && value != "resume" && value != "recover")) return {Outcome::invalid_descriptor};
-        parsed.campaign.intent = value == "create" ? CampaignIntent::create : value == "resume" ? CampaignIntent::resume : CampaignIntent::recover;
+        if (!restart_option(text,parsed.campaign)) return {Outcome::invalid_descriptor};
+        if (!intent_option(text,parsed.campaign)) return {Outcome::invalid_descriptor};
         if (parsed.campaign.intent == CampaignIntent::recover) {
             if (!line(text, "backup=", value) || value.empty() || value.size() > 128 ||
                 value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") != value.npos)
@@ -613,6 +627,24 @@ Result Namespace::recovery_record(bool complete, std::string& text) const {
     const auto path = impl_->lease.metadata.path + (complete ? L"\\recovery.complete" : L"\\recovery.pending");
     auto result = open_file(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, file);
     return result.ok() ? read_metadata(file.value, text, 32768) : result;
+}
+Result Namespace::restart_record(bool confirmed, std::string& text) const {
+    text.clear(); Handle file;
+    const auto path=metadata().path+(confirmed?L"\\stage.restart.loaded":L"\\stage.restart.pending");
+    const auto result=open_file(path,GENERIC_READ,FILE_SHARE_READ,OPEN_EXISTING,file);
+    return result.ok()?read_metadata(file.value,text,2048):result;
+}
+Result Namespace::publish_restart_record(bool confirmed,std::string_view text) {
+    if (text.empty() || text.size()>2048) return {Outcome::invalid_descriptor};
+    Handle file;
+    const auto path=metadata().path+(confirmed?L"\\stage.restart.loaded":L"\\stage.restart.pending");
+    auto result=open_file(path,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ,OPEN_ALWAYS,file);
+    if (!result.ok()) return result;
+    result=write_bytes(file.value,text.data(),static_cast<DWORD>(text.size()));
+    if (!result.ok()) return result;
+    if (!SetEndOfFile(file.value) || !FlushFileBuffers(file.value)) return io_error();
+    std::string actual; result=read_metadata(file.value,actual,2048);
+    return result.ok() && actual!=text?Result{Outcome::payload_mismatch}:result;
 }
 Result Namespace::publish_recovery_record(bool complete, std::string_view text, bool replace) {
     if (text.empty() || text.size() > 32768) return {Outcome::invalid_descriptor};
@@ -971,17 +1003,28 @@ Result parse_checkpoint_files(std::string_view& text, uint64_t count, std::strin
     }
     return {};
 }
+bool checkpoint_stage(std::string_view& text,CheckpointRecord& record) {
+    std::string_view part;
+    uint64_t subtype=1;
+    if (text.substr(0, 8) == "subtype=") {
+        if (!line(text, "subtype=", part) || !number64(part, subtype) || (subtype != 1 && subtype != 2 && subtype != 6)) return false;
+    }
+    record.subtype = static_cast<uint32_t>(subtype);
+    if (text.substr(0, 6) == "stage=") {
+        uint64_t stage=0;
+        if (!line(text,"stage=",part) || !number64(part,stage) || stage>UINT32_MAX) return false;
+        record.stage_id=static_cast<uint32_t>(stage);
+    }
+    if (subtype==6 && !record.stage_id) return false;
+    return true;
+}
 bool checkpoint_header(std::string_view& text, CheckpointRecord& record, uint64_t& count) {
     std::string_view part;
-    uint64_t subtype = 1;
     if (!line(text, "checkpoint=", part) || !number64(part, record.number) || !record.number ||
         !line(text, "map=", part) || !transport_name(part))
         return false;
     record.map = part;
-    if (text.substr(0, 8) == "subtype=") {
-        if (!line(text, "subtype=", part) || !number64(part, subtype) || (subtype != 1 && subtype != 2)) return false;
-    }
-    record.subtype = static_cast<uint32_t>(subtype);
+    if (!checkpoint_stage(text,record)) return false;
     if (!line(text, "files=", part) || !number64(part, count) || !count || count > 64) return false;
     return true;
 }
@@ -1003,7 +1046,8 @@ Result parse_checkpoint(std::string_view text, std::string_view contract, std::s
 std::string checkpoint_contract(const Descriptor& descriptor, const std::string& id) {
     return "sentinel-campaign-v2\nnamespace=" + id + "\ngeneration=" +
         descriptor.identity.generation_fingerprint + "\nprovenance=synthetic-fixture\ncampaign=unified\nstarting_stage=hub\ndifficulty=" +
-        std::to_string(descriptor.campaign.difficulty) + "\nslot=AUTOSAVE0\n";
+        std::to_string(descriptor.campaign.difficulty) + "\n" +
+        (descriptor.campaign.restart_stage?"death_policy=restart_stage\n":"") + "slot=AUTOSAVE0\n";
 }
 const char* checkpoint_state_name(CheckpointState state) {
     switch (state) {

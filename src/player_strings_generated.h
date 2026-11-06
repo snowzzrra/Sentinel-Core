@@ -36,6 +36,7 @@ inline constexpr char menu_recovery_no_active[] = "No active encounter";
 inline constexpr char menu_recovery_pending[] = "Encounter recovery in progress";
 inline constexpr char menu_recovery_unknown[] = "Recovery outcome unknown";
 inline constexpr char menu_recovery_unsupported[] = "Unsupported encounter";
+inline constexpr char menu_restart_stage[] = "RESTART LEVEL";
 inline constexpr char menu_resume_checkpoint[] = "RESUME CHECKPOINT";
 inline constexpr char menu_return_to_fortress[] = "RETURN TO FORTRESS";
 inline constexpr char menu_reward_category[] = "ARCHIPELAGO";

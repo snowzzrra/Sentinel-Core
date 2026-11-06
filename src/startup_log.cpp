@@ -234,13 +234,14 @@ void open(const Snapshot& core) {
     if(file==INVALID_HANDLE_VALUE) history_error=GetLastError();
 }
 }
-uint32_t darklord(const char* line) noexcept {
+uint32_t append_telemetry(const char* line, const wchar_t* suffix) noexcept {
     AcquireSRWLockExclusive(&darklord_guard);
     DWORD error = ERROR_PATH_NOT_FOUND;
     try {
         if (!darklord_path.empty()) {
             const std::string record = std::string(line) + darklord_identity + '\n';
-            const auto output = CreateFileW(darklord_path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+            const auto path = darklord_path.substr(0, darklord_path.size() - 13) + suffix;
+            const auto output = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
                 OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (output != INVALID_HANDLE_VALUE) {
                 DWORD written = 0;
@@ -253,6 +254,9 @@ uint32_t darklord(const char* line) noexcept {
     ReleaseSRWLockExclusive(&darklord_guard);
     return error;
 }
+uint32_t darklord(const char* line) noexcept { return append_telemetry(line, L".darklord.log"); }
+uint32_t recipe_fault(const char* line) noexcept { return append_telemetry(line, L".recipe.log"); }
+uint32_t encounter_recovery(const char* line) noexcept { return append_telemetry(line, L".recovery.log"); }
 void record(const Snapshot& core, uint32_t engine_reason) noexcept {
     AcquireSRWLockExclusive(&guard);
     try {
@@ -265,6 +269,14 @@ void record(const Snapshot& core, uint32_t engine_reason) noexcept {
             const auto campaign = save::session().campaign_run.snapshot();
             const auto flag=[](bool v){return v?"true":"false";};
             const auto campaign_json = std::string("{\"enabled\":")+flag(campaign.enabled)+
+                ",\"stage_id\":"+std::to_string(campaign.stage_id)+
+                ",\"native_subtype\":"+std::to_string(campaign.native_subtype)+
+                ",\"restart_pending\":"+flag(campaign.restart_pending)+
+                ",\"restart_status\":"+std::to_string(campaign.restart_status)+
+                ",\"restart_sequence\":"+std::to_string(campaign.restart_sequence)+
+                ",\"restart_stage_id\":"+std::to_string(campaign.restart_stage_id)+
+                ",\"restart_map\":"+quoted(campaign.restart_map.c_str())+
+                ",\"restart_reason\":"+quoted(campaign.restart_reason.c_str())+
                 ",\"parser_trace\":"+parser_trace(campaign.parser_observation)+
                 ",\"resumed\":"+flag(campaign.resumed)+",\"phase\":\""+campaign.phase+"\",\"reason\":\""+campaign.reason+
                 "\",\"slot\":\""+campaign.slot+"\",\"map\":\""+campaign.map+"\",\"difficulty\":"+std::to_string(campaign.difficulty)+

@@ -21,6 +21,34 @@ bool boss_map(const std::string& map) {
     return false;
 }
 Queue& queue() { static Queue value; return value; }
+const char* rejection(const std::string& map, const Manager& manager) {
+    if (manager.complete) return "complete";
+    if (!manager.active) return "inactive_flags";
+    if (boss_map(map) || manager.protected_fight) return "boss";
+    for (const auto& actor : manager.actors) if (actor.protected_actor) return "boss_actor";
+    if (!manager.actors.empty()) return nullptr;
+    if (manager.noncombat_wait) return manager.exclusion.empty() ? "unsupported_wait" : manager.exclusion.c_str();
+    if (manager.event_blocked || manager.recipe_blocked) return nullptr;
+    return manager.exclusion.empty() ? "no_live_ai_or_owned_combat_request" : manager.exclusion.c_str();
+}
+
+void select_targets(Attempt& attempt, const Context& context) {
+    const auto empty = std::count_if(context.managers.begin(), context.managers.end(), [&](const auto& manager) {
+        return manager.actors.empty() && !rejection(context.map, manager);
+    });
+    for (auto& manager : attempt.context.managers) {
+        if (const auto reason = rejection(context.map, manager)) {
+            manager.exclusion = reason;
+            if (manager.active && !manager.complete && (manager.protected_fight || boss_map(context.map) ||
+                manager.exclusion == "boss_actor")) attempt.outcome = unsupported;
+            continue;
+        }
+        if (empty > 1) { manager.exclusion = "ambiguous_empty_encounters"; continue; }
+        if (empty && !manager.actors.empty()) { manager.exclusion = "outside_empty_encounter"; continue; }
+        manager.exclusion.clear();
+        attempt.targets.push_back(manager);
+    }
+}
 bool protected_manager(const std::string& map, const std::string& name) {
     if (map.find("/e4m2_swamp/") != std::string::npos && name == "boss_encounter_manager_1") return true;
     if (map.find("/e4m3_mcity/") != std::string::npos && name == "platformarea_samuel_encounter_manager_dlc1_1") return true;
@@ -67,11 +95,9 @@ std::vector<Outcome> Queue::tick(uint64_t stamp, uint64_t now, Drain drain) {
     else {
         if (!attempt.started) {
             attempt.context = context;
-            for (const auto& manager : context.managers)
-                if (manager.active && !manager.complete && (!manager.actors.empty() ||
-                    (manager.recipe_blocked && !manager.noncombat_wait))) attempt.targets.push_back(manager);
+            select_targets(attempt, context);
             attempt.started = true;
-            if (attempt.targets.empty()) outcome = no_active;
+            if (attempt.targets.empty() && outcome == pending) outcome = no_active;
         }
         bool complete = !attempt.targets.empty();
         attempt.wait.clear();

@@ -264,16 +264,16 @@ void observe(uintptr_t world) {
     darklord_sample(world, GetTickCount64());
     if (restored_independent && !load_native_recipes()) return;
     try {
-        if (!restore_autonomous_summons(world)) { set_recipe_fault(__func__, "summon_restore_failed"); return; }
+        if (!restore_autonomous_summons(world)) { set_recipe_fault(__func__, __LINE__, "summon_restore_failed"); return; }
         if (pending_summon_checkpoint) return;
         std::vector<uintptr_t> points;
         for (const auto& [point, producer] : direct_points) { (void)producer; points.push_back(point); }
         for (const auto point : points) drain_direct_point(point);
-    } catch (...) { set_recipe_fault(__func__, "exception"); return; }
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); return; }
     if (independent_memberships_pending) {
         const auto start=CostClock::now();
-        try { if (!synchronize_independent_memberships_safe(world)) set_recipe_fault(__func__, "membership_sync_failed"); }
-        catch (...) { set_recipe_fault(__func__, "exception"); }
+        try { if (!synchronize_independent_memberships_safe(world)) set_recipe_fault(__func__, __LINE__, "membership_sync_failed"); }
+        catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
         cost.sync=elapsed_us(start);
         if (recipe_fault.load()) return;
     }
@@ -284,9 +284,9 @@ void observe(uintptr_t world) {
             const auto actor = find_entity(world, pending->first.c_str());
             char origin[21];
             if (!actor) { ++pending; continue; }
-            if (!independent_origin(actor, origin)) { set_recipe_fault(__func__, "independent_origin_invalid", nullptr, actor); return; }
+            if (!independent_origin(actor, origin)) { set_recipe_fault(__func__, __LINE__, "independent_origin_invalid", nullptr, actor); return; }
             const auto recipe = native_recipes.find(origin);
-            if (recipe == native_recipes.end()) { set_recipe_fault(__func__, "independent_recipe_missing", nullptr, actor); return; }
+            if (recipe == native_recipes.end()) { set_recipe_fault(__func__, __LINE__, "independent_recipe_missing", nullptr, actor); return; }
             if (recipe->second.bodies.empty()) {
                 independent_shows.insert(pending->first);
                 pending = pending_independent_shows.erase(pending);
@@ -294,7 +294,7 @@ void observe(uintptr_t world) {
             }
             independent_pose(actor, pending->second.data());
             independent_shows.insert(pending->first);
-            if (!defer_show(actor)) { set_recipe_fault(__func__, "defer_show_failed", nullptr, actor); return; }
+            if (!defer_show(actor)) { set_recipe_fault(__func__, __LINE__, "defer_show_failed", nullptr, actor); return; }
             pending = pending_independent_shows.erase(pending);
         }
         for (auto pending = deferred_shows.begin(); pending != deferred_shows.end();) {
@@ -310,7 +310,7 @@ void observe(uintptr_t world) {
         const auto scan_start=CostClock::now();
         const auto scanned=read_recipe_actors(world, actors, memberships, workers, owners,&cost.living);
         cost.scan=elapsed_us(scan_start);
-        if (!scanned) { set_recipe_fault(__func__, "actors_unreadable"); return; }
+        if (!scanned) { set_recipe_fault(__func__, __LINE__, "actors_unreadable"); return; }
         const auto now = GetTickCount64();
         if (now >= actor_diagnostic_next) {
             actor_diagnostic_next = now + 250;
@@ -360,7 +360,7 @@ void observe(uintptr_t world) {
             if (found == memberships.end()) reconcile_recipe_memberships(actor->second, none);
             ++actor;
         }
-    } catch (...) { set_recipe_fault(__func__, "exception"); }
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
 }
 
 void map_freed() {

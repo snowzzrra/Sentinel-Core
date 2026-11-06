@@ -3,6 +3,7 @@
 #include <cstring>
 
 namespace sentinel::builds {
+const uint32_t BuildDescriptor::mapload_registry=0x46b4360;
 const BuildDescriptor& steam_20260818() {
     static const BuildDescriptor descriptor{
         SC_PROFILE_STEAM_20260818, IMAGE_FILE_MACHINE_AMD64, 0x7431000, 0x6a7b9b8c, 0x286caa8,
@@ -417,7 +418,7 @@ const std::array<Site,3> BuildDescriptor::combat = {{
 {0x120e790, "4053555657415641574881ecb8010000488b053102fa024833c448898424a001"},
 {0x1212290, "4889742420574881ecc0000000488b0534c7f9024833c448898424a800000048"}
 }};
-const std::array<Site,9> BuildDescriptor::deathlink = {{
+const std::array<Site,10> BuildDescriptor::deathlink = {{
 {0x17aa5d0, "405556574157488dac2448feffff4881ecb8020000488b05ec43a0024833c448"},
 {0x69af70, "488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc"},
 {0x1631e80, "488d05e9660603c3cccccccccccccccc488d0549f00603c3cccccccccccccccc"},
@@ -426,7 +427,8 @@ const std::array<Site,9> BuildDescriptor::deathlink = {{
 {0x11feae0, "40574883ec50488b0543744503488bf9837808007413488d153bf0b501488d0d"},
 {0xa9c230, "40534883ec20488bda4885c9742f488b01ff90b804000084c07422488b0d1eb1"},
 {0x1424150, "4883ec28e897fcffff4885c07424f30f1080140100000f57c90f2fc1770df30f"},
-{0x163ffe0, "40534883ec2080b9ac01000000488bd97433488b0d7773fb02488d5424304881"}
+{0x163ffe0, "40534883ec2080b9ac01000000488bd97433488b0d7773fb02488d5424304881"},
+{0x6729a0, "4c8974242055488dac2420e2ffffb8e01e0000e8e8931f02482be0488b0516c0"}
 }};
 
 const SpecialLayout BuildDescriptor::special = {
