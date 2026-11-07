@@ -94,7 +94,8 @@ bool assign_map(uintptr_t request,const std::string& map) {
     request_map=map; field<NativeString>(request,0x30)=text(request_map); return true;
 }
 void deserialize_spawn(uintptr_t prepared,uintptr_t archive) {
-    CHECK(archive==0xa2c && field<int32_t>(prepared,0x1950)==0);
+    CHECK(archive==0xa2c);
+    CHECK(field<int32_t>(prepared,0x1950)==0);
     prepared_map=spawn_defect==L"native_read_checkpoint_wrong"?"game/hub/hub":saved_map;
     prepared_checkpoint=saved_checkpoint;
     field<NativeString>(prepared,0x10)=text(prepared_map);
@@ -103,7 +104,8 @@ void deserialize_spawn(uintptr_t prepared,uintptr_t archive) {
     field<int32_t>(prepared,0x1950)=1;
 }
 bool read_spawn(uintptr_t serializer,uintptr_t functor,uintptr_t key,uint32_t mode) {
-    ++spawn_reads; CHECK(serializer==0xa2c && mode==2);
+    ++spawn_reads; CHECK(serializer==0xa2c);
+    CHECK(mode==2);
     CHECK(std::string(field<NativeString>(key,0).data)=="missionSelectSpawnInfo_"+saved_map);
     if(spawn_defect==L"native_read_checkpoint_missing") return false;
     const auto table=field<uintptr_t>(functor,0);
@@ -123,12 +125,7 @@ uint64_t parsed(SaveReference* source,uintptr_t,uintptr_t prepared,uintptr_t req
     field<int32_t>(prepared,0x1950)=mission?0:1;
     ++parser_calls; release(source); return 0;
 }
-bool load(Model& m,bool metadata_only,const std::wstring& defect) {
-    model=&m; m.read_failure=defect==L"native_read_failed";
-    const auto before=session().campaign_run.snapshot();
-    const auto remote_before=m.remote.files;
-    auto data=reinterpret_cast<uintptr_t>(construct(allocate(0x2c0)));
-    name(data,m.directory.c_str());
+void populate_read_files(uintptr_t data, const std::wstring& defect) {
     std::vector<std::string> names{"game_duration.dat","game.details"};
     if (defect==L"native_read_backup") for(auto& n:names) n+="-BACKUP";
     if (defect==L"native_read_missing") names.pop_back();
@@ -137,15 +134,50 @@ bool load(Model& m,bool metadata_only,const std::wstring& defect) {
     for(size_t i=0;i<names.size();++i)
         field<uintptr_t>(field<uintptr_t>(data,0x1c0),i*8)=reinterpret_cast<uintptr_t>(stream(allocate(0x190),names[i].c_str(),0x41));
     field<int32_t>(data,0x1c8)=static_cast<int32_t>(names.size());
+}
+void check_prepared_read(bool restoring, bool metadata_only, const CampaignSnapshot& before, uintptr_t prepared, unsigned reads_before) {
+    if(restoring && !metadata_only) {
+        CHECK(prepared_path==saved_map+"/missionSelect");
+        CHECK(spawn_reads==reads_before+1);
+        CHECK(prepared_map==saved_map);
+        CHECK(prepared_checkpoint==saved_checkpoint);
+        CHECK(field<uint32_t>(prepared,0x19c0)==2);
+    } else CHECK(spawn_reads==reads_before);
+    const auto completed=session().campaign_run.snapshot();
+    if (metadata_only) {
+        CHECK(completed.phase==before.phase);
+        CHECK(completed.source_verified==before.source_verified);
+        CHECK(completed.parser_completed==before.parser_completed);
+        CHECK(!completed.map_active);
+        CHECK(completed.parser_observation.disposition=="verified_metadata_read");
+    }
+    else { CHECK(completed.phase=="parser_succeeded"); CHECK(completed.source_verified); CHECK(completed.parser_completed); CHECK(!completed.map_active); }
+    CHECK(!session().btrace.snapshot().first_failure.sequence);
+    CHECK(completed.checkpoint==before.checkpoint);
+}
+bool parser_runs(uint64_t value, bool restoring, bool metadata_only, const std::wstring& defect) {
+    return value==0 || (restoring && !metadata_only &&
+        (defect==L"native_read_checkpoint_missing" || defect==L"native_read_checkpoint_wrong"));
+}
+bool load(Model& m,bool metadata_only,const std::wstring& defect) {
+    model=&m; m.read_failure=defect==L"native_read_failed";
+    const auto before=session().campaign_run.snapshot();
+    const auto remote_before=m.remote.files;
+    auto data=reinterpret_cast<uintptr_t>(construct(allocate(0x2c0)));
+    name(data,m.directory.c_str());
+    populate_read_files(data, defect);
     auto* control=static_cast<Control*>(allocate(sizeof(Control))); *control={1,1,data,destroy_data};
     SaveReference source_ref{reinterpret_cast<uintptr_t>(control)},parser_ref{}; retain(&parser_ref,&source_ref);
     WriteCalls calls{read,name,release,nullptr,image,nullptr,nullptr}; SaveFuture* future=nullptr;
     read_scoped(session(),memory,reinterpret_cast<uintptr_t>(&m.remote),&future,0x7788,&source_ref,calls);
-    CHECK(!source_ref.control && future);
+    CHECK(!source_ref.control);
+    CHECK(future);
     SaveResult result{}; std::array<unsigned char,32> task{};
     future->vtable->poll(future,&result,task.data()); CHECK(result.state==-1);
     const auto pending=session().campaign_run.snapshot();
-    CHECK(pending.operation==before.operation && pending.checkpoint==before.checkpoint && pending.native_saved==before.native_saved);
+    CHECK(pending.operation==before.operation);
+    CHECK(pending.checkpoint==before.checkpoint);
+    CHECK(pending.native_saved==before.native_saved);
     future->vtable->poll(future,&result,task.data()); future->vtable->destroy(future,1);
     CHECK(m.remote.files==remote_before);
     if (result.outcome || result.state) { release(&parser_ref); return false; }
@@ -175,23 +207,9 @@ bool load(Model& m,bool metadata_only,const std::wstring& defect) {
     CHECK(!parser_ref.control);
     CHECK(map_assignments==assignments_before+(restoring && !metadata_only?1:0));
     if(metadata_only) CHECK(request==request_before);
-    CHECK(parser_calls==count_before+(value==0 || (restoring && !metadata_only &&
-        (defect==L"native_read_checkpoint_missing" || defect==L"native_read_checkpoint_wrong"))?1u:0u));
+    CHECK(parser_calls==count_before+(parser_runs(value, restoring, metadata_only, defect)?1u:0u));
     if (value) return false;
-    if(restoring && !metadata_only) {
-        CHECK(prepared_path==saved_map+"/missionSelect");
-        CHECK(spawn_reads==reads_before+1);
-        CHECK(prepared_map==saved_map && prepared_checkpoint==saved_checkpoint &&
-            field<uint32_t>(reinterpret_cast<uintptr_t>(prepared.data()),0x19c0)==2);
-    } else CHECK(spawn_reads==reads_before);
-    const auto completed=session().campaign_run.snapshot();
-    if (metadata_only) {
-        CHECK(completed.phase==before.phase && completed.source_verified==before.source_verified &&
-              completed.parser_completed==before.parser_completed && !completed.map_active);
-        CHECK(completed.parser_observation.disposition=="verified_metadata_read");
-    }
-    else CHECK(completed.phase=="parser_succeeded" && completed.source_verified && completed.parser_completed && !completed.map_active);
-    CHECK(!session().btrace.snapshot().first_failure.sequence && completed.checkpoint==before.checkpoint);
+    check_prepared_read(restoring, metadata_only, before, reinterpret_cast<uintptr_t>(prepared.data()), reads_before);
     return true;
 }
 SaveResult* poll_write(SaveFuture*,SaveResult* out,void*) {
@@ -201,7 +219,8 @@ SaveResult* poll_write(SaveFuture*,SaveResult* out,void*) {
     // Native preparation constructs a separate idFile_Memory transport object;
     // the provider and subsequent readback retain their idFile_SaveGame type.
     const auto count=field<int32_t>(m.source,0x1c8);
-    CHECK(count>0 && count<=64);
+    CHECK(count>0);
+    CHECK(count<=64);
     m.sdk_file.resize(static_cast<size_t>(count)*0x180); m.sdk_bytes.resize(count);
     const auto prepared_file=reinterpret_cast<uintptr_t>(m.sdk_file.data());
     for (int i=0;i<count;++i) {
@@ -251,7 +270,8 @@ bool poll_save_archive(Model& m, const std::wstring& defect, const CampaignSnaps
                        std::array<unsigned char, 32>& native_task) {
     if (defect == L"menu_pending_save") {
         menu_transition();
-        CHECK(session().native_io() && !session().campaign_run.snapshot().map_active);
+        CHECK(session().native_io());
+        CHECK(!session().campaign_run.snapshot().map_active);
     }
     const bool archive_failure = defect == L"archive_payload_failure" || defect == L"archive_manifest_failure";
     if (archive_failure)
@@ -266,59 +286,91 @@ bool poll_save_archive(Model& m, const std::wstring& defect, const CampaignSnaps
         const auto completed = session().campaign_run.snapshot();
         const auto archive = session().native_writes.backup(m.operation);
         CHECK(archive);
-        CHECK(archive->progress().state == BackupState::failed && !archive->progress().storage_complete);
-        CHECK(!completed.archive_complete && !completed.continuity_persisted &&
-              completed.checkpoint == before.checkpoint);
-        CHECK(!session().accepts_requests() && completed.reason == "checkpoint_archive_incomplete");
+        CHECK(archive->progress().state == BackupState::failed);
+        CHECK(!archive->progress().storage_complete);
+        CHECK(!completed.archive_complete);
+        CHECK(!completed.continuity_persisted);
+        CHECK(completed.checkpoint == before.checkpoint);
+        CHECK(!session().accepts_requests());
+        CHECK(completed.reason == "checkpoint_archive_incomplete");
         m.future->vtable->destroy(m.future, 1);
         m.future = nullptr;
         return false;
     }
     if (defect == L"delta_retained_hash") {
-        CHECK(!result.state && result.outcome && !session().campaign_run.snapshot().readback_verified);
+        CHECK(!result.state);
+        CHECK(result.outcome);
+        CHECK(!session().campaign_run.snapshot().readback_verified);
         m.future->vtable->destroy(m.future, 1);
         m.future = nullptr;
         return false;
     }
     return true;
 }
-void save(Model& m,const std::wstring& defect,const std::shared_ptr<BackupJob>& backup = {}) {
-    const auto before=session().campaign_run.snapshot();
+static void configure_save_mode(Model& m, const std::wstring& defect) {
     model=&m; m.failure=defect==L"save_failure" || defect==L"queued_save_failure"; m.pending=defect==L"pending_save";
     m.foreign=defect==L"queued_foreign"; m.queued=defect==L"queued_checkpoint" || m.foreign || defect==L"menu_pending_save" || defect==L"queued_save_failure";
     if (defect==L"delta_retained_hash") m.queued=true;
+}
+static void check_started_save(const CampaignSnapshot& started, const CampaignSnapshot& before, const std::shared_ptr<BackupJob>& backup) {
+    CHECK(started.operation);
+    CHECK(started.operation!=before.operation);
+    CHECK(started.checkpoint==before.checkpoint);
+    if (backup) CHECK(session().native_writes.request_backup(started.operation,backup));
+    CHECK(!started.continuity_persisted);
+    CHECK(!started.native_saved);
+    CHECK(!started.readback_verified);
+}
+static void check_completed_save(Model& m, const CampaignSnapshot& before, const SaveResult& result, const std::shared_ptr<BackupJob>& backup) {
+    CHECK(!result.state);
+    CHECK(!result.outcome);
+    CHECK(result.value==1);
+    const auto completed=session().campaign_run.snapshot();
+    CHECK(completed.operation==m.operation);
+    CHECK(completed.readback_verified);
+    CHECK(completed.checkpoint==before.checkpoint+(completed.continuity_persisted?1u:0u));
+    const auto archive=session().native_writes.backup(m.operation);
+    CHECK(archive);
+    CHECK((!backup || archive==backup));
+    const auto progress=archive->progress();
+    CHECK(progress.state==BackupState::complete);
+    CHECK(progress.storage_complete);
+    std::printf("archive files=%u bytes=%llu copy_us=%llu\n",progress.output.files,progress.output.bytes,progress.copy_us);
+}
+static void check_waiting_save(Model& m, const CampaignSnapshot& started, const CampaignSnapshot& before, const SaveResult& result) {
+    const auto waiting=session().campaign_run.snapshot();
+    CHECK(result.state==-1);
+    CHECK(waiting.operation==started.operation);
+    CHECK(waiting.operation==m.operation);
+    CHECK(waiting.checkpoint==before.checkpoint);
+    CHECK(!waiting.continuity_persisted);
+    CHECK(waiting.native_saved);
+    CHECK(!waiting.readback_verified);
+}
+void save(Model& m,const std::wstring& defect,const std::shared_ptr<BackupJob>& backup = {}) {
+    const auto before=session().campaign_run.snapshot();
+    configure_save_mode(m, defect);
     auto* control=static_cast<Control*>(allocate(sizeof(Control))); *control={1,1,m.source,nullptr}; m.source_ref.control=reinterpret_cast<uintptr_t>(control);
     SaveReference task{};
     if (m.queued) {
         CHECK(!capture_native_checkpoint(session().native_writes));
-        factory(0x1000,&task,0,0); // earlier mode0 factory has returned; no tls scope remains
+        factory(0x1000,&task,0,0);
     } else campaign_save_factory(defect==L"unassociated"?0:0x674744,0x674744,0x1000,&task,0,0,factory);
-    CHECK(!m.source_ref.control && m.future && !capture_native_checkpoint(session().native_writes));
+    CHECK(!m.source_ref.control);
+    CHECK(m.future);
+    CHECK(!capture_native_checkpoint(session().native_writes));
     const bool rejected=defect==L"unrelated" || defect==L"partial_save" || defect==L"unassociated" || m.foreign;
     CHECK(m.creates==(rejected?0u:1u));
     const auto started=session().campaign_run.snapshot();
     if (!rejected) {
-        CHECK(started.operation && started.operation!=before.operation && started.checkpoint==before.checkpoint);
-        if (backup) CHECK(session().native_writes.request_backup(started.operation,backup));
-        CHECK(!started.continuity_persisted && !started.native_saved && !started.readback_verified);
+        check_started_save(started, before, backup);
     }
     SaveResult result{}; std::array<unsigned char,32> native_task{};
     m.future->vtable->poll(m.future,&result,native_task.data());
     if(!rejected && !m.failure && !m.pending) {
-        const auto waiting=session().campaign_run.snapshot();
-        CHECK(result.state==-1);
-        CHECK(waiting.operation==started.operation && waiting.operation==m.operation && waiting.checkpoint==before.checkpoint);
-        CHECK(!waiting.continuity_persisted && waiting.native_saved && !waiting.readback_verified);
+        check_waiting_save(m, started, before, result);
         if (!poll_save_archive(m, defect, before, result, native_task)) return;
-        CHECK(!result.state && !result.outcome && result.value==1);
-        const auto completed=session().campaign_run.snapshot();
-        CHECK(completed.operation==m.operation && completed.readback_verified);
-        CHECK(completed.checkpoint==before.checkpoint+(completed.continuity_persisted?1u:0u));
-        const auto archive=session().native_writes.backup(m.operation);
-        CHECK(archive && (!backup || archive==backup));
-        const auto progress=archive->progress();
-        CHECK(progress.state==BackupState::complete && progress.storage_complete);
-        std::printf("archive files=%u bytes=%llu copy_us=%llu\n",progress.output.files,progress.output.bytes,progress.copy_us);
+        check_completed_save(m, before, result, backup);
     }
     m.future->vtable->destroy(m.future,1); m.future=nullptr;
 }

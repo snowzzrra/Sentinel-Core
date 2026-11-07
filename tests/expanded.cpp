@@ -10,7 +10,7 @@ void require(bool value, const char* message) {
 }
 bool near(float a, float b) { return std::fabs(a - b) < 0.0001f; }
 }
-int main() {
+void movement_cases() {
     using sentinel::expanded::movement_speed;
     require(near(movement_speed(1, "ap_v070_ai_a__ap_v070_s00001"), 0.01f), "minimum speed");
     require(near(movement_speed(1, "ap_v070_ai_a__ap_v070_s10000"), 100), "maximum speed");
@@ -27,8 +27,10 @@ int main() {
     require(near(movement_speed(1, longest), 2.5f), "bounded definition name");
     const auto oversized = prefix + std::string(512 - prefix.size() - suffix.size(), 'a') + suffix;
     require(movement_speed(3, oversized) == 3, "oversized definition preserves native speed");
-    using sentinel::expanded::spawn_limits;
-    using sentinel::expanded::spawn_allowed;
+}
+using sentinel::expanded::spawn_limits;
+using sentinel::expanded::spawn_allowed;
+void special_limit_cases() {
     const auto marauder = spawn_limits("ap_v070_spawn_a_l00000001000000020000000300000004_km__ap_v070_s00100");
     require(marauder.has_value(), "frozen limit marker");
     require(spawn_allowed(*marauder, {0, 0, 0}), "free special slot");
@@ -48,6 +50,8 @@ int main() {
     require(banned && !spawn_allowed(*banned, {0, 0, 0}), "zero species limit");
     const auto ordinary = spawn_limits("ap_v070_ai_a_l00000001000000020000000300000004_kn__ap_v070_s00100");
     require(ordinary && spawn_allowed(*ordinary, {1, 2, 3}), "ordinary actors use native global admission");
+}
+void population_limit_cases() {
     const auto bounded = spawn_limits("ap_v070_ai_a_p00000008000000020000000500000001_l00000001000000010000000100000002_kh__ap_v070_s00100");
     require(bounded && spawn_allowed(*bounded, {0,0,0,2,0,0,1,1}), "one superheavy leaves room for another");
     require(!spawn_allowed(*bounded, {1,0,0,1,0,0,1,1}), "marauders and ordinary superheavies share the same cap");
@@ -66,6 +70,8 @@ int main() {
     require(!spawn_allowed(*heavy, {0,0,0,2,0,0,0,1}), "ordinary heavies cannot exceed their simultaneous ceiling");
     auto ammunition = *heavy; ammunition.kind = 7;
     require(spawn_allowed(ammunition, {0,0,0,2,0,0,0,1}), "heavy ceiling preserves ammunition access");
+}
+void strict_limit_cases() {
     const auto strict_zero = spawn_limits("ap_v070_ai_a_p00000003000000000000000300000002_l00000000000000000000000000000000_kn__ap_v070_s00100");
     require(strict_zero && strict_zero->strict && !strict_zero->mixed &&
             !spawn_allowed(*strict_zero, {}), "strict zero heavy slots reject heavy admission");
@@ -86,6 +92,8 @@ int main() {
             "unknown population flags are refused");
     require(!spawn_limits("ap_v070_ai_a_p00000003000000000000000300000004_l00000000000000000000000000000000_kn__ap_v070_s00100"),
             "counter allowances require strict limits");
+}
+void individual_species_cases() {
     std::string individual_caps;
     for (unsigned value = 1; value <= 9; ++value) {
         char cap[9]; std::snprintf(cap, sizeof(cap), "%08x", value); individual_caps += cap;
@@ -114,6 +122,8 @@ int main() {
         require(!spawn_limits(invalid_caps) && !sentinel::expanded::spawn_tracking(invalid_caps),
                 "truncated individual special caps are refused");
     }
+}
+void tracking_scope_cases() {
     const auto scoped_name = "ap_v070_ai_a_t00000000000000010000000000000002_a1234567812345678_p00000008000000020000000500000001_l00000001000000010000000100000002_kh__ap_v070_s00100";
     const auto scoped = spawn_limits(scoped_name);
     require(scoped && scoped->scope == 0x1234567812345678ull && sentinel::expanded::spawn_tracking(scoped_name),
@@ -124,6 +134,8 @@ int main() {
             "ap_v070_spawn_a_l80000000000000020000000300000004_km__ap_v070_s00100",
             "ap_v070_spawn_a_l0000000z000000020000000300000004_km__ap_v070_s00100"})
         require(!spawn_limits(name), "unmarked or malformed limit marker");
+}
+std::string tracking_marker_cases() {
     using sentinel::expanded::spawn_tracking;
     using sentinel::expanded::spawn_lift;
     for (const auto* physical : {"0000000000002000", "0000000000040000", "0000000000080000"}) {
@@ -147,6 +159,10 @@ int main() {
             "ap_v070_group_a_tz0000000000000100000000000000020_l00000001000000010000000100000002_kn__ap_v070_s00100",
             "ap_v070_group_a_l00000001000000010000000100000002_kn__ap_v070_s00_t0"})
         require(!spawn_tracking(name), "invalid tracking marker never changes native species selection");
+    return slot;
+}
+void recipe_marker_cases(const std::string& slot) {
+    using sentinel::expanded::movement_speed;
     const auto recipe_name = "ap_v070_ai_r0123456789abcdef0123_00000004_q0000000200000006" + slot.substr(slot.find("_t"));
     const auto recipe = sentinel::expanded::spawn_recipe(recipe_name);
     require(recipe && recipe->body == 4 && recipe->logical_units == 2 && recipe->physical_units == 6,
@@ -165,6 +181,8 @@ int main() {
         "finite tail credit is explicit in the restored body's definition");
     partial.replace(partial.find("_w") + 2, 8, "00000000");
     require(!sentinel::expanded::spawn_recipe(partial), "empty tail credit is refused");
+}
+sentinel::expanded::RecipeLibrary recipe_library_cases() {
     const std::string metadata = "EAP1|" + std::string(64, 'a') + "|game/test\n" +
         "0123456789abcdef0123|m|original_group|arena|0000000000000010|00000002|00000003|00000005|00000001\n" +
         "0123456789abcdef0124|i|original_point|arena|0000000000000020|00000001|00000000|00000000|00000000\n";
@@ -178,16 +196,10 @@ int main() {
     auto corrupt = metadata;
     corrupt.replace(corrupt.find("00000005"), 8, "80000000");
     require(!sentinel::expanded::parse_recipe_library(corrupt, library), "native quota overflow is refused");
-    const std::string extended = "EAP2|" + std::string(64, 'a') + "|game/test\n" +
-        "0123456789abcdef0123|s|original_point|arena|0000010000000000|00000001|00000001|00000001|00000001|"
-        "|686f7374207c2066696c746572||0000100000000000|01\n";
-    require(sentinel::expanded::parse_recipe_library(extended, library) && library.recipes.size() == 1 &&
-        library.recipes[0].first_label == "host | filter" && library.recipes[0].call_flag &&
-        library.recipes[0].allowed_hosts == (uint64_t{1} << 44), "native special call arguments preserve masks and labels");
-    corrupt = extended;
-    corrupt.replace(corrupt.find("686f7374"), 8, "006f7374");
-    require(!sentinel::expanded::parse_recipe_library(corrupt, library) && library.recipes[0].first_label == "host | filter",
-        "invalid call strings cannot replace a valid library");
+    return library;
+}
+void health_library_cases(const std::string& extended, sentinel::expanded::RecipeLibrary& library) {
+    std::string corrupt;
     auto with_health = extended;
     with_health.replace(0, 4, "EAP3");
     with_health.insert(with_health.size() - 1, "|42c8000042a00000");
@@ -205,5 +217,22 @@ int main() {
     corrupt = ratio; corrupt.replace(corrupt.size() - 9, 8, "00000000");
     require(!sentinel::expanded::parse_recipe_library(corrupt, library) && library.recipes[0].quantity_denominator == 100,
         "invalid summon ratios cannot replace a valid library");
-    return 0;
+}
+void special_call_library_cases(sentinel::expanded::RecipeLibrary& library) {
+    const std::string extended = "EAP2|" + std::string(64, 'a') + "|game/test\n" +
+        "0123456789abcdef0123|s|original_point|arena|0000010000000000|00000001|00000001|00000001|00000001|"
+        "|686f7374207c2066696c746572||0000100000000000|01\n";
+    require(sentinel::expanded::parse_recipe_library(extended, library) && library.recipes.size() == 1 &&
+        library.recipes[0].first_label == "host | filter" && library.recipes[0].call_flag &&
+        library.recipes[0].allowed_hosts == (uint64_t{1} << 44), "native special call arguments preserve masks and labels");
+    auto corrupt = extended;
+    corrupt.replace(corrupt.find("686f7374"), 8, "006f7374");
+    require(!sentinel::expanded::parse_recipe_library(corrupt, library) && library.recipes[0].first_label == "host | filter",
+        "invalid call strings cannot replace a valid library");
+    health_library_cases(extended, library);
+}
+int main() {
+    movement_cases(); special_limit_cases(); population_limit_cases(); strict_limit_cases();
+    individual_species_cases(); tracking_scope_cases(); recipe_marker_cases(tracking_marker_cases());
+    auto library = recipe_library_cases(); special_call_library_cases(library);
 }

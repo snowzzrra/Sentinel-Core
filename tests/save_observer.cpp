@@ -68,6 +68,21 @@ void suppressed(const sc_save_snapshot& s, uint32_t reason) {
         CHECK(s.fields[i].validity == SC_OBSERVATION_UNKNOWN && s.fields[i].value == 0 && s.fields[i].reason == reason);
     unresolved(s);
 }
+static void check_save_observation_races() {
+    // a second stable-value frame doesn't rescue a changed owner/count/state
+    for (unsigned which = 0; which < 5; ++which) {
+        Fixture t; unsigned visits = 0;
+        t.memory.before = [&](uintptr_t address) {
+            if (address != t.root || ++visits != 2) return;
+            if (which == 0) t.memory.put(t.root + 0x9ca8, int32_t{1});
+            if (which == 1) t.memory.put(t.root + 0x9b38, uintptr_t{0});
+            if (which == 2) t.state(SC_GAME_IN_GAME, 2);
+            if (which == 3) { t.memory.put(t.manager + 0x60, t.job); t.memory.put(t.job + 8, uintptr_t{0}); }
+            if (which == 4) t.memory.put(t.provider, uintptr_t{0x142e88198ULL});
+        };
+        suppressed(t.sample(), SC_REASON_TRANSITION);
+    }
+}
 int main() {
     // real dll export/size/version rejection is exercised by inspection tests
     { Fake m; engine::Binding b; suppressed(save::sample(m, b, 1), SC_REASON_PROFILE_UNRECOGNIZED); CHECK(m.reads.empty()); }
@@ -112,19 +127,7 @@ int main() {
     { Fixture t; t.memory.put(t.root + 0xb8, uint8_t{1}); suppressed(t.sample(), SC_REASON_TRANSITION); }
     { Fixture t; t.memory.put(t.root + 0xb8, uint8_t{2}); suppressed(t.sample(), SC_REASON_INVALID_VALUE); }
     { Fixture t; t.memory.put(t.root, uintptr_t{0x142e90658ULL}); suppressed(t.sample(), SC_REASON_INVALID_VALUE); }
-    // a second stable-value frame doesn't rescue a changed owner/count/state
-    for (unsigned which = 0; which < 5; ++which) {
-        Fixture t; unsigned visits = 0;
-        t.memory.before = [&](uintptr_t address) {
-            if (address != t.root || ++visits != 2) return;
-            if (which == 0) t.memory.put(t.root + 0x9ca8, int32_t{1});
-            if (which == 1) t.memory.put(t.root + 0x9b38, uintptr_t{0});
-            if (which == 2) t.state(SC_GAME_IN_GAME, 2);
-            if (which == 3) { t.memory.put(t.manager + 0x60, t.job); t.memory.put(t.job + 8, uintptr_t{0}); }
-            if (which == 4) t.memory.put(t.provider, uintptr_t{0x142e88198ULL});
-        };
-        suppressed(t.sample(), SC_REASON_TRANSITION);
-    }
+    check_save_observation_races();
     { Fixture t; t.memory.put(t.root + 0x9ca8, int32_t{1}); unresolved(t.sample());
       t.memory.put(t.root + 0x9ca8, int32_t{0}); unresolved(t.sample()); }
     { Fixture t; HANDLE stop = CreateEventW(nullptr, TRUE, TRUE, nullptr); CHECK(stop);

@@ -13,6 +13,18 @@ struct Fixture {
     std::vector<uint8_t> bytes;
     bool response = false;
 };
+inline void read_fixture_hex(const std::string& line, Fixture& current) {
+    const auto hex = line.find("\"hex\": \"");
+    if (hex == std::string::npos) return;
+    const auto start = hex + 8, end = line.find('"', start);
+    if (end == std::string::npos || (end - start) % 2) throw std::runtime_error("Invalid fixture hex");
+    for (auto pos = start; pos < end; pos += 2) {
+        unsigned byte = 0;
+        const auto parsed = std::from_chars(line.data() + pos, line.data() + pos + 2, byte, 16);
+        if (parsed.ec != std::errc{} || parsed.ptr != line.data() + pos + 2) throw std::runtime_error("Invalid fixture byte");
+        current.bytes.push_back(static_cast<uint8_t>(byte));
+    }
+}
 inline std::map<std::string, Fixture> read(const std::filesystem::path& path) {
     // Fixture JSON keeps names and field hex on separate lines for this test-only reader.
     std::ifstream file(path);
@@ -30,16 +42,7 @@ inline std::map<std::string, Fixture> read(const std::filesystem::path& path) {
         }
         if (!current) continue;
         if (line == "      \"response\": true,") current->response = true;
-        const auto hex = line.find("\"hex\": \"");
-        if (hex == std::string::npos) continue;
-        const auto start = hex + 8, end = line.find('"', start);
-        if (end == std::string::npos || (end - start) % 2) throw std::runtime_error("Invalid fixture hex");
-        for (auto pos = start; pos < end; pos += 2) {
-            unsigned byte = 0;
-            const auto parsed = std::from_chars(line.data() + pos, line.data() + pos + 2, byte, 16);
-            if (parsed.ec != std::errc{} || parsed.ptr != line.data() + pos + 2) throw std::runtime_error("Invalid fixture byte");
-            current->bytes.push_back(static_cast<uint8_t>(byte));
-        }
+        read_fixture_hex(line, *current);
     }
     if (!file.eof() || fixtures.empty()) throw std::runtime_error("Cannot read wire fixtures");
     return fixtures;

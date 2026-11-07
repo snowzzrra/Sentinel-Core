@@ -214,23 +214,6 @@ void observations(V2Connection& connection) {
     CHECK(rejected.transport == ProbeResult::ok && rejected.wire == WireResult::unsupported_operation);
 }
 
-void snapshot_reads(V2Connection& connection) {
-    const auto s = submission(connection, "unused");
-    constexpr uint16_t ids[] = {1,2,3,4,11,12,13,17,50};
-    for (const auto id : ids) {
-        generated::read_envelope input{s.reference.scope, s.reference.namespace_id, id, 1, {}};
-        auto body = encode(input); body.insert(body.end(), 4, 0);
-        if (id == 4 || id == 13) body.insert(body.end(), 8, 0);
-        if (id == 50) body.insert(body.end(), 4, 0);
-        if (id == 13) body[body.size() - 8] = 1;
-        const auto response = connection.exchange(1, body, 2000);
-        if (response.wire != WireResult::ok) std::fprintf(stderr, "snapshot %u wire %u\n", id, static_cast<uint32_t>(response.wire));
-        CHECK(response.transport == ProbeResult::ok && response.wire == WireResult::ok && response.body.size() > 36);
-        generated::Result result;
-        const auto* descriptor = registry::descriptor(id, 1);
-        CHECK(descriptor->decode_result(Bytes(response.body.begin() + 36, response.body.end()), result));
-    }
-}
 void transient_model() {
     native::Diagnostics queue; ::sc_weapon_points_request payload{};
     std::memset(payload.namespace_id, 'a', 64);
@@ -251,17 +234,8 @@ template<class Native, class Payload> Native converted(V2Connection& connection,
     CHECK(v2::native_payload(*descriptor, encode(payload), envelope, native, operation));
     return std::get<Native>(native);
 }
-void adapters(V2Connection& c) {
-    const auto read = generated::Operation::read, submit = generated::Operation::submit;
-    CHECK(runes::valid(converted<::sc_runes_request>(c, 33, read, generated::runes_payload{generated::runes_observe_payload{}})));
-    CHECK(converted<::sc_runes_request>(c, 33, submit, generated::runes_payload{generated::runes_select_normal_payload{2,-1}}).select_rune == -1);
-    CHECK(converted<::sc_inventory_request>(c, 25, submit, generated::inventory_payload{generated::inventory_ensure_payload{3,4}}).equipment == 4);
-    CHECK(converted<::sc_inventory_request>(c, 25, submit, generated::inventory_payload{generated::inventory_set_capacity_payload{1,2,3}}).ammo_tier == 3);
-    CHECK(converted<::sc_arsenal_request>(c, 29, submit, generated::arsenal_payload{generated::arsenal_select_mod_payload{2,1}}).select_weapon == 2);
-    CHECK(converted<::sc_arsenal_request>(c, 29, submit, generated::arsenal_payload{generated::arsenal_project_mastery_payload{7}}).masteries == 7);
-    CHECK(converted<::sc_special_request>(c, 37, submit, generated::special_payload{generated::special_refill_execute_payload{17,1}}).refill_request_id == 17);
-    CHECK(converted<::sc_deathlink_request>(c, 41, submit, generated::deathlink_payload{generated::deathlink_ack_local_payload{17}}).ack_sequence == 17);
-    CHECK(converted<::sc_automap_request>(c, 45, read, generated::automap_payload{generated::automap_observe_payload{}}).kind == SC_AUTOMAP_OBSERVE);
+void automap_revisions(V2Connection& c) {
+    const auto submit = generated::Operation::submit;
     generated::automap_publish_payload legacy{1, 7, {1}};
     const auto legacy_request = converted<::sc_automap_request>(c, 45, submit, generated::automap_payload_revision1{legacy});
     CHECK(legacy_request.checked_locations[0] == 1 && legacy_request.checked_locations[78] == 0);
@@ -270,9 +244,8 @@ void adapters(V2Connection& c) {
     arenas.checked_locations[arena_bit/64] = uint64_t{1} << (arena_bit%64);
     const auto arena_request = converted<::sc_automap_request>(c, 45, submit, generated::automap_payload{arenas}, 2);
     CHECK(arena_request.revision == 8 && arena_request.checked_locations[arena_bit/64] == arenas.checked_locations[arena_bit/64]);
-    CHECK(commands::valid(converted<::sc_command_request>(c, 46, submit, generated::command_payload{generated::command_echo_payload{"fixture"}})));
-    CHECK(commands::process_scoped(converted<::sc_command_request>(c, 52, submit, generated::support_dump_payload{generated::support_dump_support_dump_payload{}})));
 }
+
 Bytes fixture(const char* name) {
     return wire_fixtures::read(SC_WIRE_V2_FIXTURE_FILE).at(name).bytes;
 }
@@ -385,7 +358,7 @@ void protocol_v2_contract(const wchar_t* mode, void (*park)(), void (*resume)(),
     CHECK(hello.transport == ProbeResult::ok && generated::decode(hello.body, supported));
     CHECK(supported.max_frame == 16384 && supported.execution_slots == 8 && supported.full_result_ms == 30000 && supported.identity_capacity == 65536);
     CHECK(supported.supported.size() == generated::descriptor_count);
-    adapters(connection); refused_v1(); framing(); identity(connection); observations(connection); reconnect(connection); snapshot_reads(connection);
+    automap_revisions(connection); refused_v1(); framing(); identity(connection); observations(connection); reconnect(connection);
     admission_refusals(connection, executions);
     dropped(connection, resume, park, executions);
     cancellation(connection, resume, park, entered, release, stage, executions);

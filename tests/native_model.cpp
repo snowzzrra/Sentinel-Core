@@ -25,7 +25,24 @@ sc_diagnostic_request request(uint64_t id, uint32_t deadline = 100) {
 }
 void run_backup_request_contracts();
 void run_command_identity_tests();
-int main() {
+void grenade_observation_cases(inventory::SnapshotFacts& inventory_facts, const inventory::Calls& inventory_calls, const sc_inventory_request& inventory_request) {
+    inventory_facts.slayer_key = 1;
+    for (const auto frag : {uint8_t{0}, uint8_t{1}, uint8_t{255}}) {
+        inventory_facts.frag_grenade = frag;
+        inventory_facts.ice_bomb = 0;
+        auto result = sentinel::inventory::initial(inventory_request);
+        sentinel::inventory::execute(inventory_request, result, inventory_calls);
+        CHECK(result.outcome == SC_INV_OBSERVED && result.frag_grenade_before == frag &&
+              result.frag_grenade_after == frag && result.ice_bomb_after == 0 && result.operations_applied == 0);
+    }
+    inventory_facts.frag_grenade = 2;
+    auto invalid_inventory = sentinel::inventory::initial(inventory_request);
+    sentinel::inventory::execute(inventory_request, invalid_inventory, inventory_calls);
+    CHECK(invalid_inventory.outcome == SC_INV_READ_FAILED &&
+          invalid_inventory.frag_grenade_after == SC_INVENTORY_UNKNOWN_ITEM);
+    inventory_facts.frag_grenade = 1;
+}
+void inventory_observation_cases() {
     for (int stage = 0; stage <= 4; ++stage) {
         const auto mask = (1u << stage) - 1;
         CHECK(inventory::capacity_stage(mask, mask, stage) == stage);
@@ -71,21 +88,7 @@ int main() {
     sentinel::inventory::execute(inventory_request, invalid_inventory, inventory_calls);
     CHECK(invalid_inventory.outcome == SC_INV_READ_FAILED &&
           invalid_inventory.slayer_key_after == SC_INVENTORY_UNKNOWN_ITEM);
-    inventory_facts.slayer_key = 1;
-    for (const auto frag : {uint8_t{0}, uint8_t{1}, uint8_t{255}}) {
-        inventory_facts.frag_grenade = frag;
-        inventory_facts.ice_bomb = 0;
-        auto result = sentinel::inventory::initial(inventory_request);
-        sentinel::inventory::execute(inventory_request, result, inventory_calls);
-        CHECK(result.outcome == SC_INV_OBSERVED && result.frag_grenade_before == frag &&
-              result.frag_grenade_after == frag && result.ice_bomb_after == 0 && result.operations_applied == 0);
-    }
-    inventory_facts.frag_grenade = 2;
-    invalid_inventory = sentinel::inventory::initial(inventory_request);
-    sentinel::inventory::execute(inventory_request, invalid_inventory, inventory_calls);
-    CHECK(invalid_inventory.outcome == SC_INV_READ_FAILED &&
-          invalid_inventory.frag_grenade_after == SC_INVENTORY_UNKNOWN_ITEM);
-    inventory_facts.frag_grenade = 1;
+    grenade_observation_cases(inventory_facts, inventory_calls, inventory_request);
     const auto microwave = 1ull << 6;
     inventory_facts.weapons = SC_INV_WEAPON_PLASMA_RIFLE;
     CHECK(!sentinel::inventory::microwave_counter(inventory_facts));
@@ -136,6 +139,8 @@ int main() {
     sentinel::inventory::execute(inventory_request, punch_observation, inventory_calls);
     CHECK(!sentinel::inventory::blood_punch_observed());
     inventory_facts.persistent_upgrades = 0;
+}
+void rune_binding_case() {
     struct RuneFixture { sentinel::runes::SnapshotFacts facts{}; int bound = 0, reads = 0; bool active = true; } rune;
     sentinel::runes::calls = {
         &rune, nullptr,
@@ -171,6 +176,8 @@ int main() {
           rune.facts.selected_slots[0] == -1 && rune.facts.selected_slots[1] == -1 &&
           rune.facts.selected_slots[2] == -1);
 
+}
+void challenge_suppression_cases() {
     sentinel::challenge::ScopeFacts challenge_scope{};
     challenge_scope.active = challenge_scope.admitted = challenge_scope.map_qualified =
         challenge_scope.record_mission = challenge_scope.canonical_group = true;
@@ -193,6 +200,8 @@ int main() {
     challenge_call.return_site = 5; challenge_call.currency = 5;
     CHECK(std::strcmp(sentinel::challenge::suppression_mismatch(challenge_scope, challenge_call), "currency") == 0);
     CHECK(!sentinel::challenge::suppression_diagnostic_candidate(challenge_scope, challenge_call));
+}
+void lifecycle_cases() {
     Lifecycle life;
     CHECK(life.generation == 0 && life.state == SC_LIFETIME_UNOBSERVED);
     life.begin(true, true, false, 10, 9);
@@ -218,6 +227,35 @@ int main() {
     CHECK(page.events[0].sequence == page.history_oldest);
     life.end(true, true, SC_GAME_IN_GAME, 99, 9); CHECK(life.state == SC_LIFETIME_INVALID);
 
+}
+void claimed_cancellation_case() {
+    // Deterministic claimed/cancel race: only the callback thread writes terminal
+    // results. A cancellation while CLAIMED is a request, not a false guarantee.
+    Diagnostics race;
+    sc_diagnostic_detail detail{};
+    auto r = request(50, 1000); race.submit(r, 0, 1000); auto* slot = race.claim(1001); CHECK(slot);
+    std::mutex mutex; std::condition_variable cv; bool ready = false, finish = false;
+    std::thread callback([&] {
+        auto value = slot->result;
+        { std::unique_lock<std::mutex> hold(mutex); ready = true; cv.notify_one(); cv.wait(hold, [&] { return finish; }); }
+        value.state = SC_DIAGNOSTIC_EXECUTED; value.executed_at_ms = 1002; value.completed_at_ms = 1003;
+        Diagnostics::finish(*slot, value);
+    });
+    { std::unique_lock<std::mutex> hold(mutex); cv.wait(hold, [&] { return ready; }); }
+    auto claimed = race.retrieve(r, true, 1002, &detail);
+    CHECK(detail.revision == 1 && detail.stage == SC_STAGE_NONE && !detail.observation_attempted);
+    CHECK(claimed.state == SC_DIAGNOSTIC_CLAIMED && claimed.cancel_requested && !claimed.executed_at_ms);
+    { std::lock_guard<std::mutex> hold(mutex); finish = true; cv.notify_one(); }
+    callback.join();
+    auto done = race.retrieve(r, false, 1004);
+    CHECK(done.state == SC_DIAGNOSTIC_EXECUTED && done.cancel_requested && done.retrieved_at_ms == 1004);
+
+}
+int main() {
+    inventory_observation_cases();
+    rune_binding_case();
+    challenge_suppression_cases();
+    lifecycle_cases();
     Diagnostics queue;
     auto r = request(1);
     CHECK(queue.submit(r, SC_NATIVE_NONE, 100).state == SC_DIAGNOSTIC_QUEUED);
@@ -242,26 +280,7 @@ int main() {
     CHECK(queue.submit(request(10), 0, 30200).state == SC_DIAGNOSTIC_QUEUED); // limited retention, not durable exactly-once
     CHECK(queue.retrieve(request(1), false, 30200).state == SC_DIAGNOSTIC_UNKNOWN);
 
-    // Deterministic claimed/cancel race: only the callback thread writes terminal
-    // results. A cancellation while CLAIMED is a request, not a false guarantee.
-    Diagnostics race;
-    r = request(50, 1000); race.submit(r, 0, 1000); auto* slot = race.claim(1001); CHECK(slot);
-    std::mutex mutex; std::condition_variable cv; bool ready = false, finish = false;
-    std::thread callback([&] {
-        auto value = slot->result;
-        { std::unique_lock<std::mutex> hold(mutex); ready = true; cv.notify_one(); cv.wait(hold, [&] { return finish; }); }
-        value.state = SC_DIAGNOSTIC_EXECUTED; value.executed_at_ms = 1002; value.completed_at_ms = 1003;
-        Diagnostics::finish(*slot, value);
-    });
-    { std::unique_lock<std::mutex> hold(mutex); cv.wait(hold, [&] { return ready; }); }
-    auto claimed = race.retrieve(r, true, 1002, &detail);
-    CHECK(detail.revision == 1 && detail.stage == SC_STAGE_NONE && !detail.observation_attempted);
-    CHECK(claimed.state == SC_DIAGNOSTIC_CLAIMED && claimed.cancel_requested && !claimed.executed_at_ms);
-    { std::lock_guard<std::mutex> hold(mutex); finish = true; cv.notify_one(); }
-    callback.join();
-    auto done = race.retrieve(r, false, 1004);
-    CHECK(done.state == SC_DIAGNOSTIC_EXECUTED && done.cancel_requested && done.retrieved_at_ms == 1004);
-
+    claimed_cancellation_case();
     run_backup_request_contracts();
     run_command_identity_tests();
     std::puts("PASS native lifecycle, nested/free/failure/menu, same-name generation, history gaps, queue bounds/deadlines/retention, claimed cancellation race, strict bounded wire; HARNESS ONLY");

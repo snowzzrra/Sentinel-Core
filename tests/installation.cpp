@@ -23,6 +23,25 @@ struct Memory final : engine::Memory {
   return result;
  }
 };
+void check_hook_statuses(uint8_t* bytes) {
+    save::Installation counts;
+    CHECK(MH_Initialize()==MH_OK);
+    save::Installation real_api;
+    CHECK(real_api.hook(SC_INSTALL_SAVE_CREATE,2,9,0, [&]{return MH_CreateHook(bytes+0x2000,bytes+0x100,nullptr);})==MH_ERROR_NOT_EXECUTABLE);
+    CHECK(real_api.inspect().primary_failure.minhook_status==MH_ERROR_NOT_EXECUTABLE);
+    save::Installation real_enable;
+    CHECK(real_enable.hook(SC_INSTALL_SAVE_ENABLE,2,9,0,[&]{return MH_EnableHook(bytes+0x100);})==MH_ERROR_NOT_CREATED);
+    CHECK(real_enable.inspect().primary_failure.minhook_status==MH_ERROR_NOT_CREATED);
+    CHECK(MH_Uninitialize()==MH_OK);
+    CHECK(!counts.hook(SC_INSTALL_SAVE_CREATE,2,9,0x17e6c40,[]{return 0;}));
+    CHECK(counts.hook(SC_INSTALL_SAVE_ENABLE,2,9,0x17e6c40,[]{return 10;})==10);
+    CHECK(counts.inspect().created==1 && counts.inspect().enabled==0);
+    for(auto stage:{SC_INSTALL_REFERENCE_COPY,SC_INSTALL_FACTORY_CALL,SC_INSTALL_STEAM_IMPORT}) {
+     save::Installation helper; auto event=helper.begin(stage,3,SC_INSTALL_UNKNOWN,0x367510);
+     save::attach_read(event,{77,ERROR_PARTIAL_COPY}); helper.finish(event,SC_NATIVE_READ_FAILED);
+     CHECK(helper.inspect().primary_failure.read_reason==77 && helper.inspect().primary_failure.win32_error==ERROR_PARTIAL_COPY);
+    }
+}
 void contract() {
  auto bytes=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x4000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE)); CHECK(bytes);
  const auto base=reinterpret_cast<uintptr_t>(bytes);
@@ -66,23 +85,7 @@ void contract() {
   CHECK(failure.inspect().primary_failure.minhook_status!=SC_INSTALL_UNKNOWN);
   CHECK(failure.inspect().primary_failure.win32_error==SC_INSTALL_UNKNOWN);
  }
- save::Installation counts;
- CHECK(MH_Initialize()==MH_OK);
- save::Installation real_api;
- CHECK(real_api.hook(SC_INSTALL_SAVE_CREATE,2,9,0, [&]{return MH_CreateHook(bytes+0x2000,bytes+0x100,nullptr);})==MH_ERROR_NOT_EXECUTABLE);
- CHECK(real_api.inspect().primary_failure.minhook_status==MH_ERROR_NOT_EXECUTABLE);
- save::Installation real_enable;
- CHECK(real_enable.hook(SC_INSTALL_SAVE_ENABLE,2,9,0,[&]{return MH_EnableHook(bytes+0x100);})==MH_ERROR_NOT_CREATED);
- CHECK(real_enable.inspect().primary_failure.minhook_status==MH_ERROR_NOT_CREATED);
- CHECK(MH_Uninitialize()==MH_OK);
- CHECK(!counts.hook(SC_INSTALL_SAVE_CREATE,2,9,0x17e6c40,[]{return 0;}));
- CHECK(counts.hook(SC_INSTALL_SAVE_ENABLE,2,9,0x17e6c40,[]{return 10;})==10);
- CHECK(counts.inspect().created==1 && counts.inspect().enabled==0);
- for(auto stage:{SC_INSTALL_REFERENCE_COPY,SC_INSTALL_FACTORY_CALL,SC_INSTALL_STEAM_IMPORT}) {
-  save::Installation helper; auto event=helper.begin(stage,3,SC_INSTALL_UNKNOWN,0x367510);
-  save::attach_read(event,{77,ERROR_PARTIAL_COPY}); helper.finish(event,SC_NATIVE_READ_FAILED);
-  CHECK(helper.inspect().primary_failure.read_reason==77 && helper.inspect().primary_failure.win32_error==ERROR_PARTIAL_COPY);
- }
+  check_hook_statuses(bytes);
  save::Installation unreadable; memory.fail=target.address;
  CHECK(native::validate_recorded(unreadable,memory,image,target,stop,GetTickCount64()+1000,2,0)==SC_NATIVE_TARGET_BYTES);
  CHECK(unreadable.inspect().primary_failure.win32_error==ERROR_PARTIAL_COPY);
@@ -92,6 +95,44 @@ void contract() {
  owner.install(1,2,save::required_routes); CHECK(!owner.native_io()); // record/readiness never admits
  CHECK(RtlDeleteFunctionTable(table)); CloseHandle(stop); CHECK(VirtualFree(bytes,0,MEM_RELEASE));
  std::puts("PASS chained ownership, foreign fragment/cycle/duplicate/interior refusal, first target/read/API statuses, cleanup retention, startup, additive wire; controlled host only");
+}
+void check_menu_targets(Memory& memory, const engine::Image& image, HANDLE stop) {
+     const auto targets=campaign_menu::native_targets(image.base);
+     auto old_prefix=targets[8]; old_prefix.signature_offset=0;
+     save::Installation baseline;
+     CHECK(native::validate_recorded(baseline,memory,image,old_prefix,stop,GetTickCount64()+3000,6,8)==SC_NATIVE_TARGET_NOT_UNIQUE);
+     std::puts("REPRODUCED menu target8: correct callee with shared prologue refused by production validator");
+     save::Installation menu;
+     CHECK(campaign_menu::validate_native_targets(menu,memory,image,stop,targets));
+     CHECK(!menu.inspect().primary_failure.sequence && !menu.inspect().created && !menu.inspect().enabled);
+     memory.redirect=targets[36].address;
+     save::Installation patched_label;
+     CHECK(!campaign_menu::validate_native_targets(patched_label,memory,image,stop,targets));
+     CHECK(patched_label.inspect().primary_failure.target_index==36);
+     CHECK(patched_label.inspect().primary_failure.rva==0x1859e20);
+     memory.redirect=0;
+     std::puts("PASS pristine menu qualification; target36 refusal after shared label patch");
+     auto wrong=targets; wrong[8].address=image.base+0x143c070;
+     save::Installation wrong_call;
+     CHECK(!campaign_menu::validate_native_targets(wrong_call,memory,image,stop,wrong));
+     CHECK(wrong_call.inspect().primary_failure.rva==0x10d2d99);
+     auto changed=targets[8]; changed.signature[0]^=1;
+     CHECK(native::validate_target(memory,image,changed,stop,GetTickCount64()+3000)==SC_NATIVE_TARGET_BYTES);
+     for(auto rva:{0x10d2d99u,0x43c070u,0x43c0a0u}) {
+      memory.fail=image.base+rva; save::Installation unreadable;
+      CHECK(!campaign_menu::validate_native_targets(unreadable,memory,image,stop,targets));
+      CHECK(unreadable.inspect().primary_failure.read_reason==77);
+      CHECK(!unreadable.inspect().created && !unreadable.inspect().enabled);
+     }
+     std::printf("PASS all%zu production menu bindings, shared-prologue correction, wrong callee/signature/read refusals; PE data only, no game execution\n",targets.size());
+     memory.fail=0;
+     save::Installation campaign;
+     for(const auto& target:save::campaign_targets(image.base)) {
+      const auto reason=native::validate_recorded(campaign,memory,image,target,stop,GetTickCount64()+3000,4,campaign.inspect().validated);
+      if(reason) { const auto e=campaign.inspect().primary_failure; std::fprintf(stderr,"CAMPAIGN target=%u reason=%u rva=%x collision=%x\n",e.target_index,reason,e.rva,e.collision_rva); }
+      CHECK(reason==SC_NATIVE_NONE);
+     }
+     std::printf("PASS all%u campaign bindings including persisted mission reader/serializer; PE data only\n",campaign.inspect().validated);
 }
 int wmain(int argc,wchar_t** argv) {
  if(argc==1) {contract();return 0;}
@@ -108,46 +149,11 @@ int wmain(int argc,wchar_t** argv) {
  auto entries=reinterpret_cast<RUNTIME_FUNCTION*>(bytes+directory.VirtualAddress);
  CHECK(RtlAddFunctionTable(entries,directory.Size/sizeof(RUNTIME_FUNCTION),image.base));
  HANDLE stop=CreateEventW(nullptr,TRUE,FALSE,nullptr); CHECK(stop);
- if(menu_only) {
-  const auto targets=campaign_menu::native_targets(image.base);
-  auto old_prefix=targets[8]; old_prefix.signature_offset=0;
-  save::Installation baseline;
-  CHECK(native::validate_recorded(baseline,memory,image,old_prefix,stop,GetTickCount64()+3000,6,8)==SC_NATIVE_TARGET_NOT_UNIQUE);
-  std::puts("REPRODUCED menu target8: correct callee with shared prologue refused by production validator");
-  save::Installation menu;
-  CHECK(campaign_menu::validate_native_targets(menu,memory,image,stop,targets));
-  CHECK(!menu.inspect().primary_failure.sequence && !menu.inspect().created && !menu.inspect().enabled);
-  memory.redirect=targets[36].address;
-  save::Installation patched_label;
-  CHECK(!campaign_menu::validate_native_targets(patched_label,memory,image,stop,targets));
-  CHECK(patched_label.inspect().primary_failure.target_index==36);
-  CHECK(patched_label.inspect().primary_failure.rva==0x1859e20);
-  memory.redirect=0;
-  std::puts("PASS pristine menu qualification; target36 refusal after shared label patch");
-  auto wrong=targets; wrong[8].address=image.base+0x143c070;
-  save::Installation wrong_call;
-  CHECK(!campaign_menu::validate_native_targets(wrong_call,memory,image,stop,wrong));
-  CHECK(wrong_call.inspect().primary_failure.rva==0x10d2d99);
-  auto changed=targets[8]; changed.signature[0]^=1;
-  CHECK(native::validate_target(memory,image,changed,stop,GetTickCount64()+3000)==SC_NATIVE_TARGET_BYTES);
-  for(auto rva:{0x10d2d99u,0x43c070u,0x43c0a0u}) {
-   memory.fail=image.base+rva; save::Installation unreadable;
-   CHECK(!campaign_menu::validate_native_targets(unreadable,memory,image,stop,targets));
-   CHECK(unreadable.inspect().primary_failure.read_reason==77);
-   CHECK(!unreadable.inspect().created && !unreadable.inspect().enabled);
+  if(menu_only) {
+   check_menu_targets(memory,image,stop);
+   CHECK(RtlDeleteFunctionTable(entries)); CloseHandle(stop); UnmapViewOfFile(bytes); CloseHandle(mapping); CloseHandle(file);
+   return 0;
   }
-  std::printf("PASS all%zu production menu bindings, shared-prologue correction, wrong callee/signature/read refusals; PE data only, no game execution\n",targets.size());
-  memory.fail=0;
-  save::Installation campaign;
-  for(const auto& target:save::campaign_targets(image.base)) {
-   const auto reason=native::validate_recorded(campaign,memory,image,target,stop,GetTickCount64()+3000,4,campaign.inspect().validated);
-   if(reason) { const auto e=campaign.inspect().primary_failure; std::fprintf(stderr,"CAMPAIGN target=%u reason=%u rva=%x collision=%x\n",e.target_index,reason,e.rva,e.collision_rva); }
-   CHECK(reason==SC_NATIVE_NONE);
-  }
-  std::printf("PASS all%u campaign bindings including persisted mission reader/serializer; PE data only\n",campaign.inspect().validated);
-  CHECK(RtlDeleteFunctionTable(entries)); CloseHandle(stop); UnmapViewOfFile(bytes); CloseHandle(mapping); CloseHandle(file);
-  return 0;
- }
  save::Installation record;
  auto baseline_target=native::save_target(image.base,3); baseline_target.signature_offset=0;
  save::Installation baseline;

@@ -37,14 +37,19 @@ Model* active = nullptr;
 struct WriterSubmission { const WriteCalls* calls; SaveReference* source; SaveFuture** future; unsigned releases = 0; };
 WriterSubmission* submitted_writer = nullptr;
 SaveReference* submitted_factory(uintptr_t manager, SaveReference* task, uint32_t user, uintptr_t request) {
-    CHECK(manager == 0x111 && user == 7 && request == 0x222);
+    CHECK(manager == 0x111);
+    CHECK(user == 7);
+    CHECK(request == 0x222);
     auto& m = *active; auto& submitted = *submitted_writer;
     write_scoped(m.owner, m.memory, reinterpret_cast<uintptr_t>(&m.remote), submitted.future,
         0x7788, submitted.source, *submitted.calls);
     task->control = 0x3344; return task;
 }
 SaveReference* submitted_root(uintptr_t root, SaveReference* out, uint8_t a, uint8_t b, uint8_t c) {
-    CHECK(root == 0x123 && !a && !b && !c);
+    CHECK(root == 0x123);
+    CHECK(!a);
+    CHECK(!b);
+    CHECK(!c);
     return native_save_factory(active->owner.native_writes, 0x674744, 0x674744,
         0x111, out, 7, 0x222, submitted_factory);
 }
@@ -164,12 +169,13 @@ SaveResult* poll_read(SaveFuture* base, SaveResult* out, void* task) {
     verify_readback(m.owner, m.memory, reinterpret_cast<uintptr_t>(context.data()), &result, native_decode, image);
     field<uintptr_t>(stream, 0x168) = buffer;
     release(&m.job); static_cast<uint8_t*>(task)[8] = 0;
-    if (m.mode >= 19) CHECK(result.value == (m.mode == 20 ? 0x80009100u : 0x80009101u) && result.padding == 0xa5a5a5a5u);
+    if (m.mode >= 19) { CHECK(result.value == (m.mode == 20 ? 0x80009100u : 0x80009101u)); CHECK(result.padding == 0xa5a5a5a5u); }
     *out = {0, result.outcome, result.active_value(), 0}; return out;
 }
 const SaveFutureVtable read_table{destroy_read, poll_read};
 SaveFuture** create_read(uintptr_t, SaveFuture** out, uintptr_t identity, SaveReference* data) {
-    auto& m = *active; CHECK(m.identity_alive && identity == 0x7788); ++m.reads;
+    auto& m = *active; CHECK(m.identity_alive);
+    CHECK(identity == 0x7788); ++m.reads;
     m.private_data = reinterpret_cast<Control*>(data->control)->data;
     CHECK(field<int32_t>(m.private_data, 0x1c8) == 0);
     if (m.mode == 15) { release(data); *out = nullptr; return out; }
@@ -213,7 +219,8 @@ ReadWorkerResult* ordinary_prepare(uintptr_t context, ReadWorkerResult* out, Sav
     }
     // both native exits consume exactly one weak reference, not a strong one
     auto* control = reinterpret_cast<Control*>(waiter->control);
-    CHECK(control && control->weak == 2); --control->weak; waiter->control = 0;
+    CHECK(control);
+    CHECK(control->weak == 2); --control->weak; waiter->control = 0;
     return out;
 }
 SaveFuture** create_writer(uintptr_t, SaveFuture** out, uintptr_t, SaveReference* source) {
@@ -235,6 +242,35 @@ struct GatedMemory : engine::Memory {
         return actual.copy(address, out, count);
     }
 };
+static void copy_backup_during_cancellation(Session& owner, BackupJob& job, const SdkWriteObservation& manifest, const std::vector<uintptr_t>& buffers, unsigned mode) {
+    GatedMemory gated; CHECK(gated.entered);
+    CHECK(gated.proceed);
+    std::thread worker([&] { job.copy(owner, gated, manifest, buffers); });
+    CHECK(WaitForSingleObject(gated.entered, 3000) == WAIT_OBJECT_0);
+    if (mode == 1) job.cancel(); else job.readback_finished(false);
+    CHECK(job.progress().state == BackupState::copying); // no premature completion/cleanup
+    SetEvent(gated.proceed); worker.join();
+}
+static void check_backup_worker_completion(BackupJob& job, unsigned mode, BackupProgress& progress) {
+    job.readback_finished(mode != 3);
+    progress = job.progress();
+    if (mode == 0) {
+        CHECK(progress.state == BackupState::complete);
+        job.cancel(); CHECK(job.progress().state == BackupState::complete);
+        CHECK(job.progress().cancel_requested);
+    } else {
+        CHECK(progress.state == BackupState::failed);
+        CHECK(progress.failure == (mode == 1 || mode == 5 ? BackupFailure::cancelled :
+            mode == 4 ? BackupFailure::deadline : BackupFailure::native));
+    }
+    if (mode == 1 || mode == 2) {
+        CHECK(progress.storage_attempted);
+        CHECK(!progress.output.path.empty());
+        CHECK(GetFileAttributesW((progress.output.path + L"\\transport.manifest").c_str()) == INVALID_FILE_ATTRIBUTES);
+    }
+    if (mode == 3) { CHECK(progress.storage_complete); CHECK(!progress.readback_success); CHECK(!progress.output.path.empty()); }
+    if (mode >= 4) { CHECK(!progress.storage_attempted); CHECK(progress.output.path.empty()); }
+}
 void backup_worker_contracts(const std::function<std::unique_ptr<Session>()>& make) {
     for (unsigned mode = 0; mode != 6; ++mode) {
         auto owner = make(); engine::LocalMemory memory;
@@ -250,189 +286,206 @@ void backup_worker_contracts(const std::function<std::unique_ptr<Session>()>& ma
         manifest.payloads.push_back(file);
         const std::vector<uintptr_t> buffers{reinterpret_cast<uintptr_t>(private_bytes.data())};
         BackupJob job(GetCurrentProcessId(), 654321, mode == 4 ? 0 : GetTickCount64() + 10000);
-        CHECK(job.bind(77) && !job.bind(78));
+        CHECK(job.bind(77));
+        CHECK(!job.bind(78));
         if (mode == 5) job.cancel();
         if (mode == 1 || mode == 2) {
-            GatedMemory gated; CHECK(gated.entered && gated.proceed);
-            std::thread worker([&] { job.copy(*owner, gated, manifest, buffers); });
-            CHECK(WaitForSingleObject(gated.entered, 3000) == WAIT_OBJECT_0);
-            if (mode == 1) job.cancel(); else job.readback_finished(false);
-            CHECK(job.progress().state == BackupState::copying); // no premature completion/cleanup
-            SetEvent(gated.proceed); worker.join();
+            copy_backup_during_cancellation(*owner, job, manifest, buffers, mode);
         } else job.copy(*owner, memory, manifest, buffers);
         auto progress = job.progress();
-        if (mode == 0 || mode == 3) CHECK(progress.state == BackupState::copied && progress.storage_complete);
-        else CHECK(progress.state == BackupState::failed && !progress.storage_complete);
-        job.readback_finished(mode != 3);
-        progress = job.progress();
-        if (mode == 0) {
-            CHECK(progress.state == BackupState::complete);
-            job.cancel(); CHECK(job.progress().state == BackupState::complete && job.progress().cancel_requested);
-        } else {
-            CHECK(progress.state == BackupState::failed);
-            CHECK(progress.failure == (mode == 1 || mode == 5 ? BackupFailure::cancelled :
-                mode == 4 ? BackupFailure::deadline : BackupFailure::native));
-        }
-        if (mode == 1 || mode == 2) {
-            CHECK(progress.storage_attempted && !progress.output.path.empty());
-            CHECK(GetFileAttributesW((progress.output.path + L"\\transport.manifest").c_str()) == INVALID_FILE_ATTRIBUTES);
-        }
-        if (mode == 3) CHECK(progress.storage_complete && !progress.readback_success && !progress.output.path.empty());
-        if (mode >= 4) CHECK(!progress.storage_attempted && progress.output.path.empty());
+        if (mode == 0 || mode == 3) { CHECK(progress.state == BackupState::copied); CHECK(progress.storage_complete); }
+        else { CHECK(progress.state == BackupState::failed); CHECK(!progress.storage_complete); }
+        check_backup_worker_completion(job, mode, progress);
     }
 }
 }
+static void configure_worker_directory(Session& owner,Model& m,unsigned mode,bool disabled) {
+    if (mode == 1) m.directory = owner.native_root() + "/DLC1-AUTOSAVE11";
+    if (mode == 2) m.directory = "PROFILE";
+    if (mode == 4 || disabled) m.directory = "GAME-AUTOSAVE0";
+    if (mode == 5) m.directory = "foreign/GAME-AUTOSAVE0";
+    if (mode == 8) m.directory = owner.native_root() + "/DLC2-AUTOSAVE12";
+}
+static void check_worker_references(const std::array<uintptr_t, 2>& context, uintptr_t remote, const SaveReference& waiter, const Control& weak, const Control* control) {
+    CHECK(context[0] == remote);
+    CHECK(!waiter.control);
+    CHECK(weak.weak == 1);
+    CHECK(weak.strong == 3);
+    CHECK(control->strong == 1);
+}
+static bool check_worker_result(Session& owner,Model& m,unsigned mode,bool disabled,const std::array<uintptr_t,2>& context,uintptr_t remote,const SaveReference& waiter,const Control& weak,const Control* control,const ReadWorkerResult& result) {
+    const bool accepted = mode <= 2 || mode == 11;
+    CHECK(m.prepared == 1);
+    CHECK(m.sizes == (accepted ? 1u : 0u));
+    CHECK(!m.read_polls);
+    CHECK(!m.decoded);
+    CHECK(!m.streams);
+    check_worker_references(context, remote, waiter, weak, control);
+    CHECK(result.outcome == (accepted ? 0 : 1));
+    CHECK(result.value == (mode == 12 ? 0x40u : 1u));
+    if (disabled) { CHECK(owner.state() == SessionState::disabled); CHECK(owner.fault() == SessionFault::none); }
+    else if (!accepted) { CHECK(owner.state() == SessionState::faulted); CHECK(owner.fault() == (mode == 6 ? SessionFault::native_write : SessionFault::native_read)); }
+    return accepted;
+}
+static void ordinary_worker_case(const std::function<std::unique_ptr<Session>()>& make,unsigned mode) {
+    const bool disabled = mode >= 11;
+    auto owner = disabled ? std::make_unique<Session>() : make(); Model m(*owner); active = &m;
+    m.table[15] = reinterpret_cast<uintptr_t>(size);
+    if (!disabled) CHECK(owner->bind_provider(owner->native_root(), reinterpret_cast<uintptr_t>(&m.remote), owner->ownership_record()));
+    configure_worker_directory(*owner,m,mode,disabled);
+    auto* control = static_cast<Control*>(allocate(sizeof(Control)));
+    auto* object = construct(allocate(0x280)); *control = {1, 1, reinterpret_cast<uintptr_t>(object), destroy_data};
+    set_name(control->data, m.directory.c_str()); SaveReference source{reinterpret_cast<uintptr_t>(control)};
+    SaveFuture* future = nullptr;
+    create_read(0x777, &future, 0x7788, &source);
+    CHECK(future);
+    CHECK(!source.control);
+    CHECK(control->strong == 1);
+    CHECK(m.reads == 1);
+    CHECK(!owner->native_writes.readback_operation(control->data));
+    m.identity_alive = false; // factory already captured its borrowed argument
+    std::array<uintptr_t, 2> context{reinterpret_cast<uintptr_t>(&m.remote), reinterpret_cast<uintptr_t>(control)};
+    uintptr_t replacement = reinterpret_cast<uintptr_t>(m.table.data());
+    if (mode == 3) context[0] = reinterpret_cast<uintptr_t>(&replacement); // replaced after the factory
+    if (mode == 6) owner->fail(SessionFault::native_write);
+    if (mode == 7 || mode == 12) context[0] = 0;
+    if (mode == 9) context[1] = 0;
+    if (mode == 10) field<NativeString>(control->data, 0).length = 64;
+    const auto remote = context[0];
+    Control weak{3, 2, 0, nullptr}; SaveReference waiter{reinterpret_cast<uintptr_t>(&weak)};
+    ReadWorkerResult result{};
+    prepare_readback(*owner, m.memory, reinterpret_cast<uintptr_t>(context.data()), &result, &waiter, ordinary_prepare);
+    const bool accepted=check_worker_result(*owner,m,mode,disabled,context,remote,waiter,weak,control,result);
+    if (accepted) {
+        std::array<uintptr_t, 2> decode_context{reinterpret_cast<uintptr_t>(control), 0};
+        verify_readback(*owner, m.memory, reinterpret_cast<uintptr_t>(decode_context.data()), &result, native_decode, image);
+        CHECK(!result.outcome);
+        CHECK(result.value == 1);
+        CHECK(m.decoded == 1);
+    }
+    future->vtable->destroy(future, 1); CHECK(m.freed_data == 1);
+}
+
 static void ordinary_worker_contracts(const std::function<std::unique_ptr<Session>()>& make) {
     for (unsigned mode = 0; mode < 13; ++mode) {
-        const bool disabled = mode >= 11;
-        auto owner = disabled ? std::make_unique<Session>() : make(); Model m(*owner); active = &m;
-        m.table[15] = reinterpret_cast<uintptr_t>(size);
-        if (!disabled) CHECK(owner->bind_provider(owner->native_root(), reinterpret_cast<uintptr_t>(&m.remote), owner->ownership_record()));
-        if (mode == 1) m.directory = owner->native_root() + "/DLC1-AUTOSAVE11";
-        if (mode == 2) m.directory = "PROFILE";
-        if (mode == 4 || disabled) m.directory = "GAME-AUTOSAVE0";
-        if (mode == 5) m.directory = "foreign/GAME-AUTOSAVE0";
-        if (mode == 8) m.directory = owner->native_root() + "/DLC2-AUTOSAVE12";
-        auto* control = static_cast<Control*>(allocate(sizeof(Control)));
-        auto* object = construct(allocate(0x280)); *control = {1, 1, reinterpret_cast<uintptr_t>(object), destroy_data};
-        set_name(control->data, m.directory.c_str()); SaveReference source{reinterpret_cast<uintptr_t>(control)};
-        SaveFuture* future = nullptr;
-        create_read(0x777, &future, 0x7788, &source);
-        CHECK(future && !source.control && control->strong == 1 && m.reads == 1);
-        CHECK(!owner->native_writes.readback_operation(control->data));
-        m.identity_alive = false; // factory already captured its borrowed argument
-        std::array<uintptr_t, 2> context{reinterpret_cast<uintptr_t>(&m.remote), reinterpret_cast<uintptr_t>(control)};
-        uintptr_t replacement = reinterpret_cast<uintptr_t>(m.table.data());
-        if (mode == 3) context[0] = reinterpret_cast<uintptr_t>(&replacement); // replaced after the factory
-        if (mode == 6) owner->fail(SessionFault::native_write);
-        if (mode == 7 || mode == 12) context[0] = 0;
-        if (mode == 9) context[1] = 0;
-        if (mode == 10) field<NativeString>(control->data, 0).length = 64;
-        const auto remote = context[0];
-        Control weak{3, 2, 0, nullptr}; SaveReference waiter{reinterpret_cast<uintptr_t>(&weak)};
-        ReadWorkerResult result{};
-        prepare_readback(*owner, m.memory, reinterpret_cast<uintptr_t>(context.data()), &result, &waiter, ordinary_prepare);
-        const bool accepted = mode <= 2 || mode == 11;
-        CHECK(m.prepared == 1 && m.sizes == (accepted ? 1u : 0u) && !m.read_polls && !m.decoded && !m.streams);
-        CHECK(context[0] == remote && !waiter.control && weak.weak == 1 && weak.strong == 3 && control->strong == 1);
-        CHECK(result.outcome == (accepted ? 0 : 1) && result.value == (mode == 12 ? 0x40u : 1u));
-        if (disabled) CHECK(owner->state() == SessionState::disabled && owner->fault() == SessionFault::none);
-        else if (!accepted) CHECK(owner->state() == SessionState::faulted &&
-            owner->fault() == (mode == 6 ? SessionFault::native_write : SessionFault::native_read));
-        if (accepted) {
-            std::array<uintptr_t, 2> decode_context{reinterpret_cast<uintptr_t>(control), 0};
-            verify_readback(*owner, m.memory, reinterpret_cast<uintptr_t>(decode_context.data()), &result, native_decode, image);
-            CHECK(!result.outcome && result.value == 1 && m.decoded == 1);
+        ordinary_worker_case(make,mode);
+}
+}
+static void check_cancelled_readback(Session& owner,Model& m,SaveFuture* future,const SaveResult& result,const std::array<uint8_t,16>& task,const std::shared_ptr<BackupJob>& backup) {
+        CHECK(result.state == -1);
+        CHECK(m.job.control);
+        CHECK(task[8]);
+        const auto data = m.private_data;
+        future->vtable->destroy(future, 1); owner.native_writes.close_provider(m.operation);
+        CHECK(backup->progress().state == BackupState::failed);
+        CHECK(!backup->progress().storage_attempted);
+        CHECK(!m.freed_data);
+        CHECK(owner.native_writes.readback_operation(data) == m.operation);
+        for (unsigned i = 0; i < 80; ++i) {
+            const auto id = owner.native_writes.open_provider(i + 0x900, "another"); CHECK(id);
+            owner.native_writes.close_provider(id);
         }
-        future->vtable->destroy(future, 1); CHECK(m.freed_data == 1);
+        CHECK(owner.native_writes.snapshot(m.operation).state == SC_SAVE_WRITE_READBACK_FAILED);
+        std::array<uintptr_t, 2> context{m.job.control, 0}; ReadWorkerResult late{};
+        verify_readback(owner, m.memory, reinterpret_cast<uintptr_t>(context.data()), &late, native_decode, image);
+        CHECK(late.outcome == 1);
+        CHECK(!m.decoded); release(&m.job);
+        CHECK(m.freed_data == 1);
+        CHECK(!owner.native_writes.readback_operation(data)); return;
+}
+static void check_readback_diagnostic(Session& owner,Model& m,unsigned mode) {
+    constexpr const char* failures[]{nullptr, "readback_sha256_mismatch", "readback_storage_file_size",
+        "readback_storage_file_size", "readback_storage_file_size", "readback_stream_error",
+        "readback_manifest_name_mismatch", "readback_native_cancelled", "readback_loaded_size_mismatch",
+        "readback_native_decode_result", "readback_stream_flags_mismatch", "payload_hash_bytes_unreadable",
+        "readback_native_prepare_exception", "readback_file_sdk_proof_missing", nullptr, nullptr,
+        "readback_stream_allocation_failed", "readback_terminal_hash_proof_missing", nullptr, nullptr,
+        "readback_native_decode_result", "readback_native_decode_result"};
+    const auto diagnostic = owner.btrace.snapshot().first_failure;
+    if (mode == 0 || mode == 19) {
+        if (diagnostic.sequence) {
+            std::fprintf(stderr, "readback success first failure stage=%s predicate=%s operation=%llu\n",
+                b_stage_names[static_cast<size_t>(diagnostic.stage)], diagnostic.predicate,
+                static_cast<unsigned long long>(diagnostic.operation));
+            for (const auto& fact : diagnostic.facts) if (fact.key)
+                std::fprintf(stderr, " %s=%lld\n", fact.key, static_cast<long long>(fact.value));
+        }
+        CHECK(!diagnostic.sequence); // pending, successful native calls and readback are not faults
+    }
+    else if (mode < std::size(failures) && failures[mode]) {
+        CHECK(diagnostic.sequence);
+        CHECK(diagnostic.operation == m.operation);
+        CHECK(!std::strcmp(diagnostic.predicate, failures[mode]));
+        owner.btrace.record(BStage::provider, BStatus::refused, "fixture_later_provider_failure", m.operation);
+        CHECK(owner.btrace.snapshot().first_failure.sequence == diagnostic.sequence);
     }
 }
-void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& make) {
-    for (unsigned mode = 0; mode <= 21; ++mode) {
-        const bool verified = mode == 0 || mode == 18 || mode == 19;
-        auto owner = make(); Model m(*owner); active = &m; m.mode = mode;
-        m.table[15] = reinterpret_cast<uintptr_t>(size);
-        m.operation = owner->native_writes.open_provider(0x123, m.directory); CHECK(m.operation);
-        auto backup = std::make_shared<BackupJob>(GetCurrentProcessId(), 123456, GetTickCount64() + 10000);
-        CHECK(owner->native_writes.request_backup(m.operation, backup));
-        CHECK(!owner->native_writes.request_backup(m.operation, backup));
-        if (mode == 16) m.fail_allocation = 3; // first private stream allocation, after native write
-        SaveFuture* future = create_write_readback(*owner, m.operation, 0x777, 0x7788, m.directory, calls());
-        m.identity_alive = false;
-        if (mode == 15) {
-            CHECK(!future && m.freed_data == 1 && backup->progress().state == BackupState::failed);
-            continue;
-        }
-        CHECK(future && m.read_polls == 0);
-        proof(m, mode != 13);
-        owner->native_writes.provider_result(m.operation, {0, 0, 1, 0});
-        if (mode == 18) {
-            CHECK(owner->bind_provider(owner->native_root(), reinterpret_cast<uintptr_t>(&m.remote), owner->ownership_record()));
-            owner->fail(SessionFault::native_write); CHECK(owner->state() == SessionState::faulted);
-        }
-        std::array<uint8_t, 16> task{}; SaveResult result{};
-        future->vtable->poll(future, &result, task.data());
-        if (mode == 14) {
-            CHECK(result.state == -1 && m.job.control && task[8]);
-            const auto data = m.private_data;
-            future->vtable->destroy(future, 1); owner->native_writes.close_provider(m.operation);
-            CHECK(backup->progress().state == BackupState::failed && !backup->progress().storage_attempted);
-            CHECK(!m.freed_data && owner->native_writes.readback_operation(data) == m.operation);
-            for (unsigned i = 0; i < 80; ++i) {
-                const auto id = owner->native_writes.open_provider(i + 0x900, "another"); CHECK(id);
-                owner->native_writes.close_provider(id);
-            }
-            CHECK(owner->native_writes.snapshot(m.operation).state == SC_SAVE_WRITE_READBACK_FAILED);
-            std::array<uintptr_t, 2> context{m.job.control, 0}; ReadWorkerResult late{};
-            verify_readback(*owner, m.memory, reinterpret_cast<uintptr_t>(context.data()), &late, native_decode, image);
-            CHECK(late.outcome == 1 && !m.decoded); release(&m.job);
-            CHECK(m.freed_data == 1 && !owner->native_writes.readback_operation(data)); continue;
-        }
-        if (result.state == -1) { CHECK(task[8]); future->vtable->poll(future, &result, task.data()); }
-        CHECK(result.state == 0 && (verified ? result.outcome == 0 && result.value == 1 : result.outcome == 1));
-        CHECK(m.decoded == (verified || mode == 9 || mode >= 20 ? 1u : 0u));
-        constexpr const char* failures[]{nullptr, "readback_sha256_mismatch", "readback_storage_file_size",
-            "readback_storage_file_size", "readback_storage_file_size", "readback_stream_error",
-            "readback_manifest_name_mismatch", "readback_native_cancelled", "readback_loaded_size_mismatch",
-            "readback_native_decode_result", "readback_stream_flags_mismatch", "payload_hash_bytes_unreadable",
-            "readback_native_prepare_exception", "readback_file_sdk_proof_missing", nullptr, nullptr,
-            "readback_stream_allocation_failed", "readback_terminal_hash_proof_missing", nullptr, nullptr,
-            "readback_native_decode_result", "readback_native_decode_result"};
-        const auto diagnostic = owner->btrace.snapshot().first_failure;
-        if (mode == 0 || mode == 19) {
-            if (diagnostic.sequence) {
-                std::fprintf(stderr, "readback success first failure stage=%s predicate=%s operation=%llu\n",
-                    b_stage_names[static_cast<size_t>(diagnostic.stage)], diagnostic.predicate,
-                    static_cast<unsigned long long>(diagnostic.operation));
-                for (const auto& fact : diagnostic.facts) if (fact.key)
-                    std::fprintf(stderr, " %s=%lld\n", fact.key, static_cast<long long>(fact.value));
-            }
-            CHECK(!diagnostic.sequence); // pending, successful native calls and readback are not faults
-        }
-        else if (mode < std::size(failures) && failures[mode]) {
-            CHECK(diagnostic.sequence && diagnostic.operation == m.operation);
-            CHECK(!std::strcmp(diagnostic.predicate, failures[mode]));
-            owner->btrace.record(BStage::provider, BStatus::refused, "fixture_later_provider_failure", m.operation);
-            CHECK(owner->btrace.snapshot().first_failure.sequence == diagnostic.sequence);
-        }
-        const auto snapshot = owner->native_writes.snapshot(m.operation);
-        CHECK(snapshot.state == static_cast<uint32_t>(verified ? SC_SAVE_WRITE_READBACK_CONFIRMED :
-            mode == 13 ? SC_SAVE_WRITE_NATIVE_SUCCEEDED : SC_SAVE_WRITE_READBACK_FAILED));
-        future->vtable->destroy(future, 1);
-        CHECK(m.freed_data == 1 && m.freed_streams == m.streams && !m.job.control);
-        const auto saved = backup->progress();
-        CHECK(saved.operation == m.operation && saved.readback_terminal);
-        if (verified) {
-            CHECK(saved.state == BackupState::complete && saved.readback_success && saved.storage_complete);
-            CHECK(saved.output.files == 1 && saved.output.bytes == m.bytes.size());
-            // the output remains usable after every native stream has died
-            const auto file = CreateFileW((saved.output.path + L"\\payload-0.bin").c_str(), GENERIC_READ,
-                FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-            CHECK(file != INVALID_HANDLE_VALUE);
-            std::array<char, 64> bytes{}; DWORD count = 0;
-            CHECK(ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr));
-            CloseHandle(file); CHECK(std::string(bytes.data(), count) == m.bytes);
-        } else CHECK(saved.state == BackupState::failed && !saved.storage_attempted && saved.output.path.empty());
+static void check_readback_archive(Model& m,const std::shared_ptr<BackupJob>& backup,bool verified) {
+    const auto saved = backup->progress();
+    CHECK(saved.operation == m.operation);
+    CHECK(saved.readback_terminal);
+    if (verified) {
+        CHECK(saved.state == BackupState::complete);
+        CHECK(saved.readback_success);
+        CHECK(saved.storage_complete);
+        CHECK(saved.output.files == 1);
+        CHECK(saved.output.bytes == m.bytes.size());
+        // the output remains usable after every native stream has died
+        const auto file = CreateFileW((saved.output.path + L"\\payload-0.bin").c_str(), GENERIC_READ,
+            FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        CHECK(file != INVALID_HANDLE_VALUE);
+        std::array<char, 64> bytes{}; DWORD count = 0;
+        CHECK(ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr));
+        CloseHandle(file); CHECK(std::string(bytes.data(), count) == m.bytes);
+    } else { CHECK(saved.state == BackupState::failed); CHECK(!saved.storage_attempted); CHECK(saved.output.path.empty()); }
+}
+static void check_readback_completion(Session& owner, Model& m, const SaveResult& result, unsigned mode, bool verified) {
+    CHECK(result.state == 0);
+    CHECK((verified ? result.outcome == 0 && result.value == 1 : result.outcome == 1));
+    CHECK(m.decoded == (verified || mode == 9 || mode >= 20 ? 1u : 0u));
+    check_readback_diagnostic(owner,m,mode);
+    const auto snapshot = owner.native_writes.snapshot(m.operation);
+    CHECK(snapshot.state == static_cast<uint32_t>(verified ? SC_SAVE_WRITE_READBACK_CONFIRMED :
+        mode == 13 ? SC_SAVE_WRITE_NATIVE_SUCCEEDED : SC_SAVE_WRITE_READBACK_FAILED));
+}
+static void readback_case(const std::function<std::unique_ptr<Session>()>& make,unsigned mode) {
+    const bool verified = mode == 0 || mode == 18 || mode == 19;
+    auto owner = make(); Model m(*owner); active = &m; m.mode = mode;
+    m.table[15] = reinterpret_cast<uintptr_t>(size);
+    m.operation = owner->native_writes.open_provider(0x123, m.directory); CHECK(m.operation);
+    auto backup = std::make_shared<BackupJob>(GetCurrentProcessId(), 123456, GetTickCount64() + 10000);
+    CHECK(owner->native_writes.request_backup(m.operation, backup));
+    CHECK(!owner->native_writes.request_backup(m.operation, backup));
+    if (mode == 16) m.fail_allocation = 3; // first private stream allocation, after native write
+    SaveFuture* future = create_write_readback(*owner, m.operation, 0x777, 0x7788, m.directory, calls());
+    m.identity_alive = false;
+    if (mode == 15) {
+        CHECK(!future);
+        CHECK(m.freed_data == 1);
+        CHECK(backup->progress().state == BackupState::failed);
+        return;
     }
-    for (unsigned allocation = 1; allocation <= 2; ++allocation) {
-        auto owner = make(); Model m(*owner); active = &m; m.fail_allocation = allocation;
-        m.operation = owner->native_writes.open_provider(0x123, m.directory); CHECK(m.operation);
-        CHECK(!create_write_readback(*owner, m.operation, 0x777, 0x7788, m.directory, calls()));
-        CHECK(!m.reads && !m.streams && !m.freed_data);
-        const auto first = owner->btrace.snapshot().first_failure;
-        CHECK(first.operation == m.operation && !std::strcmp(first.predicate, allocation == 1 ?
-            "readback_control_allocation_failed" : "readback_data_allocation_failed"));
+    CHECK(future);
+    CHECK(m.read_polls == 0);
+    proof(m, mode != 13);
+    owner->native_writes.provider_result(m.operation, {0, 0, 1, 0});
+    if (mode == 18) {
+        CHECK(owner->bind_provider(owner->native_root(), reinterpret_cast<uintptr_t>(&m.remote), owner->ownership_record()));
+        owner->fail(SessionFault::native_write); CHECK(owner->state() == SessionState::faulted);
     }
-    ordinary_worker_contracts(make);
-    for (const auto count : {1u, 17u}) {
-        auto owner = make(); auto& writes = owner->native_writes;
-        const auto operation = writes.open_provider(0x123, "PROFILE"); CHECK(operation);
-        CHECK(writes.attach_readback(operation, 0x456, 16)); CHECK(writes.attach_files(operation, 0x789, count));
-        const auto sequence = writes.begin(0xabc, 0x789, count, "PROFILE"); CHECK(sequence);
-        std::vector<SdkFileWrite> files(count);
-        for (auto& file : files) { file.prepared = true; file.size = count == 1 ? 0u : 1u; }
-        CHECK(!writes.prepared(sequence, files)); // refused before the preflight invokes quota/deletion
-    }
+    std::array<uint8_t, 16> task{}; SaveResult result{};
+    future->vtable->poll(future, &result, task.data());
+    if(mode==14) { check_cancelled_readback(*owner,m,future,result,task,backup); return; }
+    if (result.state == -1) { CHECK(task[8]); future->vtable->poll(future, &result, task.data()); }
+    check_readback_completion(*owner, m, result, mode, verified);
+    future->vtable->destroy(future, 1);
+    CHECK(m.freed_data == 1);
+    CHECK(m.freed_streams == m.streams);
+    CHECK(!m.job.control);
+    check_readback_archive(m,backup,verified);
+}
+
+static void writer_readback_cases(const std::function<std::unique_ptr<Session>()>& make) {
     for (const bool armed : {false, true}) {
         auto owner = make(); Model m(*owner); active = &m; m.table[15] = reinterpret_cast<uintptr_t>(size);
         CHECK(owner->bind_provider(owner->native_root(), reinterpret_cast<uintptr_t>(&m.remote), owner->ownership_record()));
@@ -454,8 +507,12 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
             WriterSubmission submission{&write, &source, &future}; submitted_writer = &submission;
             const auto invoked = submit_native_save(owner->native_writes, backup, m.directory,
                 {submitted_root, submitted_release, 0x123, 0x674744});
-            CHECK(invoked.entered && invoked.matched && !invoked.exception && submission.releases == 1);
-            CHECK(invoked.operation == backup->progress().operation && !backup->progress().storage_attempted);
+            CHECK(invoked.entered);
+            CHECK(invoked.matched);
+            CHECK(!invoked.exception);
+            CHECK(submission.releases == 1);
+            CHECK(invoked.operation == backup->progress().operation);
+            CHECK(!backup->progress().storage_attempted);
             submitted_writer = nullptr;
             auto facts = slot->result;
             facts.observed_at_ms = facts.executed_at_ms = now + 1; facts.thread_id = GetCurrentThreadId();
@@ -465,20 +522,60 @@ void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& mak
             native::Diagnostics::await_backup(*slot, facts, {}, invoked);
             CHECK(queue.backup_result(request, false, now + 1).state == SC_BACKUP_WAITING_NATIVE);
         } else write_scoped(*owner, m.memory, reinterpret_cast<uintptr_t>(&m.remote), &future, 0x7788, &source, write);
-        CHECK(future && !source.control && m.writes == 1 && m.reads == 1 && m.read_polls == 0);
+        CHECK(future);
+        CHECK(!source.control);
+        CHECK(m.writes == 1);
+        CHECK(m.reads == 1);
+        CHECK(m.read_polls == 0);
         m.identity_alive = false; std::array<uint8_t, 16> task{}; SaveResult result{};
         future->vtable->poll(future, &result, task.data());
-        CHECK(result.state == -1 && m.writer_polls == 1 && owner->native_writes.snapshot().state == SC_SAVE_WRITE_READBACK_PENDING);
+        CHECK(result.state == -1);
+        CHECK(m.writer_polls == 1);
+        CHECK(owner->native_writes.snapshot().state == SC_SAVE_WRITE_READBACK_PENDING);
         future->vtable->poll(future, &result, task.data());
-        CHECK(!result.state && !result.outcome && result.value == 1 && m.writer_polls == 1);
-        future->vtable->destroy(future, 1); CHECK(m.freed_data == 2 && m.freed_streams == 1);
+        CHECK(!result.state);
+        CHECK(!result.outcome);
+        CHECK(result.value == 1);
+        CHECK(m.writer_polls == 1);
+        future->vtable->destroy(future, 1); CHECK(m.freed_data == 2);
+        CHECK(m.freed_streams == 1);
         CHECK(backup->progress().state == (armed ? BackupState::complete : BackupState::pending));
         if (armed) {
             const auto record = queue.backup_result(request, false, GetTickCount64() + 3);
-            CHECK(record.state == SC_BACKUP_COMPLETE && record.operation_id == owner->native_writes.snapshot().operation_id);
-            CHECK(record.files == 1 && record.bytes == m.bytes.size() && record.basename[0]);
+            CHECK(record.state == SC_BACKUP_COMPLETE);
+            CHECK(record.operation_id == owner->native_writes.snapshot().operation_id);
+            CHECK(record.files == 1);
+            CHECK(record.bytes == m.bytes.size());
+            CHECK(record.basename[0]);
         }
     }
+}
+void run_readback_contracts(const std::function<std::unique_ptr<Session>()>& make) {
+    for (unsigned mode = 0; mode <= 21; ++mode) {
+        readback_case(make,mode);
+}
+    for (unsigned allocation = 1; allocation <= 2; ++allocation) {
+        auto owner = make(); Model m(*owner); active = &m; m.fail_allocation = allocation;
+        m.operation = owner->native_writes.open_provider(0x123, m.directory); CHECK(m.operation);
+        CHECK(!create_write_readback(*owner, m.operation, 0x777, 0x7788, m.directory, calls()));
+        CHECK(!m.reads);
+        CHECK(!m.streams);
+        CHECK(!m.freed_data);
+        const auto first = owner->btrace.snapshot().first_failure;
+        CHECK(first.operation == m.operation);
+        CHECK(!std::strcmp(first.predicate, allocation == 1 ? "readback_control_allocation_failed" : "readback_data_allocation_failed"));
+    }
+    ordinary_worker_contracts(make);
+    for (const auto count : {1u, 17u}) {
+        auto owner = make(); auto& writes = owner->native_writes;
+        const auto operation = writes.open_provider(0x123, "PROFILE"); CHECK(operation);
+        CHECK(writes.attach_readback(operation, 0x456, 16)); CHECK(writes.attach_files(operation, 0x789, count));
+        const auto sequence = writes.begin(0xabc, 0x789, count, "PROFILE"); CHECK(sequence);
+        std::vector<SdkFileWrite> files(count);
+        for (auto& file : files) { file.prepared = true; file.size = count == 1 ? 0u : 1u; }
+        CHECK(!writes.prepared(sequence, files)); // refused before the preflight invokes quota/deletion
+    }
+    writer_readback_cases(make);
     active = nullptr; backup_worker_contracts(make); run_submission_contracts();
     std::puts("PASS native readback, owned transport backup, cancellation/retention and writer completion contracts");
 }

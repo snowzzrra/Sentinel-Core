@@ -13,6 +13,25 @@ sc_context_snapshot facts() {
     strcpy_s(value.current_map.bytes,name.data); value.current_map.length=name.length;
     return value;
 }
+void grant_travel_points(const std::function<sc_weapon_points_request(sc_native_scope)>& request) {
+        native::publish_context({},native::observation_stamp());
+        auto r=request(native::inspect().scope);
+        r.kind=SC_WUP_GRANT; r.amount=3; r.expected_gained=gained;
+        auto result=native::submit_weapon_points(r);
+        if(result.execution.state!=SC_DIAGNOSTIC_QUEUED)
+            std::printf("WUP refused reason=%u campaign=%s\n",result.execution.reason,session().campaign_run.snapshot().reason.c_str());
+        CHECK(result.execution.state==SC_DIAGNOSTIC_QUEUED);
+        native::test_post_frame(); result=native::weapon_points_result(r,false,false);
+        CHECK(result.execution.state==SC_DIAGNOSTIC_EXECUTED && result.outcome==SC_WUP_GRANTED);
+        CHECK(result.balance_after-result.balance_before==3);
+        native::weapon_points_result(r,false,true);
+}
+std::vector<std::string> travel_maps(const CampaignSnapshot& initial) {
+    std::vector<std::string> maps{initial.resumed?initial.map:"game/hub/hub"};
+    if(initial.resumed) maps.push_back("game/sp/e1m3_cult/e1m3_cult");
+    else { maps.push_back("game/sp/e1m1_intro/e1m1_intro"); maps.push_back("game/sp/e1m2_battle/e1m2_battle"); }
+    return maps;
+}
 int run(uint32_t difficulty,const std::wstring& defect,const std::function<void()>& save) {
     auto& campaign=session().campaign_run;
     std::array<unsigned char,0xc0> root_bytes{};
@@ -43,23 +62,7 @@ int run(uint32_t difficulty,const std::wstring& defect,const std::function<void(
         r.execution.expected=expected; r.execution.request_id=++sequence; r.execution.nonce[0]=1; r.execution.deadline_ms=2000;
         strcpy_s(r.namespace_id,session().namespace_id().c_str()); return r;
     };
-    auto points=[&] {
-        native::publish_context({},native::observation_stamp());
-        auto r=request(native::inspect().scope);
-        r.kind=SC_WUP_GRANT; r.amount=3; r.expected_gained=gained;
-        auto result=native::submit_weapon_points(r);
-        if(result.execution.state!=SC_DIAGNOSTIC_QUEUED)
-            std::printf("WUP refused reason=%u campaign=%s\n",result.execution.reason,campaign.snapshot().reason.c_str());
-        CHECK(result.execution.state==SC_DIAGNOSTIC_QUEUED);
-        native::test_post_frame(); result=native::weapon_points_result(r,false,false);
-        CHECK(result.execution.state==SC_DIAGNOSTIC_EXECUTED && result.outcome==SC_WUP_GRANTED);
-        CHECK(result.balance_after-result.balance_before==3);
-        native::weapon_points_result(r,false,true);
-    };
-    const auto initial=campaign.snapshot();
-    std::vector<std::string> maps{initial.resumed?initial.map:"game/hub/hub"};
-    if(initial.resumed) maps.push_back("game/sp/e1m3_cult/e1m3_cult");
-    else { maps.push_back("game/sp/e1m1_intro/e1m1_intro"); maps.push_back("game/sp/e1m2_battle/e1m2_battle"); }
+    auto maps=travel_maps(campaign.snapshot());
     transition_defect=L"travel";
     for(size_t i=0;i<maps.size();++i) {
         // outgoing checkpoint completes before executemapchange, as in retail
@@ -78,7 +81,7 @@ int run(uint32_t difficulty,const std::wstring& defect,const std::function<void(
         CHECK(session().accepts_requests() && observed.map_active && observed.map==maps[i]);
         CHECK(observed.native_subtype==subtype);
         CHECK(observed.generation_after==previous.lifecycle_generation+1); // nested primary free isn't a second generation
-        points();
+        grant_travel_points(request);
         if(i) {
             auto stale=request(previous);
             CHECK(native::submit_weapon_points(stale).execution.reason==SC_NATIVE_SCOPE_MISMATCH);

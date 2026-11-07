@@ -7,8 +7,73 @@
 #include <iostream>
 #include <cstring>
 #include <iterator>
+#include <functional>
 namespace fs = std::filesystem;
 void check(bool value, const char* label) { if (!value) throw std::runtime_error(label); }
+void check_initial_log(std::ifstream& input,const fs::path& root) {
+    std::string line; unsigned lines=0;
+    while (std::getline(input,line)) {
+        ++lines;
+        check(line.find(root.u8string())==std::string::npos,"no private path");
+        if (lines>1) check(line.find("\"win32_error\":52")!=std::string::npos,"first failure retained");
+        if (lines==3) {
+            check(line.find("\"first_failed_stage\":\"decode\"")!=std::string::npos,"first PROFILE failure survives downstream refusal");
+            check(line.find("native_authentication_refused")!=std::string::npos,"native result and predicate retained");
+            check(line.find("\"native_value\":4")!=std::string::npos,"original native error retained");
+            check(line.find("\"read_requested\":560873,\"read_offset\":262144,\"read_size\":262144")!=std::string::npos,
+                "bounded acquisition diagnostics retained without pointers");
+            check(line.find("\"read_error\":299")!=std::string::npos,"original partial read error retained");
+        }
+    }
+    check(lines==3,"bounded transition-only automatic log");
+}
+void check_latest_identity(const std::string& content,const sentinel::Snapshot& core,uint64_t created) {
+    check(!content.empty() && content.size()<=131072 && content.front()=='{' && content.substr(content.size()-2)=="}\n",
+        "complete bounded latest JSON envelope");
+    check(content.find("\"checkpoint_index\":299")!=std::string::npos,"latest observes changes beyond history cap");
+    check(content.find("\"build_id\":\""+std::string(core.core.build_id)+"\"")!=std::string::npos &&
+        content.find("\"pid\":"+std::to_string(core.pid)+",")!=std::string::npos &&
+        content.find("\"process_created\":\""+std::to_string(created)+"\"")!=std::string::npos,"latest exact producer identity");
+}
+void check_log_retention(sentinel::save::Session& session,const sentinel::Snapshot& core,const fs::path& log,const fs::path& latest,uint64_t created,const std::function<std::string()>& read_latest) {
+    using sentinel::save::BStage; using sentinel::save::BStatus;
+    const auto first=session.btrace.snapshot().first_failure;
+    uintmax_t capped_size=0;
+    constexpr const char* pending_predicate="fixture_checkpoint_pending";
+    constexpr const char* checkpoint_key="checkpoint_index";
+    for(int i=0;i<300;++i) {
+        session.btrace.record(BStage::sdk_callback,BStatus::pending,pending_predicate,i,{{checkpoint_key,i}});
+        sentinel::startup_log::record(core);
+        if(i==150) capped_size=fs::file_size(log);
+    }
+    check(fs::file_size(log)==capped_size && capped_size<=1024*1024,"history byte budget stops growth while later changes continue");
+    auto content=read_latest();
+    check_latest_identity(content,core,created);
+    std::ifstream bounded_history(log); unsigned lines=0; std::string line;
+    while(std::getline(bounded_history,line)) {
+        ++lines;
+        check(line.find("\"checkpoint_index\":299")==std::string::npos,"late event is independently retained in latest");
+    }
+    check(lines<=128,"history record budget enforced");
+    const auto sequence=session.btrace.snapshot().sequence;
+    for(int i=0;i<300;++i) {
+        session.btrace.record(BStage::sdk_callback,BStatus::pending,pending_predicate,299,{{checkpoint_key,299}});
+        sentinel::startup_log::record(core);
+    }
+    check(session.btrace.snapshot().sequence==sequence && read_latest()==content,"identical polling coalesces after history is full");
+    session.btrace.record(BStage::sdk_result,BStatus::refused,"fixture_late_native_save_failed",400,{{"native_result",-9}},0x12345678);
+    sentinel::startup_log::record(core);
+    content=read_latest();
+    const auto first_begin=content.find("\"first_failure\":{\"sequence\":"+std::to_string(first.sequence)+",");
+    const auto first_end=content.find("\"stages\":",first_begin);
+    check(first_begin!=std::string::npos && first_end!=std::string::npos &&
+        content.substr(first_begin,first_end-first_begin).find("native_authentication_refused")!=std::string::npos,
+        "original precise cause survives later errors and all stage rollover");
+    check(content.find("fixture_late_native_save_failed")!=std::string::npos && content.find("\"native_result\":-9")!=std::string::npos,
+        "late failed stage retains exact native result after history limit");
+    check(content.size()<=131072 && fs::file_size(log)==capped_size,"independent snapshot and history remain bounded after failure");
+    check(!fs::exists(latest.wstring()+L".pending"),"latest publication completed atomic replacement");
+}
 int main() {
     const fs::path root = fs::current_path() / ("workflow-fixture-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
     try {
@@ -82,21 +147,8 @@ int main() {
             "profile_buffer_partial_read", false, 0, 0, 0, {SC_REASON_PARTIAL_READ, ERROR_PARTIAL_COPY, 560873, 262144, 262144});
         for (int i=0;i<300;++i) sentinel::startup_log::record(core);
         const auto log = root / "SentinelCore/diagnostics" / (std::to_string(core.pid)+"-"+std::to_string(created)+".jsonl");
-        std::ifstream input(log); std::string line; unsigned lines=0;
-        while (std::getline(input,line)) {
-            ++lines;
-            check(line.find(root.u8string())==std::string::npos,"no private path");
-            if (lines>1) check(line.find("\"win32_error\":52")!=std::string::npos,"first failure retained");
-            if (lines==3) {
-                check(line.find("\"first_failed_stage\":\"decode\"")!=std::string::npos,"first PROFILE failure survives downstream refusal");
-                check(line.find("native_authentication_refused")!=std::string::npos,"native result and predicate retained");
-                check(line.find("\"native_value\":4")!=std::string::npos,"original native error retained");
-                check(line.find("\"read_requested\":560873,\"read_offset\":262144,\"read_size\":262144")!=std::string::npos,
-                    "bounded acquisition diagnostics retained without pointers");
-                check(line.find("\"read_error\":299")!=std::string::npos,"original partial read error retained");
-            }
-        }
-        check(lines==3,"bounded transition-only automatic log");
+        std::ifstream history_reader(log);
+        check_initial_log(history_reader,root);
         const auto latest = root / "SentinelCore/diagnostics" / (std::to_string(core.pid)+"-"+std::to_string(created)+".latest.json");
         const auto read_latest = [&] {
             std::ifstream snapshot(latest,std::ios::binary);
@@ -116,46 +168,7 @@ int main() {
                  {"fact_09",INT64_MIN},{"fact_10",INT64_MAX},{"fact_11",INT64_MIN},{"fact_12",INT64_MAX},
                  {"fact_13",INT64_MIN},{"fact_14",INT64_MAX},{"fact_15",INT64_MIN},{"fact_16",INT64_MAX}});
         }
-        uintmax_t capped_size=0;
-        constexpr const char* pending_predicate="fixture_checkpoint_pending";
-        constexpr const char* checkpoint_key="checkpoint_index";
-        for(int i=0;i<300;++i) {
-            session.btrace.record(BStage::sdk_callback,BStatus::pending,pending_predicate,i,{{checkpoint_key,i}});
-            sentinel::startup_log::record(core);
-            if(i==150) capped_size=fs::file_size(log);
-        }
-        check(fs::file_size(log)==capped_size && capped_size<=1024*1024,"history byte budget stops growth while later changes continue");
-        auto content=read_latest();
-        check(!content.empty() && content.size()<=131072 && content.front()=='{' && content.substr(content.size()-2)=="}\n",
-            "complete bounded latest JSON envelope");
-        check(content.find("\"checkpoint_index\":299")!=std::string::npos,"latest observes changes beyond history cap");
-        check(content.find("\"build_id\":\""+std::string(core.core.build_id)+"\"")!=std::string::npos &&
-            content.find("\"pid\":"+std::to_string(core.pid)+",")!=std::string::npos &&
-            content.find("\"process_created\":\""+std::to_string(created)+"\"")!=std::string::npos,"latest exact producer identity");
-        std::ifstream bounded_history(log); lines=0;
-        while(std::getline(bounded_history,line)) {
-            ++lines;
-            check(line.find("\"checkpoint_index\":299")==std::string::npos,"late event is independently retained in latest");
-        }
-        check(lines<=128,"history record budget enforced");
-        const auto sequence=session.btrace.snapshot().sequence;
-        for(int i=0;i<300;++i) {
-            session.btrace.record(BStage::sdk_callback,BStatus::pending,pending_predicate,299,{{checkpoint_key,299}});
-            sentinel::startup_log::record(core);
-        }
-        check(session.btrace.snapshot().sequence==sequence && read_latest()==content,"identical polling coalesces after history is full");
-        session.btrace.record(BStage::sdk_result,BStatus::refused,"fixture_late_native_save_failed",400,{{"native_result",-9}},0x12345678);
-        sentinel::startup_log::record(core);
-        content=read_latest();
-        const auto first_begin=content.find("\"first_failure\":{\"sequence\":"+std::to_string(first.sequence)+",");
-        const auto first_end=content.find("\"stages\":",first_begin);
-        check(first_begin!=std::string::npos && first_end!=std::string::npos &&
-            content.substr(first_begin,first_end-first_begin).find("native_authentication_refused")!=std::string::npos,
-            "original precise cause survives later errors and all stage rollover");
-        check(content.find("fixture_late_native_save_failed")!=std::string::npos && content.find("\"native_result\":-9")!=std::string::npos,
-            "late failed stage retains exact native result after history limit");
-        check(content.size()<=131072 && fs::file_size(log)==capped_size,"independent snapshot and history remain bounded after failure");
-        check(!fs::exists(latest.wstring()+L".pending"),"latest publication completed atomic replacement");
+        check_log_retention(session,core,log,latest,created,read_latest);
         // the process owns its open log handle until exit; keep fixture evidence
         std::cout << "workflow handoff and automatic logging fixtures passed\n";
         return 0;

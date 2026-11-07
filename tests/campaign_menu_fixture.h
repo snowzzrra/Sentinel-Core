@@ -25,19 +25,25 @@ void encounter_projection() {
     commit(true);
     sc_campaign_reward observed{};
     const std::string ns(64,'a'),map="game/dlc2/e5m1_spear/e5m1_spear";
-    CHECK(model.encounter_reward(2,ns,GetTickCount64(),observed) && !observed.location_id);
+    CHECK(model.encounter_reward(2,ns,GetTickCount64(),observed));
+    CHECK(!observed.location_id);
     ++request.revision; commit(false);
     const auto since=GetTickCount64();
     ++request.revision; commit(true);
-    CHECK(model.encounter_reward(2,ns,since,observed) && observed.location_id==reward.location_id);
+    CHECK(model.encounter_reward(2,ns,since,observed));
+    CHECK(observed.location_id==reward.location_id);
     CHECK(!std::strcmp(observed.text,"Your Ballista"));
-    CHECK(model.encounter_reward(2,ns,since+3000,observed) && !observed.location_id);
+    CHECK(model.encounter_reward(2,ns,since+3000,observed));
+    CHECK(!observed.location_id);
     CHECK(!model.encounter_reward(2,std::string(64,'b'),since,observed));
     sc_campaign_summary hub{};
-    CHECK(model.summary(1,ns,hub) && hub.found==2 && hub.total==20);
+    CHECK(model.summary(1,ns,hub));
+    CHECK(hub.found==2);
+    CHECK(hub.total==20);
     CHECK(!model.summary(1,std::string(64,'b'),hub));
     std::memset(request.namespace_id,'b',64); request.revision=1; commit(true);
-    CHECK(model.encounter_reward(2,std::string(64,'b'),since,observed) && !observed.location_id);
+    CHECK(model.encounter_reward(2,std::string(64,'b'),since,observed));
+    CHECK(!observed.location_id);
 }
 uintptr_t screen=0,list=0,details=0,campaign=0;
 uintptr_t source_list=0;
@@ -66,6 +72,28 @@ void assign(uintptr_t address,const char* text) {
     auto& value=strings[address]; value=text;
     auto& name=*reinterpret_cast<NativeString*>(address);
     name.data=value.data(); name.length=static_cast<int32_t>(value.size());
+}
+void update_native_details(uintptr_t address) {
+    using namespace campaign_menu;
+        ++details_render_calls;
+        if (details_fault) { details_fault=false; RaiseException(0xe0420066,0,0,nullptr); }
+        if (!at<NativeString>(address,0x180).length || at<int>(address,0x190)<1) {
+            CHECK(!at<uintptr_t>(address,0x1b0)); ++hidden;
+            const auto d_sprite=at<uintptr_t>(address,0x18);
+            if (d_sprite) test_sprite_visibility(d_sprite,0,1);
+            return;
+        }
+        const auto meter=at<uintptr_t>(address,0x6f8);
+        const auto decl=at<uintptr_t>(address,0x88);
+        const auto encounters=decl ? at<uintptr_t>(decl,0x1b0) : 0;
+        if (encounters) {
+            test_meter_allocate(meter,encounters,decl);
+            const auto meter_sprite=meter ? at<uintptr_t>(meter,0x18) : 0;
+            test_sprite_visibility(meter_sprite,1,1);
+        }
+        const auto d_sprite=at<uintptr_t>(address,0x18);
+        test_sprite_visibility(d_sprite,1,1);
+
 }
 void exercise() {
     using namespace campaign_menu;
@@ -129,7 +157,8 @@ void exercise() {
     calls.populate=[](uintptr_t owner,uintptr_t target) {
         ++populations;
         const auto source=at<uintptr_t>(campaign,0x1a8);
-        CHECK(source!=source_list && at<int>(source,0x90)==3);
+        CHECK(source!=source_list);
+        CHECK(at<int>(source,0x90)==3);
         at<uintptr_t>(owner,0x110)=source;
         at<uintptr_t>(owner,0x120)=reinterpret_cast<uintptr_t>(derived.data()); at<int>(owner,0x128)=3;
         for (size_t i=0;i<widgets.size();++i) widget_addresses[i]=reinterpret_cast<uintptr_t>(widgets[i].data());
@@ -138,26 +167,7 @@ void exercise() {
     calls.focus=[](uintptr_t) {
         ++focuses; assign(details+0x180,"native mission details"); test_details_update(details);
     };
-    calls.details_update=[](uintptr_t address) {
-        ++details_render_calls;
-        if (details_fault) { details_fault=false; RaiseException(0xe0420066,0,0,nullptr); }
-        if (!at<NativeString>(address,0x180).length || at<int>(address,0x190)<1) {
-            CHECK(!at<uintptr_t>(address,0x1b0)); ++hidden;
-            const auto d_sprite=at<uintptr_t>(address,0x18);
-            if (d_sprite) test_sprite_visibility(d_sprite,0,1);
-            return;
-        }
-        const auto meter=at<uintptr_t>(address,0x6f8);
-        const auto decl=at<uintptr_t>(address,0x88);
-        const auto encounters=decl ? at<uintptr_t>(decl,0x1b0) : 0;
-        if (encounters) {
-            test_meter_allocate(meter,encounters,decl);
-            const auto meter_sprite=meter ? at<uintptr_t>(meter,0x18) : 0;
-            test_sprite_visibility(meter_sprite,1,1);
-        }
-        const auto d_sprite=at<uintptr_t>(address,0x18);
-        test_sprite_visibility(d_sprite,1,1);
-    };
+    calls.details_update=update_native_details;
     calls.meter_allocate=[](uintptr_t meter,uintptr_t,uintptr_t) {
         if (at<uintptr_t>(meter,0x168)) {
             CHECK(meter!=combat_meter); ++unrelated_meter_allocates;
@@ -231,7 +241,8 @@ void exercise() {
         test_root_navigation(root_screen,1);
         test_root_campaign(root_screen,campaign+source*8);
     }
-    CHECK(root_navigations==3 && root_campaigns==3);
+    CHECK(root_navigations==3);
+    CHECK(root_campaigns==3);
     CHECK(root_moves==6); // repeated native navigation must not shift again
     for (size_t i=3;i<9;++i) {
         CHECK(at<float>(transform_address,i*0x40+0x14)==float((i-2)%5)*30.f);
@@ -268,27 +279,36 @@ void exercise() {
     CHECK(exchange(campaign_commit_operation).committed_revision==1);
     CHECK(exchange(campaign_inspect_operation).rendered_revision==0); // ack isn't rendering
     at<int>(screen,0x108)=-1; test_update(screen);
-    CHECK(populations==1 && at<uintptr_t>(campaign,0x1a8)==source_list);
-    CHECK(strings[widget_addresses[2]+0x188]=="??? / LOCKED" && at<int>(widget_addresses[2],0x154)==5);
-    CHECK(at<int>(list,0x150)==1 && focuses==1 && statistics==1);
-    CHECK(at<uintptr_t>(combat_meter,0x198)==0 && unrelated_meter_allocates==0);
+    CHECK(populations==1);
+    CHECK(at<uintptr_t>(campaign,0x1a8)==source_list);
+    CHECK(strings[widget_addresses[2]+0x188]=="??? / LOCKED");
+    CHECK(at<int>(widget_addresses[2],0x154)==5);
+    CHECK(at<int>(list,0x150)==1);
+    CHECK(focuses==1);
+    CHECK(statistics==1);
+    CHECK(at<uintptr_t>(combat_meter,0x198)==0);
+    CHECK(unrelated_meter_allocates==0);
     test_meter_update(combat_meter);
-    CHECK(at<int>(combat_meter,0x15c)==0 && unrelated_meter_ticks==0);
+    CHECK(at<int>(combat_meter,0x15c)==0);
+    CHECK(unrelated_meter_ticks==0);
     CHECK(strings[details+0x180]=="native mission details");
     CHECK(at<uint8_t>(details_sprite,0x51)==1);
     CHECK(at<uint8_t>(combat_sprite,0x51)==0);
     CHECK(at<uintptr_t>(combat_meter,0x168)==0x123456);
     at<uintptr_t>(details,0x88)=sentinel_decl_ptr;
     test_details_update(details);
-    CHECK(at<uintptr_t>(combat_meter,0x198)==0 && unrelated_meter_allocates==0);
+    CHECK(at<uintptr_t>(combat_meter,0x198)==0);
+    CHECK(unrelated_meter_allocates==0);
     CHECK(at<uint8_t>(details_sprite,0x51)==1);
     CHECK(at<uint8_t>(combat_sprite,0x51)==0);
     at<uintptr_t>(details,0x88)=cultist_decl_ptr;
     assign(other_details+0x180,"unrelated native details");
     test_details_update(other_details);
-    CHECK(unrelated_meter_allocates==1 && at<uintptr_t>(other_combat,0x198)==0xbeef);
+    CHECK(unrelated_meter_allocates==1);
+    CHECK(at<uintptr_t>(other_combat,0x198)==0xbeef);
     test_meter_update(other_combat);
-    CHECK(unrelated_meter_ticks==1 && at<int>(other_combat,0x15c)==1);
+    CHECK(unrelated_meter_ticks==1);
+    CHECK(at<int>(other_combat,0x15c)==1);
     CHECK(at<uint8_t>(other_details_sprite,0x51)==1);
     CHECK(at<uint8_t>(other_combat_sprite,0x51)==1);
     CHECK(at<uintptr_t>(other_combat,0x168)==0x654321);
@@ -308,12 +328,16 @@ void exercise() {
     CHECK(at<uintptr_t>(combat_meter,0x198)==0);
     const auto before_hidden=hidden;
     at<int>(list,0x150)=2; test_focus(screen); test_load(screen,2);
-    CHECK(hidden==before_hidden+1 && !loads && focuses==1 && statistics==1);
+    CHECK(hidden==before_hidden+1);
+    CHECK(!loads);
+    CHECK(focuses==1);
+    CHECK(statistics==1);
     CHECK(std::strcmp(save::session().btrace.snapshot().stages[static_cast<size_t>(save::BStage::checkpoint_factory)].predicate,
         "mission_load_row_blocked")==0);
     CHECK(at<uint8_t>(details_sprite,0x51)==0);
     test_meter_update(combat_meter);
-    CHECK(unrelated_meter_ticks==1 && at<int>(combat_meter,0x15c)==0);
+    CHECK(unrelated_meter_ticks==1);
+    CHECK(at<int>(combat_meter,0x15c)==0);
     test_load(screen,1); CHECK(loads==1);
     CHECK(std::strcmp(save::session().btrace.snapshot().stages[static_cast<size_t>(save::BStage::checkpoint_factory)].predicate,
         "mission_native_load_returned")==0);
@@ -327,7 +351,8 @@ void exercise() {
     at<uintptr_t>(mission_address,0xa8)=retained;
     std::string target="game/dlc2/e5m1_spear/e5m1_spear",destination;
     at<NativeString>(mission_address,0x30)=text(target);
-    CHECK(mission_request(mission_address,destination) && destination==target);
+    CHECK(mission_request(mission_address,destination));
+    CHECK(destination==target);
     at<uintptr_t>(mission_address,0xa8)=retained+0x50;
     CHECK(!mission_request(mission_address,destination));
     at<uintptr_t>(mission_address,0xa8)=retained;
@@ -340,19 +365,27 @@ void exercise() {
     std::swap(rows[1],rows[2]);
     for (uint32_t i=0;i<3;++i) { request.index=i; request.row=rows[i]; CHECK(exchange(campaign_row_operation).status==0); }
     request.index=0; request.row={}; request.row.id=2; CHECK(exchange(campaign_commit_operation).status==0);
-    test_update(screen); CHECK(populations==1 && at<NativeString>(retained,0).data==retained_map);
+    test_update(screen); CHECK(populations==1);
+    CHECK(at<NativeString>(retained,0).data==retained_map);
     CHECK(exchange(campaign_inspect_operation).loaded_id==0); // selection isn't a completed load
     at<uintptr_t>(screen,0x870)=0; test_update(screen);
-    CHECK(populations==2 && at<int>(list,0x150)==2);
-    CHECK(at<uintptr_t>(combat_meter,0x198)==0 && at<int>(combat_meter,0x15c)==0);
+    CHECK(populations==2);
+    CHECK(at<int>(list,0x150)==2);
+    CHECK(at<uintptr_t>(combat_meter,0x198)==0);
+    CHECK(at<int>(combat_meter,0x15c)==0);
     test_meter_update(combat_meter);
-    CHECK(unrelated_meter_ticks==1 && at<int>(combat_meter,0x15c)==0);
+    CHECK(unrelated_meter_ticks==1);
+    CHECK(at<int>(combat_meter,0x15c)==0);
     test_root_navigation(root_screen,0);
     test_meter_update(other_combat);
-    CHECK(unrelated_meter_allocates==1 && unrelated_meter_ticks==2);
+    CHECK(unrelated_meter_allocates==1);
+    CHECK(unrelated_meter_ticks==2);
     const auto diag=meter_diagnostics();
-    CHECK(diag.update_ticks==5 && diag.update_suppressed==3 && diag.update_delegated==2);
-    CHECK(diag.published_ptr==0 && diag.retire_count>=1);
+    CHECK(diag.update_ticks==5);
+    CHECK(diag.update_suppressed==3);
+    CHECK(diag.update_delegated==2);
+    CHECK(diag.published_ptr==0);
+    CHECK(diag.retire_count>=1);
     request.revision=1; CHECK(exchange(campaign_commit_operation).reason==SC_CAMPAIGN_REVISION);
     std::puts("PASS typed native campaign projection/privacy/focus/pending-load entry ownership");
     std::puts("PASS AP mission details bypass crashing legacy combat meter; unrelated HUD/details forwarded");
@@ -382,7 +415,8 @@ void actions() {
     present_campaign_actions(owner,false); // projection arrived after a disabled native button
     CHECK(strings[children[0]+0x188]=="RETURN TO FORTRESS");
     CHECK(strings[children[1]+0x188]=="CHOOSE MISSION");
-    CHECK(at<int>(children[1],0x154)==1 && at<int>(list,0x150)==1);
+    CHECK(at<int>(children[1],0x154)==1);
+    CHECK(at<int>(list,0x150)==1);
     at<int>(list,0x150)=0;
     present_campaign_actions(owner,false);
     CHECK(at<int>(list,0x150)==0); // don't steal focus after a manual change

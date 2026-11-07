@@ -42,6 +42,28 @@ bool test_darklord_summon_scope() {
     return ok;
 }
 
+bool darklord_line_context(const std::string& line) { return line.rfind("AP_DARKLORD ", 0) == 0 && line.find(" seq=") != line.npos &&
+        line.find(" at_ms=") != line.npos && line.find(" game_tick=") != line.npos && line.find(" map=e5m4_boss ") != line.npos; }
+bool check_darklord_log(const std::vector<std::string>& lines) {
+    bool ok = true;
+    const auto contains = [&](const char* a, const char* b) {
+        return std::any_of(lines.begin(), lines.end(), [&](const auto& line) {
+            return line.find(a) != line.npos && line.find(b) != line.npos;
+        });
+    };
+    ok &= contains("event=begin", "rng_before=0x1234 count_before=1") &&
+        contains("event=end", "count_before=1 count_after=3 original_us=") &&
+        contains("event=slot", "slot=0 decl=ai/heavy/hellknight inherit=null") &&
+        contains("event=slot", "slot=1 decl=ai/boss/darklord/summoned/painelemental") &&
+        contains("event=identity", "slot=0 entity_name=fixture_actor decl=ai/heavy/hellknight inherit=null") &&
+        contains("event=actor", "anim_read=ok anim_enabled=1") &&
+        contains("event=sample", "recovered_at_ms=1000") &&
+        contains("event=summary", "frozen_ms=12000 recovered_at_ms=-1 samples=8") &&
+        contains("event=actor", "read_fault=1") && contains("event=read_fault", "field=handle_diff") &&
+        contains("event=limit", "reason=invocation_line_cap");
+    for (const auto& line : lines) ok &= darklord_line_context(line);
+    return ok;
+}
 bool test_darklord_telemetry() {
     static std::vector<std::string> lines;
     static std::array<uintptr_t, 2> actors{};
@@ -122,23 +144,7 @@ bool test_darklord_telemetry() {
         broken->lines = 1023;
         darklord_emit(*broken, "sample", "unused=1"); darklord_emit(*broken, "sample", "unused=2");
     } else ok = false;
-    const auto contains = [&](const char* a, const char* b) {
-        return std::any_of(lines.begin(), lines.end(), [&](const auto& line) {
-            return line.find(a) != line.npos && line.find(b) != line.npos;
-        });
-    };
-    ok &= contains("event=begin", "rng_before=0x1234 count_before=1") &&
-        contains("event=end", "count_before=1 count_after=3 original_us=") &&
-        contains("event=slot", "slot=0 decl=ai/heavy/hellknight inherit=null") &&
-        contains("event=slot", "slot=1 decl=ai/boss/darklord/summoned/painelemental") &&
-        contains("event=identity", "slot=0 entity_name=fixture_actor decl=ai/heavy/hellknight inherit=null") &&
-        contains("event=actor", "anim_read=ok anim_enabled=1") &&
-        contains("event=sample", "recovered_at_ms=1000") &&
-        contains("event=summary", "frozen_ms=12000 recovered_at_ms=-1 samples=8") &&
-        contains("event=actor", "read_fault=1") && contains("event=read_fault", "field=handle_diff") &&
-        contains("event=limit", "reason=invocation_line_cap");
-    for (const auto& line : lines) ok &= line.rfind("AP_DARKLORD ", 0) == 0 && line.find(" seq=") != line.npos &&
-        line.find(" at_ms=") != line.npos && line.find(" game_tick=") != line.npos && line.find(" map=e5m4_boss ") != line.npos;
+    ok &= check_darklord_log(lines);
     Snapshot identity; identity.pid = GetCurrentProcessId(); identity.process_created = 123456;
     startup_log::record(identity, 0);
     for (const auto& line : lines) ok &= startup_log::darklord(line.c_str()) == ERROR_SUCCESS;

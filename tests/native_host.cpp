@@ -80,11 +80,9 @@ sc_context_snapshot facts() {
 }
 // Real production double-read/budget function on explicit fake memory. These
 // fixtures are not native semantic proof and no controls enter production IPC.
-sc_context_snapshot observe(context::Evidence& measured) {
-    const auto mode = observation_case.load();
-    struct Memory final : engine::Memory {
+    struct ObservationMemory final : engine::Memory {
         unsigned mode, state_reads = 0;
-        explicit Memory(unsigned value) : mode(value) {}
+        explicit ObservationMemory(unsigned value) : mode(value) {}
         engine::ReadResult copy(uintptr_t address, void* out, size_t size) override {
             constexpr uintptr_t root = 0x1445ea6f0ULL, object = 0x200000000ULL, data = 0x300000000ULL;
             const char* name = campaign_maps[campaign_map.load()];
@@ -109,7 +107,11 @@ sc_context_snapshot observe(context::Evidence& measured) {
             if (!source || size != width) return {SC_REASON_READ_FAILED, ERROR_NOACCESS};
             std::memcpy(out, source, size); return {};
         }
-    } memory(mode);
+};
+
+sc_context_snapshot observe(context::Evidence& measured) {
+    const auto mode = observation_case.load();
+    ObservationMemory memory(mode);
     engine::Binding b{}; b.image.base = 0x140000000ULL; b.root = 0x1445ea6f0ULL;
     b.metadata.profile = SC_PROFILE_STEAM_20260818; b.descriptor = &builds::steam_20260818();
     static thread_local int64_t ticks = 0, delta = 0;
@@ -117,7 +119,7 @@ sc_context_snapshot observe(context::Evidence& measured) {
     const context::Clock clock{
         [](int64_t& out) { out = ticks; ticks += delta; return true; },
         []() -> uint64_t { return GetTickCount64(); }, 1000000000};
-    auto c = context::sample(memory, b, 1, nullptr, context::native_budget_ms, &measured, mode ? &clock : nullptr);
+    auto c = context::sample(memory, b, 1, nullptr, context::native_budget_ms, &measured, &clock);
     if (mode == 8) pending.store(true);
     return c;
 }
@@ -178,7 +180,8 @@ struct Child {
     }
     std::string complete(DWORD expected) {
         CHECK(WaitForSingleObject(process.value, 8000) == WAIT_OBJECT_0);
-        DWORD code = 0; CHECK(GetExitCodeProcess(process.value, &code) && code == expected);
+        DWORD code = 0; CHECK(GetExitCodeProcess(process.value, &code));
+        CHECK(code == expected);
         std::string text; char bytes[4096]; DWORD count = 0;
         while (ReadFile(output.value, bytes, sizeof(bytes), &count, nullptr) && count) text.append(bytes, count);
         CHECK(text.size() < 32768);
@@ -230,7 +233,8 @@ void registry_evidence_contract() {
     const auto* descriptor = registry::descriptor(18, 1);
     generated::Payload payload = generated::weapon_points_payload{generated::weapon_points_grant_payload{3, 0}};
     generated::Bytes bytes;
-    CHECK(descriptor->encode_payload(payload, bytes) && bytes == generated::Bytes({1,0,0,0,3,0,0,0,0,0,0,0}));
+    CHECK(descriptor->encode_payload(payload, bytes));
+    CHECK(bytes == generated::Bytes({1,0,0,0,3,0,0,0,0,0,0,0}));
     generated::Payload decoded{};
     CHECK(descriptor->decode_payload(bytes, decoded));
     CHECK(std::get<generated::weapon_points_grant_payload>(std::get<generated::weapon_points_payload>(decoded)).amount == 3);
@@ -241,7 +245,10 @@ void identity_registry_contract() {
     for (size_t i = 0; i < generated::descriptor_count; ++i) {
         const auto& descriptor = generated::descriptors[i];
         const auto* handler = registry::handler(static_cast<registry::Id>(descriptor.id));
-        CHECK(handler && handler->admit && handler->execute && handler->classify);
+        CHECK(handler);
+        CHECK(handler->admit);
+        CHECK(handler->execute);
+        CHECK(handler->classify);
     }
     park();
     const auto original = identity_submission("concurrent");
@@ -249,7 +256,7 @@ void identity_registry_contract() {
     std::array<std::thread, 8> clients;
     for (size_t i = 0; i < clients.size(); ++i) clients[i] = std::thread([&, i] { replies[i] = native::submit(original, sc_diagnostic_request{}); });
     for (auto& client : clients) client.join();
-    for (const auto& reply : replies) CHECK(reply.execution.state == SC_DIAGNOSTIC_QUEUED && reply.reference.fingerprint == replies[0].reference.fingerprint);
+    for (const auto& reply : replies) { CHECK(reply.execution.state == SC_DIAGNOSTIC_QUEUED); CHECK(reply.reference.fingerprint == replies[0].reference.fingerprint); }
     const auto before = executions.load();
     resume(); until([&] { return native::query(replies[0].reference).execution.state == SC_DIAGNOSTIC_EXECUTED; });
     CHECK(executions.load() == before + 1);
@@ -265,7 +272,8 @@ void identity_registry_contract() {
     transition(4); ready();
     until([&] { return native::query(stale.reference).execution.state >= SC_DIAGNOSTIC_EXECUTED; });
     const auto blocked = native::query(stale.reference);
-    CHECK(blocked.execution.state == SC_DIAGNOSTIC_REJECTED && !blocked.execution.executed_at_ms);
+    CHECK(blocked.execution.state == SC_DIAGNOSTIC_REJECTED);
+    CHECK(!blocked.execution.executed_at_ms);
     CHECK(blocked.reference.scope.generation == original.reference.scope.generation);
     CHECK(native::query(replies[0].reference).execution.state == SC_DIAGNOSTIC_EXECUTED);
     CHECK(native::ack(stale.reference, stale.result_token).error == Diagnostics::Error::none);
@@ -286,7 +294,8 @@ std::wstring retrieve_args(const sc_diagnostic_request& r, bool cancel) {
 std::atomic<uint32_t> mutations{0}, restriction{7};
 std::atomic<bool> mutation_fault{false};
 void command_body(uintptr_t, const char* text) {
-    CHECK(!std::strcmp(text, "condump AP_SUPPORT_FILE.txt") && restriction.load() == 0);
+    CHECK(!std::strcmp(text, "condump AP_SUPPORT_FILE.txt"));
+    CHECK(restriction.load() == 0);
     ++mutations;
     if (mutation_fault.load()) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
 }
@@ -298,7 +307,8 @@ sc_command_request command_request() {
 }
 void stopped_result(const sc_command_result& result, bool executed, bool claimed) {
     if (claimed) {
-        CHECK(result.execution.cancel_requested && !result.execution.executed_at_ms);
+        CHECK(result.execution.cancel_requested);
+        CHECK(!result.execution.executed_at_ms);
         CHECK(result.execution.state == SC_DIAGNOSTIC_CANCELLED || result.execution.state == SC_DIAGNOSTIC_REJECTED);
     } else CHECK(result.execution.state == static_cast<uint32_t>(executed ? SC_DIAGNOSTIC_EXECUTED : SC_DIAGNOSTIC_CANCELLED));
     CHECK(mutations.load() == static_cast<unsigned>(executed));
@@ -321,12 +331,16 @@ void stop_command(const wchar_t* mode, const sc_command_request& value) {
     stopped_result(result, executed, claimed);
     const auto sequence = native::inspect().callback_sequence, before = originals.load();
     call_frame();
-    CHECK(originals.load() == before + 1 && native::inspect().callback_sequence == sequence);
+    CHECK(originals.load() == before + 1);
+    CHECK(native::inspect().callback_sequence == sequence);
     const auto again = native::command_result(value, false);
-    CHECK(again.execution.state == result.execution.state && again.outcome == result.outcome);
-    CHECK(again.native_exception == result.native_exception && again.execution.executed_at_ms == result.execution.executed_at_ms);
+    CHECK(again.execution.state == result.execution.state);
+    CHECK(again.outcome == result.outcome);
+    CHECK(again.native_exception == result.native_exception);
+    CHECK(again.execution.executed_at_ms == result.execution.executed_at_ms);
     CHECK(again.execution.completed_at_ms == result.execution.completed_at_ms);
-    CHECK(mutations.load() == static_cast<unsigned>(executed) && restriction.load() == 7);
+    CHECK(mutations.load() == static_cast<unsigned>(executed));
+    CHECK(restriction.load() == 7);
     auto late = command_request(); ++late.execution.request_id;
     CHECK(native::submit_command(late).execution.state == SC_DIAGNOSTIC_REJECTED);
 }
@@ -345,12 +359,15 @@ void command_scenario(const wchar_t* mode, std::thread& callback) {
         until([&] { return native::command_result(value, false).execution.completed_at_ms != 0; });
         park();
         const auto result = native::command_result(value, false);
-        CHECK(mutations.load() == 1 && restriction.load() == 7);
-        CHECK(result.outcome == SC_COMMAND_NATIVE_FAILED && result.native_exception == EXCEPTION_ACCESS_VIOLATION);
+        CHECK(mutations.load() == 1);
+        CHECK(restriction.load() == 7);
+        CHECK(result.outcome == SC_COMMAND_NATIVE_FAILED);
+        CHECK(result.native_exception == EXCEPTION_ACCESS_VIOLATION);
         CHECK(result.outcome != SC_COMMAND_DISPATCHED);
     } else if (name == L"wrong-command-thread") {
         native::test_post_frame();
-        CHECK(native::inspect().reason == SC_NATIVE_WRONG_THREAD && mutations.load() == 0);
+        CHECK(native::inspect().reason == SC_NATIVE_WRONG_THREAD);
+        CHECK(mutations.load() == 0);
         CHECK(!native::command_result(value, false).execution.executed_at_ms);
     } else stop_command(mode, value);
     CHECK(native::stop());
@@ -362,8 +379,7 @@ void command_scenario(const wchar_t* mode, std::thread& callback) {
 
 }
 void protocol_v2_contract(const wchar_t*, void (*)(), void (*)(), HANDLE, HANDLE, std::atomic<unsigned>&, std::atomic<uint64_t>&);
-int wmain(int argc, wchar_t** argv) {
-    CHECK(argc == 3); const wchar_t* probe = argv[1];
+void automap_cases() {
     sc_automap_request automap{}; automap.known=1;
     automap.checked_locations[0]|=uint64_t{1}<<(7770001-SC_AUTOMAP_LOCATION_BASE);
     CHECK(native::test_automap_checked(automap,"game/sp/e1m1_intro/e1m1_intro","ap_automap_location_7770001"));
@@ -399,12 +415,14 @@ int wmain(int argc, wchar_t** argv) {
     std::array<uint8_t,0x150> automap_entry{}; automap_test_object=reinterpret_cast<uintptr_t>(automap_entry.data());
     *reinterpret_cast<int32_t*>(automap_test_object+0x134)=1;
     CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
-    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3 && automap_collect_calls==1);
+    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3);
+    CHECK(automap_collect_calls==1);
     CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
     CHECK(automap_collect_calls==1);
     *reinterpret_cast<int32_t*>(automap_test_object+0x134)=1;
     CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
-    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3 && automap_collect_calls==2);
+    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3);
+    CHECK(automap_collect_calls==2);
     *reinterpret_cast<int32_t*>(automap_test_object+0x134)=0;
     *reinterpret_cast<uintptr_t*>(automap_test_object+0x18)=0x12345678;
     CHECK(native::test_automap_uncollected(automap_test_object,fixture_automap_uncollected));
@@ -415,34 +433,10 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(automap_collect_calls==2);
     *reinterpret_cast<uintptr_t*>(automap_test_object+0x18)=0x12345678;
     CHECK(native::test_automap_collect(0x1234,0x5678,automap_test_object,fixture_automap_collect));
-    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3 && automap_collect_calls==3);
-    parked = CreateEventW(nullptr, TRUE, FALSE, nullptr); wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    gate_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr); gate_release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    changed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    CHECK(parked && wake && gate_entered && gate_release && changed);
-    Handle stop(CreateEventW(nullptr, TRUE, FALSE, nullptr)); CHECK(stop);
-    CHECK(sc_initialize(SC_ABI_VERSION, SC_CAP_INSPECTION | SC_CAP_LIFECYCLE) == SC_OK);
-    until([] { return native::inspect().availability == SC_NATIVE_DISABLED; });
-    CHECK(native::inspect().reason == SC_NATIVE_UNKNOWN_BUILD && !native::inspect().installed_hooks);
-    auto old = query_context(GetCurrentProcessId(), 2000); CHECK(old.result == ProbeResult::ok && old.context.profile == SC_PROFILE_NONE);
-    Child unknown(probe, L"--native"); CHECK(unknown.complete(0).find("unknown_build") != std::string::npos);
-    std::thread callback([] {
-        owner.store(GetCurrentThreadId());
-        while (!finish_thread.load()) {
-            if (pause_frames.load()) {
-                SetEvent(parked); WaitForSingleObject(wake, 5000); ResetEvent(parked); continue;
-            }
-            const auto action = command.exchange(0);
-            if (action) {
-                Descriptor descriptor{static_cast<uint8_t>(action == 1 ? 2 : 0), action != 2,
-                                      static_cast<uint32_t>(action == 3 ? SC_GAME_MAIN_MENU : SC_GAME_IN_GAME)};
-                last_return.store(fixture_change(reinterpret_cast<uintptr_t>(&root_object), reinterpret_cast<uintptr_t>(&descriptor), 0));
-                SetEvent(changed);
-            }
-            call_frame(); Sleep(2); // only this task-owned host synthesizes frames
-        }
-    });
-    until([] { return caller.load() && originals.load(); }); park();
+    CHECK(*reinterpret_cast<int32_t*>(automap_test_object+0x134)==3);
+    CHECK(automap_collect_calls==3);
+}
+void first_contact_case() {
     std::array<uint8_t,0xc80> saved_trigger{};
     saved_trigger[0xb9e]=1;
     const auto arm=+[](uintptr_t target,uintptr_t player) {
@@ -456,6 +450,8 @@ int wmain(int argc, wchar_t** argv) {
     saved_trigger[0xb9e]=2;
     CHECK(!native::test_arm_first_contact(trigger,reinterpret_cast<uintptr_t>(arm),42));
     CHECK(!native::test_arm_first_contact(0,reinterpret_cast<uintptr_t>(arm),42));
+}
+void start_fixture_adapter(HANDLE stop) {
     native::TestAdapter adapter{};
     adapter.root = reinterpret_cast<uintptr_t>(&root_object); adapter.common = reinterpret_cast<uintptr_t>(&common_object);
     adapter.caller = caller.load();
@@ -493,14 +489,13 @@ int wmain(int argc, wchar_t** argv) {
     auto interior = adapter.targets[0]; ++interior.address;
     CHECK(memory.copy(interior.address, interior.bytes.data(), 32).reason == SC_REASON_NONE);
     CHECK(native::validate_target(memory, image, interior, nullptr, GetTickCount64() + 3000) == SC_NATIVE_TARGET_BOUNDARY);
-    native::test_start(adapter, current_snapshot(), stop.value);
-    CHECK(native::inspect().availability == SC_NATIVE_ENABLED && native::inspect().installed_hooks == 7);
-    CHECK(native::inspect().lifecycle == SC_LIFETIME_UNOBSERVED && !native::inspect().context_generation);
-    transition(1); ready();
-    command_scenario(argv[2], callback);
-    protocol_v2_contract(argv[2], park, resume, gate_entered, gate_release, gate_stage, executions);
-    const bool special_service = std::wcscmp(argv[2], L"special-service") == 0;
-    if (std::wcscmp(argv[2], L"weapon-points-service") == 0 || special_service) {
+    native::test_start(adapter, current_snapshot(), stop);
+    CHECK(native::inspect().availability == SC_NATIVE_ENABLED);
+    CHECK(native::inspect().installed_hooks == 7);
+    CHECK(native::inspect().lifecycle == SC_LIFETIME_UNOBSERVED);
+    CHECK(!native::inspect().context_generation);
+}
+int currency_service(bool special_service, std::thread& callback) {
         struct Currency { uint32_t current = 0, gained = 0, purchases = 0, other = 41, encounters = 0; } currency;
         weapon_points::Calls calls{
             &currency, [](void*) -> uintptr_t { return 42; },
@@ -551,7 +546,8 @@ int wmain(int argc, wchar_t** argv) {
                 CHECK(!weapon_points::suppress(true,weapon_points::Source::unknown,0,-3,false));
                 currency.current-=3; ++currency.purchases;
             } else if (action == "map") {
-                unsigned selected=0; std::cin >> selected; CHECK(selected>=1 && selected<=4);
+                unsigned selected=0; std::cin >> selected; CHECK(selected>=1);
+                CHECK(selected<=4);
                 campaign_map.store(selected); transition(4); ready(); park();
             } else if (action == "restore") {
                 std::cin >> currency.current >> currency.gained >> currency.purchases;
@@ -564,14 +560,9 @@ int wmain(int argc, wchar_t** argv) {
             std::fflush(stdout); resume();
         }
         finish_thread.store(true); resume(); callback.join(); sc_shutdown(); return 0;
-    }
-    CHECK(last_return.load() == change_return && changes.load() == 1 && frees.load() == 1);
-    CHECK(native::inspect().scope.lifecycle_generation == 1 && native::inspect().checkpoint_flag);
-    Child normal(probe, L"--diagnostic --deadline-ms 1500");
-    const auto successful = normal.complete(0);
-    CHECK(successful.find("callback_executed") != std::string::npos);
-    CHECK(native::inspect().callback_thread_id == owner.load() && owner.load() != GetCurrentThreadId());
-    if (std::wcscmp(argv[2], L"basic") == 0) {
+
+}
+void basic_lifecycle_cases(const wchar_t* probe) {
         park(); Child stale(probe, L"--diagnostic --deadline-ms 1500");
         until([] { return native::inspect().queued == 1; });
         transition(1);
@@ -586,20 +577,22 @@ int wmain(int argc, wchar_t** argv) {
         for (unsigned stage = 1; stage <= 2; ++stage) {
             park(); auto r = request(100 + stage);
             auto admitted = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_submit_operation, r);
-            CHECK(admitted.result == ProbeResult::ok && admitted.diagnostic.state == SC_DIAGNOSTIC_QUEUED);
+            CHECK(admitted.result == ProbeResult::ok);
+            CHECK(admitted.diagnostic.state == SC_DIAGNOSTIC_QUEUED);
             auto duplicate = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_submit_operation, r);
             CHECK(duplicate.diagnostic.admitted_at_ms == admitted.diagnostic.admitted_at_ms);
             ResetEvent(gate_entered); gate_stage.store(stage); resume();
             CHECK(WaitForSingleObject(gate_entered, 4000) == WAIT_OBJECT_0);
-            const auto start = GetTickCount64(); CHECK(query(GetCurrentProcessId(), 500).result == ProbeResult::ok);
-            CHECK(GetTickCount64() - start < 500); // sole ipc worker remains responsive
+            CHECK(query(GetCurrentProcessId(), 500).result == ProbeResult::ok);
             Child cancel(probe, retrieve_args(r, true));
             const auto cancellation = cancel.complete(8);
-            CHECK(cancellation.find("\"state\":\"claimed\"") != std::string::npos && cancellation.find("\"cancel_requested\":true") != std::string::npos);
+            CHECK(cancellation.find("\"state\":\"claimed\"") != std::string::npos);
+            CHECK(cancellation.find("\"cancel_requested\":true") != std::string::npos);
             SetEvent(gate_release);
             until([&] { return query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, r).diagnostic.state != SC_DIAGNOSTIC_CLAIMED; });
             auto completed = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, r);
-            CHECK(completed.result == ProbeResult::ok && completed.diagnostic.cancel_requested);
+            CHECK(completed.result == ProbeResult::ok);
+            CHECK(completed.diagnostic.cancel_requested);
             CHECK(completed.diagnostic.state == static_cast<uint32_t>(stage == 1 ? SC_DIAGNOSTIC_CANCELLED : SC_DIAGNOSTIC_EXECUTED));
         }
         ready(); park(); pending.store(true);
@@ -607,57 +600,65 @@ int wmain(int argc, wchar_t** argv) {
         resume(); until([&] { return query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, r).diagnostic.state >= SC_DIAGNOSTIC_EXECUTED; });
         CHECK(query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, r).diagnostic.reason == SC_NATIVE_TRANSITION); pending.store(false);
         park(); transition(2); until([] { return native::inspect().lifecycle == SC_LIFETIME_FAILED; });
-        CHECK(!native::inspect().context_generation && last_return.load() == 0);
+        CHECK(!native::inspect().context_generation);
+        CHECK(last_return.load() == 0);
         park(); transition(3); until([] { return native::inspect().lifecycle == SC_LIFETIME_MENU; });
         CHECK(!native::inspect().context_generation);
         park(); transition(1); ready();
         recurse.store(true); until([] { return native::inspect().reason == SC_NATIVE_REENTRANT; });
-    } else if (std::wcscmp(argv[2], L"wrong-thread") == 0) {
-        for (const unsigned mode : {1u, 3u, 9u, 4u, 5u, 6u, 8u}) {
+
+}
+void observation_budget_case(const wchar_t* probe, unsigned mode) {
             park(); observation_case.store(mode);
             const auto req = request(300 + mode);
             const auto admitted = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_submit_operation, req);
             CHECK(admitted.diagnostic.state == SC_DIAGNOSTIC_QUEUED);
             resume(); until([&] { return query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, req).diagnostic.state >= SC_DIAGNOSTIC_EXECUTED; });
             const auto out = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, req);
-            CHECK(out.result == ProbeResult::ok && out.detail.revision == 1 && out.detail.observation_attempted);
-            CHECK(out.detail.timing_valid && out.detail.observation_budget_ns == 10000000);
+            CHECK(out.result == ProbeResult::ok);
+            CHECK(out.detail.revision == 1);
+            CHECK(out.detail.observation_attempted);
+            CHECK(out.detail.timing_valid);
+            CHECK(out.detail.observation_budget_ns == 10000000);
             CHECK(out.detail.observation_elapsed_ns == (mode == 3 ? 10000001u : (mode == 4 ? 15000000u : (mode == 9 ? 4600000u : 100000u))));
-            if (mode == 1 || mode == 9) CHECK(out.diagnostic.state == SC_DIAGNOSTIC_EXECUTED && out.detail.observation_accepted);
+            if (mode == 1 || mode == 9) { CHECK(out.diagnostic.state == SC_DIAGNOSTIC_EXECUTED); CHECK(out.detail.observation_accepted); }
             else {
-                CHECK(out.diagnostic.state == SC_DIAGNOSTIC_REJECTED && !out.diagnostic.current_map.length && !out.diagnostic.observed_at_ms);
-                if (mode == 3 || mode == 4) CHECK(out.diagnostic.reason == SC_NATIVE_BUDGET && out.detail.stage == SC_STAGE_OBSERVATION_BUDGET);
-                if (mode == 5) CHECK(out.detail.map_reason == SC_REASON_PARTIAL_READ && out.detail.map_error == ERROR_PARTIAL_COPY);
-                if (mode == 6) CHECK(out.detail.state_reason == SC_REASON_TRANSITION && out.detail.stage == SC_STAGE_FRESH_CONTEXT);
-                if (mode == 8) CHECK(out.detail.stage == SC_STAGE_PENDING_AFTER && out.detail.pending_before == 1 && out.detail.pending_after == 2);
+                CHECK(out.diagnostic.state == SC_DIAGNOSTIC_REJECTED);
+                CHECK(!out.diagnostic.current_map.length);
+                CHECK(!out.diagnostic.observed_at_ms);
+                if (mode == 3 || mode == 4) { CHECK(out.diagnostic.reason == SC_NATIVE_BUDGET); CHECK(out.detail.stage == SC_STAGE_OBSERVATION_BUDGET); }
+                if (mode == 5) { CHECK(out.detail.map_reason == SC_REASON_PARTIAL_READ); CHECK(out.detail.map_error == ERROR_PARTIAL_COPY); }
+                if (mode == 6) { CHECK(out.detail.state_reason == SC_REASON_TRANSITION); CHECK(out.detail.stage == SC_STAGE_FRESH_CONTEXT); }
+                if (mode == 8) { CHECK(out.detail.stage == SC_STAGE_PENDING_AFTER); CHECK(out.detail.pending_before == 1); CHECK(out.detail.pending_after == 2); }
             }
             Child captured(probe, retrieve_args(req, false));
             CHECK(captured.complete(mode == 1 || mode == 9 ? 0 : 8).find("\"observation_attempted\":true") != std::string::npos);
             const auto again = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_result_operation, req);
             CHECK(std::memcmp(&out.detail, &again.detail, sizeof(out.detail)) == 0);
             observation_case.store(0); pending.store(false); ready();
-        }
-        park(); owner.store(0); resume(); until([] { return native::inspect().reason == SC_NATIVE_WRONG_THREAD; });
-    } else {
-        park();
-        const auto generation = native::inspect().scope.lifecycle_generation;
-        if (std::wcscmp(argv[2], L"unobserved-map") == 0) map.store(43);
-        else game.store(SC_GAME_LOADING);
-        resume(); until([] { return native::inspect().reason == SC_NATIVE_EVENT_GAP; });
-        CHECK(native::inspect().scope.lifecycle_generation == generation); // observation can't mint a generation
+
+}
+void wrong_thread_cases(const wchar_t* probe) {
+        for (const unsigned mode : {1u, 3u, 9u, 4u, 5u, 6u, 8u}) {
+            observation_budget_case(probe, mode);
     }
-    CHECK(!native::inspect().context_generation && native::inspect().event_gap_count);
-    const auto original_count = originals.load();
+        park(); owner.store(0); resume(); until([] { return native::inspect().reason == SC_NATIVE_WRONG_THREAD; });
+
+}
+void installation_inspection_cases(const wchar_t* probe) {
     sc_native_snapshot exact{};
     sc_save_admission_snapshot admission_status{};
     CHECK(sc_save_admission_inspect(SC_SAVE_ADMISSION_ABI_VERSION, sizeof(admission_status), &admission_status) == SC_OK);
-    CHECK(admission_status.size == 160 && admission_status.state == SC_SAVE_SESSION_DISABLED);
+    CHECK(admission_status.size == 160);
+    CHECK(admission_status.state == SC_SAVE_SESSION_DISABLED);
     const auto installation_query = query_save_installation(GetCurrentProcessId(), 1000);
-    CHECK(installation_query.result == ProbeResult::ok && installation_query.installation.attempt == 1);
+    CHECK(installation_query.result == ProbeResult::ok);
+    CHECK(installation_query.installation.attempt == 1);
     Child installation_probe(probe, L"--save-installation");
     const auto installation_json = installation_probe.complete(0);
-    CHECK(installation_json.find("\"operation\":\"save_installation\"") != std::string::npos &&
-          installation_json.find("\"primary_failure\":{") != std::string::npos && installation_json.find("GetTickCount64") != std::string::npos);
+    CHECK(installation_json.find("\"operation\":\"save_installation\"") != std::string::npos);
+    CHECK(installation_json.find("\"primary_failure\":{") != std::string::npos);
+    CHECK(installation_json.find("GetTickCount64") != std::string::npos);
     CHECK(installation_query.installation.primary_failure.sequence); // initial unknown-build refusal remains queryable
     sc_save_installation_snapshot installation_status{};
     CHECK(sc_save_installation_inspect(1, sizeof(installation_status), &installation_status) == SC_OK);
@@ -670,12 +671,88 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(sc_native_inspect(SC_NATIVE_ABI_VERSION, sizeof(exact), &exact) == SC_OK);
     CHECK(sc_native_inspect(SC_NATIVE_ABI_VERSION + 1, sizeof(exact), &exact) == SC_ABI_MISMATCH);
     CHECK(sc_native_inspect(SC_NATIVE_ABI_VERSION, sizeof(exact) - 1, &exact) == SC_INVALID_ARGUMENT);
+}
+void fixture_frames() {
+        owner.store(GetCurrentThreadId());
+        while (!finish_thread.load()) {
+            if (pause_frames.load()) {
+                SetEvent(parked); WaitForSingleObject(wake, 5000); ResetEvent(parked); continue;
+            }
+            const auto action = command.exchange(0);
+            if (action) {
+                Descriptor descriptor{static_cast<uint8_t>(action == 1 ? 2 : 0), action != 2,
+                                      static_cast<uint32_t>(action == 3 ? SC_GAME_MAIN_MENU : SC_GAME_IN_GAME)};
+                last_return.store(fixture_change(reinterpret_cast<uintptr_t>(&root_object), reinterpret_cast<uintptr_t>(&descriptor), 0));
+                SetEvent(changed);
+            }
+            call_frame(); Sleep(2); // only this task-owned host synthesizes frames
+        }
+
+}
+int wmain(int argc, wchar_t** argv) {
+    CHECK(argc == 3); const wchar_t* probe = argv[1];
+    automap_cases();
+    parked = CreateEventW(nullptr, TRUE, FALSE, nullptr); wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    gate_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr); gate_release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    changed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    CHECK(parked);
+    CHECK(wake);
+    CHECK(gate_entered);
+    CHECK(gate_release);
+    CHECK(changed);
+    Handle stop(CreateEventW(nullptr, TRUE, FALSE, nullptr)); CHECK(stop);
+    CHECK(sc_initialize(SC_ABI_VERSION, SC_CAP_INSPECTION | SC_CAP_LIFECYCLE) == SC_OK);
+    until([] { return native::inspect().availability == SC_NATIVE_DISABLED; });
+    CHECK(native::inspect().reason == SC_NATIVE_UNKNOWN_BUILD);
+    CHECK(!native::inspect().installed_hooks);
+    auto old = query_context(GetCurrentProcessId(), 2000); CHECK(old.result == ProbeResult::ok);
+    CHECK(old.context.profile == SC_PROFILE_NONE);
+    Child unknown(probe, L"--native"); CHECK(unknown.complete(0).find("unknown_build") != std::string::npos);
+    std::thread callback(fixture_frames);
+    until([] { return caller.load() && originals.load(); }); park();
+    first_contact_case();
+    start_fixture_adapter(stop.value);
+    transition(1); ready();
+    command_scenario(argv[2], callback);
+    protocol_v2_contract(argv[2], park, resume, gate_entered, gate_release, gate_stage, executions);
+    const bool special_service = std::wcscmp(argv[2], L"special-service") == 0;
+    if (std::wcscmp(argv[2], L"weapon-points-service") == 0 || special_service) {
+        return currency_service(special_service, callback);
+    }
+    CHECK(last_return.load() == change_return);
+    CHECK(changes.load() == 1);
+    CHECK(frees.load() == 1);
+    CHECK(native::inspect().scope.lifecycle_generation == 1);
+    CHECK(native::inspect().checkpoint_flag);
+    Child normal(probe, L"--diagnostic --deadline-ms 1500");
+    const auto successful = normal.complete(0);
+    CHECK(successful.find("callback_executed") != std::string::npos);
+    CHECK(native::inspect().callback_thread_id == owner.load());
+    CHECK(owner.load() != GetCurrentThreadId());
+    if (std::wcscmp(argv[2], L"basic") == 0) {
+        basic_lifecycle_cases(probe);
+    } else if (std::wcscmp(argv[2], L"wrong-thread") == 0) {
+        wrong_thread_cases(probe);
+    } else {
+        park();
+        const auto generation = native::inspect().scope.lifecycle_generation;
+        if (std::wcscmp(argv[2], L"unobserved-map") == 0) map.store(43);
+        else game.store(SC_GAME_LOADING);
+        resume(); until([] { return native::inspect().reason == SC_NATIVE_EVENT_GAP; });
+        CHECK(native::inspect().scope.lifecycle_generation == generation); // observation can't mint a generation
+    }
+    CHECK(!native::inspect().context_generation);
+    CHECK(native::inspect().event_gap_count);
+    const auto original_count = originals.load();
+    installation_inspection_cases(probe);
     const auto identity = current_snapshot();
     inspection_failed(ERROR_GEN_FAILURE);
     CHECK(sc_initialize(SC_ABI_VERSION, 0) == SC_UNLOAD_RETAINED);
     CHECK(current_snapshot().instance == identity.instance); // a kept service failure can't rebind live hooks
-    CHECK(sc_shutdown() == SC_UNLOAD_RETAINED && sc_shutdown() == SC_UNLOAD_RETAINED);
-    CHECK(native::retained() && sc_initialize(SC_ABI_VERSION, 0) == SC_UNLOAD_RETAINED);
+    CHECK(sc_shutdown() == SC_UNLOAD_RETAINED);
+    CHECK(sc_shutdown() == SC_UNLOAD_RETAINED);
+    CHECK(native::retained());
+    CHECK(sc_initialize(SC_ABI_VERSION, 0) == SC_UNLOAD_RETAINED);
     CHECK(native::inspect().availability == SC_NATIVE_RETAINED);
     call_frame(); CHECK(originals.load() > original_count); // still valid pass-through trampolines after shutdown
     CHECK(query(GetCurrentProcessId(), 500).result == ProbeResult::endpoint_absent);

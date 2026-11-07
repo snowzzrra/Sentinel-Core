@@ -71,6 +71,31 @@ sc_special_request request(const char* id) {
 }
 } // namespace
 
+static void check_local_special_toggle(uint32_t known) {
+    sc_special_result result{};
+    Fixture toggle{};
+    toggle.facts = {1, 1, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
+    sentinel::special::reset_session("special-local-toggle");
+    result = sentinel::special::toggle_local("special-local-toggle", calls(toggle));
+    CHECK(result.kind == SC_SPECIAL_SELECT && result.outcome == SC_SPECIAL_OUTCOME_OK);
+    CHECK(result.selected == SC_SPECIAL_WEAPON_HAMMER && toggle.select_calls == 1);
+
+    Fixture unchanged{};
+    unchanged.facts = {1, 0, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
+    sentinel::special::reset_session("special-local-unchanged");
+    result = sentinel::special::toggle_local("special-local-unchanged", calls(unchanged));
+    CHECK(result.kind == SC_SPECIAL_SELECT && result.outcome == SC_SPECIAL_OUTCOME_NOOP);
+    CHECK(result.selected == SC_SPECIAL_WEAPON_CRUCIBLE && unchanged.select_calls == 1);
+    CHECK(result.operations_applied == 0);
+
+    Fixture no_owned{};
+    no_owned.facts = {0, 0, 0, SC_SPECIAL_WEAPON_NONE, known, 0, 0};
+    sentinel::special::reset_session("special-local-no-owned");
+    result = sentinel::special::toggle_local("special-local-no-owned", calls(no_owned));
+    CHECK(result.kind == SC_SPECIAL_OBSERVE && result.outcome == SC_SPECIAL_OUTCOME_OK);
+    CHECK(no_owned.select_calls == 0);
+
+}
 int main() {
     constexpr uint32_t known = SC_SPECIAL_KNOWN_CRUCIBLE | SC_SPECIAL_KNOWN_HAMMER |
         SC_SPECIAL_KNOWN_HAMMER_PERKS | SC_SPECIAL_KNOWN_SELECTION;
@@ -129,28 +154,7 @@ int main() {
     sentinel::special::execute(command, result, calls(invalid));
     CHECK(result.outcome == SC_SPECIAL_OUTCOME_NO_PLAYER && invalid.ensure_calls == 0);
 
-    Fixture toggle{};
-    toggle.facts = {1, 1, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
-    sentinel::special::reset_session("special-local-toggle");
-    result = sentinel::special::toggle_local("special-local-toggle", calls(toggle));
-    CHECK(result.kind == SC_SPECIAL_SELECT && result.outcome == SC_SPECIAL_OUTCOME_OK);
-    CHECK(result.selected == SC_SPECIAL_WEAPON_HAMMER && toggle.select_calls == 1);
-
-    Fixture unchanged{};
-    unchanged.facts = {1, 0, 0, SC_SPECIAL_WEAPON_CRUCIBLE, known, 0, 0};
-    sentinel::special::reset_session("special-local-unchanged");
-    result = sentinel::special::toggle_local("special-local-unchanged", calls(unchanged));
-    CHECK(result.kind == SC_SPECIAL_SELECT && result.outcome == SC_SPECIAL_OUTCOME_NOOP);
-    CHECK(result.selected == SC_SPECIAL_WEAPON_CRUCIBLE && unchanged.select_calls == 1);
-    CHECK(result.operations_applied == 0);
-
-    Fixture no_owned{};
-    no_owned.facts = {0, 0, 0, SC_SPECIAL_WEAPON_NONE, known, 0, 0};
-    sentinel::special::reset_session("special-local-no-owned");
-    result = sentinel::special::toggle_local("special-local-no-owned", calls(no_owned));
-    CHECK(result.kind == SC_SPECIAL_OBSERVE && result.outcome == SC_SPECIAL_OUTCOME_OK);
-    CHECK(no_owned.select_calls == 0);
-
+    check_local_special_toggle(known);
     Fixture refill{};
     constexpr auto refill_flags = SC_SPECIAL_REFILL_AUTHORITATIVE |
         SC_SPECIAL_REFILL_BALANCE_KNOWN | SC_SPECIAL_REFILL_CONNECTED;

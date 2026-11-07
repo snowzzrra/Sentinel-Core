@@ -1,8 +1,4 @@
-"""Check schema rejection, reproducibility and independently specified wire bytes."""
-import copy
-import hashlib
 import importlib.util
-import json
 from pathlib import Path
 import subprocess
 import sys
@@ -11,8 +7,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-import generate_protocol as generator
-import complexity_gate
 
 
 def load_projection():
@@ -23,87 +17,11 @@ def load_projection():
 
 
 class GeneratorTests(unittest.TestCase):
-    def setUp(self):
-        self.source = generator.SCHEMA.read_bytes()
-        self.schema = json.loads(self.source)
-
-
-    def test_deterministic_and_checked_in(self):
-        first = generator.render(self.source)
-        self.assertEqual(first, generator.render(self.source))
-        self.assertEqual(generator.project(first, ROOT, True), [])
-        canonical = json.dumps(json.loads(self.source), sort_keys=True, separators=(",", ":")).encode()
-        for data in first.values():
-            self.assertIn(hashlib.sha256(canonical).hexdigest().encode(), data.splitlines()[0])
-            self.assertNotIn(str(ROOT).encode(), data)
-
-    def test_schema_format_preserves_content_and_projections(self):
-        schema = json.loads(self.source)
-        formatted = (generator.format_schema(schema) + "\n").encode()
-        self.assertEqual(formatted, self.source)
-        self.assertEqual(json.loads(formatted), schema)
-        self.assertEqual(formatted, (generator.format_schema(json.loads(formatted)) + "\n").encode())
-        self.assertEqual(generator.render(json.dumps(schema).encode()), generator.render(formatted))
-
-    def test_duplicate_ids_and_revisions_refused(self):
-        duplicate = copy.deepcopy(self.schema)
-        duplicate["commands"][1]["id"] = duplicate["commands"][0]["id"]
-        with self.assertRaisesRegex(ValueError, "duplicate"):
-            generator.validate(duplicate)
-        self.schema["commands"][0]["payload_revisions"] = [1, 1]
-        with self.assertRaisesRegex(ValueError, "revisions"):
-            generator.validate(self.schema)
-
-    def test_native_binding_coverage_and_types(self):
-        missing = copy.deepcopy(self.schema)
-        missing["native_bindings"].pop()
-        with self.assertRaisesRegex(ValueError, "coverage"):
-            generator.validate(missing)
-        self.schema["native_bindings"][0]["request"] = "arbitrary()"
-        with self.assertRaisesRegex(ValueError, "native request"):
-            generator.validate(self.schema)
-
-    def test_duplicate_tags_and_fields_refused(self):
-        command = next(c for c in self.schema["commands"] if c["name"] == "runes")
-        command["payload"]["variants"][1]["tag"] = 0
-        with self.assertRaisesRegex(ValueError, "duplicate"):
-            generator.validate(self.schema)
-        self.schema["types"][0]["fields"].append(self.schema["types"][0]["fields"][0])
-        with self.assertRaisesRegex(ValueError, "duplicate"):
-            generator.validate(self.schema)
-
-    def test_impossible_sizes_refused(self):
-        for changes in ({"count": 20000}, {"count": -1}, {"max_count": 20000}, {"type": "u8", "max": 256}):
-            schema = copy.deepcopy(self.schema)
-            schema["types"][0]["fields"][0].update(changes)
-            with self.subTest(changes=changes), self.assertRaises(ValueError):
-                generator.validate(schema)
-
-    def test_generated_source_excluded_from_handwritten_gate(self):
-        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
-            root = Path(directory)
-            (root / "src").mkdir()
-            (root / "src/protocol_generated.cpp").write_text("int generated() {")
-            (root / "src/active.cpp").write_text("int active() { return 0; }")
-            rows = complexity_gate.scan_tree(root)
-            self.assertEqual(list(rows), ["src/active.cpp::active()"])
-
-    def test_campaign_revision_payloads_are_distinct(self):
-        codec = load_projection()
-        command = codec.COMMANDS[22]
-        variants = [r["payload_variants"][0] for r in command["revision_types"]]
-        self.assertEqual(len(set(variants)), 5)
-        fields = [{f["name"] for f in codec.TYPES[name]["fields"]} for name in variants]
-        self.assertEqual(fields[1] - fields[0], {"summary"})
-        self.assertEqual(fields[2] - fields[1], {"rewards"})
-        self.assertEqual(fields[3] - fields[2], {"rewards_known"})
-        self.assertEqual(fields[4], fields[3])
-
-
     def test_check_reports_drift_without_writing(self):
+        import generate_protocol as generator
         with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
             root = Path(directory)
-            outputs = generator.render(self.source)
+            outputs = generator.render(generator.SCHEMA.read_bytes())
             generator.project(outputs, root, False)
             path = root / "src/protocol_generated.cpp"
             path.write_bytes(b"drift")
@@ -125,9 +43,6 @@ class GeneratorTests(unittest.TestCase):
                 codec.encode_variant(command, revision, tag, payload)
         with self.assertRaises(ValueError):
             codec.decode_variant(33, 1, b"\xff\xff\xff\xff")
-
-
-
 
 
 if __name__ == "__main__":

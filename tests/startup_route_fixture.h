@@ -20,6 +20,43 @@ inline SaveFuture** query(SaveFuture** out,SaveReference* identity,const char* n
     CHECK(std::strcmp(name,"PROFILE")==0); ++native_queries; release(identity);
     static const SaveFutureVtable table{destroy,poll}; auto* result=new Result; result->vtable=&table; *out=result; return out;
 }
+static void check_gate_trace(StartupGate& gate,BTrace& trace,unsigned mode) {
+    const auto snapshot=trace.snapshot();
+    const auto event=snapshot.stages[static_cast<size_t>(BStage::startup_gate)];
+    CHECK(diagnostic_fact(event,"startup_enter_ms")>=static_cast<int64_t>(gate.begin_ms()));
+    CHECK(diagnostic_fact(event,"first_wait_ms")>=diagnostic_fact(event,"startup_enter_ms"));
+    CHECK(diagnostic_fact(event,"install_complete_ms")>=diagnostic_fact(event,"first_wait_ms"));
+    CHECK(diagnostic_fact(event,"startup_thread")!=0 && diagnostic_fact(event,"caller_rva")==0x4323fc);
+    CHECK(diagnostic_fact(event,"manager_present")==static_cast<int64_t>(mode==1));
+    CHECK(diagnostic_fact(event,"root_equals_binding")==1 && diagnostic_fact(event,"init_slot_equals_target0")==1);
+    if (mode==0) CHECK(!snapshot.first_failure.sequence);
+    else {
+        CHECK(snapshot.first_failure.stage==BStage::startup_gate);
+        CHECK(std::strcmp(snapshot.first_failure.predicate,mode==2?
+            "startup_gate_installation_cancelled":"startup_gate_installation_failed")==0);
+        trace.record(BStage::session,BStatus::refused,"fixture_later_refusal");
+        CHECK(trace.snapshot().first_failure.sequence==snapshot.first_failure.sequence);
+    }
+}
+static void complete_gate_installation(StartupGate& gate,BTrace& trace,unsigned mode,std::atomic<uint32_t>& routes,std::atomic<uint32_t>& forwarded,HANDLE done) {
+    try {
+        {
+            StartupGate::Completion completion(gate,&trace);
+            routes.store(1,std::memory_order_release); // partial installation
+            CHECK(forwarded==0 && WaitForSingleObject(done,0)==WAIT_TIMEOUT);
+            if (mode==0) completion.disarm();
+            else if (mode==2) completion.cancel();
+            else if (mode==3) throw std::runtime_error("fixture_install_exception");
+        }
+        if (mode==0) {
+            CHECK(forwarded==0 && WaitForSingleObject(done,0)==WAIT_TIMEOUT);
+            StartupGate::Completion final_completion(gate,&trace);
+            routes.store(steam_20260818_routes,std::memory_order_release);
+            final_completion.ready();
+            CHECK(forwarded==0); // ready() commits only on scope completion
+        }
+    } catch (const std::runtime_error&) { CHECK(mode==3); }
+}
 inline void exercise_gate() {
     // Use the same event/scope guard as the real RootInit detour and installer.
     // A waiting native invocation must observe complete route publication on
@@ -45,42 +82,11 @@ inline void exercise_gate() {
         const auto deadline=GetTickCount64()+2000;
         while (!gate.waiting() && GetTickCount64()<deadline) Sleep(1);
         CHECK(gate.waiting()==1 && forwarded==0 && admitted==0);
-        try {
-            {
-                StartupGate::Completion completion(gate,&trace);
-                routes.store(1,std::memory_order_release); // partial installation
-                CHECK(forwarded==0 && WaitForSingleObject(done,0)==WAIT_TIMEOUT);
-                if (mode==0) completion.disarm();
-                else if (mode==2) completion.cancel();
-                else if (mode==3) throw std::runtime_error("fixture_install_exception");
-            }
-            if (mode==0) {
-                CHECK(forwarded==0 && WaitForSingleObject(done,0)==WAIT_TIMEOUT);
-                StartupGate::Completion final_completion(gate,&trace);
-                routes.store(steam_20260818_routes,std::memory_order_release);
-                final_completion.ready();
-                CHECK(forwarded==0); // ready() commits only on scope completion
-            }
-        } catch (const std::runtime_error&) { CHECK(mode==3); }
+        complete_gate_installation(gate,trace,mode,routes,forwarded,done);
         CHECK(WaitForSingleObject(done,2000)==WAIT_OBJECT_0); native.join(); CloseHandle(done);
         CHECK(forwarded==1 && admitted==(mode==0?1u:0u));
         CHECK(observed.state==(mode==0?StartupGate::State::ready:mode==2?StartupGate::State::cancelled:StartupGate::State::failed));
-        const auto snapshot=trace.snapshot();
-        const auto event=snapshot.stages[static_cast<size_t>(BStage::startup_gate)];
-        CHECK(diagnostic_fact(event,"startup_enter_ms")>=static_cast<int64_t>(gate.begin_ms()));
-        CHECK(diagnostic_fact(event,"first_wait_ms")>=diagnostic_fact(event,"startup_enter_ms"));
-        CHECK(diagnostic_fact(event,"install_complete_ms")>=diagnostic_fact(event,"first_wait_ms"));
-        CHECK(diagnostic_fact(event,"startup_thread")!=0 && diagnostic_fact(event,"caller_rva")==0x4323fc);
-        CHECK(diagnostic_fact(event,"manager_present")==static_cast<int64_t>(mode==1));
-        CHECK(diagnostic_fact(event,"root_equals_binding")==1 && diagnostic_fact(event,"init_slot_equals_target0")==1);
-        if (mode==0) CHECK(!snapshot.first_failure.sequence);
-        else {
-            CHECK(snapshot.first_failure.stage==BStage::startup_gate);
-            CHECK(std::strcmp(snapshot.first_failure.predicate,mode==2?
-                "startup_gate_installation_cancelled":"startup_gate_installation_failed")==0);
-            trace.record(BStage::session,BStatus::refused,"fixture_later_refusal");
-            CHECK(trace.snapshot().first_failure.sequence==snapshot.first_failure.sequence);
-        }
+        check_gate_trace(gate,trace,mode);
     }
     StartupGate late; BTrace trace; CHECK(late.arm());
     { StartupGate::Completion complete(late,&trace); complete.ready(); }
@@ -93,33 +99,15 @@ inline void exercise_gate() {
     CHECK(!trace.snapshot().first_failure.sequence);
 }
 // real adapter and consumed-reference contract. only the native transport is substituted
-inline void exercise(Session& owner,unsigned defect=0) {
-    if (!defect) exercise_gate();
-    CHECK(owner.state()==SessionState::prepared);
-    owner.install(0x1000,0x2000,steam_20260818_routes);
-    owner.installation.finish(owner.installation.begin(SC_INSTALL_READY));
-    if (defect==3) owner.install(0x1000,0x2000,0);
-    if (defect==4) owner.install(0,0x2000,steam_20260818_routes);
-    if (defect==5 || defect==7) CHECK(owner.startup_enter(0x1000,0x2000,GetCurrentThreadId()+(defect==5?1:0)));
-    std::array<uintptr_t,3> control{0x200000002,defect==2?uintptr_t{0}:uintptr_t{0x7788},0}; SaveReference identity{reinterpret_cast<uintptr_t>(control.data())};
-    engine::LocalMemory memory; SaveFuture* future=nullptr;
-    const auto before=native_queries, before_release=releases;
-    { NativeRouteScope route(defect==1?callback+1:callback,image);
-      CHECK(query_exists_scoped(owner,memory,&future,&identity,defect==6?"GAME-AUTOSAVE7":"PROFILE",{{image,nullptr},query,release})==&future); }
-    CHECK(!identity.control && releases==before_release+1 && future);
-    SaveResult result{}; future->vtable->poll(future,&result,nullptr); future->vtable->destroy(future,1);
-    const auto trace=owner.unrouted_trace(); CHECK(trace.at_ms && std::strcmp(trace.route,"presence_query")==0);
-    CHECK(trace.caller_rva==0x1be4b3a+(defect==1?1:0));
-    if (!defect) std::printf("STARTUP adapter=%s state=%u fault=%u root_observed=%u qualified=%u hooks_last=%u account_query=%u\n",
-        trace.route,static_cast<unsigned>(owner.state()),static_cast<unsigned>(owner.fault()),trace.startup_entered?1u:0u,
-        trace.root_qualified?1u:0u,owner.installation.inspect().last_completed_stage,trace.delegated_account_query?1u:0u);
-    CHECK(!owner.routed() && !owner.native_io() && !owner.accepts_requests() && owner.profile_trace().request==0);
-    CHECK(native_queries==before+(defect==0 || defect==7?1:0));
+static void check_admitted_query(Session& owner, unsigned defect, const UnroutedTrace& trace, const SaveResult& result) {
+    CHECK(owner.state()==(defect==7?SessionState::starting:SessionState::prepared) && owner.fault()==SessionFault::none && trace.delegated_account_query);
+    CHECK(trace.startup_entered==(defect==7) && trace.root_qualified==(defect==7) && result.state==0 && result.outcome==0 && result.value==0);
+    CHECK(owner.installation.inspect().last_completed_stage==SC_INSTALL_READY);
+    CHECK(!owner.btrace.snapshot().first_failure.sequence);
+}
+static void check_startup_query_result(Session& owner, unsigned defect, const UnroutedTrace& trace, const SaveResult& result) {
     if (!defect || defect==7) {
-        CHECK(owner.state()==(defect==7?SessionState::starting:SessionState::prepared) && owner.fault()==SessionFault::none && trace.delegated_account_query);
-        CHECK(trace.startup_entered==(defect==7) && trace.root_qualified==(defect==7) && result.state==0 && result.outcome==0 && result.value==0);
-        CHECK(owner.installation.inspect().last_completed_stage==SC_INSTALL_READY);
-        CHECK(!owner.btrace.snapshot().first_failure.sequence);
+        check_admitted_query(owner,defect,trace,result);
     } else {
         CHECK(owner.state()==SessionState::rejected && owner.fault()==SessionFault::missed_startup && !trace.delegated_account_query);
         CHECK(owner.installation.inspect().primary_failure.stage==SC_INSTALL_STARTUP);
@@ -136,5 +124,36 @@ inline void exercise(Session& owner,unsigned defect=0) {
         owner.unrouted_import("later_operation"); CHECK(owner.unrouted_trace().at_ms==trace.at_ms);
         owner.stop_requests(); CHECK(owner.btrace.snapshot().first_failure.sequence==first.sequence);
     }
+}
+
+static void install_query_routes(Session& owner,unsigned defect) {
+    CHECK(owner.state()==SessionState::prepared);
+    owner.install(0x1000,0x2000,steam_20260818_routes);
+    owner.installation.finish(owner.installation.begin(SC_INSTALL_READY));
+    if (defect==3) owner.install(0x1000,0x2000,0);
+    if (defect==4) owner.install(0,0x2000,steam_20260818_routes);
+    if (defect==5 || defect==7) CHECK(owner.startup_enter(0x1000,0x2000,GetCurrentThreadId()+(defect==5?1:0)));
+}
+static void print_startup_query(Session& owner,const UnroutedTrace& trace) {
+    std::printf("STARTUP adapter=%s state=%u fault=%u root_observed=%u qualified=%u hooks_last=%u account_query=%u\n",
+        trace.route,static_cast<unsigned>(owner.state()),static_cast<unsigned>(owner.fault()),trace.startup_entered?1u:0u,
+        trace.root_qualified?1u:0u,owner.installation.inspect().last_completed_stage,trace.delegated_account_query?1u:0u);
+}
+inline void exercise(Session& owner,unsigned defect=0) {
+    if (!defect) exercise_gate();
+    install_query_routes(owner,defect);
+    std::array<uintptr_t,3> control{0x200000002,defect==2?uintptr_t{0}:uintptr_t{0x7788},0}; SaveReference identity{reinterpret_cast<uintptr_t>(control.data())};
+    engine::LocalMemory memory; SaveFuture* future=nullptr;
+    const auto before=native_queries, before_release=releases;
+    { NativeRouteScope route(defect==1?callback+1:callback,image);
+      CHECK(query_exists_scoped(owner,memory,&future,&identity,defect==6?"GAME-AUTOSAVE7":"PROFILE",{{image,nullptr},query,release})==&future); }
+    CHECK(!identity.control && releases==before_release+1 && future);
+    SaveResult result{}; future->vtable->poll(future,&result,nullptr); future->vtable->destroy(future,1);
+    const auto trace=owner.unrouted_trace(); CHECK(trace.at_ms && std::strcmp(trace.route,"presence_query")==0);
+    CHECK(trace.caller_rva==0x1be4b3a+(defect==1?1:0));
+    if(!defect) print_startup_query(owner,trace);
+    CHECK(!owner.routed() && !owner.native_io() && !owner.accepts_requests() && owner.profile_trace().request==0);
+    CHECK(native_queries==before+(defect==0 || defect==7?1:0));
+    check_startup_query_result(owner, defect, trace, result);
 }
 }

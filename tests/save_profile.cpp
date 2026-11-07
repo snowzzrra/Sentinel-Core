@@ -224,10 +224,7 @@ uint64_t native_read(SaveReference* profile, SaveReference* data) {
     release_reference(profile); release_reference(data);
     return result ? 4 : f.read_result;
 }
-void frame(Frame& f, const std::string& name, int index, unsigned variant = 0, size_t target_size = 0) {
-    Bytes body{14};
-    count(body, variant == 1 || variant == 2 ? 3 : variant == 10 ? 5 : 4);
-    text(body, "magicNumber"); body.push_back(3); number(body, variant == 6 ? magic + 256 : magic, 4);
+static void selection_fields(Bytes& body, const std::string& name, int index, unsigned variant) {
     if (variant != 1) {
         text(body, "lastSaveGameName"); body.push_back(variant == 3 ? 0 : 10);
         if (variant != 3) text(body, name);
@@ -236,6 +233,8 @@ void frame(Frame& f, const std::string& name, int index, unsigned variant = 0, s
         text(body, "lastUsedGameSlot"); body.push_back(variant == 4 ? 10 : variant == 19 ? 5 : 1);
         if (variant == 4) text(body, "2"); else number(body, variant == 5 ? 12 : static_cast<uint64_t>(index), 1);
     }
+}
+static void preference_fields(Bytes& body, unsigned variant, size_t target_size) {
     text(body, "preferences");
     if (variant == 11) { for (unsigned i = 0; i < 66; ++i) { body.push_back(13); count(body, 1); } body.push_back(11); }
     else {
@@ -245,6 +244,13 @@ void frame(Frame& f, const std::string& name, int index, unsigned variant = 0, s
         text(body, std::string(padding, 'x'));
         if (variant == 20) { text(body, "fixture"); body.push_back(12); }
     }
+}
+void frame(Frame& f, const std::string& name, int index, unsigned variant = 0, size_t target_size = 0) {
+    Bytes body{14};
+    count(body, variant == 1 || variant == 2 ? 3 : variant == 10 ? 5 : 4);
+    text(body, "magicNumber"); body.push_back(3); number(body, variant == 6 ? magic + 256 : magic, 4);
+    selection_fields(body, name, index, variant);
+    preference_fields(body, variant, target_size);
     if (variant == 10) { text(body, "lastSaveGameName"); body.push_back(10); text(body, name); }
     if (variant == 9) body.pop_back();
     const auto hash = static_cast<uint32_t>(checksum(body.data(), body.size()));
@@ -321,224 +327,327 @@ void exercise_unowned_profile(Session& owner,unsigned mode) {
     REQUIRE(!owner.profile_trace().ownership.baseline_ready && owner.profile_trace().request==0);
     active=nullptr;
 }
+static uintptr_t configure_later_profile(Session& owner,Frame& a,Frame& later,unsigned defect) {
+    uintptr_t later_manager = manager;
+    if (defect == 1) { later_manager += 8; put(later.shell, 16, later_manager); }
+    if (defect == 2 || defect == 6) put(later.state, 8, uint32_t{24});
+    if (defect == 3) put(later.state, 0x48, uintptr_t{0});
+    if (defect == 4) put(later.shell, 0, uintptr_t{0});
+    if (defect == 5) put(later.shell, 8, reinterpret_cast<uintptr_t>(a.state.data()));
+    if (defect == 8) owner.fail(SessionFault::native_collection);
+    if (defect == 9) REQUIRE(!owner.provider_operation(0x9999, 0x1111));
+    if (defect == 10) later.memory.campaign = "DLC1-";
+    if (defect == 11) REQUIRE(!owner.provider_operation(0x9876, 0x2222));
+    if (defect == 12) owner.provider_reset(0x9000);
+    if (defect == 13) put(later.state, 8, UINT32_MAX);
+    return later_manager;
+}
+static void profile_owner_case(const std::function<std::unique_ptr<Session>()>& make,unsigned defect) {
+    auto owner = make(); Frame a(*owner), b(*owner); active = &a;
+    a.calls = b.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
+    REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {}, "AUTOSAVE0", 0, true, 0));
+    frame(a, a.vanilla, a.vanilla_index);
+    if (defect != 7) REQUIRE(read_profile(*owner, a.memory, &a.profile_ref, &a.data_ref, a.calls) == 0);
+    Frame& later = defect == 6 ? a : b; active = &later; // reuse address with another user
+    const auto later_manager=configure_later_profile(*owner,a,later,defect);
+    prepare(later, [&] {
+        Json output("AUTOSAVE0", 0); ProfileHolder holder{1, {}, &output.root};
+        const auto result = serialize_profile(*owner, later.memory, later_manager, reinterpret_cast<uintptr_t>(later.state.data()), &holder, later.calls);
+        REQUIRE((result == 0) == (defect == 0));
+        REQUIRE(output.members.at("musicVolume").payload == 27);
+        REQUIRE(defect ? output.name() == "AUTOSAVE0" : output.name() == "AUTOSAVE7" && output.index() == 2);
+        frame(later, output.name(), output.index());
+    });
+    REQUIRE(owner->native_io() == (defect == 0));
+    if (!defect) {
+        const auto trace = owner->profile_trace().ownership;
+        REQUIRE(trace.stable_owner && trace.initial.profile != trace.latest.profile && trace.initial.shell != trace.latest.shell);
+    }
+}
+
+static void profile_size_case(const std::function<std::unique_ptr<Session>()>& make,size_t size) {
+    auto owner = make(); Frame f(*owner); active = &f;
+    f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
+    REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {}, "AUTOSAVE0", 0, true, 0));
+    frame(f, f.vanilla, f.vanilla_index, 0, size);
+    REQUIRE(f.bytes.size() == size);
+    const auto before = f.bytes;
+    // the complete production adapter uses localmemory for all real addresses
+    engine::LocalMemory memory;
+    const auto result = read_profile(*owner, memory, &f.profile_ref, &f.data_ref, f.calls);
+    std::printf("PROFILE LocalMemory bytes=%zu result=%llu predicate=%s readers=%u releases=%u\n",
+        f.bytes.size(), result, owner->profile_trace().failure.predicate, f.readers, f.releases);
+    std::fflush(stdout);
+    REQUIRE(result == 0 && owner->accepts_requests() && f.selected == "AUTOSAVE0");
+    REQUIRE(f.bytes == before && f.releases == 2 && f.strings_freed == 1 && f.comments_freed == 1);
+    prepare(f, [&] {
+        Json output("AUTOSAVE0", 0); ProfileHolder holder{1, {}, &output.root};
+        output.members.at("musicVolume").payload = 99;
+        REQUIRE(serialize_profile(*owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls) == 0);
+        REQUIRE(output.name() == f.vanilla && output.index() == f.vanilla_index && output.members.at("musicVolume").payload == 99);
+        frame(f, output.name(), output.index(), 0, size);
+    });
+    publish(f, true);
+    REQUIRE(owner->profile_trace().steps[static_cast<size_t>(ProfileStage::output_validation)].status == ProfileStatus::succeeded);
+}
+
+static void corrupt_profile_source(Frame& f,unsigned defect,void*& pages) {
+        const uintptr_t buffer = reinterpret_cast<uintptr_t>(f.bytes.data());
+        if (defect == 0) {
+            pages = VirtualAlloc(nullptr, f.bytes.size(), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); REQUIRE(pages);
+            std::memcpy(pages, f.bytes.data(), f.bytes.size()); DWORD old = 0;
+            REQUIRE(VirtualProtect(static_cast<uint8_t*>(pages) + engine::Memory::maximum_copy, 4096, PAGE_NOACCESS, &old));
+            put(f.file, 0x168, reinterpret_cast<uintptr_t>(pages));
+        }
+        if (defect == 1) f.memory.partial_address = buffer + engine::Memory::maximum_copy;
+        if (defect == 2) { put(f.file, 0x150, uint64_t(0xfa001)); put(f.file, 0x158, uint64_t(0xfa001)); }
+        if (defect == 3) put(f.file, 0x158, uint64_t(f.bytes.size() - 1));
+        if (defect == 4) put(f.file, 0x168, UINTPTR_MAX - 15);
+        if (defect == 5) f.memory.after_copy = [&, buffer](uintptr_t address, size_t) {
+            if (address == buffer) put(f.file, 0x158, uint64_t(f.bytes.size() + 1));
+        };
+}
+static void check_acquisition_failure(Session& owner,Frame& f,unsigned defect,bool output,const Bytes& before) {
+    REQUIRE(f.bytes == before && !owner.accepts_requests() && owner.fault() == SessionFault::native_profile && !f.creates);
+    const auto trace = owner.profile_trace();
+    REQUIRE(trace.failed_stage == (output ? ProfileStage::output_validation : ProfileStage::framing));
+    if (defect <= 1) {
+        REQUIRE(trace.failure.read.requested == 560873 && trace.failure.read.offset == engine::Memory::maximum_copy &&
+            trace.failure.read.size == engine::Memory::maximum_copy);
+        REQUIRE(trace.failure.read.reason == uint32_t(defect ? SC_REASON_PARTIAL_READ : SC_REASON_READ_FAILED));
+        REQUIRE(trace.failure.read.error == uint32_t(defect ? ERROR_PARTIAL_COPY : ERROR_NOACCESS));
+    }
+    if (defect == 5) REQUIRE(std::strcmp(trace.failure.predicate, "profile_source_changed") == 0);
+}
+static void profile_acquisition_case(const std::function<std::unique_ptr<Session>()>& make,bool output,unsigned defect) {
+    auto owner = make(); Frame f(*owner); active = &f;
+    f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
+    REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {}, "AUTOSAVE0", 0, true, 0));
+    frame(f, f.vanilla, f.vanilla_index, 0, 560873);
+    if (output) {
+        REQUIRE(read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls) == 0);
+        f.refresh_refs();
+    }
+    void* pages = nullptr;
+    const auto before = f.bytes;
+    if (output) {
+        prepare(f, [&] {
+            Json root("AUTOSAVE0", 0); ProfileHolder holder{1, {}, &root.root};
+            REQUIRE(serialize_profile(*owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls) == 0);
+            corrupt_profile_source(f,defect,pages);
+        });
+        publish(f, false);
+    } else {
+        corrupt_profile_source(f,defect,pages);
+        const auto result = read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls);
+        std::printf("PROFILE acquisition defect=%u result=%llu predicate=%s\n", defect, result, owner->profile_trace().failure.predicate);
+        std::fflush(stdout);
+        REQUIRE(result == 0x10);
+        REQUIRE(f.readers == 0 && f.serializers == 0 && f.releases == 2);
+    }
+    check_acquisition_failure(*owner,f,defect,output,before);
+    if (pages) REQUIRE(VirtualFree(pages, 0, MEM_RELEASE));
+}
+
+static bool check_repeated_profile_read(Session& owner,Frame& f,unsigned test,const Bytes& original_bytes,const char* baseline) {
+    if (test >= 30) {
+        // a delayed profile callback still owns valid inputs after an unrelated route failed. no native import may run at that point
+        f.refresh_refs();
+        const auto fault = test == 30 ? SessionFault::native_write : SessionFault::native_collection;
+        owner.fail(fault);
+        REQUIRE(read_profile(owner, f.memory, &f.profile_ref, &f.data_ref, f.calls) == 0x10);
+        REQUIRE(f.readers == 1 && f.serializers == 1 && f.bytes == original_bytes);
+        REQUIRE(f.releases == 4 && !f.profile_ref.control && !f.data_ref.control);
+        REQUIRE(f.profile_control.strong == 1 && f.profile_control.weak == 1 &&
+            f.data_control.strong == 1 && f.data_control.weak == 1);
+        REQUIRE(owner.state() == SessionState::faulted && owner.fault() == fault && !owner.accepts_requests());
+        return true;
+    }
+    if (test == 21) {
+        f.refresh_refs(); frame(f, "AUTOSAVE4", 3);
+        REQUIRE(read_profile(owner, f.memory, &f.profile_ref, &f.data_ref, f.calls) == 0x10 && f.readers == 1);
+        REQUIRE(std::strcmp(baseline, "AUTOSAVE7") == 0); return true;
+    }
+    return false;
+}
+static void configure_profile_catalog(Session& owner,unsigned test) {
+    if (test == 26)
+        REQUIRE(owner.publish_profile_catalog(0x1234, owner.ownership_record(), {"autosave3", "autosave10"}, "AUTOSAVE10", 1, false, 0));
+    if (test == 24) {
+        REQUIRE(!owner.publish_profile_catalog(0x1234, owner.ownership_record(), {"AUTOSAVE3", "AUTOSAVE3"}, "AUTOSAVE3", 1, false, 0));
+        REQUIRE(!owner.publish_profile_catalog(0x1234, owner.ownership_record(), {"AUTOSAVE3", "autosave3"}, "AUTOSAVE3", 1, false, 0));
+        REQUIRE(!owner.publish_profile_catalog(0x1234, owner.ownership_record(), {"AUTOSAVE3", "AUTOSAVE10"}, "AUTOSAVE10", 0, false, 0));
+    }
+}
+static void check_refused_profile(Session& owner,Frame& f,unsigned test) {
+        REQUIRE(!owner.accepts_requests() && owner.routed()); REQUIRE(f.readers == (test == 12 ? 1u : 0u));
+        const auto trace = owner.profile_trace();
+        REQUIRE(trace.failed_stage != ProfileStage::count);
+        if (test == 7 || test == 23) REQUIRE(trace.failed_stage == ProfileStage::framing);
+        if (test == 8) REQUIRE(trace.failed_stage == ProfileStage::checksum);
+        if (test == 12) REQUIRE(trace.failed_stage == ProfileStage::reader && trace.failure.native_attempted && trace.failure.native_outcome == 4);
+}
+static void check_profile_output_failure(Session& owner,unsigned test) {
+        const auto trace = owner.profile_trace();
+        REQUIRE(trace.failed_stage == ProfileStage::output_validation);
+        const auto expected = test == 15 ? "native_output_serializer_result" :
+            test == 16 ? "serializer_callback_identity" : test == 29 ? "profile_write_choice_or_campaign_mismatch" :
+            "serialized_selection_not_in_owned_catalog";
+        REQUIRE(std::strcmp(trace.failure.predicate, expected) == 0);
+        const auto causal=owner.btrace.snapshot().first_failure;
+        const auto cause=test==15 ? "native_output_serializer_result" : test==16 ? "profile_major_callback" :
+            test==29 ? "profile_choice_capture" : "choice_pair_not_catalog_or_prospective";
+        REQUIRE(causal.sequence && causal.status==BStatus::refused && std::strcmp(causal.predicate,cause)==0);
+        owner.btrace.record(BStage::session,BStatus::refused,"fixture_downstream_refusal");
+        REQUIRE(owner.btrace.snapshot().first_failure.sequence==causal.sequence);
+}
+static void serialize_selection_case(Session& owner,Frame& f,unsigned test,bool failure) {
+    prepare(f, [&] {
+        Json output(test == 26 ? "autosave3" : "AUTOSAVE3", test == 14 || test == 25 ? 1 : 0);
+        output.members.at("musicVolume").payload = 99;
+        const auto comments = output.members.at("lastSaveGameName").comments;
+        ProfileHolder holder{1, {}, &output.root};
+        if (test == 15) f.serialize_result = 3;
+        if (test == 16) put(f.state, 0x20, uintptr_t(0));
+        const auto status = serialize_profile(owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls);
+        REQUIRE((status != 0) == failure);
+        REQUIRE(output.members.at("musicVolume").payload == 99 && output.members.at("lastSaveGameName").comments == comments);
+        REQUIRE(failure ? output.name() == "AUTOSAVE3" : output.name() == "AUTOSAVE7" && output.index() == 2);
+        frame(f, test == 17 ? "AUTOSAVE10" : output.name(), output.index());
+        // the real writer ignores status and encodes. exercise that exact ordering: publication must independently refuse its unsafe output
+    });
+}
+static void check_profile_read_result(Frame& f,const Bytes& original_bytes,uint64_t result,bool refused) {
+    REQUIRE(f.releases == 2 && !f.profile_ref.control && !f.data_ref.control && f.bytes == original_bytes);
+    REQUIRE(result == (refused ? 0x10u : 0u));
+    // Model the governing native load callback: only zero imports cache;
+    // error 4 would reset and 0x100 would re-save. Neither can escape here.
+    REQUIRE(result != 4 && result != 0x100);
+}
+static const char* check_profile_import(Session& owner,Frame& f) {
+    REQUIRE(owner.state() == SessionState::admitted && owner.accepts_requests());
+    check_binding_rotation(owner);
+    REQUIRE(f.selected == "AUTOSAVE10" && f.selected_index == 1 && f.serializers == 1);
+    REQUIRE(f.strings_freed == 1 && f.comments_freed == 1);
+    const char* baseline = nullptr; int32_t baseline_index = -1;
+    REQUIRE(owner.profile_output_baseline(baseline, baseline_index) && std::strcmp(baseline, "AUTOSAVE7") == 0 && baseline_index == 2);
+    return baseline;
+}
+static void check_profile_data_reuse(Session& owner,Frame& f,unsigned test) {
+    if (test == 27 || test == 28) {
+        const auto data = reinterpret_cast<uintptr_t>(f.data.data());
+        owner.forget_save_data(data); // clear or physical destructor, before provider transfer
+        ProfileWrite absent; REQUIRE(!owner.take_profile_write(data, absent));
+        if (test == 28) { // reuse that exact address for a different operation
+            prepare(f, [&] {
+                Json output("AUTOSAVE10", 1); ProfileHolder holder{1, {}, &output.root};
+                REQUIRE(serialize_profile(owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls) == 0);
+                frame(f, output.name(), output.index());
+            });
+            REQUIRE(owner.take_profile_write(data, absent) && std::strcmp(absent.choice.name.data(), "AUTOSAVE10") == 0);
+        }
+    }
+}
+static void configure_profile_read(Frame& f,unsigned test) {
+    const unsigned malformed = test <= 11 || test == 19 || test == 20 ? test : 0;
+    frame(f, f.vanilla, f.vanilla_index, malformed);
+}
+static bool check_selection_import(Session& owner,Frame& f,unsigned test,uint64_t result,const Bytes& original_bytes) {
+    const bool refused = (test >= 1 && test <= 12) || test == 18 || test == 19 || test == 20 || test == 23;
+    check_profile_read_result(f,original_bytes,result,refused);
+    if(refused) { check_refused_profile(owner,f,test); return true; }
+    return false;
+}
+static void profile_selection_output(Session& owner, Frame& f, unsigned test) {
+    const bool failure = test == 14 || test == 15 || test == 16 || test == 25 || test == 29;
+    if (test == 29) f.memory.campaign = "DLC1-"; // shell choice must belong to the enumerated campaign
+    serialize_selection_case(owner,f,test,failure);
+    check_profile_data_reuse(owner,f,test);
+    if(failure) check_profile_output_failure(owner,test);
+    publish(f, !failure && test != 17 && test != 27 && test != 28, test == 25);
+    REQUIRE(f.strings_freed == (test == 28 ? 3u : 2u) && f.comments_freed == (test == 28 ? 3u : 2u));}
+static void profile_selection_case(const std::function<std::unique_ptr<Session>()>& make,unsigned test) {
+    auto owner = make(); Frame f(*owner); active = &f;
+    f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
+    REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {"AUTOSAVE3", "AUTOSAVE10"}, "AUTOSAVE10", 1, false, 0));
+    configure_profile_catalog(*owner,test);
+    configure_profile_read(f,test);
+    const auto original_bytes = f.bytes;
+    REQUIRE(!owner->accepts_requests()); // catalog/binding alone isn't admission
+    if (test == 12) f.read_result = 4;
+    if (test == 18) f.allocation_failure = true;
+    if (test == 23) put(f.data, 0x1c8, int32_t(0));
+    const auto result = read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls);
+    if(check_selection_import(*owner,f,test,result,original_bytes)) return;
+    const char* baseline=check_profile_import(*owner,f);
+    if(check_repeated_profile_read(*owner,f,test,original_bytes,baseline)) return;
+    profile_selection_output(*owner, f, test);
+}
+
+static void check_missing_profile_fields(const BEvent& failure,unsigned defect) {
+    bool cursor_fact=false,missing_fact=false;
+    const char* missing=defect==1?"name_present":defect==2?"index_present":"magic_present";
+    for(const auto& fact:failure.facts) if(fact.key) {
+        if(std::strcmp(fact.key,"cursor_state")==0) cursor_fact=fact.value==0;
+        if(std::strcmp(fact.key,missing)==0) missing_fact=fact.value==0;
+    }
+    REQUIRE(cursor_fact && (defect>3 || missing_fact));
+}
+static void check_document_selection(Session& owner,Frame& f,Json& output,unsigned defect) {
+    if(!defect) REQUIRE(output.name()==f.vanilla && output.index()==f.vanilla_index);
+    else {
+        const auto failure=owner.btrace.snapshot().first_failure;
+        REQUIRE(failure.stage==BStage::profile_output && failure.status==BStatus::refused);
+        const char* expected=defect<=3?"serialized_selection_member_missing":
+            defect==4?"serialized_slot_type_or_read":"serialized_magic_type_or_value";
+        REQUIRE(std::strcmp(failure.predicate,expected)==0);
+        check_missing_profile_fields(failure,defect);
+    }
+}
+static void profile_document_case(const std::function<std::unique_ptr<Session>()>& make,unsigned defect) {
+    auto owner=make(); Frame f(*owner); active=&f;
+    f.calls={native_read,native_serialize,lookup,destroy_value,checksum,release_reference,image_base};
+    REQUIRE(owner->publish_profile_catalog(0x1234,owner->ownership_record(),{},"AUTOSAVE0",0,true,0));
+    frame(f,f.vanilla,f.vanilla_index);
+    REQUIRE(read_profile(*owner,f.memory,&f.profile_ref,&f.data_ref,f.calls)==0);
+    prepare(f,[&] {
+        Json output("AUTOSAVE0",0);
+        // a valid pair in the final cursor must never repair a broken entry document. native encoding still uses output.root after failure
+        auto& child=output.master_level->members;
+        child["lastSaveGameName"]={reinterpret_cast<uintptr_t>("AUTOSAVE0"),4,0,{},0};
+        child["lastUsedGameSlot"]={0,1,0,{},0}; child["magicNumber"]={magic,1,0,{},0};
+        if(defect>=1 && defect<=3) {
+            const char* key=defect==1?"lastSaveGameName":defect==2?"lastUsedGameSlot":"magicNumber";
+            destroy_value(&output.members.at(key)); output.members.erase(key);
+        } else if(defect==4) output.members.at("lastUsedGameSlot").type=2;
+        else if(defect==5) output.members.at("magicNumber").payload^=0x100;
+        Bytes settings_before; encode_value(settings_before,output.members.at("preferences"));
+        ProfileHolder holder{1,{},&output.root};
+        const auto result=serialize_profile(*owner,f.memory,manager,reinterpret_cast<uintptr_t>(f.state.data()),&holder,f.calls);
+        REQUIRE((result==0)==(defect==0) && holder.root==&output.members.at("idMasterLevelManager"));
+        Bytes settings_after; encode_value(settings_after,output.members.at("preferences"));
+        REQUIRE(settings_before==settings_after);
+        check_document_selection(*owner,f,output,defect);
+        // like 1414978e0, encode after the callback even when it failed
+        encoded_profile(f,output);
+    });
+    publish(f,defect==0); // refused structured output can't reach the backend
+}
+
 void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make) {
     // a live session owns the vanilla selection, not a profile allocation
     for (unsigned defect = 0; defect < 14; ++defect) {
-        auto owner = make(); Frame a(*owner), b(*owner); active = &a;
-        a.calls = b.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
-        REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {}, "AUTOSAVE0", 0, true, 0));
-        frame(a, a.vanilla, a.vanilla_index);
-        if (defect != 7) REQUIRE(read_profile(*owner, a.memory, &a.profile_ref, &a.data_ref, a.calls) == 0);
-        Frame& later = defect == 6 ? a : b; active = &later; // reuse address with another user
-        uintptr_t later_manager = manager;
-        if (defect == 1) { later_manager += 8; put(later.shell, 16, later_manager); }
-        if (defect == 2 || defect == 6) put(later.state, 8, uint32_t{24});
-        if (defect == 3) put(later.state, 0x48, uintptr_t{0});
-        if (defect == 4) put(later.shell, 0, uintptr_t{0});
-        if (defect == 5) put(later.shell, 8, reinterpret_cast<uintptr_t>(a.state.data()));
-        if (defect == 8) owner->fail(SessionFault::native_collection);
-        if (defect == 9) REQUIRE(!owner->provider_operation(0x9999, 0x1111));
-        if (defect == 10) later.memory.campaign = "DLC1-";
-        if (defect == 11) REQUIRE(!owner->provider_operation(0x9876, 0x2222));
-        if (defect == 12) owner->provider_reset(0x9000);
-        if (defect == 13) put(later.state, 8, UINT32_MAX);
-        prepare(later, [&] {
-            Json output("AUTOSAVE0", 0); ProfileHolder holder{1, {}, &output.root};
-            const auto result = serialize_profile(*owner, later.memory, later_manager, reinterpret_cast<uintptr_t>(later.state.data()), &holder, later.calls);
-            REQUIRE((result == 0) == (defect == 0));
-            REQUIRE(output.members.at("musicVolume").payload == 27);
-            REQUIRE(defect ? output.name() == "AUTOSAVE0" : output.name() == "AUTOSAVE7" && output.index() == 2);
-            frame(later, output.name(), output.index());
-        });
-        REQUIRE(owner->native_io() == (defect == 0));
-        if (!defect) {
-            const auto trace = owner->profile_trace().ownership;
-            REQUIRE(trace.stable_owner && trace.initial.profile != trace.latest.profile && trace.initial.shell != trace.latest.shell);
-        }
-    }
+        profile_owner_case(make,defect);
+}
     for (size_t size : {size_t(262143), size_t(262144), size_t(262145), size_t(560873), size_t(0xfa000 - 1), size_t(0xfa000)}) {
-        auto owner = make(); Frame f(*owner); active = &f;
-        f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
-        REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {}, "AUTOSAVE0", 0, true, 0));
-        frame(f, f.vanilla, f.vanilla_index, 0, size);
-        REQUIRE(f.bytes.size() == size);
-        const auto before = f.bytes;
-        // the complete production adapter uses localmemory for all real addresses
-        engine::LocalMemory memory;
-        const auto result = read_profile(*owner, memory, &f.profile_ref, &f.data_ref, f.calls);
-        std::printf("PROFILE LocalMemory bytes=%zu result=%llu predicate=%s readers=%u releases=%u\n",
-            f.bytes.size(), result, owner->profile_trace().failure.predicate, f.readers, f.releases);
-        std::fflush(stdout);
-        REQUIRE(result == 0 && owner->accepts_requests() && f.selected == "AUTOSAVE0");
-        REQUIRE(f.bytes == before && f.releases == 2 && f.strings_freed == 1 && f.comments_freed == 1);
-        prepare(f, [&] {
-            Json output("AUTOSAVE0", 0); ProfileHolder holder{1, {}, &output.root};
-            output.members.at("musicVolume").payload = 99;
-            REQUIRE(serialize_profile(*owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls) == 0);
-            REQUIRE(output.name() == f.vanilla && output.index() == f.vanilla_index && output.members.at("musicVolume").payload == 99);
-            frame(f, output.name(), output.index(), 0, size);
-        });
-        publish(f, true);
-        REQUIRE(owner->profile_trace().steps[static_cast<size_t>(ProfileStage::output_validation)].status == ProfileStatus::succeeded);
-    }
+        profile_size_case(make,size);
+}
     for (bool output : {false, true}) for (unsigned defect = 0; defect < 6; ++defect) {
-        auto owner = make(); Frame f(*owner); active = &f;
-        f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
-        REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {}, "AUTOSAVE0", 0, true, 0));
-        frame(f, f.vanilla, f.vanilla_index, 0, 560873);
-        if (output) {
-            REQUIRE(read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls) == 0);
-            f.refresh_refs();
-        }
-        void* pages = nullptr;
-        const auto corrupt = [&] {
-            const uintptr_t buffer = reinterpret_cast<uintptr_t>(f.bytes.data());
-            if (defect == 0) {
-                pages = VirtualAlloc(nullptr, f.bytes.size(), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); REQUIRE(pages);
-                std::memcpy(pages, f.bytes.data(), f.bytes.size()); DWORD old = 0;
-                REQUIRE(VirtualProtect(static_cast<uint8_t*>(pages) + engine::Memory::maximum_copy, 4096, PAGE_NOACCESS, &old));
-                put(f.file, 0x168, reinterpret_cast<uintptr_t>(pages));
-            }
-            if (defect == 1) f.memory.partial_address = buffer + engine::Memory::maximum_copy;
-            if (defect == 2) { put(f.file, 0x150, uint64_t(0xfa001)); put(f.file, 0x158, uint64_t(0xfa001)); }
-            if (defect == 3) put(f.file, 0x158, uint64_t(f.bytes.size() - 1));
-            if (defect == 4) put(f.file, 0x168, UINTPTR_MAX - 15);
-            if (defect == 5) f.memory.after_copy = [&, buffer](uintptr_t address, size_t) {
-                if (address == buffer) put(f.file, 0x158, uint64_t(f.bytes.size() + 1));
-            };
-        };
-        const auto before = f.bytes;
-        if (output) {
-            prepare(f, [&] {
-                Json root("AUTOSAVE0", 0); ProfileHolder holder{1, {}, &root.root};
-                REQUIRE(serialize_profile(*owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls) == 0);
-                corrupt();
-            });
-            publish(f, false);
-        } else {
-            corrupt();
-            const auto result = read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls);
-            std::printf("PROFILE acquisition defect=%u result=%llu predicate=%s\n", defect, result, owner->profile_trace().failure.predicate);
-            std::fflush(stdout);
-            REQUIRE(result == 0x10);
-            REQUIRE(f.readers == 0 && f.serializers == 0 && f.releases == 2);
-        }
-        REQUIRE(f.bytes == before && !owner->accepts_requests() && owner->fault() == SessionFault::native_profile && !f.creates);
-        const auto trace = owner->profile_trace();
-        REQUIRE(trace.failed_stage == (output ? ProfileStage::output_validation : ProfileStage::framing));
-        if (defect <= 1) {
-            REQUIRE(trace.failure.read.requested == 560873 && trace.failure.read.offset == engine::Memory::maximum_copy &&
-                trace.failure.read.size == engine::Memory::maximum_copy);
-            REQUIRE(trace.failure.read.reason == uint32_t(defect ? SC_REASON_PARTIAL_READ : SC_REASON_READ_FAILED));
-            REQUIRE(trace.failure.read.error == uint32_t(defect ? ERROR_PARTIAL_COPY : ERROR_NOACCESS));
-        }
-        if (defect == 5) REQUIRE(std::strcmp(trace.failure.predicate, "profile_source_changed") == 0);
-        if (pages) REQUIRE(VirtualFree(pages, 0, MEM_RELEASE));
-    }
+        profile_acquisition_case(make,output,defect);
+}
     for (unsigned test = 0; test < 32; ++test) {
-        auto owner = make(); Frame f(*owner); active = &f;
-        f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
-        REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {"AUTOSAVE3", "AUTOSAVE10"}, "AUTOSAVE10", 1, false, 0));
-        if (test == 26)
-            REQUIRE(owner->publish_profile_catalog(0x1234, owner->ownership_record(), {"autosave3", "autosave10"}, "AUTOSAVE10", 1, false, 0));
-        if (test == 24) {
-            REQUIRE(!owner->publish_profile_catalog(0x1234, owner->ownership_record(), {"AUTOSAVE3", "AUTOSAVE3"}, "AUTOSAVE3", 1, false, 0));
-            REQUIRE(!owner->publish_profile_catalog(0x1234, owner->ownership_record(), {"AUTOSAVE3", "autosave3"}, "AUTOSAVE3", 1, false, 0));
-            REQUIRE(!owner->publish_profile_catalog(0x1234, owner->ownership_record(), {"AUTOSAVE3", "AUTOSAVE10"}, "AUTOSAVE10", 0, false, 0));
-        }
-        const unsigned malformed = test <= 11 || test == 19 || test == 20 ? test : 0;
-        frame(f, f.vanilla, f.vanilla_index, malformed);
-        const auto original_bytes = f.bytes;
-        REQUIRE(!owner->accepts_requests()); // catalog/binding alone isn't admission
-        if (test == 12) f.read_result = 4;
-        if (test == 18) f.allocation_failure = true;
-        if (test == 23) put(f.data, 0x1c8, int32_t(0));
-        const auto result = read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls);
-        const bool refused = (test >= 1 && test <= 12) || test == 18 || test == 19 || test == 20 || test == 23;
-        REQUIRE(f.releases == 2 && !f.profile_ref.control && !f.data_ref.control && f.bytes == original_bytes);
-        REQUIRE(result == (refused ? 0x10u : 0u));
-        // Model the governing native load callback: only zero imports cache;
-        // error 4 would reset and 0x100 would re-save. Neither can escape here.
-        REQUIRE(result != 4 && result != 0x100);
-        if (refused) {
-            REQUIRE(!owner->accepts_requests() && owner->routed()); REQUIRE(f.readers == (test == 12 ? 1u : 0u));
-            const auto trace = owner->profile_trace();
-            REQUIRE(trace.failed_stage != ProfileStage::count);
-            if (test == 7 || test == 23) REQUIRE(trace.failed_stage == ProfileStage::framing);
-            if (test == 8) REQUIRE(trace.failed_stage == ProfileStage::checksum);
-            if (test == 12) REQUIRE(trace.failed_stage == ProfileStage::reader && trace.failure.native_attempted && trace.failure.native_outcome == 4);
-            continue;
-        }
-        REQUIRE(owner->state() == SessionState::admitted && owner->accepts_requests());
-        check_binding_rotation(*owner);
-        REQUIRE(f.selected == "AUTOSAVE10" && f.selected_index == 1 && f.serializers == 1);
-        REQUIRE(f.strings_freed == 1 && f.comments_freed == 1);
-        const char* baseline = nullptr; int32_t baseline_index = -1;
-        REQUIRE(owner->profile_output_baseline(baseline, baseline_index) && std::strcmp(baseline, "AUTOSAVE7") == 0 && baseline_index == 2);
-        if (test >= 30) {
-            // a delayed profile callback still owns valid inputs after an unrelated route failed. no native import may run at that point
-            f.refresh_refs();
-            const auto fault = test == 30 ? SessionFault::native_write : SessionFault::native_collection;
-            owner->fail(fault);
-            REQUIRE(read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls) == 0x10);
-            REQUIRE(f.readers == 1 && f.serializers == 1 && f.bytes == original_bytes);
-            REQUIRE(f.releases == 4 && !f.profile_ref.control && !f.data_ref.control);
-            REQUIRE(f.profile_control.strong == 1 && f.profile_control.weak == 1 &&
-                f.data_control.strong == 1 && f.data_control.weak == 1);
-            REQUIRE(owner->state() == SessionState::faulted && owner->fault() == fault && !owner->accepts_requests());
-            continue;
-        }
-        if (test == 21) {
-            f.refresh_refs(); frame(f, "AUTOSAVE4", 3);
-            REQUIRE(read_profile(*owner, f.memory, &f.profile_ref, &f.data_ref, f.calls) == 0x10 && f.readers == 1);
-            REQUIRE(std::strcmp(baseline, "AUTOSAVE7") == 0); continue;
-        }
-        const bool failure = test == 14 || test == 15 || test == 16 || test == 25 || test == 29;
-        if (test == 29) f.memory.campaign = "DLC1-"; // shell choice must belong to the enumerated campaign
-        prepare(f, [&] {
-            Json output(test == 26 ? "autosave3" : "AUTOSAVE3", test == 14 || test == 25 ? 1 : 0);
-            output.members.at("musicVolume").payload = 99;
-            const auto comments = output.members.at("lastSaveGameName").comments;
-            ProfileHolder holder{1, {}, &output.root};
-            if (test == 15) f.serialize_result = 3;
-            if (test == 16) put(f.state, 0x20, uintptr_t(0));
-            const auto status = serialize_profile(*owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls);
-            REQUIRE((status != 0) == failure);
-            REQUIRE(output.members.at("musicVolume").payload == 99 && output.members.at("lastSaveGameName").comments == comments);
-            REQUIRE(failure ? output.name() == "AUTOSAVE3" : output.name() == "AUTOSAVE7" && output.index() == 2);
-            frame(f, test == 17 ? "AUTOSAVE10" : output.name(), output.index());
-            // the real writer ignores status and encodes. exercise that exact ordering: publication must independently refuse its unsafe output
-        });
-        if (test == 27 || test == 28) {
-            const auto data = reinterpret_cast<uintptr_t>(f.data.data());
-            owner->forget_save_data(data); // clear or physical destructor, before provider transfer
-            ProfileWrite absent; REQUIRE(!owner->take_profile_write(data, absent));
-            if (test == 28) { // reuse that exact address for a different operation
-                prepare(f, [&] {
-                    Json output("AUTOSAVE10", 1); ProfileHolder holder{1, {}, &output.root};
-                    REQUIRE(serialize_profile(*owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls) == 0);
-                    frame(f, output.name(), output.index());
-                });
-                REQUIRE(owner->take_profile_write(data, absent) && std::strcmp(absent.choice.name.data(), "AUTOSAVE10") == 0);
-            }
-        }
-        if (failure) {
-            const auto trace = owner->profile_trace();
-            REQUIRE(trace.failed_stage == ProfileStage::output_validation);
-            const auto expected = test == 15 ? "native_output_serializer_result" :
-                test == 16 ? "serializer_callback_identity" : test == 29 ? "profile_write_choice_or_campaign_mismatch" :
-                "serialized_selection_not_in_owned_catalog";
-            REQUIRE(std::strcmp(trace.failure.predicate, expected) == 0);
-            const auto causal=owner->btrace.snapshot().first_failure;
-            const auto cause=test==15 ? "native_output_serializer_result" : test==16 ? "profile_major_callback" :
-                test==29 ? "profile_choice_capture" : "choice_pair_not_catalog_or_prospective";
-            REQUIRE(causal.sequence && causal.status==BStatus::refused && std::strcmp(causal.predicate,cause)==0);
-            owner->btrace.record(BStage::session,BStatus::refused,"fixture_downstream_refusal");
-            REQUIRE(owner->btrace.snapshot().first_failure.sequence==causal.sequence);
-        }
-        publish(f, !failure && test != 17 && test != 27 && test != 28, test == 25);
-        REQUIRE(f.strings_freed == (test == 28 ? 3u : 2u) && f.comments_freed == (test == 28 ? 3u : 2u));
-    }
+        profile_selection_case(make,test);
+}
     {
         auto owner = make(); Frame f(*owner); active = &f;
         f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
@@ -561,48 +670,8 @@ void run_profile_contracts(const std::function<std::unique_ptr<Session>()>& make
         REQUIRE(owner->accepts_requests() && owner->profile_trace().failed_stage == ProfileStage::count);
     }
     for(unsigned defect=0;defect<6;++defect) {
-        auto owner=make(); Frame f(*owner); active=&f;
-        f.calls={native_read,native_serialize,lookup,destroy_value,checksum,release_reference,image_base};
-        REQUIRE(owner->publish_profile_catalog(0x1234,owner->ownership_record(),{},"AUTOSAVE0",0,true,0));
-        frame(f,f.vanilla,f.vanilla_index);
-        REQUIRE(read_profile(*owner,f.memory,&f.profile_ref,&f.data_ref,f.calls)==0);
-        prepare(f,[&] {
-            Json output("AUTOSAVE0",0);
-            // a valid pair in the final cursor must never repair a broken entry document. native encoding still uses output.root after failure
-            auto& child=output.master_level->members;
-            child["lastSaveGameName"]={reinterpret_cast<uintptr_t>("AUTOSAVE0"),4,0,{},0};
-            child["lastUsedGameSlot"]={0,1,0,{},0}; child["magicNumber"]={magic,1,0,{},0};
-            if(defect>=1 && defect<=3) {
-                const char* key=defect==1?"lastSaveGameName":defect==2?"lastUsedGameSlot":"magicNumber";
-                destroy_value(&output.members.at(key)); output.members.erase(key);
-            } else if(defect==4) output.members.at("lastUsedGameSlot").type=2;
-            else if(defect==5) output.members.at("magicNumber").payload^=0x100;
-            Bytes settings_before; encode_value(settings_before,output.members.at("preferences"));
-            ProfileHolder holder{1,{},&output.root};
-            const auto result=serialize_profile(*owner,f.memory,manager,reinterpret_cast<uintptr_t>(f.state.data()),&holder,f.calls);
-            REQUIRE((result==0)==(defect==0) && holder.root==&output.members.at("idMasterLevelManager"));
-            Bytes settings_after; encode_value(settings_after,output.members.at("preferences"));
-            REQUIRE(settings_before==settings_after);
-            if(!defect) REQUIRE(output.name()==f.vanilla && output.index()==f.vanilla_index);
-            else {
-                const auto failure=owner->btrace.snapshot().first_failure;
-                REQUIRE(failure.stage==BStage::profile_output && failure.status==BStatus::refused);
-                const char* expected=defect<=3?"serialized_selection_member_missing":
-                    defect==4?"serialized_slot_type_or_read":"serialized_magic_type_or_value";
-                REQUIRE(std::strcmp(failure.predicate,expected)==0);
-                bool cursor_fact=false,missing_fact=false;
-                const char* missing=defect==1?"name_present":defect==2?"index_present":"magic_present";
-                for(const auto& fact:failure.facts) if(fact.key) {
-                    if(std::strcmp(fact.key,"cursor_state")==0) cursor_fact=fact.value==0;
-                    if(std::strcmp(fact.key,missing)==0) missing_fact=fact.value==0;
-                }
-                REQUIRE(cursor_fact && (defect>3 || missing_fact));
-            }
-            // like 1414978e0, encode after the callback even when it failed
-            encoded_profile(f,output);
-        });
-        publish(f,defect==0); // refused structured output can't reach the backend
-    }
+        profile_document_case(make,defect);
+}
     active = nullptr;
     std::puts("PASS production PROFILE reader/serializer and LocalMemory bounded acquisition (51 payload + 14 owner + 6 output document cases; synthetic host, not DOOM)");
 }
@@ -656,6 +725,17 @@ void exercise_campaign_profile(Session& owner, const std::function<void(const st
     });
     active = nullptr;
 }
+static void exercise_profile_output(Frame& f, Session& owner) {
+    prepare(f, [&] {
+        Json output(f.selected, f.selected_index); ProfileHolder holder{1, {}, &output.root};
+        output.members.at("musicVolume").payload = 99;
+        REQUIRE(serialize_profile(owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls) == 0);
+        REQUIRE(output.name() == f.vanilla && output.index() == f.vanilla_index && output.members.at("musicVolume").payload == 99);
+        frame(f, output.name(), output.index());
+    });
+    publish(f, true);
+    if (owner.routed()) REQUIRE(f.strings_freed == 2 && f.comments_freed == 2);
+}
 void exercise_profile_caller(Session& owner, const std::function<bool(SaveReference&)>& provider, bool malformed) {
     Frame f(owner); active = &f;
     f.calls = {native_read, native_serialize, lookup, destroy_value, checksum, release_reference, image_base};
@@ -676,15 +756,7 @@ void exercise_profile_caller(Session& owner, const std::function<bool(SaveRefere
         REQUIRE(result == (malformed ? 0x10u : 0u) && f.bytes == input);
         if (!malformed) {
             REQUIRE(f.selected == expected.name.data() && f.selected_index == expected.index);
-            prepare(f, [&] {
-                Json output(f.selected, f.selected_index); ProfileHolder holder{1, {}, &output.root};
-                output.members.at("musicVolume").payload = 99;
-                REQUIRE(serialize_profile(owner, f.memory, manager, reinterpret_cast<uintptr_t>(f.state.data()), &holder, f.calls) == 0);
-                REQUIRE(output.name() == f.vanilla && output.index() == f.vanilla_index && output.members.at("musicVolume").payload == 99);
-                frame(f, output.name(), output.index());
-            });
-            publish(f, true);
-            if (owner.routed()) REQUIRE(f.strings_freed == 2 && f.comments_freed == 2);
+            exercise_profile_output(f, owner);
         } else REQUIRE(f.readers == 0 && !owner.accepts_requests());
     } else {
         REQUIRE(f.readers == 0 && f.serializers == 0 && f.bytes == input);

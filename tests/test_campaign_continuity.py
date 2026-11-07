@@ -84,7 +84,8 @@ class CampaignContinuity(unittest.TestCase):
 
     def stage(self, mode, root, difficulty, defect=None):
         command = [str(EXE), mode, str(root), str(difficulty)]
-        if defect: command.append(defect)
+        if defect:
+            command.append(defect)
         result = subprocess.run(command, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode(errors='replace'))
         return result.stdout.decode()
@@ -228,4 +229,5 @@ class CampaignContinuity(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout.decode(errors='replace'))
 
 
-if __name__ == '__main__': unittest.main()
+if __name__ == '__main__':
+    unittest.main()

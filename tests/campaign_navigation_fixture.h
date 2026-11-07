@@ -104,7 +104,7 @@ void create(uint32_t difficulty,const std::wstring& defect) {
         selected=0;
         argument[1]=0; // ordinary single-campaign newgame, not a slot widget
         CHECK(test_campaign_action(screen_address,action)==1);
-        CHECK(created==1 && selected==1 && integer==1 && internal==1 && choices==1);
+        CHECK(std::tie(created, selected, integer, internal, choices) == std::make_tuple(1u, 1u, 1u, 1u, 1u));
         CHECK(session().campaign_run.snapshot().phase=="native_start_queued");
         CHECK(*reinterpret_cast<uint32_t*>(cvar.data()+8)==difficulty);
         CHECK(test_campaign_action(screen_address,action)==1 && created==1); // duplicate and nested callback reserve once

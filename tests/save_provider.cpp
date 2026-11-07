@@ -95,7 +95,9 @@ unsigned query_native_calls = 0, query_releases = 0;
 std::string queried_native_name;
 void release_query(SaveReference* identity) {
     auto* counts = reinterpret_cast<uint32_t*>(identity->control);
-    REQUIRE(counts && counts[0] == 2 && counts[1] == 2);
+    REQUIRE(counts);
+    REQUIRE(counts[0] == 2);
+    REQUIRE(counts[1] == 2);
     --counts[0]; --counts[1]; identity->control = 0; ++query_releases;
 }
 SaveFuture** original_query(SaveFuture** out, SaveReference* identity, const char* name) {
@@ -103,6 +105,365 @@ SaveFuture** original_query(SaveFuture** out, SaveReference* identity, const cha
     release_query(identity); *out = refused_save_future(); return out;
 }
 }
+static void provider_filename_case(const std::function<std::unique_ptr<Session>()>& make,std::array<uintptr_t,20>& table,const ProviderCalls& calls,unsigned test,char* boundary,DWORD page) {
+    std::string maximum(test == 4 ? 259 : 260, 'a');
+    if (test == 7) boundary[page - 1] = 0;
+    const char* names[]{"PROFILE/profile.bin", nullptr, "", boundary + page,
+                        maximum.c_str(), maximum.c_str(), boundary + page - 8, boundary + page - 8};
+    auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+    remote.files = {{"PROFILE/profile.bin", "unrelated vanilla"}};
+    remote.override_name = true; remote.first_name = names[test];
+    uintptr_t provider = image + 0x2e90658;
+    std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+    uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
+    Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
+    // Proton can return API strings outside the Windows memory regions used by the engine reader.
+    memory.excluded_name = remote.first_name;
+    const auto original = remote.files;
+    const bool accepted = test == 0 || test == 4 || test == 7;
+    REQUIRE(provider_initialized(*owner, memory, memory.manager, calls) == accepted);
+    REQUIRE(remote.files.front() == original.front());
+    REQUIRE(remote.writes == (accepted ? 1u : 0u));
+    if (!accepted) {
+        REQUIRE(remote.files == original);
+        REQUIRE(!owner->routed());
+        REQUIRE(std::strcmp(owner->btrace.snapshot().first_failure.predicate, "remote_filename_unreadable") == 0);
+    }
+}
+
+static void provider_continuity_case(const std::function<std::unique_ptr<Session>()>& make,std::array<uintptr_t,20>& table,const ProviderCalls& calls,unsigned test) {
+    auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+    uintptr_t provider = image + 0x2e90658;
+    std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+    uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
+    Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
+    REQUIRE(provider_initialized(*owner, memory, memory.manager, calls));
+    REQUIRE(owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x123456));
+    owner->startup_leave(false);
+    REQUIRE(provider_initialized(*owner, memory, memory.manager, calls)); // ordinary lazy getter after startup
+    REQUIRE(owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x123456));
+    const auto files = remote.files;
+    if (test == 1) remote_pointer = 0x9999;
+    if (test == 2) provider = image + 0x2e90a60; // native fallback stub, never an ap migration
+    if (test == 3) control[1] = 0;
+    if (test == 4) owner->provider_reset(memory.manager);
+    if (test == 5) REQUIRE(!owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x654321));
+    if (test == 6) REQUIRE(!owner->provider_operation(0xdead, 0x123456));
+    if (test == 7) owner->provider_reset(0xbeef); // unrelated manager
+    if (test == 8) {
+        std::thread worker([&] { REQUIRE(provider_initialized(*owner, memory, memory.manager, calls)); });
+        worker.join(); // continuity doesn't require replaying checked startup
+    }
+    const bool valid = test == 0 || test >= 7;
+    REQUIRE(provider_initialized(*owner, memory, memory.manager, calls) == valid);
+    REQUIRE(owner->routed());
+    REQUIRE(owner->native_io() == valid);
+    REQUIRE(remote.files == files);
+    if (!valid) {
+        uintptr_t unavailable = 0;
+        REQUIRE(owner->fault() == SessionFault::provider_identity);
+        REQUIRE(!owner->native_provider(unavailable));
+        provider = image + 0x2e90658; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+        REQUIRE(!provider_initialized(*owner, memory, memory.manager, calls)); // no resurrection/unrouting
+    }
+}
+
+static void uppercase_provider_marker(Remote& remote, unsigned test) {
+    if (test == 12) for (char& c : remote.files.back().first) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));}
+static void configure_provider_identity(Session& owner,Remote& remote,uintptr_t& provider,const std::string& marker,unsigned test) {
+    if (test == 1) remote.files.pop_back(); // empty remote root may be prepared, then read back
+    if (test == 2) remote.files.back().second.back() = '?';
+    if (test == 3) remote.files.emplace_back(owner.native_root() + "/sentinel-owner-foreign.txt", "foreign");
+    if (test == 4) remote.short_read = true;
+    if (test == 5) remote.wrong_size = true;
+    if (test == 6) remote.mutate = true;
+    if (test == 7) remote.bad_count = true;
+    if (test == 8) remote.bad_alloc = true;
+    if (test == 9) provider = image + 0x2e88198; // unsupported local provider
+    if (test == 10) remote_pointer = 0;
+    if (test == 11) remote.files.emplace_back(marker, owner.ownership_record());
+    uppercase_provider_marker(remote, test);
+}
+static void configure_marker_creation(Session& owner,Remote& remote,unsigned test) {
+    if (test >= 15 && test <= 21) remote.files.pop_back();
+    if (test == 15) remote.files.emplace_back(owner.native_root() + "/GAME-AUTOSAVE0/game.details", "orphaned native payload");
+    if (test == 16 || test == 17) remote.fail_write = true;
+    if (test == 17) remote.partial_write = true;
+    if (test == 18) remote.short_read = true;
+    if (test == 19) remote.add_foreign = true;
+    if (test == 20) remote.files.clear(); // entire remotestorage empty
+    if (test == 21) remote.discard_write = true;
+}
+static void configure_selected_catalog(Session& owner,Remote& remote,unsigned test) {
+    if (test >= 22 && test <= 27) {
+        remote.files.emplace_back(owner.native_root() + "/game-autosave10/game.details", "native payload");
+        std::string record = "sentinel-native-selection-v1\nnamespace_id=" + owner.namespace_id() + "\ncampaign=GAME-\nname=AUTOSAVE10\n";
+        if (test == 23) record[record.find(owner.namespace_id())] = '?';
+        if (test == 24) record.replace(record.find("AUTOSAVE10"), 10, "AUTOSAVE01");
+        if (test == 25) remote.files.emplace_back(owner.native_root() + "/GAME-AUTOSAVE10/game.details", "alias");
+        if (test == 26) record.replace(0, 1, "?");
+        if (test == 27) remote.files.emplace_back(owner.native_root() + "/GAME-AUTOSAVE12/game.details", "unsupported slot");
+        remote.files.emplace_back(owner.native_root() + "/sentinel-selection-GAME.txt", std::move(record));
+    }
+}
+static void configure_partial_catalog(Session& owner,Remote& remote,unsigned test) {
+    if (test == 28 || test == 29 || test == 34)
+        remote.files.emplace_back(owner.native_root() + "/GAME-AUTOSAVE0/SlotFile", "native payload");
+    if (test == 29 || test == 32 || test == 34)
+        remote.files.emplace_back(owner.native_root() + "/game-autosave0/game.details", "native metadata");
+    if (test == 30) remote.files.emplace_back(owner.native_root() + "/DLC1-AUTOSAVE0/SlotFile", "partial");
+    if (test == 31) remote.files.emplace_back(owner.native_root() + "/GAME-AUTOSAVE01/SlotFile", "invalid slot");
+    if (test == 32) remote.files.emplace_back(owner.native_root() + "/DLC2-AUTOSAVE0/SlotFile", "partial");
+    if (test == 33) remote.files.emplace_back("GAME-AUTOSAVE0/SlotFile", "unrelated vanilla");
+    if (test == 34) remote.files.emplace_back(owner.native_root() + "/game-autosave0/auxiliary/extra.bin", "auxiliary payload");
+}
+static void check_owned_provider(Session& owner,Remote& remote,Memory& memory,unsigned test) {
+    REQUIRE(owner.state() == SessionState::binding);
+    REQUIRE(!owner.accepts_requests());
+    REQUIRE(remote.reads == (test == 22 ? 3u : 2u));
+    REQUIRE(owner.collecting(remote_pointer, owner.native_root()));
+    NativeCampaignCatalog source; uintptr_t source_provider = 0;
+    REQUIRE(read_native_catalog(owner, memory, "GAME-", source, source_provider));
+    REQUIRE(source_provider == remote_pointer);
+    if (test == 22) { REQUIRE(source.slots == std::vector<std::string>{"AUTOSAVE10"}); REQUIRE(source.selected == "AUTOSAVE10"); }
+    else if (test == 29 || test == 34) { REQUIRE(source.slots == std::vector<std::string>{"AUTOSAVE0"}); REQUIRE(source.selected.empty()); }
+    else { REQUIRE(source.slots.empty()); REQUIRE(source.selected.empty()); }
+    owner.startup_leave(false); owner.stop_requests();
+    REQUIRE(owner.routed());
+    REQUIRE(!owner.accepts_requests());
+    const std::wstring mutex = L"Local\\SentinelCore-Steam-782330-" +
+        std::wstring(owner.native_root().begin(), owner.native_root().end());
+    std::thread other([&] {
+        HANDLE lock = OpenMutexW(SYNCHRONIZE, FALSE, mutex.c_str()); REQUIRE(lock);
+        REQUIRE(WaitForSingleObject(lock, 0) == WAIT_TIMEOUT); CloseHandle(lock);
+    }); other.join(); // stop keeps the real-root mutex as well as the offline lease
+}
+static void check_provider_ownership(Session& owner, Remote& remote, Memory& memory, const ProviderCalls& calls, unsigned test, const decltype(Remote::files)& before) {
+    const bool accepted = provider_initialized(owner, memory, memory.manager, calls);
+    constexpr unsigned accepted_cases[]{0, 1, 12, 13, 14, 20, 22, 29, 33, 34};
+    REQUIRE(accepted == (std::find(std::begin(accepted_cases), std::end(accepted_cases), test) != std::end(accepted_cases)));
+    const bool creation = test == 1 || (test >= 16 && test <= 21);
+    REQUIRE(remote.writes == (creation ? 1u : 0u));
+    if (!creation || test == 16 || test == 21) REQUIRE(remote.files == before);
+    for (const auto& file : before) REQUIRE(std::find(remote.files.begin(), remote.files.end(), file) != remote.files.end());
+    if (accepted) {
+        check_owned_provider(owner,remote,memory,test);
+    } else {
+        REQUIRE(!owner.routed());
+        REQUIRE(owner.fault() == SessionFault::provider_identity);
+        if (test == 7) REQUIRE(std::strcmp(owner.btrace.snapshot().first_failure.predicate,"remote_file_count_invalid")==0);
+        if (test == 16) REQUIRE(std::strcmp(owner.btrace.snapshot().first_failure.predicate,"remote_marker_write_failed")==0);
+    }}
+static void provider_ownership_case(const std::function<std::unique_ptr<Session>()>& make,std::array<uintptr_t,20>& table,const ProviderCalls& calls,unsigned test) {
+    auto owner = make();
+    Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+    const auto marker = owner->native_root() + "/sentinel-owner-" + owner->namespace_id() + ".txt";
+    remote.files = {{"PROFILE/profile.bin", "unrelated vanilla"}, {marker, owner->ownership_record()}};
+    uintptr_t provider = image + 0x2e90658;
+    std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+    uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
+    Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
+    configure_provider_identity(*owner,remote,provider,marker,test);
+    configure_marker_creation(*owner,remote,test);
+    configure_selected_catalog(*owner,remote,test);
+    configure_partial_catalog(*owner,remote,test);
+    const auto before = remote.files;
+    const auto before_context = context_calls;
+    if (test == 13) {
+        REQUIRE(!provider_initialized(*owner, memory, 0x7777, calls));
+        REQUIRE(owner->state() == SessionState::starting);
+        REQUIRE(context_calls == before_context);
+    }
+    if (test == 14) {
+        std::thread other([&] {
+            REQUIRE(!provider_initialized(*owner, memory, memory.manager, calls));
+        }); other.join();
+        REQUIRE(owner->state() == SessionState::starting);
+        REQUIRE(context_calls == before_context);
+    }
+    check_provider_ownership(*owner, remote, memory, calls, test, before);
+}
+
+static void configure_selection_write_failure(Session& owner, Remote& remote, unsigned test) {
+        if (test == 3) remote.fail_write = true;
+        if (test == 4) remote.partial_write = true;
+        if (test == 5) remote.discard_write = true;
+        if (test == 6) remote.files[0].second.back() = '?';
+        if (test == 7) remote.files.erase(remote.files.begin());
+        if (test == 8) remote.files.erase(remote.files.begin() + 1); // serialized selection was deleted
+        if (test == 9) owner.stop_requests(); // already-owned writes still finalize under kept routing
+}
+static void poll_selection_writes(Session& owner, Remote& remote, Memory& memory, const decltype(Remote::files)& original, unsigned test, SaveFuture* older, SaveFuture* newer) {
+        REQUIRE(remote.writes == 0);
+        REQUIRE(remote.files == original);
+        SaveResult result{};
+        older->vtable->poll(older, &result, nullptr); REQUIRE(result.state == -1);
+        REQUIRE(remote.writes == 0);
+        newer->vtable->poll(newer, &result, nullptr); REQUIRE(result.state == -1);
+        REQUIRE(remote.writes == 0);
+        if (test == 2) return; // destruction while pending can't publish either record
+        configure_selection_write_failure(owner, remote, test);
+        const bool reverse = test == 1;
+        auto first = reverse ? newer : older; auto second = reverse ? older : newer;
+        first->vtable->poll(first, &result, nullptr);
+        const bool failed = (test >= 3 && test <= 8) || test >= 10;
+        REQUIRE(result.state == 0);
+        REQUIRE(result.outcome == (failed ? 1 : 0));
+        if (failed) {
+            REQUIRE(owner.fault() == (test >= 10 ? SessionFault::native_write : SessionFault::native_profile));
+            REQUIRE(remote.writes == (test <= 5 ? 1u : 0u)); return;
+        }
+        NativeCampaignCatalog catalog; uintptr_t actual = 0;
+        REQUIRE(read_native_catalog(owner, memory, "GAME-", catalog, actual));
+        REQUIRE(catalog.selected == (reverse ? "AUTOSAVE10" : "AUTOSAVE3"));
+        REQUIRE(remote.writes == 1);
+        second->vtable->poll(second, &result, nullptr); REQUIRE(result.state == 0);
+        REQUIRE(result.outcome == 0);
+        REQUIRE(read_native_catalog(owner, memory, "GAME-", catalog, actual));
+        REQUIRE(catalog.selected == "AUTOSAVE10");
+        REQUIRE(remote.writes == (reverse ? 1u : 2u));
+        second->vtable->poll(second, &result, nullptr); REQUIRE(result.state == 1);
+        for (const auto& file : original) REQUIRE(*find(remote, file.first.c_str()) == file);
+}
+static void provider_selection_write_case(const std::function<std::unique_ptr<Session>()>& make,std::array<uintptr_t,20>& table,const ProviderCalls& calls,unsigned test) {
+    auto owner = make(); const auto root = owner->native_root();
+    Remote remote{table.data()}; remote.replace_selection = true; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+    remote.files = {{root + "/sentinel-owner-" + owner->namespace_id() + ".txt", owner->ownership_record()},
+        {root + "/GAME-AUTOSAVE3/game.details", "native3"}, {root + "/GAME-AUTOSAVE10/game.details", "native10"},
+        {"PROFILE/profile.bin", "shared native output"}, {"GAME-AUTOSAVE3/game.details", "vanilla"}};
+    uintptr_t provider = image + 0x2e90658;
+    std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+    uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
+    Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
+    REQUIRE(provider_initialized(*owner, memory, memory.manager, calls)); owner->startup_leave(false);
+    REQUIRE(owner->publish_profile_catalog(remote_pointer, owner->ownership_record(),
+        {"AUTOSAVE3", "AUTOSAVE10"}, "AUTOSAVE10", 1, false, 0));
+    const auto original = remote.files;
+    exercise_selection_writes(*owner, test >= 10 ? test - 9 : 0, [&](SaveFuture* older, SaveFuture* newer) {
+        poll_selection_writes(*owner, remote, memory, original, test, older, newer);
+    });
+}
+
+static std::string query_input_case(Memory& memory, const std::string& root, unsigned test) {
+    std::string input = "GAME-AUTOSAVE3";
+    if (test == 1 || test == 23) input = "GAME-AUTOSAVE10";
+    if (test == 4) { input = "DLC1-AUTOSAVE10"; memory.campaign = "DLC1-"; }
+    if (test == 6) input = root + "/game-autosave3";
+    if (test == 7) input = "GAME-AUTOSAVE12";
+    if (test == 8) input = "GAME-AUTOSAVE3/../PROFILE";
+    if (test == 9) input = "ap-other/GAME-AUTOSAVE3";
+    return input;
+}
+static std::string configure_provider_query(Session& owner, Remote& remote, Remote& foreign, Memory& memory, const std::string& root, unsigned test) {
+    std::string input = query_input_case(memory, root, test);
+    if (test == 10) remote.files.erase(remote.files.begin());
+    if (test == 11 || test == 22) remote_pointer = reinterpret_cast<uintptr_t>(&foreign);
+    if (test == 12) memory.campaign = "OTHER-";
+    if (test == 13) remote.files.pop_back();
+    if (test == 14) { remote.files.pop_back(); remote.files.emplace_back(root + "/GAME-AUTOSAVE3/SlotFile", "partial"); }
+    if (test == 15 || test == 22) input = "PROFILE";
+    if (test == 18) owner.stop_requests();
+    if (test == 19) remote.files[0].second.back() = '?';
+    if (test == 20) input.assign(260, 'X');
+    if (test == 23) memory.campaign = "DLC1-";    return input;
+}
+static std::pair<bool, bool> query_refusal_case(unsigned test) {
+    const bool invalid = (test >= 7 && test <= 12) || test == 14 || (test >= 19 && test <= 22) || test == 17;
+    const bool empty = test == 2 || test == 3 || test == 5 || test == 13;    return {invalid, empty};
+}
+static void check_query_completion(Session& owner, SaveFuture* future, unsigned test) {
+    const bool native = test == 15 || test == 16;
+    const auto [invalid, empty] = query_refusal_case(test);
+    SaveResult result{}; future->vtable->poll(future, &result, nullptr);
+    REQUIRE(result.state == 0);
+    REQUIRE(result.outcome == (invalid || empty || native ? 1 : 0));
+    REQUIRE(result.value == (empty ? 8u : invalid || native ? 1u : test == 1 || test == 23 ? 0u : 1u));
+    if (invalid && test != 17) REQUIRE(owner.fault() == SessionFault::native_collection);
+    else if (test != 17) REQUIRE(owner.fault() == SessionFault::none);
+    if (!invalid && !native) { future->vtable->poll(future, &result, nullptr); REQUIRE(result.state == 1); }
+    future->vtable->destroy(future, 1);
+}
+static void populate_query_files(Session& owner, Remote& remote, const std::string& root, unsigned test) {
+    remote.files = {{root + "/sentinel-owner-" + owner.namespace_id() + ".txt", owner.ownership_record()},
+        {"PROFILE/profile.bin", "account"}, {"GAME-AUTOSAVE10/game.details", "vanilla"}};
+    if (test != 2 && test != 3 && test != 4 && test != 5)
+        remote.files.emplace_back(root + "/GAME-AUTOSAVE3/game.details", "AP3");
+    if (test == 3) remote.files.emplace_back("ap-other/GAME-AUTOSAVE3/game.details", "foreign AP");
+    if (test == 4 || test == 5 || test == 23)
+        remote.files.emplace_back(root + "/DLC1-AUTOSAVE10/game.details", "AP DLC1");
+}
+static void provider_query_case(const std::function<std::unique_ptr<Session>()>& make,std::array<uintptr_t,20>& table,const ProviderCalls& calls,unsigned test) {
+    auto owner = test == 16 ? std::make_unique<Session>() : make();
+    const auto root = owner->native_root();
+    Remote remote{table.data()}, foreign{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+    populate_query_files(*owner, remote, root, test);
+    uintptr_t provider = image + 0x2e90658;
+    std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+    uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
+    Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
+    if (test != 16 && test != 17) REQUIRE(provider_initialized(*owner, memory, memory.manager, calls));
+    const auto input = configure_provider_query(*owner, remote, foreign, memory, root, test);
+    const auto before_files = remote.files, foreign_files = foreign.files;
+    const auto before_native = query_native_calls, before_releases = query_releases, before_context = context_calls;
+    std::array<uint32_t, 6> identity_control{2, 2}; SaveReference identity{reinterpret_cast<uintptr_t>(identity_control.data())};
+    SaveFuture* future = nullptr;
+    REQUIRE(query_exists_scoped(*owner, memory, &future, &identity, test == 21 ? nullptr : input.c_str(), {calls, original_query, release_query}) == &future);
+    REQUIRE(future);
+    REQUIRE(!identity.control);
+    REQUIRE(identity_control[0] == 1);
+    REQUIRE(identity_control[1] == 1);
+    REQUIRE(query_releases == before_releases + 1);
+    const bool native = test == 15 || test == 16;
+    REQUIRE(query_native_calls == before_native + (native ? 1 : 0));
+    if (native) { REQUIRE(queried_native_name == input); REQUIRE(future == refused_save_future()); }
+    if (test == 16 || test == 17) REQUIRE(context_calls == before_context);
+    check_query_completion(*owner, future, test);
+    REQUIRE(remote.files == before_files);
+    REQUIRE(foreign.files == foreign_files);
+    REQUIRE(remote.writes == 0);
+    REQUIRE(foreign.writes == 0);
+    REQUIRE(foreign.reads == 0);
+    REQUIRE(foreign.queries == 0);
+    if (test == 17) { REQUIRE(owner->state() == SessionState::rejected); REQUIRE(owner->fault() == SessionFault::missed_startup); }
+}
+
+static bool bind_provider_root_case(Session& owner, Memory& memory, uintptr_t& provider, uintptr_t manager_address, const ProviderCalls& calls, unsigned test) {
+    // model the constructor return followed by rootinit's root+9b38 store
+    memory.manager = manager_address;
+    if (test == 1) owner.unrouted_import();
+    if (test == 2) owner.stop_requests();
+    if (test == 3) owner.startup_leave(true);
+    if (test == 5) memory.manager = 0;
+    if (test == 6) provider = image + 0x2e87db0;
+    if (test == 7) REQUIRE(provider_initialized(owner, memory, manager_address, calls));
+    bool bound = false;
+    if (test == 4) { std::thread other([&] { bound = bind_root_provider(owner, memory, calls); }); other.join(); }
+    else bound = bind_root_provider(owner, memory, calls);    return bound;
+}
+static void provider_root_case(const std::function<std::unique_ptr<Session>()>& make,std::array<uintptr_t,20>& table,const ProviderCalls& calls,unsigned test) {
+    auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+    uintptr_t provider = image + 0x2e90658;
+    std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+    uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
+    const auto manager_address = reinterpret_cast<uintptr_t>(&manager);
+    Memory memory; memory.manager = 0; const auto before = context_calls;
+    REQUIRE(!provider_initialized(*owner, memory, manager_address, calls));
+    REQUIRE(owner->state() == SessionState::starting);
+    REQUIRE(context_calls == before);
+    REQUIRE(remote.writes == 0);
+    const bool bound = bind_provider_root_case(*owner, memory, provider, manager_address, calls, test);
+    const bool ready = test == 0 || test == 7;
+    REQUIRE(bound == (test == 0));
+    REQUIRE(owner->routed() == ready);
+    REQUIRE(!owner->accepts_requests());
+    REQUIRE(remote.writes == (ready ? 1u : 0u));
+    REQUIRE(context_calls == before + (ready ? 1 : 0));
+    owner->startup_leave(false);
+    REQUIRE(!owner->accepts_requests()); // root/provider readiness still requires native profile import
+    if (ready) REQUIRE(owner->state() == SessionState::binding);
+    else if (test != 4) REQUIRE(owner->state() == SessionState::rejected);
+}
+
 void run_provider_contracts(const std::function<std::unique_ptr<Session>()>& make) {
     std::array<uintptr_t, 20> table{};
     table[0] = reinterpret_cast<uintptr_t>(write);
@@ -118,288 +479,30 @@ void run_provider_contracts(const std::function<std::unique_ptr<Session>()>& mak
     DWORD previous = 0;
     REQUIRE(VirtualProtect(boundary + page, page, PAGE_NOACCESS, &previous));
     for (unsigned test = 0; test < 8; ++test) {
-        std::string maximum(test == 4 ? 259 : 260, 'a');
-        if (test == 7) boundary[page - 1] = 0;
-        const char* names[]{"PROFILE/profile.bin", nullptr, "", boundary + page,
-                            maximum.c_str(), maximum.c_str(), boundary + page - 8, boundary + page - 8};
-        auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
-        remote.files = {{"PROFILE/profile.bin", "unrelated vanilla"}};
-        remote.override_name = true; remote.first_name = names[test];
-        uintptr_t provider = image + 0x2e90658;
-        std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
-        uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
-        Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
-        // Proton can return API strings outside the Windows memory regions used by the engine reader.
-        memory.excluded_name = remote.first_name;
-        const auto original = remote.files;
-        const bool accepted = test == 0 || test == 4 || test == 7;
-        REQUIRE(provider_initialized(*owner, memory, memory.manager, calls) == accepted);
-        REQUIRE(remote.files.front() == original.front() && remote.writes == (accepted ? 1u : 0u));
-        if (!accepted) {
-            REQUIRE(remote.files == original && !owner->routed());
-            REQUIRE(std::strcmp(owner->btrace.snapshot().first_failure.predicate, "remote_filename_unreadable") == 0);
-        }
-    }
+        provider_filename_case(make,table,calls,test,boundary,page);
+}
     REQUIRE(VirtualFree(boundary, 0, MEM_RELEASE));
     for (unsigned test = 0; test < 9; ++test) {
-        auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
-        uintptr_t provider = image + 0x2e90658;
-        std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
-        uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
-        Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
-        REQUIRE(provider_initialized(*owner, memory, memory.manager, calls));
-        REQUIRE(owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x123456));
-        owner->startup_leave(false);
-        REQUIRE(provider_initialized(*owner, memory, memory.manager, calls)); // ordinary lazy getter after startup
-        REQUIRE(owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x123456));
-        const auto files = remote.files;
-        if (test == 1) remote_pointer = 0x9999;
-        if (test == 2) provider = image + 0x2e90a60; // native fallback stub, never an ap migration
-        if (test == 3) control[1] = 0;
-        if (test == 4) owner->provider_reset(memory.manager);
-        if (test == 5) REQUIRE(!owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x654321));
-        if (test == 6) REQUIRE(!owner->provider_operation(0xdead, 0x123456));
-        if (test == 7) owner->provider_reset(0xbeef); // unrelated manager
-        if (test == 8) {
-            std::thread worker([&] { REQUIRE(provider_initialized(*owner, memory, memory.manager, calls)); });
-            worker.join(); // continuity doesn't require replaying checked startup
-        }
-        const bool valid = test == 0 || test >= 7;
-        REQUIRE(provider_initialized(*owner, memory, memory.manager, calls) == valid);
-        REQUIRE(owner->routed() && owner->native_io() == valid && remote.files == files);
-        if (!valid) {
-            uintptr_t unavailable = 0;
-            REQUIRE(owner->fault() == SessionFault::provider_identity && !owner->native_provider(unavailable));
-            provider = image + 0x2e90658; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
-            REQUIRE(!provider_initialized(*owner, memory, memory.manager, calls)); // no resurrection/unrouting
-        }
-    }
+        provider_continuity_case(make,table,calls,test);
+}
     for (unsigned test = 0; test < 35; ++test) {
-        auto owner = make();
-        Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
-        const auto marker = owner->native_root() + "/sentinel-owner-" + owner->namespace_id() + ".txt";
-        remote.files = {{"PROFILE/profile.bin", "unrelated vanilla"}, {marker, owner->ownership_record()}};
-        uintptr_t provider = image + 0x2e90658;
-        std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
-        uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
-        Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
-        if (test == 1) remote.files.pop_back(); // empty remote root may be prepared, then read back
-        if (test == 2) remote.files.back().second.back() = '?';
-        if (test == 3) remote.files.emplace_back(owner->native_root() + "/sentinel-owner-foreign.txt", "foreign");
-        if (test == 4) remote.short_read = true;
-        if (test == 5) remote.wrong_size = true;
-        if (test == 6) remote.mutate = true;
-        if (test == 7) remote.bad_count = true;
-        if (test == 8) remote.bad_alloc = true;
-        if (test == 9) provider = image + 0x2e88198; // unsupported local provider
-        if (test == 10) remote_pointer = 0;
-        if (test == 11) remote.files.emplace_back(marker, owner->ownership_record());
-        if (test == 12) for (char& c : remote.files.back().first) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));
-        if (test >= 15 && test <= 21) remote.files.pop_back();
-        if (test == 15) remote.files.emplace_back(owner->native_root() + "/GAME-AUTOSAVE0/game.details", "orphaned native payload");
-        if (test == 16 || test == 17) remote.fail_write = true;
-        if (test == 17) remote.partial_write = true;
-        if (test == 18) remote.short_read = true;
-        if (test == 19) remote.add_foreign = true;
-        if (test == 20) remote.files.clear(); // entire remotestorage empty
-        if (test == 21) remote.discard_write = true;
-        if (test >= 22 && test <= 27) {
-            remote.files.emplace_back(owner->native_root() + "/game-autosave10/game.details", "native payload");
-            std::string record = "sentinel-native-selection-v1\nnamespace_id=" + owner->namespace_id() + "\ncampaign=GAME-\nname=AUTOSAVE10\n";
-            if (test == 23) record[record.find(owner->namespace_id())] = '?';
-            if (test == 24) record.replace(record.find("AUTOSAVE10"), 10, "AUTOSAVE01");
-            if (test == 25) remote.files.emplace_back(owner->native_root() + "/GAME-AUTOSAVE10/game.details", "alias");
-            if (test == 26) record.replace(0, 1, "?");
-            if (test == 27) remote.files.emplace_back(owner->native_root() + "/GAME-AUTOSAVE12/game.details", "unsupported slot");
-            remote.files.emplace_back(owner->native_root() + "/sentinel-selection-GAME.txt", std::move(record));
-        }
-        if (test == 28 || test == 29 || test == 34)
-            remote.files.emplace_back(owner->native_root() + "/GAME-AUTOSAVE0/SlotFile", "native payload");
-        if (test == 29 || test == 32 || test == 34)
-            remote.files.emplace_back(owner->native_root() + "/game-autosave0/game.details", "native metadata");
-        if (test == 30) remote.files.emplace_back(owner->native_root() + "/DLC1-AUTOSAVE0/SlotFile", "partial");
-        if (test == 31) remote.files.emplace_back(owner->native_root() + "/GAME-AUTOSAVE01/SlotFile", "invalid slot");
-        if (test == 32) remote.files.emplace_back(owner->native_root() + "/DLC2-AUTOSAVE0/SlotFile", "partial");
-        if (test == 33) remote.files.emplace_back("GAME-AUTOSAVE0/SlotFile", "unrelated vanilla");
-        if (test == 34) remote.files.emplace_back(owner->native_root() + "/game-autosave0/auxiliary/extra.bin", "auxiliary payload");
-        const auto before = remote.files;
-        const auto before_context = context_calls;
-        if (test == 13) {
-            REQUIRE(!provider_initialized(*owner, memory, 0x7777, calls));
-            REQUIRE(owner->state() == SessionState::starting && context_calls == before_context);
-        }
-        if (test == 14) {
-            std::thread other([&] {
-                REQUIRE(!provider_initialized(*owner, memory, memory.manager, calls));
-            }); other.join();
-            REQUIRE(owner->state() == SessionState::starting && context_calls == before_context);
-        }
-        const bool accepted = provider_initialized(*owner, memory, memory.manager, calls);
-        REQUIRE(accepted == (test == 0 || test == 1 || (test >= 12 && test <= 14) || test == 20 || test == 22 ||
-            test == 29 || test == 33 || test == 34));
-        const bool creation = test == 1 || (test >= 16 && test <= 21);
-        REQUIRE(remote.writes == (creation ? 1u : 0u));
-        if (!creation || test == 16 || test == 21) REQUIRE(remote.files == before);
-        for (const auto& file : before) REQUIRE(std::find(remote.files.begin(), remote.files.end(), file) != remote.files.end());
-        if (accepted) {
-            REQUIRE(owner->state() == SessionState::binding && !owner->accepts_requests());
-            REQUIRE(remote.reads == (test == 22 ? 3u : 2u) && owner->collecting(remote_pointer, owner->native_root()));
-            NativeCampaignCatalog source; uintptr_t source_provider = 0;
-            REQUIRE(read_native_catalog(*owner, memory, "GAME-", source, source_provider) && source_provider == remote_pointer);
-            if (test == 22) REQUIRE(source.slots == std::vector<std::string>{"AUTOSAVE10"} && source.selected == "AUTOSAVE10");
-            else if (test == 29 || test == 34) REQUIRE(source.slots == std::vector<std::string>{"AUTOSAVE0"} && source.selected.empty());
-            else REQUIRE(source.slots.empty() && source.selected.empty());
-            owner->startup_leave(false); owner->stop_requests();
-            REQUIRE(owner->routed() && !owner->accepts_requests());
-            const std::wstring mutex = L"Local\\SentinelCore-Steam-782330-" +
-                std::wstring(owner->native_root().begin(), owner->native_root().end());
-            std::thread other([&] {
-                HANDLE lock = OpenMutexW(SYNCHRONIZE, FALSE, mutex.c_str()); REQUIRE(lock);
-                REQUIRE(WaitForSingleObject(lock, 0) == WAIT_TIMEOUT); CloseHandle(lock);
-            }); other.join(); // stop keeps the real-root mutex as well as the offline lease
-        } else {
-            REQUIRE(!owner->routed() && owner->fault() == SessionFault::provider_identity);
-            if (test == 7) REQUIRE(std::strcmp(owner->btrace.snapshot().first_failure.predicate,"remote_file_count_invalid")==0);
-            if (test == 16) REQUIRE(std::strcmp(owner->btrace.snapshot().first_failure.predicate,"remote_marker_write_failed")==0);
-        }
-    }
+        provider_ownership_case(make,table,calls,test);
+}
     for (unsigned test = 0; test < 8; ++test) {
-        auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
-        uintptr_t provider = image + 0x2e90658;
-        std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
-        uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
-        const auto manager_address = reinterpret_cast<uintptr_t>(&manager);
-        Memory memory; memory.manager = 0; const auto before = context_calls;
-        REQUIRE(!provider_initialized(*owner, memory, manager_address, calls));
-        REQUIRE(owner->state() == SessionState::starting && context_calls == before && remote.writes == 0);
-        // model the constructor return followed by rootinit's root+9b38 store
-        memory.manager = manager_address;
-        if (test == 1) owner->unrouted_import();
-        if (test == 2) owner->stop_requests();
-        if (test == 3) owner->startup_leave(true);
-        if (test == 5) memory.manager = 0;
-        if (test == 6) provider = image + 0x2e87db0;
-        if (test == 7) REQUIRE(provider_initialized(*owner, memory, manager_address, calls));
-        bool bound = false;
-        if (test == 4) { std::thread other([&] { bound = bind_root_provider(*owner, memory, calls); }); other.join(); }
-        else bound = bind_root_provider(*owner, memory, calls);
-        const bool ready = test == 0 || test == 7;
-        REQUIRE(bound == (test == 0) && owner->routed() == ready && !owner->accepts_requests());
-        REQUIRE(remote.writes == (ready ? 1u : 0u));
-        REQUIRE(context_calls == before + (ready ? 1 : 0));
-        owner->startup_leave(false);
-        REQUIRE(!owner->accepts_requests()); // root/provider readiness still requires native profile import
-        if (ready) REQUIRE(owner->state() == SessionState::binding);
-        else if (test != 4) REQUIRE(owner->state() == SessionState::rejected);
-    }
+        provider_root_case(make,table,calls,test);
+}
     std::puts("PASS selected provider binding after native RootInit publication (8 cases)");
     for (unsigned test = 0; test < 13; ++test) {
-        auto owner = make(); const auto root = owner->native_root();
-        Remote remote{table.data()}; remote.replace_selection = true; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
-        remote.files = {{root + "/sentinel-owner-" + owner->namespace_id() + ".txt", owner->ownership_record()},
-            {root + "/GAME-AUTOSAVE3/game.details", "native3"}, {root + "/GAME-AUTOSAVE10/game.details", "native10"},
-            {"PROFILE/profile.bin", "shared native output"}, {"GAME-AUTOSAVE3/game.details", "vanilla"}};
-        uintptr_t provider = image + 0x2e90658;
-        std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
-        uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
-        Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
-        REQUIRE(provider_initialized(*owner, memory, memory.manager, calls)); owner->startup_leave(false);
-        REQUIRE(owner->publish_profile_catalog(remote_pointer, owner->ownership_record(),
-            {"AUTOSAVE3", "AUTOSAVE10"}, "AUTOSAVE10", 1, false, 0));
-        const auto original = remote.files;
-        exercise_selection_writes(*owner, test >= 10 ? test - 9 : 0, [&](SaveFuture* older, SaveFuture* newer) {
-            REQUIRE(remote.writes == 0 && remote.files == original);
-            SaveResult result{};
-            older->vtable->poll(older, &result, nullptr); REQUIRE(result.state == -1 && remote.writes == 0);
-            newer->vtable->poll(newer, &result, nullptr); REQUIRE(result.state == -1 && remote.writes == 0);
-            if (test == 2) return; // destruction while pending can't publish either record
-            if (test == 3) remote.fail_write = true;
-            if (test == 4) remote.partial_write = true;
-            if (test == 5) remote.discard_write = true;
-            if (test == 6) remote.files[0].second.back() = '?';
-            if (test == 7) remote.files.erase(remote.files.begin());
-            if (test == 8) remote.files.erase(remote.files.begin() + 1); // serialized selection was deleted
-            if (test == 9) owner->stop_requests(); // already-owned writes still finalize under kept routing
-            const bool reverse = test == 1;
-            auto first = reverse ? newer : older; auto second = reverse ? older : newer;
-            first->vtable->poll(first, &result, nullptr);
-            const bool failed = (test >= 3 && test <= 8) || test >= 10;
-            REQUIRE(result.state == 0 && result.outcome == (failed ? 1 : 0));
-            if (failed) {
-                REQUIRE(owner->fault() == (test >= 10 ? SessionFault::native_write : SessionFault::native_profile));
-                REQUIRE(remote.writes == (test <= 5 ? 1u : 0u)); return;
-            }
-            NativeCampaignCatalog catalog; uintptr_t actual = 0;
-            REQUIRE(read_native_catalog(*owner, memory, "GAME-", catalog, actual));
-            REQUIRE(catalog.selected == (reverse ? "AUTOSAVE10" : "AUTOSAVE3") && remote.writes == 1);
-            second->vtable->poll(second, &result, nullptr); REQUIRE(result.state == 0 && result.outcome == 0);
-            REQUIRE(read_native_catalog(*owner, memory, "GAME-", catalog, actual) && catalog.selected == "AUTOSAVE10");
-            REQUIRE(remote.writes == (reverse ? 1u : 2u));
-            second->vtable->poll(second, &result, nullptr); REQUIRE(result.state == 1);
-            for (const auto& file : original) REQUIRE(*find(remote, file.first.c_str()) == file);
-        });
-    }
+        provider_selection_write_case(make,table,calls,test);
+}
     std::puts("PASS correlated PROFILE selection storage, ordering, cancellation and write refusal (13 cases)");
     for (unsigned test = 0; test < 24; ++test) {
-        auto owner = test == 16 ? std::make_unique<Session>() : make();
-        const auto root = owner->native_root();
-        Remote remote{table.data()}, foreign{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
-        remote.files = {{root + "/sentinel-owner-" + owner->namespace_id() + ".txt", owner->ownership_record()},
-            {"PROFILE/profile.bin", "account"}, {"GAME-AUTOSAVE10/game.details", "vanilla"}};
-        if (test != 2 && test != 3 && test != 4 && test != 5)
-            remote.files.emplace_back(root + "/GAME-AUTOSAVE3/game.details", "AP3");
-        if (test == 3) remote.files.emplace_back("ap-other/GAME-AUTOSAVE3/game.details", "foreign AP");
-        if (test == 4 || test == 5 || test == 23)
-            remote.files.emplace_back(root + "/DLC1-AUTOSAVE10/game.details", "AP DLC1");
-        uintptr_t provider = image + 0x2e90658;
-        std::array<uintptr_t, 3> control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
-        uintptr_t manager = reinterpret_cast<uintptr_t>(control.data());
-        Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
-        if (test != 16 && test != 17) REQUIRE(provider_initialized(*owner, memory, memory.manager, calls));
-        std::string input = "GAME-AUTOSAVE3";
-        if (test == 1 || test == 23) input = "GAME-AUTOSAVE10";
-        if (test == 4) { input = "DLC1-AUTOSAVE10"; memory.campaign = "DLC1-"; }
-        if (test == 6) input = root + "/game-autosave3";
-        if (test == 7) input = "GAME-AUTOSAVE12";
-        if (test == 8) input = "GAME-AUTOSAVE3/../PROFILE";
-        if (test == 9) input = "ap-other/GAME-AUTOSAVE3";
-        if (test == 10) remote.files.erase(remote.files.begin());
-        if (test == 11 || test == 22) remote_pointer = reinterpret_cast<uintptr_t>(&foreign);
-        if (test == 12) memory.campaign = "OTHER-";
-        if (test == 13) remote.files.pop_back();
-        if (test == 14) { remote.files.pop_back(); remote.files.emplace_back(root + "/GAME-AUTOSAVE3/SlotFile", "partial"); }
-        if (test == 15 || test == 22) input = "PROFILE";
-        if (test == 18) owner->stop_requests();
-        if (test == 19) remote.files[0].second.back() = '?';
-        if (test == 20) input.assign(260, 'X');
-        if (test == 23) memory.campaign = "DLC1-";
-        const auto before_files = remote.files, foreign_files = foreign.files;
-        const auto before_native = query_native_calls, before_releases = query_releases, before_context = context_calls;
-        std::array<uint32_t, 6> identity_control{2, 2}; SaveReference identity{reinterpret_cast<uintptr_t>(identity_control.data())};
-        SaveFuture* future = nullptr;
-        REQUIRE(query_exists_scoped(*owner, memory, &future, &identity, test == 21 ? nullptr : input.c_str(),
-            {calls, original_query, release_query}) == &future && future && !identity.control);
-        REQUIRE(identity_control[0] == 1 && identity_control[1] == 1 && query_releases == before_releases + 1);
-        const bool native = test == 15 || test == 16;
-        REQUIRE(query_native_calls == before_native + (native ? 1 : 0));
-        if (native) REQUIRE(queried_native_name == input && future == refused_save_future());
-        if (test == 16 || test == 17) REQUIRE(context_calls == before_context);
-        const bool invalid = (test >= 7 && test <= 12) || test == 14 || (test >= 19 && test <= 22) || test == 17;
-        const bool empty = test == 2 || test == 3 || test == 5 || test == 13;
-        SaveResult result{}; future->vtable->poll(future, &result, nullptr);
-        REQUIRE(result.state == 0 && result.outcome == (invalid || empty || native ? 1 : 0));
-        REQUIRE(result.value == (empty ? 8u : invalid || native ? 1u : test == 1 || test == 23 ? 0u : 1u));
-        if (invalid && test != 17) REQUIRE(owner->fault() == SessionFault::native_collection);
-        else if (test != 17) REQUIRE(owner->fault() == SessionFault::none);
-        if (!invalid && !native) { future->vtable->poll(future, &result, nullptr); REQUIRE(result.state == 1); }
-        future->vtable->destroy(future, 1);
-        REQUIRE(remote.files == before_files && foreign.files == foreign_files && remote.writes == 0 && foreign.writes == 0);
-        REQUIRE(foreign.reads == 0 && foreign.queries == 0);
-        if (test == 17) REQUIRE(owner->state() == SessionState::rejected && owner->fault() == SessionFault::missed_startup);
-    }
+        provider_query_case(make,table,calls,test);
+}
     std::puts("PASS scoped native existence results, account delegation and consumed identity (24 cases)");
     Session disabled; Memory memory; const auto before = context_calls;
-    REQUIRE(!provider_initialized(disabled, memory, 0, calls) && context_calls == before);
+    REQUIRE(!provider_initialized(disabled, memory, 0, calls));
+    REQUIRE(context_calls == before);
     std::puts("PASS production native namespace preparation/identity/catalog source and retained root lease (35 synthetic interface-014 cases)");
 }
 
@@ -423,12 +526,14 @@ static_assert(sizeof(CatalogData) == 0x280 && offsetof(CatalogData, entries) == 
 struct Control { uint32_t strong = 2, weak = 2; uintptr_t object = 0, destructor = 0; };
 unsigned private_controls_freed = 0;
 SaveReference* retain(SaveReference* out, const SaveReference* from) {
-    auto* control = reinterpret_cast<Control*>(from->control); REQUIRE(control && control->strong);
+    auto* control = reinterpret_cast<Control*>(from->control); REQUIRE(control);
+    REQUIRE(control->strong);
     ++control->strong; ++control->weak; *out = *from; return out;
 }
 void release_reference(SaveReference* reference) {
     if (!reference->control) return;
-    auto* control = reinterpret_cast<Control*>(reference->control); REQUIRE(control->strong && control->weak);
+    auto* control = reinterpret_cast<Control*>(reference->control); REQUIRE(control->strong);
+    REQUIRE(control->weak);
     --control->strong; --control->weak; reference->control = 0;
     if (!control->strong && control->destructor) {
         reinterpret_cast<DestroySaveData>(control->destructor)(control->object);
@@ -484,6 +589,129 @@ SaveFuture* create_catalog(Session& owner, SaveReference& data, const CatalogCal
     return out; // the adapter must not keep this stack memory object or the argument reference
 }
 }
+static void configure_catalog_inventory(Session& owner,Remote& remote,const std::string& root,unsigned test) {
+    if (test != 1 && test != 25) {
+        remote.files.emplace_back(root + "/game-autosave3/game.details", "native details 3");
+        remote.files.emplace_back(root + "/game-autosave10/game.details", "native details 10");
+        if (test != 10) remote.files.emplace_back(root + "/sentinel-selection-GAME.txt",
+            "sentinel-native-selection-v1\nnamespace_id=" + owner.namespace_id() + "\ncampaign=GAME-\nname=AUTOSAVE10\n");
+    }
+    if (test == 25) remote.files.emplace_back(root + "/sentinel-selection-GAME.txt",
+        "sentinel-native-selection-v1\nnamespace_id=" + owner.namespace_id() + "\ncampaign=GAME-\nname=AUTOSAVE0\n");
+}
+static void configure_catalog_result(CatalogModel& model,const std::string& root,unsigned test) {
+    if (test == 1 || test == 25) model.published_count = 0;
+    if (test == 2) model.published_count = 1; // native read dropped an expected entry
+    if (test == 3) model.entries[0].set("foreign-root/GAME-AUTOSAVE10");
+    if (test == 4) model.entries[1].set((root + "/GAME-AUTOSAVE10").c_str());
+    if (test == 5) model.entries[0].fields[0x58] = 1;
+    if (test == 6) model.terminal = {0, 1, 0x40, 0};
+    if (test == 8) model.fail_assign = true;
+    if (test == 9) model.throw_assign = true;
+    if (test == 12) model.published_count = 13;
+    if (test == 13) model.terminal = {0, 0, 0, 0};
+    if (test == 14) set_data_name(reinterpret_cast<uintptr_t>(&model.data), "foreign-root");
+}
+static void mutate_catalog_publication(Remote& remote,CatalogModel& model,const std::string& root,unsigned test) {
+    if (test == 11) current_campaign = "DLC2-";
+    // changes after provider binding must be observed at the native enumeration's terminal publication, never from a startup cache
+    if (test == 15) {
+        remote.files.erase(find(remote, (root + "/game-autosave3/game.details").c_str()));
+        model.published_count = 1;
+    }
+    if (test == 26) {
+        remote.files.emplace_back(root + "/GAME-AUTOSAVE3/SlotFile", "remaining payload");
+        remote.files.erase(remote.files.begin() + 1); model.published_count = 1;
+    }
+    if (test == 16) {
+        auto file = find(remote, (root + "/game-autosave3/game.details").c_str());
+        file->first = root + "/game-autosave0/game.details";
+        model.entries[1].set((root + "/game-autosave0").c_str());
+    }
+    if (test == 16 || test == 17) {
+        auto& record = find(remote, (root + "/sentinel-selection-GAME.txt").c_str())->second;
+        record.replace(record.find("AUTOSAVE10"), 10, test == 16 ? "AUTOSAVE0" : "AUTOSAVE3");
+    }
+    if (test == 18) remote.files.erase(remote.files.begin()); // never recreate a lost marker
+    if (test == 19) remote.files[0].second.back() = '?';
+    if (test == 20) find(remote, (root + "/sentinel-selection-GAME.txt").c_str())->second = "bad record";
+    if (test == 21) remote.files.emplace_back(root + "/sentinel-owner-foreign.txt", "foreign");
+    if (test == 22) remote.files.erase(find(remote, (root + "/sentinel-selection-GAME.txt").c_str()));
+    if (test == 23) remote.files.emplace_back(root + "/GAME-AUTOSAVE0/game.details", "not in native result");
+    if (test == 24) remote.files.emplace_back("GAME-AUTOSAVE0/game.details", "vanilla is outside the inventory");
+}
+static const char* expected_catalog_selection(unsigned test) {
+    return test == 1 || test == 16 || test == 25 ? "AUTOSAVE0" : test == 17 ? "AUTOSAVE3" : "AUTOSAVE10";
+}
+static void check_catalog_publication(Session& owner,CatalogModel& model,const std::string& root,unsigned test,const SaveResult& result,ProfileChoice& choice) {
+    const bool success = test == 0 || test == 1 || test == 15 || test == 16 || test == 17 || test == 24 || test == 25;
+    REQUIRE(result.state == 0);
+    REQUIRE(result.outcome == (success ? 0 : 1));
+    REQUIRE(result.value == 1);
+    REQUIRE(owner.profile_choice(choice) == success);
+    if (success) {
+        const auto expected = expected_catalog_selection(test);
+        REQUIRE(std::string(choice.name.data()) == expected);
+        REQUIRE(choice.index == (test == 16 || test == 17 ? 1 : 0));
+        if (test == 0) {
+            REQUIRE(model.assigns == 2);
+            REQUIRE(std::string(model.entries[0].text) == root + "/GAME-AUTOSAVE10");
+            REQUIRE(std::string(model.entries[1].text) == root + "/GAME-AUTOSAVE3");
+            // compare the selected name at its metadata offset with case-sensitive prefix handling
+            REQUIRE(std::string(model.entries[0].text).substr(root.size() + 6) == choice.name.data());
+        }
+    } else { REQUIRE(owner.fault() == SessionFault::native_collection); REQUIRE(owner.routed()); }
+}
+static void catalog_case(const std::function<std::unique_ptr<Session>()>& make,std::array<uintptr_t,20>& table,const ProviderCalls& provider_calls,const CatalogCalls& calls,unsigned test) {
+    auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+    const auto root = owner->native_root();
+    remote.files = {{root + "/sentinel-owner-" + owner->namespace_id() + ".txt", owner->ownership_record()}};
+    configure_catalog_inventory(*owner,remote,root,test);
+    uintptr_t provider = image + 0x2e90658;
+    std::array<uintptr_t, 3> provider_control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+    uintptr_t manager = reinterpret_cast<uintptr_t>(provider_control.data());
+    Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
+    REQUIRE(provider_initialized(*owner, memory, memory.manager, provider_calls));
+    owner->startup_leave(false); current_campaign = "GAME-";
+    CatalogModel model(root); catalog_model = &model;
+    configure_catalog_result(model,root,test);
+    SaveReference argument{reinterpret_cast<uintptr_t>(&model.control)};
+    auto* future = create_catalog(*owner, argument, calls);
+    REQUIRE(!argument.control);
+    SaveResult result{}; ProfileChoice choice{};
+    if (test == 14) {
+        future->vtable->poll(future, &result, nullptr);
+        REQUIRE(model.creates == 0);
+        REQUIRE(result.state == 0);
+        REQUIRE(result.outcome == 1);
+    } else {
+        REQUIRE(model.creates == 1);
+        REQUIRE(model.control.strong == 3);
+        REQUIRE(std::string(model.data.text) == root);
+        future->vtable->poll(future, &result, nullptr);
+        REQUIRE(result.state == -1);
+        REQUIRE(!owner->profile_choice(choice));
+        REQUIRE(model.assigns == 0);
+        if (test == 7) {
+            future->vtable->destroy(future, 1);
+            REQUIRE(model.destroys == 1);
+            REQUIRE(model.control.strong == 1);
+            REQUIRE(!owner->profile_choice(choice));
+            return; // abandoning a future is neither catalog publication nor completion
+        }
+        mutate_catalog_publication(remote,model,root,test);
+        const auto physical_before = remote.files;
+        future->vtable->poll(future, &result, nullptr);
+        REQUIRE(remote.files == physical_before);
+        REQUIRE(remote.writes == 0);
+    }
+    check_catalog_publication(*owner,model,root,test,result,choice);
+    future->vtable->destroy(future, 1);
+    REQUIRE(model.control.strong == 1);
+    REQUIRE(model.control.weak == 1);
+    REQUIRE(model.destroys == model.creates);
+}
+
 void run_catalog_contracts(const std::function<std::unique_ptr<Session>()>& make) {
     std::array<uintptr_t, 20> table{};
     table[0] = reinterpret_cast<uintptr_t>(write); table[1] = reinterpret_cast<uintptr_t>(read);
@@ -493,106 +721,21 @@ void run_catalog_contracts(const std::function<std::unique_ptr<Session>()>& make
     const CatalogCalls calls{enumeration, retain, release_reference, set_data_name, set_entry_name,
         reinterpret_cast<uintptr_t>(&current_campaign) - 0x397f4a8};
     for (unsigned test = 0; test < 27; ++test) {
-        auto owner = make(); Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
-        const auto root = owner->native_root();
-        remote.files = {{root + "/sentinel-owner-" + owner->namespace_id() + ".txt", owner->ownership_record()}};
-        if (test != 1 && test != 25) {
-            remote.files.emplace_back(root + "/game-autosave3/game.details", "native details 3");
-            remote.files.emplace_back(root + "/game-autosave10/game.details", "native details 10");
-            if (test != 10) remote.files.emplace_back(root + "/sentinel-selection-GAME.txt",
-                "sentinel-native-selection-v1\nnamespace_id=" + owner->namespace_id() + "\ncampaign=GAME-\nname=AUTOSAVE10\n");
-        }
-        if (test == 25) remote.files.emplace_back(root + "/sentinel-selection-GAME.txt",
-            "sentinel-native-selection-v1\nnamespace_id=" + owner->namespace_id() + "\ncampaign=GAME-\nname=AUTOSAVE0\n");
-        uintptr_t provider = image + 0x2e90658;
-        std::array<uintptr_t, 3> provider_control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
-        uintptr_t manager = reinterpret_cast<uintptr_t>(provider_control.data());
-        Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
-        REQUIRE(provider_initialized(*owner, memory, memory.manager, provider_calls));
-        owner->startup_leave(false); current_campaign = "GAME-";
-        CatalogModel model(root); catalog_model = &model;
-        if (test == 1 || test == 25) model.published_count = 0;
-        if (test == 2) model.published_count = 1; // native read dropped an expected entry
-        if (test == 3) model.entries[0].set("foreign-root/GAME-AUTOSAVE10");
-        if (test == 4) model.entries[1].set((root + "/GAME-AUTOSAVE10").c_str());
-        if (test == 5) model.entries[0].fields[0x58] = 1;
-        if (test == 6) model.terminal = {0, 1, 0x40, 0};
-        if (test == 8) model.fail_assign = true;
-        if (test == 9) model.throw_assign = true;
-        if (test == 12) model.published_count = 13;
-        if (test == 13) model.terminal = {0, 0, 0, 0};
-        if (test == 14) set_data_name(reinterpret_cast<uintptr_t>(&model.data), "foreign-root");
-        SaveReference argument{reinterpret_cast<uintptr_t>(&model.control)};
-        auto* future = create_catalog(*owner, argument, calls);
-        REQUIRE(!argument.control);
-        SaveResult result{}; ProfileChoice choice{};
-        if (test == 14) {
-            future->vtable->poll(future, &result, nullptr);
-            REQUIRE(model.creates == 0 && result.state == 0 && result.outcome == 1);
-        } else {
-            REQUIRE(model.creates == 1 && model.control.strong == 3 && std::string(model.data.text) == root);
-            future->vtable->poll(future, &result, nullptr);
-            REQUIRE(result.state == -1 && !owner->profile_choice(choice) && model.assigns == 0);
-            if (test == 7) {
-                future->vtable->destroy(future, 1);
-                REQUIRE(model.destroys == 1 && model.control.strong == 1 && !owner->profile_choice(choice));
-                continue; // abandoning a future is neither catalog publication nor completion
-            }
-            if (test == 11) current_campaign = "DLC2-";
-            // changes after provider binding must be observed at the native enumeration's terminal publication, never from a startup cache
-            if (test == 15) {
-                remote.files.erase(find(remote, (root + "/game-autosave3/game.details").c_str()));
-                model.published_count = 1;
-            }
-            if (test == 26) {
-                remote.files.emplace_back(root + "/GAME-AUTOSAVE3/SlotFile", "remaining payload");
-                remote.files.erase(remote.files.begin() + 1); model.published_count = 1;
-            }
-            if (test == 16) {
-                auto file = find(remote, (root + "/game-autosave3/game.details").c_str());
-                file->first = root + "/game-autosave0/game.details";
-                model.entries[1].set((root + "/game-autosave0").c_str());
-            }
-            if (test == 16 || test == 17) {
-                auto& record = find(remote, (root + "/sentinel-selection-GAME.txt").c_str())->second;
-                record.replace(record.find("AUTOSAVE10"), 10, test == 16 ? "AUTOSAVE0" : "AUTOSAVE3");
-            }
-            if (test == 18) remote.files.erase(remote.files.begin()); // never recreate a lost marker
-            if (test == 19) remote.files[0].second.back() = '?';
-            if (test == 20) find(remote, (root + "/sentinel-selection-GAME.txt").c_str())->second = "bad record";
-            if (test == 21) remote.files.emplace_back(root + "/sentinel-owner-foreign.txt", "foreign");
-            if (test == 22) remote.files.erase(find(remote, (root + "/sentinel-selection-GAME.txt").c_str()));
-            if (test == 23) remote.files.emplace_back(root + "/GAME-AUTOSAVE0/game.details", "not in native result");
-            if (test == 24) remote.files.emplace_back("GAME-AUTOSAVE0/game.details", "vanilla is outside the inventory");
-            const auto physical_before = remote.files;
-            future->vtable->poll(future, &result, nullptr);
-            REQUIRE(remote.files == physical_before && remote.writes == 0);
-        }
-        const bool success = test == 0 || test == 1 || test == 15 || test == 16 || test == 17 || test == 24 || test == 25;
-        REQUIRE(result.state == 0 && result.outcome == (success ? 0 : 1) && result.value == 1);
-        REQUIRE(owner->profile_choice(choice) == success);
-        if (success) {
-            const auto expected = test == 1 || test == 16 || test == 25 ? "AUTOSAVE0" : test == 17 ? "AUTOSAVE3" : "AUTOSAVE10";
-            REQUIRE(std::string(choice.name.data()) == expected && choice.index == (test == 16 || test == 17 ? 1 : 0));
-            if (test == 0) {
-                REQUIRE(model.assigns == 2 && std::string(model.entries[0].text) == root + "/GAME-AUTOSAVE10");
-                REQUIRE(std::string(model.entries[1].text) == root + "/GAME-AUTOSAVE3");
-                // compare the selected name at its metadata offset with case-sensitive prefix handling
-                REQUIRE(std::string(model.entries[0].text).substr(root.size() + 6) == choice.name.data());
-            }
-        } else REQUIRE(owner->fault() == SessionFault::native_collection && owner->routed());
-        future->vtable->destroy(future, 1);
-        REQUIRE(model.control.strong == 1 && model.control.weak == 1 && model.destroys == model.creates);
-    }
+        catalog_case(make,table,provider_calls,calls,test);
+}
     {
         Session disabled; CatalogModel model("unscoped"); catalog_model = &model;
         set_data_name(reinterpret_cast<uintptr_t>(&model.data), "vanilla-root");
         SaveReference argument{reinterpret_cast<uintptr_t>(&model.control)};
         auto* future = create_catalog(disabled, argument, calls);
         SaveResult result{}; future->vtable->poll(future, &result, nullptr); future->vtable->poll(future, &result, nullptr);
-        REQUIRE(result.state == 0 && result.outcome == 0 && model.control.strong == 2 && model.assigns == 0);
+        REQUIRE(result.state == 0);
+        REQUIRE(result.outcome == 0);
+        REQUIRE(model.control.strong == 2);
+        REQUIRE(model.assigns == 0);
         REQUIRE(std::string(model.data.text) == "vanilla-root");
-        future->vtable->destroy(future, 1); REQUIRE(model.control.strong == 1 && model.destroys == 1);
+        future->vtable->destroy(future, 1); REQUIRE(model.control.strong == 1);
+        REQUIRE(model.destroys == 1);
     }
     catalog_model = nullptr;
     std::puts("PASS production live native catalog, metadata order, ownership and consumed refusals (28 cases)");
@@ -639,6 +782,189 @@ SaveFuture** prepare_profile(uintptr_t p, SaveFuture** out, uintptr_t identity, 
     return profile_read_prerequisite(*prerequisite_model->owner, local, p, out, identity, data, *active_prerequisite_calls);
 }
 }
+static void bind_prerequisite_provider(Session& owner,Remote& remote,Memory& memory,const ProviderCalls& provider_calls,const std::string& root,unsigned test) {
+    if (test != 14) {
+        remote.files = {{root + "/sentinel-owner-" + owner.namespace_id() + ".txt", owner.ownership_record()}};
+        if (test != 11) {
+            remote.files.emplace_back(root + "/game-autosave3/game.details", "native details 3");
+            remote.files.emplace_back(root + "/game-autosave10/game.details", "native details 10");
+            remote.files.emplace_back(root + "/sentinel-selection-GAME.txt", "sentinel-native-selection-v1\nnamespace_id=" +
+                owner.namespace_id() + "\ncampaign=GAME-\nname=AUTOSAVE10\n");
+        }
+        if (test == 16 || test == 18) owner.startup_leave(false);
+        if (test != 18) REQUIRE(provider_initialized(owner, memory, memory.manager, provider_calls));
+        if (test != 15 && test != 16 && test != 17 && test != 18) owner.startup_leave(false);
+    }
+}
+static bool finish_prerequisite_poll(SaveFuture* future, SaveResult& result, unsigned test) {
+    const bool accepted = test == 0 || test == 9 || test == 10 || test == 11 || (test >= 14 && test != 18);
+    REQUIRE(result.state == 0);
+    REQUIRE(result.outcome == (accepted ? 0 : 1));
+    REQUIRE(result.value == 1);
+    future->vtable->destroy(future, 1); return accepted;}
+static bool poll_prerequisite_case(Session& owner,uintptr_t& provider,PrerequisiteModel& prerequisite,SaveReference& input,unsigned test) {
+    WriteCalls read_calls{create_profile_read, set_data_name, release_reference, nullptr, 0, prepare_profile};
+    SaveFuture* future = nullptr;
+    {
+        engine::LocalMemory temporary;
+        const auto native_provider = reinterpret_cast<uintptr_t>(&provider);
+        if (owner.routed()) REQUIRE(owner.provider_operation(native_provider, 0x5678));
+        REQUIRE(read_scoped(owner, temporary, native_provider, &future, 0x5678, &input, read_calls) == &future);
+    }
+    REQUIRE(!input.control);
+    REQUIRE(prerequisite.profile_polled == 0);
+    if (test == 7) current_campaign = "DLC2-";
+    if (test == 9) owner.stop_requests();
+    SaveResult result{};
+    if (test == 19) Sleep(10020);
+    future->vtable->poll(future, &result, nullptr);
+    if (test == 4) {
+        REQUIRE(result.state == -1);
+        REQUIRE(prerequisite.profile_polled == 1);
+        future->vtable->destroy(future, 1); return false;
+    }
+    if (test == 19) Sleep(10020);
+    if (result.state == -1) future->vtable->poll(future, &result, nullptr);
+    if (test == 5) {
+        REQUIRE(result.state == -1);
+        REQUIRE(prerequisite.profile_polled == 2);
+        future->vtable->destroy(future, 1); return false;
+    }
+    if (test == 13) current_campaign = "DLC1-";
+    if (result.state == -1) future->vtable->poll(future, &result, nullptr);
+    return finish_prerequisite_poll(future, result, test);
+}
+static void check_prerequisite_invalidation(Session& owner,Remote& remote,Memory& memory,uintptr_t& provider,unsigned test) {
+    if (test == 11 || test == 15 || test == 16) {
+        const auto before = remote.files;
+        const auto callback_manager = memory.manager;
+        uintptr_t frames[]{image+0x1490000,image+(test==15?0x675d24:0x675300)};
+        if (test==16) ++memory.manager;
+        invalidate_provider(owner,memory,callback_manager,image,image+0x1490010,1,frames,2);
+        REQUIRE(owner.routed());
+        REQUIRE(!owner.native_io());
+        REQUIRE(!owner.accepts_requests());
+        REQUIRE(remote.files==before);
+        if (test==11) {
+            REQUIRE(owner.state()==SessionState::admitted);
+            REQUIRE(owner.fault()==SessionFault::none);
+            REQUIRE(!owner.btrace.snapshot().first_failure.sequence);
+            invalidate_provider(owner,memory,callback_manager,image,image+0x1490020,2,frames,2);
+            owner.stop_requests();
+            REQUIRE(owner.fault()==SessionFault::none);
+            REQUIRE(owner.inspect().flags==5);
+            REQUIRE(!owner.provider_operation(reinterpret_cast<uintptr_t>(&provider),0x5678));
+            REQUIRE(owner.fault()==SessionFault::provider_identity);
+        } else {
+            REQUIRE(owner.fault()==SessionFault::provider_identity);
+            const auto first=owner.btrace.snapshot().first_failure;
+            REQUIRE(std::strcmp(first.predicate,"native_provider_reset_during_session")==0);
+        }
+    }
+}
+static void check_prerequisite_quit(Session& owner,Remote& remote,Memory& memory,uintptr_t& provider,unsigned test) {
+    if (test >= 20) {
+        const auto before=remote.files;
+        uintptr_t frames[]{image+0x17c1221,image+0x1a5b9b2,image+0x66d601,image+0x435cb9,image+0x43da41};
+        if (test>=21 && test<=25) ++frames[test-21];
+        const auto callback_manager=memory.manager;
+        if (test==27) ++memory.manager;
+        if (test==29) owner.fail(SessionFault::native_campaign);
+        const auto prior=owner.btrace.snapshot().first_failure.sequence;
+        invalidate_provider(owner,memory,callback_manager,image,image+0x17c1221,test==26?1:2,frames,test==28?4:5);
+        REQUIRE(!owner.native_io());
+        REQUIRE(!owner.accepts_requests());
+        REQUIRE(remote.files==before);
+        if (test==20) {
+            REQUIRE(owner.fault()==SessionFault::none);
+            REQUIRE(!owner.btrace.snapshot().first_failure.sequence);
+            // retirement is final; repeated cleanup need not rediscover the outer quit stack, and can never reopen provider operations
+            owner.provider_reset(callback_manager); owner.stop_requests();
+            REQUIRE(owner.fault()==SessionFault::none);
+            REQUIRE(owner.inspect().flags==5);
+            REQUIRE(!owner.provider_operation(reinterpret_cast<uintptr_t>(&provider),0x5678));
+            REQUIRE(owner.fault()==SessionFault::provider_identity);
+        } else if (test==29) {
+            REQUIRE(owner.fault()==SessionFault::native_campaign);
+            REQUIRE(owner.btrace.snapshot().first_failure.sequence==prior);
+        } else REQUIRE(owner.fault()==SessionFault::provider_identity);
+    }
+}
+static void check_admitted_provider_reset(Session& owner, Remote& remote, Memory& memory, uintptr_t& provider, const ProviderCalls& provider_calls, unsigned test) {
+    if (test == 0) {
+        REQUIRE(provider_initialized(owner, memory, memory.manager, provider_calls));
+        REQUIRE(owner.provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x5678));
+        REQUIRE(owner.state() == SessionState::admitted);
+        REQUIRE(owner.inspect().prepared_routes == required_routes);
+        const auto before = remote.files;
+        owner.provider_reset(memory.manager); // reset/account removal after full profile/catalog admission
+        REQUIRE(owner.routed());
+        REQUIRE(!owner.accepts_requests());
+        REQUIRE(!owner.native_io());
+        REQUIRE(!provider_initialized(owner, memory, memory.manager, provider_calls));
+        REQUIRE(remote.files == before);
+    }
+}
+static void check_prerequisite_admission(Session& owner,Remote& remote,Memory& memory,uintptr_t& provider,const ProviderCalls& provider_calls,unsigned test) {
+    REQUIRE(owner.accepts_requests() == (test == 0 || test == 11 || test == 15 || test == 16 || test == 19 || test >= 20));
+    const auto trace = owner.profile_trace();
+    if (test == 3) { REQUIRE(trace.failed_stage == ProfileStage::catalog); REQUIRE(trace.failure.native_attempted); REQUIRE(trace.failure.native_value == 0x40); }
+    if (test == 6) { REQUIRE(trace.failed_stage == ProfileStage::transport); REQUIRE(trace.failure.native_attempted); REQUIRE(trace.failure.native_value == 0x40); }
+    if (test == 19) {
+        REQUIRE(trace.failed_stage == ProfileStage::count);
+        REQUIRE(trace.steps[static_cast<size_t>(ProfileStage::first_poll)].first_ms - trace.steps[0].first_ms >= 10000);
+        REQUIRE(trace.steps[static_cast<size_t>(ProfileStage::transport)].changed_ms - trace.steps[static_cast<size_t>(ProfileStage::transport)].first_ms >= 10000);
+    }
+    check_admitted_provider_reset(owner, remote, memory, provider, provider_calls, test);
+    if (test == 9) REQUIRE(owner.state() == SessionState::admitted); // shutdown stays nonaccepting after admission finishes
+    if (test == 17) { REQUIRE(owner.state() == SessionState::faulted); REQUIRE(owner.routed()); }
+    if (test == 18) {
+        REQUIRE(owner.state() == SessionState::rejected);
+        REQUIRE(owner.fault() == SessionFault::missed_startup);
+        REQUIRE(!owner.bind_provider(owner.native_root(), remote_pointer, owner.ownership_record()));
+    }
+}
+static void check_prerequisite_completion(Session& owner, Remote& remote, Memory& memory, uintptr_t& provider, const ProviderCalls& provider_calls, const CatalogModel& model, const PrerequisiteModel& prerequisite, unsigned test) {
+    if (test == 15 || test == 17) {
+        REQUIRE(owner.state() == SessionState::binding);
+        REQUIRE(!owner.accepts_requests());
+        owner.startup_leave(test == 17);
+    }
+    check_prerequisite_admission(owner,remote,memory,provider,provider_calls,test);
+    REQUIRE(model.destroys == model.creates);
+    REQUIRE(prerequisite.profile_destroyed == prerequisite.profile_created);
+    REQUIRE(prerequisite.data_freed == prerequisite.constructed);
+    REQUIRE(prerequisite.allocated == prerequisite.data_freed + private_controls_freed);
+    if (test == 1 || test == 2 || test == 12 || test == 14 || test == 18) REQUIRE(!model.creates);
+    if (test == 1 || test == 2 || test == 7 || test == 12)
+        REQUIRE(prerequisite.profile_polled == 0);
+}
+static void prerequisite_case(const std::function<std::unique_ptr<Session>()>& make,std::array<uintptr_t,20>& table,const ProviderCalls& provider_calls,unsigned test) {
+    auto owner = test == 14 ? std::make_unique<Session>() : make();
+    Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
+    const auto root = owner->native_root();
+    uintptr_t provider = image + 0x2e90658;
+    std::array<uintptr_t, 3> provider_control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
+    uintptr_t manager = reinterpret_cast<uintptr_t>(provider_control.data());
+    Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
+    bind_prerequisite_provider(*owner,remote,memory,provider_calls,root,test);
+    CatalogModel model(root); catalog_model = &model;
+    PrerequisiteModel prerequisite{owner.get()}; prerequisite_model = &prerequisite;
+    private_controls_freed = 0; current_campaign = "GAME-";
+    if (test == 1 || test == 2) prerequisite.fail_allocation = test;
+    if (test == 3) model.terminal = {0, 1, 0x40, 0};
+    if (test == 6) prerequisite.result = {0, 1, 0x40, 0};
+    if (test == 8) model.published_count = 1;
+    if (test == 11) model.published_count = 0;
+    if (test == 12) current_campaign = "unsupported";
+    exercise_profile_caller(*owner, [&](SaveReference& input) {
+        return poll_prerequisite_case(*owner,provider,prerequisite,input,test);
+    }, test == 10);
+    check_prerequisite_completion(*owner, remote, memory, provider, provider_calls, model, prerequisite, test);
+    check_prerequisite_invalidation(*owner,remote,memory,provider,test);
+    check_prerequisite_quit(*owner,remote,memory,provider,test);
+}
+
 void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>& make) {
     std::array<uintptr_t, 20> table{};
     table[0] = reinterpret_cast<uintptr_t>(write); table[1] = reinterpret_cast<uintptr_t>(read);
@@ -650,143 +976,8 @@ void run_prerequisite_contracts(const std::function<std::unique_ptr<Session>()>&
     const ProfilePrerequisiteCalls calls{allocate_private, construct_private, destroy_private, catalog, create_profile_read};
     active_prerequisite_calls = &calls;
     for (unsigned test = 0; test < 30; ++test) {
-        auto owner = test == 14 ? std::make_unique<Session>() : make();
-        Remote remote{table.data()}; remote_pointer = reinterpret_cast<uintptr_t>(&remote);
-        const auto root = owner->native_root();
-        uintptr_t provider = image + 0x2e90658;
-        std::array<uintptr_t, 3> provider_control{0x100000001, reinterpret_cast<uintptr_t>(&provider), 0};
-        uintptr_t manager = reinterpret_cast<uintptr_t>(provider_control.data());
-        Memory memory; memory.manager = reinterpret_cast<uintptr_t>(&manager);
-        if (test != 14) {
-            remote.files = {{root + "/sentinel-owner-" + owner->namespace_id() + ".txt", owner->ownership_record()}};
-            if (test != 11) {
-                remote.files.emplace_back(root + "/game-autosave3/game.details", "native details 3");
-                remote.files.emplace_back(root + "/game-autosave10/game.details", "native details 10");
-                remote.files.emplace_back(root + "/sentinel-selection-GAME.txt", "sentinel-native-selection-v1\nnamespace_id=" +
-                    owner->namespace_id() + "\ncampaign=GAME-\nname=AUTOSAVE10\n");
-            }
-            if (test == 16 || test == 18) owner->startup_leave(false);
-            if (test != 18) REQUIRE(provider_initialized(*owner, memory, memory.manager, provider_calls));
-            if (test != 15 && test != 16 && test != 17 && test != 18) owner->startup_leave(false);
-        }
-        CatalogModel model(root); catalog_model = &model;
-        PrerequisiteModel prerequisite{owner.get()}; prerequisite_model = &prerequisite;
-        private_controls_freed = 0; current_campaign = "GAME-";
-        if (test == 1 || test == 2) prerequisite.fail_allocation = test;
-        if (test == 3) model.terminal = {0, 1, 0x40, 0};
-        if (test == 6) prerequisite.result = {0, 1, 0x40, 0};
-        if (test == 8) model.published_count = 1;
-        if (test == 11) model.published_count = 0;
-        if (test == 12) current_campaign = "unsupported";
-        exercise_profile_caller(*owner, [&](SaveReference& input) {
-            WriteCalls read_calls{create_profile_read, set_data_name, release_reference, nullptr, 0, prepare_profile};
-            SaveFuture* future = nullptr;
-            {
-                engine::LocalMemory temporary;
-                const auto native_provider = reinterpret_cast<uintptr_t>(&provider);
-                if (owner->routed()) REQUIRE(owner->provider_operation(native_provider, 0x5678));
-                REQUIRE(read_scoped(*owner, temporary, native_provider, &future, 0x5678, &input, read_calls) == &future);
-            }
-            REQUIRE(!input.control && prerequisite.profile_polled == 0);
-            if (test == 7) current_campaign = "DLC2-";
-            if (test == 9) owner->stop_requests();
-            SaveResult result{};
-            if (test == 19) Sleep(10020); // would expire the old construction-time deadline before any work
-            future->vtable->poll(future, &result, nullptr);
-            if (test == 4) {
-                REQUIRE(result.state == -1 && prerequisite.profile_polled == 1);
-                future->vtable->destroy(future, 1); return false;
-            }
-            if (test == 19) Sleep(10020); // native pending keeps its waiter beyond a guessed core budget
-            if (result.state == -1) future->vtable->poll(future, &result, nullptr);
-            if (test == 5) {
-                REQUIRE(result.state == -1 && prerequisite.profile_polled == 2);
-                future->vtable->destroy(future, 1); return false;
-            }
-            if (test == 13) current_campaign = "DLC1-";
-            if (result.state == -1) future->vtable->poll(future, &result, nullptr);
-            const bool accepted = test == 0 || test == 9 || test == 10 || test == 11 || (test >= 14 && test != 18);
-            REQUIRE(result.state == 0 && result.outcome == (accepted ? 0 : 1) && result.value == 1);
-            future->vtable->destroy(future, 1); return accepted;
-        }, test == 10);
-        if (test == 15 || test == 17) {
-            REQUIRE(owner->state() == SessionState::binding && !owner->accepts_requests());
-            owner->startup_leave(test == 17);
-        }
-        REQUIRE(owner->accepts_requests() == (test == 0 || test == 11 || test == 15 || test == 16 || test == 19 || test >= 20));
-        const auto trace = owner->profile_trace();
-        if (test == 3) REQUIRE(trace.failed_stage == ProfileStage::catalog && trace.failure.native_attempted && trace.failure.native_value == 0x40);
-        if (test == 6) REQUIRE(trace.failed_stage == ProfileStage::transport && trace.failure.native_attempted && trace.failure.native_value == 0x40);
-        if (test == 19) {
-            REQUIRE(trace.failed_stage == ProfileStage::count);
-            REQUIRE(trace.steps[static_cast<size_t>(ProfileStage::first_poll)].first_ms - trace.steps[0].first_ms >= 10000);
-            REQUIRE(trace.steps[static_cast<size_t>(ProfileStage::transport)].changed_ms - trace.steps[static_cast<size_t>(ProfileStage::transport)].first_ms >= 10000);
-        }
-        if (test == 0) {
-            REQUIRE(provider_initialized(*owner, memory, memory.manager, provider_calls));
-            REQUIRE(owner->provider_operation(reinterpret_cast<uintptr_t>(&provider), 0x5678));
-            REQUIRE(owner->state() == SessionState::admitted && owner->inspect().prepared_routes == required_routes);
-            const auto before = remote.files;
-            owner->provider_reset(memory.manager); // reset/account removal after full profile/catalog admission
-            REQUIRE(owner->routed() && !owner->accepts_requests() && !owner->native_io());
-            REQUIRE(!provider_initialized(*owner, memory, memory.manager, provider_calls) && remote.files == before);
-        }
-        if (test == 9) REQUIRE(owner->state() == SessionState::admitted); // shutdown stays nonaccepting after admission finishes
-        if (test == 17) REQUIRE(owner->state() == SessionState::faulted && owner->routed());
-        if (test == 18) {
-            REQUIRE(owner->state() == SessionState::rejected && owner->fault() == SessionFault::missed_startup);
-            REQUIRE(!owner->bind_provider(owner->native_root(), remote_pointer, owner->ownership_record()));
-        }
-        REQUIRE(model.destroys == model.creates && prerequisite.profile_destroyed == prerequisite.profile_created);
-        REQUIRE(prerequisite.data_freed == prerequisite.constructed &&
-            prerequisite.allocated == prerequisite.data_freed + private_controls_freed);
-        if (test == 1 || test == 2 || test == 12 || test == 14 || test == 18) REQUIRE(!model.creates);
-        if (test == 1 || test == 2 || test == 7 || test == 12)
-            REQUIRE(prerequisite.profile_polled == 0);
-        if (test == 11 || test == 15 || test == 16) {
-            const auto before = remote.files;
-            const auto callback_manager = memory.manager;
-            uintptr_t frames[]{image+0x1490000,image+(test==15?0x675d24:0x675300)};
-            if (test==16) ++memory.manager;
-            invalidate_provider(*owner,memory,callback_manager,image,image+0x1490010,1,frames,2);
-            REQUIRE(owner->routed() && !owner->native_io() && !owner->accepts_requests());
-            REQUIRE(remote.files==before);
-            if (test==11) {
-                REQUIRE(owner->state()==SessionState::admitted && owner->fault()==SessionFault::none);
-                REQUIRE(!owner->btrace.snapshot().first_failure.sequence);
-                invalidate_provider(*owner,memory,callback_manager,image,image+0x1490020,2,frames,2);
-                owner->stop_requests();
-                REQUIRE(owner->fault()==SessionFault::none && owner->inspect().flags==5);
-                REQUIRE(!owner->provider_operation(reinterpret_cast<uintptr_t>(&provider),0x5678));
-                REQUIRE(owner->fault()==SessionFault::provider_identity);
-            } else {
-                REQUIRE(owner->fault()==SessionFault::provider_identity);
-                const auto first=owner->btrace.snapshot().first_failure;
-                REQUIRE(std::strcmp(first.predicate,"native_provider_reset_during_session")==0);
-            }
-        }
-        if (test >= 20) {
-            const auto before=remote.files;
-            uintptr_t frames[]{image+0x17c1221,image+0x1a5b9b2,image+0x66d601,image+0x435cb9,image+0x43da41};
-            if (test>=21 && test<=25) ++frames[test-21];
-            const auto callback_manager=memory.manager;
-            if (test==27) ++memory.manager;
-            if (test==29) owner->fail(SessionFault::native_campaign);
-            const auto prior=owner->btrace.snapshot().first_failure.sequence;
-            invalidate_provider(*owner,memory,callback_manager,image,image+0x17c1221,test==26?1:2,frames,test==28?4:5);
-            REQUIRE(!owner->native_io() && !owner->accepts_requests() && remote.files==before);
-            if (test==20) {
-                REQUIRE(owner->fault()==SessionFault::none && !owner->btrace.snapshot().first_failure.sequence);
-                // retirement is final; repeated cleanup need not rediscover the outer quit stack, and can never reopen provider operations
-                owner->provider_reset(callback_manager); owner->stop_requests();
-                REQUIRE(owner->fault()==SessionFault::none && owner->inspect().flags==5);
-                REQUIRE(!owner->provider_operation(reinterpret_cast<uintptr_t>(&provider),0x5678));
-                REQUIRE(owner->fault()==SessionFault::provider_identity);
-            } else if (test==29) {
-                REQUIRE(owner->fault()==SessionFault::native_campaign && owner->btrace.snapshot().first_failure.sequence==prior);
-            } else REQUIRE(owner->fault()==SessionFault::provider_identity);
-        }
-    }
+        prerequisite_case(make,table,provider_calls,test);
+}
     active_prerequisite_calls = nullptr; prerequisite_model = nullptr; catalog_model = nullptr;
     std::puts("PASS production PROFILE prerequisite, scheduling, admission and qualified cleanup (30 cases)");
 }

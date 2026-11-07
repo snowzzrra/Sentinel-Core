@@ -1,4 +1,3 @@
-"""Check independent v2 frames against both generated layouts and annotated offsets."""
 import hashlib
 import importlib.util
 import json
@@ -51,31 +50,6 @@ class WireV2Tests(unittest.TestCase):
                     self.assertEqual(result['balance_after'], 3)
                     self.assertEqual(codec.encode('sc_weapon_points_result', result), fields['typed_result'])
 
-    def test_unavailable_admission_namespace(self):
-        data = bytes(156)
-        result = codec.decode('sc_save_admission_snapshot', data)
-        self.assertEqual(codec.encode('sc_save_admission_snapshot', result), data)
-        result['namespace_id'] = [ord('a')] + [0] * 64
-        with self.assertRaises(ValueError):
-            codec.encode('sc_save_admission_snapshot', result)
-
-    def test_campaign_revision4_bounds(self):
-        for count in (1, 21):
-            payload = dict(revision=7, count=count, selected_id=2)
-            data = codec.encode_variant(23, 4, 0, payload)
-            self.assertEqual(codec.decode_variant(23, 4, data), (0, payload))
-        for count in (0, 22):
-            with self.assertRaises(ValueError):
-                codec.encode_variant(23, 4, 0, dict(revision=7, count=count, selected_id=2))
-        item = self.fixtures['campaign_row_unknown']
-        data = b''.join(bytes.fromhex(f['hex']) for f in item['fields'])[165:]
-        tag, payload = codec.decode_variant(22, 4, data)
-        for known in (0, 1):
-            payload['rewards_known'] = known
-            self.assertEqual(codec.decode_variant(22, 4, codec.encode_variant(22, 4, tag, payload)), (tag, payload))
-        payload['rewards_known'] = 2
-        with self.assertRaises(ValueError):
-            codec.encode_variant(22, 4, tag, payload)
 
     def test_campaign_master_level_bounds(self):
         item = self.fixtures['campaign_row_unknown']

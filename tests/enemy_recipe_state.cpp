@@ -10,7 +10,8 @@ RecipeEmission create(RecipeState& state, const char* request) {
     const auto emission = state.reserve(request); CHECK(emission);
     CHECK(state.created(request, *emission)); return *emission;
 }
-int main() {
+void native_checkpoint_cases(const std::string&);
+void linked_recipe_cases() {
     RecipeState linked;
     CHECK(linked.reset("plan", "game/test"));
     CHECK(linked.request("host", {"manager", "origin-host", "", 16, 1, 1, 1}));
@@ -47,8 +48,12 @@ int main() {
         credit_at_least(linked_restored.deaths("adopter", 16, "native_label"), 1) == false &&
         !credit_at_most(linked_restored.deaths("adopter", 16, "native_label"), 0));
     CHECK(create(linked_restored, "independent/source").ordinal == 1);
+    native_checkpoint_cases(linked_snapshot);
+}
+void native_checkpoint_cases(const std::string& linked_state) {
     RecipeNativeCheckpoint checkpoint;
-    checkpoint.plan = "plan"; checkpoint.map = "game/test"; checkpoint.state = linked_snapshot;
+    checkpoint.plan = "plan"; checkpoint.map = "game/test"; checkpoint.state = linked_state;
+    std::string linked_snapshot;
     checkpoint.shows["stable_body"] = {12, 13, 14, 1, 0, 0, 0, 1, 0, 0, 0, 1};
     checkpoint.actions[{"independent/source", "native_relay"}] = {2, 0, 3};
     std::string native_snapshot;
@@ -63,6 +68,9 @@ int main() {
     CHECK(native_restored.capture(linked_snapshot) && linked_snapshot == native_snapshot);
     checkpoint.shows["stable_body"][0] = std::numeric_limits<float>::quiet_NaN();
     CHECK(!checkpoint.capture(linked_snapshot));
+}
+void cohort_checkpoint_cases() {
+    std::string linked_snapshot;
     RecipeState state;
     CHECK(state.reset("plan-012345", "game/test"));
     const RecipeRequest first{"manager-a", "origin-a", "arena", 16, 2, 6, 6};
@@ -151,6 +159,9 @@ int main() {
     CHECK(credit_at_most(state.deaths("manager-b", 16, "current"), 1));
     CHECK(!credit_at_least(state.deaths("manager-a", 16, "cancelled"), 1));
 
+}
+void partial_cohort_cases() {
+    std::string saved; RecipeState restored;
     RecipeState partial; CHECK(partial.reset("plan-partial", "game/test"));
     CHECK(partial.request("partial/0", {"manager-a", "origin-partial", "arena", 16, 2, 3, 5, 5, 1}));
     std::vector<RecipeEmission> finite;
@@ -164,6 +175,8 @@ int main() {
     CHECK(credit_at_least(restored.deaths("manager-a", 16, "arena"), 3));
     CHECK(!credit_at_least(restored.deaths("manager-a", 16, "arena"), 4));
 
+}
+void credit_arithmetic_cases() {
     CHECK(credit_at_least({{1, 3}, {2, 3}}, 1));
     CHECK(credit_at_most({{1, 3}, {2, 3}}, 1));
     CHECK(!credit_at_least({{1, 3}, {1, 3}}, 1));
@@ -174,6 +187,9 @@ int main() {
     CHECK(credit_at_least(many_cohorts, 10000));
     CHECK(credit_at_most(many_cohorts, 10000));
     CHECK(credit_at_least({{UINT64_MAX, 1}, {UINT64_MAX, 1}}, UINT64_MAX));
+}
+void renewable_cohort_cases() {
+    std::string saved; RecipeState restored;
     RecipeState renewable;
     CHECK(renewable.reset("plan-012345", "game/test"));
     CHECK(renewable.request("renewable", {"manager-a", "origin-renewable", "", 16, 1, 3, 0}));
@@ -187,6 +203,8 @@ int main() {
     CHECK(restored.restore(saved, "plan-012345", "game/test"));
     CHECK(credit_at_least(restored.deaths("manager-a", 16, ""), 3333));
     CHECK(create(restored, "renewable").ordinal == 10000);
+}
+void health_credit_cases() {
     std::vector<RecipeHealth> health(6, RecipeHealth{{2, 6}, 100, 100});
     for (unsigned index : {5U, 1U, 3U}) health[index].current = 0;
     CHECK(health_at_most(health, 0.5f) == true);
@@ -200,6 +218,9 @@ int main() {
     CHECK(!health_at_most({}, 0.5f));
     CHECK(!health_at_most({{{1, 0}, 100, 0}}, 0.5f));
     CHECK(!health_at_most({{{1, 3}, 100, std::numeric_limits<float>::quiet_NaN()}}, 0.5f));
+}
+void membership_migration_cases() {
+    std::string saved; RecipeState restored;
     RecipeState migration;
     CHECK(migration.reset("plan", "map"));
     CHECK(migration.request("source", {"manager-a", "origin", "before", 16, 1, 3, 3}));
@@ -232,5 +253,9 @@ int main() {
     CHECK(migration.cancel("source") && !migration.capture(saved));
     CHECK(migration.created("source", *in_flight));
     CHECK(!migration.reserve("source") && migration.capture(saved));
+}
+int main() {
+    linked_recipe_cases(); cohort_checkpoint_cases(); partial_cohort_cases(); credit_arithmetic_cases();
+    renewable_cohort_cases(); health_credit_cases(); membership_migration_cases();
     std::puts("PASS recipe admission, exact cohort credits, pending emissions and checkpoint state");
 }

@@ -44,10 +44,7 @@ sc_combat_query query_for(const Context& ctx) {
     return query;
 }
 }
-int main(int argc, char** argv) {
-    (void)argc; (void)argv;
-    auto model = std::make_unique<Model>();
-    const auto ctx = context();
+void recovery_suppression_case(const Context& ctx) {
     {
         auto recovery = std::make_unique<Model>();
         recovery->transition(1); recovery->context(ctx);
@@ -70,6 +67,8 @@ int main(int argc, char** argv) {
         recovery->release(captured);
         recovery->snapshot(query_for(ctx), snapshot); check(snapshot.qualified_kills == 1, "recovery suppression lost registration bookkeeping or kill credit isolation");
     }
+}
+void worker_death_case(const Context& ctx) {
     {
         auto worker = std::make_unique<Model>();
         worker->transition(1); worker->context(ctx);
@@ -86,6 +85,64 @@ int main(int argc, char** argv) {
         sc_combat_snapshot snapshot{}; worker->snapshot(query_for(ctx), snapshot);
         check(snapshot.qualified_kills == 1, "worker death did not reach cumulative counter");
     }
+}
+void native_record_case(const Context& ctx, const DeathRecord& record) {
+    std::array<uint8_t, 0x128> bytes{};
+    write<uint32_t>(bytes, 0x48, 0x123456); write<int32_t>(bytes, 0x4c, 1);
+    write<uint64_t>(bytes, 0x50, 0x1234); write<uint32_t>(bytes, 0x80, 9);
+    write<int32_t>(bytes, 0x84, 0); write<uint64_t>(bytes, 0x98, ctx.player);
+    write<uint32_t>(bytes, 0xb8, 10); write<int32_t>(bytes, 0x38, 3);
+    write<int32_t>(bytes, 0x124, 1);
+    const auto decoded = decode_record(bytes);
+    check(decoded.victim_spawn_id == record.victim_spawn_id && decoded.attacker_player == ctx.player &&
+        decoded.death_time == record.death_time && decoded.attack_type == 3, "native record fixture decoded incorrectly");
+}
+void progress_presentation_cases(const Snapshot& source) {
+    Presentation progress;
+    sc_native_scope scope{}; scope.pid = source.pid; scope.process_created = source.process_created;
+    std::memcpy(scope.instance_id, source.instance.data(), 16); scope.lifecycle_generation = 1;
+    sc_combat_presentation_request presentation{};
+    presentation.execution.expected = scope;
+    presentation.execution.request_id = 42; presentation.execution.deadline_ms = 1000;
+    presentation.execution.nonce[0] = 1;
+    std::memset(presentation.namespace_id, 'a', 64);
+    presentation.total = 350; presentation.target = 400; presentation.visible = 1;
+    check(progress.submit(presentation, scope, false).status == 1, "progress rejects unadmitted room");
+    check(progress.submit(presentation, scope, true).status == 0 && !progress.view(presentation.namespace_id).milestone,
+          "restored total does not fabricate milestone notices");
+    presentation.first_milestone = 100; presentation.milestone = 300; presentation.milestone_step = 100;
+    check(progress.submit(presentation, scope, true).status == 0, "progress accepts batched milestones");
+    check(progress.submit(presentation, scope, true).status == 0, "progress retries are idempotent");
+    for (uint64_t notice = 100; notice <= 300; notice += 100) {
+        check(progress.view(presentation.namespace_id).milestone == notice, "each batched milestone is preserved");
+        progress.notice_presented(presentation.namespace_id, notice);
+    }
+    check(!progress.view(presentation.namespace_id).milestone, "milestones finish once");
+    presentation.total = 400; presentation.target = 0; presentation.visible = 0;
+    presentation.first_milestone = presentation.milestone = 400;
+    check(progress.submit(presentation, scope, true).status == 0 && !progress.view(presentation.namespace_id).visible,
+          "final milestone hides counter without hiding notice");
+    presentation.total = 399;
+    check(progress.submit(presentation, scope, true).status == 1, "stale progress cannot decrease room total");
+    presentation.namespace_id[0] = 'b'; presentation.total = 3;
+    presentation.first_milestone = presentation.milestone = presentation.milestone_step = 0;
+    check(progress.submit(presentation, scope, true).status == 0 && !progress.view(context().namespace_id).total,
+          "another room cannot see prior progress");
+    presentation.target = 100; presentation.visible = 1;
+}
+void check_death_scope(Model& model, const Context& ctx) {
+    check(!model.confirmed_dead(ctx.world + 1, 0x30000, 3, 0x123456) &&
+          !model.confirmed_dead(ctx.world, 0x30001, 3, 0x123456) &&
+          !model.confirmed_dead(ctx.world, 0x30000, 3, 0x123457) &&
+          !model.confirmed_dead(ctx.world, 0x30000, managed_slots, 0x123456),
+          "another world, body or life reused a death");
+}
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    auto model = std::make_unique<Model>();
+    const auto ctx = context();
+    recovery_suppression_case(ctx);
+    worker_death_case(ctx);
     model->transition(1); model->context(ctx);
     model->registered(ctx.world, 0x30000, 3, 0x123456);
     auto outer = model->capture(ctx.world, 0x30000, 3, 0x123456, 101, 20, 17);
@@ -97,11 +154,7 @@ int main(int argc, char** argv) {
     const auto record = death(ctx);
     check(model->publish(inner, record, 103, 20, 17) == Publication::published, "nested death lost");
     check(model->confirmed_dead(ctx.world, 0x30000, 3, 0x123456), "confirmed death retained its special slot");
-    check(!model->confirmed_dead(ctx.world + 1, 0x30000, 3, 0x123456) &&
-          !model->confirmed_dead(ctx.world, 0x30001, 3, 0x123456) &&
-          !model->confirmed_dead(ctx.world, 0x30000, 3, 0x123457) &&
-          !model->confirmed_dead(ctx.world, 0x30000, managed_slots, 0x123456),
-          "another world, body or life reused a death");
+    check_death_scope(*model, ctx);
     check(model->publish(outer, record, 104, 20, 17) == Publication::published, "outer frozen registration lost");
     check(model->publish(outer, record, 105, 20, 17) == Publication::duplicate, "duplicate death got a new sequence");
     const auto query = query_for(ctx);
@@ -138,15 +191,7 @@ int main(int argc, char** argv) {
     check(model->publish(inner, record, 107, 20, 17) == Publication::ignored, "room switch reused pending death");
     model->transition(2); model->context(context(2));
     check(model->publish(inner, record, 108, 20, 17) == Publication::ignored, "checkpoint replayed pending death");
-    std::array<uint8_t, 0x128> bytes{};
-    write<uint32_t>(bytes, 0x48, 0x123456); write<int32_t>(bytes, 0x4c, 1);
-    write<uint64_t>(bytes, 0x50, 0x1234); write<uint32_t>(bytes, 0x80, 9);
-    write<int32_t>(bytes, 0x84, 0); write<uint64_t>(bytes, 0x98, ctx.player);
-    write<uint32_t>(bytes, 0xb8, 10); write<int32_t>(bytes, 0x38, 3);
-    write<int32_t>(bytes, 0x124, 1);
-    const auto decoded = decode_record(bytes);
-    check(decoded.victim_spawn_id == record.victim_spawn_id && decoded.attacker_player == ctx.player &&
-        decoded.death_time == record.death_time && decoded.attack_type == 3, "native record fixture decoded incorrectly");
+    native_record_case(ctx, record);
     Snapshot source{}; source.pid = 101; source.process_created = 102;
     source.instance.fill(0x33); source.core.abi_version = SC_ABI_VERSION;
     std::memcpy(source.core.version, "1.1.0", 6); std::memset(source.core.build_id, 'c', 64);
@@ -226,37 +271,7 @@ int main(int argc, char** argv) {
     const auto recovered = bounded->capture(ctx.world, 0x70000, 100, 0x123456, 104, 20, 17);
     check(bounded->publish(recovered, record, 105, 20, 17) == Publication::published, "released claim capacity leaked");
     bounded->release(recovered);
-    Presentation progress;
-    sc_native_scope scope{}; scope.pid = source.pid; scope.process_created = source.process_created;
-    std::memcpy(scope.instance_id, source.instance.data(), 16); scope.lifecycle_generation = 1;
-    sc_combat_presentation_request presentation{};
-    presentation.execution.expected = scope;
-    presentation.execution.request_id = 42; presentation.execution.deadline_ms = 1000;
-    presentation.execution.nonce[0] = 1;
-    std::memset(presentation.namespace_id, 'a', 64);
-    presentation.total = 350; presentation.target = 400; presentation.visible = 1;
-    check(progress.submit(presentation, scope, false).status == 1, "progress rejects unadmitted room");
-    check(progress.submit(presentation, scope, true).status == 0 && !progress.view(presentation.namespace_id).milestone,
-          "restored total does not fabricate milestone notices");
-    presentation.first_milestone = 100; presentation.milestone = 300; presentation.milestone_step = 100;
-    check(progress.submit(presentation, scope, true).status == 0, "progress accepts batched milestones");
-    check(progress.submit(presentation, scope, true).status == 0, "progress retries are idempotent");
-    for (uint64_t notice = 100; notice <= 300; notice += 100) {
-        check(progress.view(presentation.namespace_id).milestone == notice, "each batched milestone is preserved");
-        progress.notice_presented(presentation.namespace_id, notice);
-    }
-    check(!progress.view(presentation.namespace_id).milestone, "milestones finish once");
-    presentation.total = 400; presentation.target = 0; presentation.visible = 0;
-    presentation.first_milestone = presentation.milestone = 400;
-    check(progress.submit(presentation, scope, true).status == 0 && !progress.view(presentation.namespace_id).visible,
-          "final milestone hides counter without hiding notice");
-    presentation.total = 399;
-    check(progress.submit(presentation, scope, true).status == 1, "stale progress cannot decrease room total");
-    presentation.namespace_id[0] = 'b'; presentation.total = 3;
-    presentation.first_milestone = presentation.milestone = presentation.milestone_step = 0;
-    check(progress.submit(presentation, scope, true).status == 0 && !progress.view(context().namespace_id).total,
-          "another room cannot see prior progress");
-    presentation.target = 100; presentation.visible = 1;
+    progress_presentation_cases(source);
     if (!failures) std::cout << "combat registration/delivery PASS\n";
     return failures ? 1 : 0;
 }

@@ -54,6 +54,22 @@ void retained_backup_identity() {
     CHECK(queue.submit(request(600).execution, 0, 50003).state == SC_DIAGNOSTIC_QUEUED);
 }
 }
+static void check_backup_cancellation_modes() {
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        Diagnostics q; auto value = request(mode + 1);
+        CHECK(q.submit(value.execution, 0, 100, nullptr, &value).state == SC_DIAGNOSTIC_QUEUED);
+        if (mode == 0) CHECK(q.backup_result(value, true, 101).state == SC_BACKUP_CANCELLED && !q.claim(102));
+        if (mode == 1) CHECK(q.backup_result(value, false, 1100).state == SC_BACKUP_EXPIRED && !q.claim(1101));
+        if (mode == 2) { q.cancel_pending(101); CHECK(q.backup_result(value, false, 102).state == SC_BACKUP_CANCELLED); }
+        if (mode == 3) {
+            auto* s = q.claim(101); const auto owned = s->backup;
+            q.cancel_pending(102); CHECK(owned->progress().cancel_requested);
+            auto result = s->result; result.state = SC_DIAGNOSTIC_CANCELLED; result.reason = SC_NATIVE_CANCELLED; result.completed_at_ms = 103;
+            Diagnostics::finish(*s, result);
+            CHECK(q.backup_result(value, false, 104).state == SC_BACKUP_CANCELLED && owned->progress().readback_terminal);
+        }
+    }
+}
 void run_backup_request_contracts() {
     retained_backup_identity();
     const auto r = request();
@@ -90,19 +106,6 @@ void run_backup_request_contracts() {
     CHECK(queue.backup_result(r, true, 120003).state == SC_BACKUP_UNKNOWN); // new diagnostic isn't the retired backup
     CHECK(queue.retrieve(r.execution, false, 120003).state == SC_DIAGNOSTIC_QUEUED);
 
-    for (unsigned mode = 0; mode < 4; ++mode) {
-        Diagnostics q; auto value = request(mode + 1);
-        CHECK(q.submit(value.execution, 0, 100, nullptr, &value).state == SC_DIAGNOSTIC_QUEUED);
-        if (mode == 0) CHECK(q.backup_result(value, true, 101).state == SC_BACKUP_CANCELLED && !q.claim(102));
-        if (mode == 1) CHECK(q.backup_result(value, false, 1100).state == SC_BACKUP_EXPIRED && !q.claim(1101));
-        if (mode == 2) { q.cancel_pending(101); CHECK(q.backup_result(value, false, 102).state == SC_BACKUP_CANCELLED); }
-        if (mode == 3) {
-            auto* s = q.claim(101); const auto owned = s->backup;
-            q.cancel_pending(102); CHECK(owned->progress().cancel_requested);
-            auto result = s->result; result.state = SC_DIAGNOSTIC_CANCELLED; result.reason = SC_NATIVE_CANCELLED; result.completed_at_ms = 103;
-            Diagnostics::finish(*s, result);
-            CHECK(q.backup_result(value, false, 104).state == SC_BACKUP_CANCELLED && owned->progress().readback_terminal);
-        }
-    }
+    check_backup_cancellation_modes();
     std::puts("PASS shared backup request capacity, ownership handoff, cross-kind isolation, cancellation, retirement and strict wire");
 }

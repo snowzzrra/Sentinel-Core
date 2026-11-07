@@ -42,7 +42,9 @@ int64_t diagnostic_fact(const BEvent& event,const char* key) {
     CHECK(false); return 0;
 }
 void diagnostic_stage_observed(const BSnapshot& trace,BStage stage) {
-    const auto& event=trace.stages[static_cast<size_t>(stage)]; CHECK(event.sequence && event.thread && event.predicate);
+    const auto& event=trace.stages[static_cast<size_t>(stage)]; CHECK(event.sequence);
+    CHECK(event.thread);
+    CHECK(event.predicate);
 }
 struct Remote { uintptr_t* table; std::map<std::string,std::string> files; };
 std::filesystem::path recovery_disk;
@@ -124,6 +126,15 @@ uint64_t observed_change(uintptr_t root,uintptr_t descriptor) {
     __try { return native::test_change(root,descriptor,0); }
     __except(GetExceptionCode()==0xe0420042?EXCEPTION_EXECUTE_HANDLER:EXCEPTION_CONTINUE_SEARCH) { return 0; }
 }
+static bool transition_saves_initial_checkpoint() {
+    return transition_defect == L"initial_save" || transition_defect == L"initial_save_return_failed" ||
+        transition_defect == L"save_failure" || transition_defect == L"partial_save";
+}
+static void apply_transition_defect(uintptr_t self) {
+    if (transition_defect==L"generation") native::test_generation_gap();
+    if (transition_defect==L"state_read") { DWORD previous=0; CHECK(VirtualProtect(reinterpret_cast<void*>(self),0x1000,PAGE_NOACCESS,&previous)); }
+    if (transition_defect==L"pending_transition" || transition_defect==L"unrelated") *reinterpret_cast<uint32_t*>(self+0x44)=SC_GAME_LOADING;
+}
 uint64_t native_load(uintptr_t self,uintptr_t descriptor,uintptr_t files) {
     if (transition_defect==L"terminal_cleanup" && !session().native_io()) {
         ++native_cleanups; *reinterpret_cast<uint32_t*>(self+0x44)=SC_GAME_MAIN_MENU; return 7;
@@ -145,12 +156,75 @@ uint64_t native_load(uintptr_t self,uintptr_t descriptor,uintptr_t files) {
         CHECK(native::test_change(self,descriptor,files)==1);
     }
     *reinterpret_cast<uint32_t*>(self+0x44)=transition_defect==L"partial_save"?SC_GAME_LOADING:SC_GAME_IN_GAME;
-    if (initial_checkpoint && (transition_defect==L"initial_save" || transition_defect==L"initial_save_return_failed" || transition_defect==L"save_failure" || transition_defect==L"partial_save")) initial_checkpoint();
-    if (transition_defect==L"generation") native::test_generation_gap();
-    if (transition_defect==L"state_read") { DWORD previous=0; CHECK(VirtualProtect(reinterpret_cast<void*>(self),0x1000,PAGE_NOACCESS,&previous)); }
-    if (transition_defect==L"pending_transition" || transition_defect==L"unrelated") *reinterpret_cast<uint32_t*>(self+0x44)=SC_GAME_LOADING;
+    if (initial_checkpoint && transition_saves_initial_checkpoint()) initial_checkpoint();
+    apply_transition_defect(self);
     return transition_defect==L"native_return" || transition_defect==L"initial_save_return_failed"?0:1;
 }
+static void check_transition_result(const CampaignSnapshot& result,const std::wstring& defect) {
+    const std::map<std::wstring,std::string> failures{{L"native_return","native_transition_return_failed"},
+        {L"abnormal","native_transition_abnormal"},{L"initial_save_return_failed","native_transition_return_failed"},
+        {L"state_read","native_transition_state_unreadable"},{L"generation","native_transition_generation_mismatch"},
+        {L"difficulty","native_transition_difficulty_mismatch"},{L"unrelated","native_checkpoint_transition_unassociated"},
+        {L"partial_save","native_checkpoint_map_not_ready"},{L"save_failure","native_checkpoint_completion_unproven"},
+        {L"archive_payload_failure","checkpoint_archive_incomplete"},{L"archive_manifest_failure","checkpoint_archive_incomplete"}};
+    auto expected=failures.find(defect);
+    if (expected!=failures.end()) {
+        CHECK(result.reason==expected->second); CHECK(!result.continuity_persisted);
+        const auto trace=session().btrace.snapshot(); CHECK(trace.first_failure.sequence);
+        CHECK(trace.first_failure.status==BStatus::refused);
+        diagnostic_stage_observed(trace,BStage::transition);
+        if (defect==L"difficulty") {
+            CHECK(std::strcmp(trace.first_failure.predicate,"native_transition_difficulty_mismatch")==0);
+            CHECK(diagnostic_fact(trace.first_failure,"actual_difficulty")!=diagnostic_fact(trace.first_failure,"expected_difficulty"));
+        }
+    }
+    else CHECK(result.map_active || defect==L"menu_pending_save" || defect==L"native_read_c_active_mission");
+}
+static int check_terminal_cleanup(unsigned char* root,const engine::Binding& binding,std::array<unsigned char,0x1a00>& request) {
+        session().fail_profile();
+        const auto first=session().btrace.snapshot().first_failure;
+        CHECK(first.sequence);
+        CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==7);
+        CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==7);
+        CHECK(native_cleanups==2);
+        CHECK(session().fault()==SessionFault::native_profile);
+        CHECK(!session().native_io());
+        CHECK(session().btrace.snapshot().first_failure.sequence==first.sequence);
+        CHECK(session().campaign_run.snapshot().reason=="lifecycle_after_session_refusal");
+        CHECK(!session().campaign_run.snapshot().native_saved);
+        CHECK(VirtualFree(root,0,MEM_RELEASE)); return 0;
+}
+void finish_pending_transition(unsigned char* root, const engine::Binding& binding, const std::wstring& defect) {
+    if (defect==L"pending_transition" || defect==L"unrelated") {
+        CHECK(!session().campaign_run.snapshot().map_active);
+        CHECK(session().campaign_run.snapshot().reason=="none");
+        *reinterpret_cast<uint32_t*>(root+0x44)=SC_GAME_IN_GAME;
+        CHECK(!session().campaign_run.snapshot().map_active); // fresh memory alone never certifies the event
+        if (defect==L"unrelated") native::test_free(binding.root,[](uintptr_t,uintptr_t) {});
+    }
+}
+void check_menu_continuity(const CampaignSnapshot& result, const std::wstring& defect) {
+    if (result.continuity_persisted && result.map_active && defect!=L"native_read_c_active_mission") {
+        menu_transition();
+        const auto menu=session().campaign_run.snapshot();
+        CHECK(session().accepts_requests());
+        CHECK(menu.continuity_persisted);
+        CHECK(menu.checkpoint==result.checkpoint);
+        CHECK(!menu.map_active);
+        CHECK(!menu.save_ready);
+        CHECK(menu.map==result.map);
+        CHECK(menu.phase==result.phase);
+    }
+}
+bool finish_native_change(unsigned char* root, const engine::Binding& binding, std::array<unsigned char,0x1a00>& request, const std::wstring& defect) {
+    CHECK(native::inspect().game_state==SC_GAME_MAIN_MENU);
+    if(defect==L"terminal_cleanup") { check_terminal_cleanup(root,binding,request); return false; }
+    if (defect==L"state_read") { DWORD previous=0; CHECK(VirtualProtect(root,0x1000,PAGE_READWRITE,&previous)); }
+    finish_pending_transition(root, binding, defect);
+    return true;
+}
+bool checkpoint_callback_expected(const std::wstring& defect) { return defect!=L"initial_save" && defect!=L"initial_save_return_failed" && defect!=L"save_failure" && defect!=L"partial_save"; }
+uint64_t expected_change_result(const std::wstring& defect) { return defect==L"native_return" || defect==L"abnormal" || defect==L"initial_save_return_failed"?0u:1u; }
 int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::function<void()> checkpoint={},
         std::function<void()> after_ready={},std::function<void()> on_menu={},std::string destination={},std::function<void()> after_menu={}) {
     transition_defect=defect; initial_checkpoint=checkpoint; menu_profile=on_menu;
@@ -180,58 +254,20 @@ int native_transition(uint32_t difficulty,const std::wstring& defect=L"",std::fu
         CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==1);
     };
     CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==
-        (defect==L"native_return" || defect==L"abnormal" || defect==L"initial_save_return_failed"?0u:1u));
-    CHECK(native::inspect().game_state==SC_GAME_MAIN_MENU);
-    if (defect==L"terminal_cleanup") {
-        session().fail_profile();
-        const auto first=session().btrace.snapshot().first_failure;
-        CHECK(first.sequence);
-        CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==7);
-        CHECK(observed_change(binding.root,reinterpret_cast<uintptr_t>(request.data()))==7);
-        CHECK(native_cleanups==2 && session().fault()==SessionFault::native_profile && !session().native_io());
-        CHECK(session().btrace.snapshot().first_failure.sequence==first.sequence);
-        CHECK(session().campaign_run.snapshot().reason=="lifecycle_after_session_refusal");
-        CHECK(!session().campaign_run.snapshot().native_saved);
-        CHECK(VirtualFree(root,0,MEM_RELEASE)); return 0;
-    }
-    if (defect==L"state_read") { DWORD previous=0; CHECK(VirtualProtect(root,0x1000,PAGE_READWRITE,&previous)); }
-    if (defect==L"pending_transition" || defect==L"unrelated") {
-        CHECK(!session().campaign_run.snapshot().map_active && session().campaign_run.snapshot().reason=="none");
-        *reinterpret_cast<uint32_t*>(root+0x44)=SC_GAME_IN_GAME;
-        CHECK(!session().campaign_run.snapshot().map_active); // fresh memory alone never certifies the event
-        if (defect==L"unrelated") native::test_free(binding.root,[](uintptr_t,uintptr_t) {});
-    }
-    if (checkpoint && defect!=L"initial_save" && defect!=L"initial_save_return_failed" && defect!=L"save_failure" && defect!=L"partial_save") checkpoint();
+        (expected_change_result(defect)));
+    if (!finish_native_change(root, binding, request, defect)) return 0;
+    if (checkpoint && checkpoint_callback_expected(defect)) checkpoint();
     if (after_ready) after_ready();
     const auto result=session().campaign_run.snapshot();
     if (bootstrap && result.map_active) CHECK(result.map=="game/hub/hub");
     if (defect==L"pending_transition") {
-        CHECK(result.transition.game==SC_GAME_LOADING && result.checkpoint_boundary.game==SC_GAME_IN_GAME);
-        CHECK(result.transition.at_ms<=result.checkpoint_boundary.at_ms && result.map_active);
+        CHECK(result.transition.game==SC_GAME_LOADING);
+        CHECK(result.checkpoint_boundary.game==SC_GAME_IN_GAME);
+        CHECK(result.transition.at_ms<=result.checkpoint_boundary.at_ms);
+        CHECK(result.map_active);
     }
-    const std::map<std::wstring,std::string> failures{{L"native_return","native_transition_return_failed"},
-        {L"abnormal","native_transition_abnormal"},{L"initial_save_return_failed","native_transition_return_failed"},
-        {L"state_read","native_transition_state_unreadable"},{L"generation","native_transition_generation_mismatch"},
-        {L"difficulty","native_transition_difficulty_mismatch"},{L"unrelated","native_checkpoint_transition_unassociated"},
-        {L"partial_save","native_checkpoint_map_not_ready"},{L"save_failure","native_checkpoint_completion_unproven"},
-        {L"archive_payload_failure","checkpoint_archive_incomplete"},{L"archive_manifest_failure","checkpoint_archive_incomplete"}};
-    auto expected=failures.find(defect);
-    if (expected!=failures.end()) {
-        CHECK(result.reason==expected->second); CHECK(!result.continuity_persisted);
-        const auto trace=session().btrace.snapshot(); CHECK(trace.first_failure.sequence && trace.first_failure.status==BStatus::refused);
-        diagnostic_stage_observed(trace,BStage::transition);
-        if (defect==L"difficulty") {
-            CHECK(std::strcmp(trace.first_failure.predicate,"native_transition_difficulty_mismatch")==0);
-            CHECK(diagnostic_fact(trace.first_failure,"actual_difficulty")!=diagnostic_fact(trace.first_failure,"expected_difficulty"));
-        }
-    }
-    else CHECK(result.map_active || defect==L"menu_pending_save" || defect==L"native_read_c_active_mission");
-    if (result.continuity_persisted && result.map_active && defect!=L"native_read_c_active_mission") {
-        menu_transition();
-        const auto menu=session().campaign_run.snapshot();
-        CHECK(session().accepts_requests() && menu.continuity_persisted && menu.checkpoint==result.checkpoint);
-        CHECK(!menu.map_active && !menu.save_ready && menu.map==result.map && menu.phase==result.phase);
-    }
+    check_transition_result(result,defect);
+    check_menu_continuity(result, defect);
     if (after_menu) after_menu();
     initial_checkpoint={}; menu_transition={}; menu_profile={}; CHECK(VirtualFree(root,0,MEM_RELEASE));
     return 0;
@@ -353,12 +389,15 @@ void startup_parser_refusal(Session& owner) {
     owner.campaign_run.observe_parser(observed);
     CHECK(!owner.campaign_run.parser_enter(observed.data));
     const auto after = owner.campaign_run.snapshot();
-    CHECK(after.phase == before.phase && after.reason == before.reason && !after.parser_completed &&
-          !after.native_saved);
+    CHECK(after.phase == before.phase);
+    CHECK(after.reason == before.reason);
+    CHECK(!after.parser_completed);
+    CHECK(!after.native_saved);
     CHECK(after.parser_observation.disposition == "downstream_of_terminal_session");
-    CHECK(after.parser_observation.source == "foreign_or_unowned_campaign" &&
-          after.parser_observation.native_completion);
-    CHECK(owner.fault() == SessionFault::missed_startup && owner.unrouted_trace().at_ms == first.at_ms);
+    CHECK(after.parser_observation.source == "foreign_or_unowned_campaign");
+    CHECK(after.parser_observation.native_completion);
+    CHECK(owner.fault() == SessionFault::missed_startup);
+    CHECK(owner.unrouted_trace().at_ms == first.at_ms);
     std::puts("PASS startup refusal remains first; downstream foreign campaign parser never imports");
 }
 int recover_campaign_fixture(Session& owner, Remote& remote, uintptr_t provider, const std::wstring& defect) {
@@ -392,554 +431,882 @@ bool configured_fixture(bool recovery_case,storage::Result configured) {
     }
     return true;
 }
-int wmain(int argc,wchar_t** argv) {
-    CHECK(argc==4 || argc==5);
-    std::filesystem::create_directories(argv[2]);
+struct CampaignTestCase {
+    int argc = 0;
+    wchar_t** argv = nullptr;
+    Session& owner = session();
+    std::array<uintptr_t, 20> table{};
+    Remote remote{table.data(), {}};
+    storage::Descriptor descriptor{};
+    storage::Result configured{};
+    engine::LocalMemory memory;
     wchar_t expanded[MAX_PATH]{};
-    const auto length=GetLongPathNameW(argv[2],expanded,MAX_PATH);
-    CHECK(length && length<MAX_PATH);
-    argv[2]=expanded;
-    const std::wstring mode=argv[1]; const bool resume=mode==L"resume",recover=mode==L"recover";
-    const auto difficulty=static_cast<uint32_t>(std::wcstoul(argv[3],nullptr,10));
-    const std::wstring defect=argc==5?argv[4]:L"";
-    run_hook_case(defect);
-    if (run_native_fixture_case(defect)) return 0;
-    const bool profile_lifecycle=defect==L"profile_lifecycle";
-    const bool native_read=defect.rfind(L"native_read",0)==0;
-    const bool profile_overlap=defect.rfind(L"cross_map_profile_overlap",0)==0;
-    const bool recovery_case=recovery_fixture_case(defect);
-    const auto retail_marker=std::filesystem::path(argv[2])/"retail-pair.fixture";
-    const bool retail_pair=defect==L"native_read_c_retail_pair" || std::filesystem::exists(retail_marker);
-    if(retail_pair && !resume && !recover) { std::filesystem::create_directories(argv[2]); std::ofstream(retail_marker)<<"primary operation; preserved rotation pair\n"; }
-    if(recovery_case) recovery_disk=std::filesystem::path(argv[2])/"remote";
-    navigation_fixture::vanilla();
-    storage::Descriptor descriptor{{"synthetic-campaign-host",0,1,std::string(64,'b')},argv[2],
-        {recover?storage::CampaignIntent::recover:resume?storage::CampaignIntent::resume:storage::CampaignIntent::create,difficulty,{}}};
-    descriptor.campaign.restart_stage=defect.rfind(L"restart_",0)==0;
-    if(recover) {
-        std::ifstream selected(std::filesystem::path(argv[2])/"selected-backup.txt");
-        std::getline(selected,descriptor.campaign.recovery_basename); CHECK(!descriptor.campaign.recovery_basename.empty());
+    std::wstring mode, defect;
+    bool resume = false, recover = false, profile_lifecycle = false, native_read = false, profile_overlap = false;
+    bool recovery_case = false, retail_pair = false, automatic_resume = false;
+    uint32_t difficulty = 0;
+    uintptr_t provider = reinterpret_cast<uintptr_t>(&remote);
+    std::string directory, payload, relative, native_directory, next_payload;
+    std::array<unsigned char, 0x190> file{}, next_file{};
+    std::array<unsigned char, 0x280> data{}, next_data{};
+    uintptr_t files = reinterpret_cast<uintptr_t>(file.data()), source = reinterpret_cast<uintptr_t>(data.data());
+    uintptr_t next_stream = reinterpret_cast<uintptr_t>(next_file.data()),
+              next_source = reinterpret_cast<uintptr_t>(next_data.data());
+    std::array<uintptr_t, 1> file_list{files}, next_list{next_stream};
+    std::array<std::string, 3> extra_names{"game_duration.dat", "game.details-BACKUP", "game_duration.dat-BACKUP"};
+    std::array<std::string, 3> extra_payloads{"encoded duration checkpoint", "older details checkpoint",
+                                              "older duration checkpoint"};
+    std::array<std::array<unsigned char, 0x190>, 3> extra_files{};
+    std::array<uintptr_t, 4> all_files{files};
+    std::function<void()> profile_write;
+    unsigned profile_writes = 0;
+    void write_profile() {
+        profile_write();
+        ++profile_writes;
+        CHECK(owner.native_io());
+        CHECK(owner.accepts_requests());
+        CHECK(!owner.btrace.snapshot().first_failure.sequence);
     }
-    std::unique_ptr<storage::Namespace> lease;
-    const auto opened=(resume||recover)?storage::reopen(descriptor,lease):storage::prepare(descriptor,lease);
-    if(!opened.ok()) std::printf("storage=%s win32=%u\n",storage::outcome_name(opened.outcome),opened.win32_error);
-    CHECK(opened.ok());
-    recovery_namespace=lease->metadata().path;
-    auto& owner=session(); const auto configured=owner.configure(descriptor,std::move(lease));
-    if(!configured_fixture(recovery_case,configured)) return 2;
-    if (defect==L"refuse_configuration") {
-        if (configured.ok()) {
-            CHECK(!owner.campaign_run.enabled() && !owner.accepts_requests());
-            std::puts("PASS interrupted checkpoint waits for startup recovery without importing payloads"); return 0;
-        }
-        CHECK(!configured.ok()); const auto trace=owner.btrace.snapshot(); CHECK(trace.first_failure.sequence);
-        CHECK(trace.first_failure.stage==(resume?BStage::resume:BStage::creation));
-        CHECK(std::strcmp(trace.first_failure.predicate,"resume_checkpoint_incomplete_or_invalid")!=0);
-        std::puts("PASS refused immutable or incomplete campaign contract with exact diagnostic predicate"); return 0;
-    }
-    CHECK(configured.ok());
-    std::array<uintptr_t,20> table{}; Remote remote{table.data(),{}};
-    table[0]=reinterpret_cast<uintptr_t>(put); table[1]=reinterpret_cast<uintptr_t>(get);
-    table[13]=reinterpret_cast<uintptr_t>(exists); table[15]=reinterpret_cast<uintptr_t>(size);
-    table[18]=reinterpret_cast<uintptr_t>(count); table[19]=reinterpret_cast<uintptr_t>(entry);
-    const auto provider=reinterpret_cast<uintptr_t>(&remote);
-    const auto directory=owner.native_root()+"/GAME-AUTOSAVE0";
-    if(recovery_case && (resume||recover)) load_remote(remote);
-    else remote.files[owner.native_root()+"/sentinel-owner-"+owner.namespace_id()+".txt"]=owner.ownership_record();
-    if (defect == L"startup_parser") {
-        startup_parser_refusal(owner);
+    int cold_menu_case() {
+        std::array<unsigned char, 0x1000> native_root{};
+        store(native_root, 0x44, uint32_t{SC_GAME_MAIN_MENU});
+        engine::Binding binding{};
+        binding.root = reinterpret_cast<uintptr_t>(native_root.data());
+        binding.image.base = image;
+        test_campaign_binding(binding.image.base, binding.root);
+        native::test_cold_events(binding, native_load);
+        const auto boundary = native::checkpoint_transition();
+        CHECK(boundary.observed);
+        CHECK(!boundary.observation_reason);
+        CHECK(!boundary.depth);
+        CHECK(!boundary.generation_after);
+        auto invalid = boundary;
+        invalid.depth = 1;
+        CHECK(!owner.campaign_run.prepare_menu_save(invalid));
+        invalid = boundary;
+        invalid.observation_reason = SC_NATIVE_WRONG_THREAD;
+        CHECK(!owner.campaign_run.prepare_menu_save(invalid));
+        CHECK(owner.campaign_run.prepare_menu_save(boundary));
+        CHECK(!owner.campaign_run.prepare_menu_save(boundary));
+        owner.campaign_run.cancel_menu_save();
+        CHECK(owner.campaign_run.prepare_menu_save(boundary));
+        payload += " / native cold MissionSelect shell rewrite";
+        store(file, 0x150, uint64_t(payload.size()));
+        store(file, 0x158, uint64_t(payload.size()));
+        store(file, 0x168, reinterpret_cast<uintptr_t>(payload.data()));
+        writer_fixture::Model presave{remote, source, files, payload, directory};
+        writer_fixture::save(presave, L"queued_checkpoint");
+        const auto rewritten = owner.campaign_run.snapshot();
+        CHECK(rewritten.checkpoint == 2);
+        CHECK(rewritten.continuity_persisted);
+        CHECK(rewritten.readback_verified);
+        CHECK(!rewritten.map_active);
+        CHECK(!rewritten.save_ready);
+        CHECK(owner.campaign_run.begin_resume("game/dlc2/e5m1_spear/e5m1_spear"));
+        CHECK(writer_fixture::load(presave, false, L"native_read"));
+        CHECK(owner.campaign_run.allow_difficulty(difficulty));
+        CHECK(native_transition(difficulty, L"", {}, {}, {}, "game/dlc2/e5m1_spear/e5m1_spear") == 0);
+        CHECK(owner.campaign_run.snapshot().map == "game/dlc2/e5m1_spear/e5m1_spear");
+        std::puts("PASS cold Mission Select generation-zero presave, source, parser and destination");
         return 0;
     }
-    startup_route_fixture::exercise(owner);
-    CHECK(owner.startup_enter(0x1000,0x2000,GetCurrentThreadId()));
-    const bool automatic_resume=resume && defect==L"native_read_c_auto";
-    if(automatic_resume) {
-        if (!owner.recover_startup({provider,steam_owner,put,get,exists,size,count,entry})) {
-            std::printf("REFUSED automatic recovery %s\n",owner.btrace.snapshot().stages[static_cast<size_t>(BStage::resume)].predicate);
-            persist_remote(remote); return 2;
+    int incremental_save_case(writer_fixture::Model& reader) {
+        const auto previous_details = remote.files.at(directory + "/game.details");
+        extra_payloads[0] += " / incremental checkpoint";
+        store(extra_files[0], 0x150, uint64_t(extra_payloads[0].size()));
+        store(extra_files[0], 0x158, uint64_t(extra_payloads[0].size()));
+        store(extra_files[0], 0x168, reinterpret_cast<uintptr_t>(extra_payloads[0].data()));
+        store(data, 0x1c0, reinterpret_cast<uintptr_t>(all_files.data() + 1));
+        store(data, 0x1c8, int32_t{1});
+        store(data, 0x1cc, int32_t{1});
+        const bool tamper = defect == L"native_read_delta_hash";
+        if (tamper) reader.after_first_payload = [&] { remote.files[directory + "/game.details"][0] ^= 1; };
+        auto backup = defect == L"native_read_delta_backup"
+                          ? std::make_shared<BackupJob>(GetCurrentProcessId(), 1, GetTickCount64() + 30000, steam_owner)
+                          : std::shared_ptr<BackupJob>{};
+        CHECK(native_transition(difficulty, L"", [&] {
+                  writer_fixture::save(reader, tamper ? L"delta_retained_hash" : L"queued_checkpoint", backup);
+              }) == 0);
+        if (tamper) {
+            CHECK(!owner.accepts_requests());
+            CHECK(owner.campaign_run.snapshot().checkpoint == 1);
+            CHECK(!owner.campaign_run.snapshot().readback_verified);
+            std::puts("PASS partial-save retained-file tampering refused");
+            return 0;
         }
-        std::printf("automatic recovery %s\n",owner.btrace.snapshot().stages[static_cast<size_t>(BStage::resume)].predicate);
+        CHECK(remote.files.at(directory + "/game.details") == previous_details);
+        CHECK(owner.campaign_run.snapshot().checkpoint == 2);
+        CHECK(owner.campaign_run.snapshot().continuity_persisted);
+        if (backup) CHECK(backup->progress().state == BackupState::complete);
+        CHECK(writer_fixture::load(reader, true, L"native_read"));
+        CHECK(owner.campaign_run.begin_resume());
+        CHECK(writer_fixture::load(reader, false, L"native_read"));
+        std::puts("PASS partial-save complete inventory/readback/catalog/Continue/backup");
+        return 0;
     }
-    if(!recover) CHECK(owner.observe_provider_objects(0x9000,0x9100,provider));
-    if (recover) return recover_campaign_fixture(owner, remote, provider, defect);
-    CHECK(owner.bind_provider(owner.native_root(),provider,owner.ownership_record()));
-    owner.startup_leave(false);
-    CHECK(owner.provider_operation(provider,0x7788));
-    CHECK(owner.publish_profile_catalog(provider,owner.ownership_record(),resume?std::vector<std::string>{"AUTOSAVE0"}:std::vector<std::string>{},"AUTOSAVE0",0,!resume,0));
-    int outcome = 0;
-    exercise_campaign_profile(owner,[&](const std::function<void()>& profile_write) {
-    outcome = [&]() -> int {
-    std::string payload=resume && profile_lifecycle?"second encoded checkpoint payload":"synthetic encoded checkpoint payload";
-    std::string relative="game.details", native_directory=directory;
-    std::array<unsigned char,0x190> file{}; std::array<unsigned char,0x280> data{};
-    store(file,0,image+0x2a575a8); store(file,8,text(relative));
-    const uint64_t length=payload.size(); const uintptr_t buffer=reinterpret_cast<uintptr_t>(payload.data());
-    store(file,0x150,length); store(file,0x158,length); store(file,0x168,buffer); file[0x178]=1;
-    const uintptr_t files=reinterpret_cast<uintptr_t>(file.data()), source=reinterpret_cast<uintptr_t>(data.data());
-    const std::array<uintptr_t,1> file_list{files};
-    store(data,0,text(native_directory)); store(data,0x1c0,reinterpret_cast<uintptr_t>(file_list.data())); store(data,0x1c8,int32_t{1}); store(data,0x1cc,int32_t{1});
-    std::array<std::string,3> extra_names{"game_duration.dat","game.details-BACKUP","game_duration.dat-BACKUP"};
-    std::array<std::string,3> extra_payloads{"encoded duration checkpoint","older details checkpoint","older duration checkpoint"};
-    if (!resume && defect==L"native_read_c_rollback") extra_payloads[0]=std::string(92135,'d');
-    std::array<std::array<unsigned char,0x190>,3> extra_files{};
-    std::array<uintptr_t,4> all_files{files};
-    if (native_read || profile_overlap) {
-        for (size_t i=0;i<extra_files.size();++i) {
-            extra_files[i]=file; store(extra_files[i],8,text(extra_names[i]));
-            store(extra_files[i],0x150,uint64_t(extra_payloads[i].size())); store(extra_files[i],0x158,uint64_t(extra_payloads[i].size()));
-            store(extra_files[i],0x168,reinterpret_cast<uintptr_t>(extra_payloads[i].data()));
-            all_files[i+1]=reinterpret_cast<uintptr_t>(extra_files[i].data());
-            if (resume && !recovery_case) remote.files[directory+"/"+extra_names[i]]=extra_payloads[i];
+    int repeated_menu_case(writer_fixture::Model& reader) {
+        CHECK(writer_fixture::load(reader, true, L"native_read"));
+        CHECK(writer_fixture::load(reader, true, L"native_read"));
+        CHECK(owner.campaign_run.snapshot().checkpoint == 2);
+        CHECK(owner.campaign_run.begin_resume());
+        if (defect == L"native_read_menu_cycle_hash") {
+            remote.files[directory + "/game.details"][0] = 'X';
+            CHECK(!writer_fixture::load(reader, false, L"native_read"));
+            CHECK(owner.campaign_run.snapshot().checkpoint == 2);
+            CHECK(std::strcmp(owner.btrace.snapshot().first_failure.predicate, "resume_payload_hash_mismatch") == 0);
+            std::puts("PASS repeated Continue rejects changed payload");
+            return 0;
         }
-        const int32_t file_count=retail_pair || profile_overlap?2:4;
-        if (profile_overlap) std::swap(all_files[0],all_files[1]); // native duration precedes details
-        store(data,0x1c0,reinterpret_cast<uintptr_t>(all_files.data())); store(data,0x1c8,file_count); store(data,0x1cc,file_count);
-        if (resume && !recovery_case) remote.files[directory+"/game.details"]=payload;
+        CHECK(writer_fixture::load(reader, false, L"native_read"));
+        CHECK(owner.campaign_run.allow_difficulty(difficulty));
+        writer_fixture::Model next{remote, source, files, payload, directory};
+        CHECK(native_transition(difficulty, L"", [&] { writer_fixture::save(next, L"queued_checkpoint"); }) == 0);
+        CHECK(writer_fixture::load(next, true, L"native_read"));
+        CHECK(owner.campaign_run.snapshot().checkpoint == 3);
+        CHECK(owner.accepts_requests());
+        std::puts("PASS shell/catalog/Continue/save/catalog checkpoint=3");
+        return 0;
     }
-    engine::LocalMemory memory;
-    if (descriptor.campaign.restart_stage) {
-        return restart_fixture::run(owner,resume,defect,source,directory,memory,[&] {
-            writer_fixture::Model restart_writer{remote,source,files,payload,directory};
-            profile_write(); writer_fixture::save(restart_writer,L"queued_checkpoint");
-        });
+    void save_native_read_checkpoint(writer_fixture::Model& reader) {
+        CHECK(owner.campaign_run.snapshot().phase == "reopened");
+        if (defect == L"native_read_c_active_mission") return;
+        const auto next_backup =
+            defect == L"native_read_c_backup_next"
+                ? std::make_shared<BackupJob>(GetCurrentProcessId(), 1, GetTickCount64() + 30000, steam_owner)
+                : std::shared_ptr<BackupJob>{};
+        writer_fixture::save(reader, L"queued_checkpoint", next_backup);
+        if (next_backup) {
+            const auto progress = next_backup->progress();
+            CHECK(progress.state == BackupState::complete);
+            std::ofstream selected(std::filesystem::path(argv[2]) / "selected-backup.txt");
+            selected << std::filesystem::path(progress.output.path).filename().string() << '\n';
+        }
     }
-    // A later save owns a different native SaveData/file and different bytes;
-    // reopening checkpoint2 must not accidentally validate checkpoint1.
-    std::string next_payload=resume?"third encoded checkpoint payload":"second encoded checkpoint payload";
-    auto next_file=file; auto next_data=data;
-    const uintptr_t next_stream=reinterpret_cast<uintptr_t>(next_file.data()), next_source=reinterpret_cast<uintptr_t>(next_data.data());
-    const std::array<uintptr_t,1> next_list{next_stream};
-    store(next_file,0x150,uint64_t{next_payload.size()}); store(next_file,0x158,uint64_t{next_payload.size()});
-    store(next_file,0x168,reinterpret_cast<uintptr_t>(next_payload.data()));
-    store(next_data,0x1c0,reinterpret_cast<uintptr_t>(next_list.data()));
-    unsigned profile_writes=0;
-    const auto write_profile=[&] {
-        profile_write(); ++profile_writes;
-        CHECK(owner.native_io() && owner.accepts_requests() && !owner.btrace.snapshot().first_failure.sequence);
-    };
-    if (defect==L"fresh_catalog") {
-        remote.files[directory+"/game_duration.dat"]="catalog duration";
-        remote.files[directory+"/game.details"]=payload;
-        writer_fixture::Model reader{remote,source,files,payload,directory};
-        CHECK(writer_fixture::load(reader,true,defect));
-        const auto snapshot=owner.campaign_run.snapshot();
-        CHECK(snapshot.phase=="armed" && !snapshot.resumed && !snapshot.native_saved && !snapshot.continuity_persisted);
-        CHECK(!snapshot.source_verified && !snapshot.parser_completed);
-        CHECK(!owner.btrace.snapshot().first_failure.sequence);
-        std::puts("PASS complete fresh catalog read leaves gameplay Resume unverified"); return 0;
+    void rewrite_active_mission() {
+        if (defect != L"native_read_c_active_mission") return;
+        const auto active = owner.campaign_run.snapshot();
+        const auto boundary = native::checkpoint_transition();
+        CHECK(active.map_active);
+        CHECK(!active.continuity_persisted);
+        CHECK(boundary.generation_after == active.generation_after);
+        CHECK(owner.campaign_run.prepare_menu_save(boundary));
+        CHECK(!owner.campaign_run.prepare_menu_save(boundary));
+        owner.campaign_run.cancel_menu_save();
+        CHECK(owner.campaign_run.prepare_menu_save(boundary));
+        payload += " / active Fortress Mission Select rewrite";
+        store(file, 0x150, uint64_t(payload.size()));
+        store(file, 0x158, uint64_t(payload.size()));
+        store(file, 0x168, reinterpret_cast<uintptr_t>(payload.data()));
+        writer_fixture::Model presave{remote, source, files, payload, directory};
+        writer_fixture::save(presave, L"queued_checkpoint");
+        const auto rewritten = owner.campaign_run.snapshot();
+        CHECK(rewritten.checkpoint > active.checkpoint);
+        CHECK(rewritten.continuity_persisted);
+        CHECK(rewritten.readback_verified);
+        CHECK(rewritten.map_active);
+        CHECK(rewritten.map == "game/hub/hub");
+        CHECK(owner.campaign_run.begin_resume("game/dlc2/e5m1_spear/e5m1_spear"));
+        CHECK(writer_fixture::load(presave, false, L"native_read"));
     }
-    if (run_foreign_access_case(owner, source, defect)) return 0;
-    if (defect.rfind(L"cross_map",0)==0) {
-        if (resume) {
+    void rewrite_menu_shell() {
+        if (defect.rfind(L"native_read_shell", 0) != 0) return;
+        const auto boundary = native::checkpoint_transition();
+        CHECK(boundary.generation_after);
+        auto zero = boundary;
+        zero.generation_after = 0;
+        CHECK(!owner.campaign_run.prepare_menu_save(zero));
+        if (defect != L"native_read_shell_unarmed") CHECK(owner.campaign_run.prepare_menu_save(boundary));
+        if (defect == L"native_read_shell_unarmed" || defect == L"native_read_shell_generation") {
+            auto wrong = boundary;
+            wrong.state_read = true;
+            wrong.game = SC_GAME_MAIN_MENU;
+            if (defect == L"native_read_shell_generation") ++wrong.generation_after;
+            CHECK(!owner.campaign_run.checkpoint_ready(wrong));
+            CHECK(owner.campaign_run.snapshot().checkpoint == 2);
+            return;
+        }
+        payload += " / native MissionSelect shell rewrite";
+        store(file, 0x150, uint64_t(payload.size()));
+        store(file, 0x158, uint64_t(payload.size()));
+        store(file, 0x168, reinterpret_cast<uintptr_t>(payload.data()));
+        writer_fixture::Model presave{remote, source, files, payload, directory};
+        writer_fixture::save(presave, defect == L"native_read_shell_foreign"   ? L"queued_foreign"
+                                      : defect == L"native_read_shell_failure" ? L"queued_save_failure"
+                                                                               : L"queued_checkpoint");
+        if (defect == L"native_read_shell_foreign" || defect == L"native_read_shell_failure") {
+            CHECK(!owner.accepts_requests());
+            CHECK(owner.campaign_run.snapshot().checkpoint == 2);
+            return;
+        }
+        const auto rewritten = owner.campaign_run.snapshot();
+        CHECK(rewritten.checkpoint == 3);
+        CHECK(rewritten.continuity_persisted);
+        CHECK(rewritten.readback_verified);
+        CHECK(!rewritten.map_active);
+        CHECK(!rewritten.save_ready);
+        CHECK(rewritten.map == "game/hub/hub");
+        CHECK(owner.campaign_run.begin_resume("game/dlc2/e5m1_spear/e5m1_spear"));
+        CHECK(writer_fixture::load(presave, false, L"native_read"));
+        CHECK(owner.campaign_run.snapshot().source_checkpoint == 3);
+    }
+    bool native_read_refused(bool loaded, bool corrupt, const std::map<std::wstring, const char*>& expected) {
+        if (defect == L"native_read_c_rollback") {
+            CHECK(!loaded);
+            CHECK(owner.campaign_run.snapshot().checkpoint == 1);
+            CHECK(!owner.campaign_run.snapshot().parser_completed);
+            CHECK(owner.campaign_run.snapshot().reason == "resume_payload_hash_mismatch");
+            std::puts("PASS provider rollback without confirmed hashes is refused");
+            return true;
+        }
+        if (!loaded && expected.count(defect)) {
+            const auto first = owner.btrace.snapshot().first_failure;
+            CHECK(std::strcmp(first.predicate, expected.at(defect)) == 0);
+            CHECK(owner.campaign_run.snapshot().checkpoint == 1);
+            CHECK(!owner.campaign_run.snapshot().parser_completed);
+            std::puts("PASS precise gameplay-read refusal without checkpoint completion");
+            return true;
+        }
+        if (defect == L"native_read_checkpoint_missing" || defect == L"native_read_checkpoint_wrong" ||
+            defect == L"native_read_checkpoint_assign") {
+            CHECK(!loaded);
+            CHECK(!owner.campaign_run.snapshot().parser_completed);
+            CHECK(owner.campaign_run.snapshot().reason == (defect == L"native_read_checkpoint_assign"
+                                                               ? "native_resume_request_map_failed"
+                                                               : "native_mission_checkpoint_missing"));
+            std::puts("PASS persisted mission checkpoint refusal before gameplay");
+            return true;
+        }
+        if (corrupt) {
+            CHECK(!loaded);
+            const auto first = owner.btrace.snapshot().first_failure;
+            CHECK(std::strcmp(first.predicate, "resume_payload_hash_mismatch") == 0);
+            CHECK(!owner.campaign_run.snapshot().parser_completed);
+            std::puts("PASS native authentication failure after successful menu hydration");
+            return true;
+        }
+        return false;
+    }
+    int confirmed_native_read_case(writer_fixture::Model& reader) {
+        const auto saved = owner.campaign_run.snapshot();
+        if (automatic_resume) {
+            const auto recovered = owner.btrace.snapshot().stages[static_cast<size_t>(BStage::checkpoint_recovery)];
+            CHECK(recovered.status == BStatus::succeeded);
+            CHECK((std::strcmp(recovered.predicate, "previous_checkpoint_restored") == 0 ||
+                   std::strcmp(recovered.predicate, "interrupted_save_recovered") == 0));
+        }
+        CHECK((automatic_resume ? saved.checkpoint == saved.source_checkpoint + 1
+                                : saved.checkpoint == 2 && saved.source_checkpoint == 1));
+        CHECK(saved.source_verified);
+        CHECK(saved.parser_completed);
+        CHECK(saved.native_saved);
+        CHECK(saved.readback_verified);
+        CHECK(saved.continuity_persisted);
+        CHECK(remote.files.at(directory + "/game.details") == payload);
+        if (defect == L"native_read_checkpoint") {
+            CHECK(writer_fixture::load(reader, true, L"native_read"));
             CHECK(owner.campaign_run.begin_resume());
-            CHECK(owner.campaign_run.allow_access(source,directory,false,false));
-            CHECK(owner.campaign_run.verify_source(memory,source,image));
-            CHECK(owner.campaign_run.parser_enter(source)); owner.campaign_run.parser_leave(0);
-            CHECK(owner.campaign_run.allow_difficulty(difficulty));
-        } else navigation_fixture::create(difficulty,L"");
-        const auto save_with_profile=[&] {
-            if (!profile_overlap) write_profile();
-            writer_fixture::Model next{remote,source,files,payload,directory};
-            if (profile_overlap) next.after_first_payload=[&] {
-                CHECK(owner.campaign_run.snapshot().phase=="native_save_pending");
-                write_profile();
-                CHECK(!owner.campaign_run.snapshot().continuity_persisted);
-                CHECK(std::strcmp(owner.btrace.snapshot().stages[static_cast<size_t>(BStage::profile_publish)].predicate,
-                    "selection_deferred_to_native_checkpoint")==0);
-                if (defect==L"cross_map_profile_overlap_failed_save") next.failure=true;
-            };
-            writer_fixture::save(next,L"queued_checkpoint");
-        };
-        if (defect==L"cross_map_profile_overlap_failed_save") {
-            native_transition(difficulty,L"",save_with_profile);
-            CHECK(!owner.accepts_requests() && !owner.campaign_run.snapshot().continuity_persisted);
-            CHECK(owner.campaign_run.snapshot().checkpoint==0);
-            std::puts("PASS deferred PROFILE cannot certify failed gameplay save"); return 0;
+            CHECK(writer_fixture::load(reader, false, L"native_read"));
+            std::puts("PASS dual Hub/ARC snapshot checkpoint preserved in same process");
+            return 0;
         }
-        return travel_fixture::run(difficulty,defect,save_with_profile);
+        if (defect == L"native_read_menu_cycle" || defect == L"native_read_menu_cycle_hash") {
+            return repeated_menu_case(reader);
+        }
+        std::printf("PASS separate-process menu/read/parser/Continue/save checkpoint=%llu files=%u pid=%lu\n",
+                    saved.checkpoint, retail_pair ? 2u : 4u, GetCurrentProcessId());
+        return 0;
     }
-    if (resume) {
-            if (defect==L"native_read_c_active_mission" || automatic_resume) CHECK(owner.campaign_run.snapshot().source_checkpoint>=1);
-            else CHECK(owner.campaign_run.snapshot().source_checkpoint==(profile_lifecycle || defect==L"native_read_delta_resume" || defect==L"native_read_checkpoint_resume"?2u:1u));
+    void unhydrated_menu_case() {
+        CampaignTransition unhydrated{};
+        unhydrated.observed = true;
+        CHECK(!owner.campaign_run.prepare_menu_save(unhydrated));
+    }
+    bool hydrate_native_menu(writer_fixture::Model& reader, bool corrupt,
+                             const std::map<std::wstring, const char*>& expected) {
+        const bool metadata_ok = writer_fixture::load(
+            reader, true, corrupt || defect == L"native_read_checkpoint_assign" ? L"native_read" : defect);
+        if (!metadata_ok) {
+            const auto first = owner.btrace.snapshot().first_failure;
+            CHECK(expected.count(defect));
+            CHECK(std::strcmp(first.predicate, expected.at(defect)) == 0);
+            CHECK(first.operation == 0);
+            CHECK(!owner.campaign_run.snapshot().parser_completed);
+            CHECK(owner.campaign_run.snapshot().checkpoint == 1);
+            std::puts("PASS precise ordinary-read/parser refusal without invented checkpoint completion");
+            return false;
+        }
+        return true;
+    }
+    int resume_loaded_gameplay(writer_fixture::Model& reader, const std::string& destination) {
+        payload = "new primary checkpoint after native Continue";
+        store(file, 0x150, uint64_t(payload.size()));
+        store(file, 0x158, uint64_t(payload.size()));
+        store(file, 0x168, reinterpret_cast<uintptr_t>(payload.data()));
+        CHECK(native_transition(
+                  difficulty, defect == L"native_read_c_active_mission" ? defect : L"",
+                  [&] { save_native_read_checkpoint(reader); }, [&] { rewrite_active_mission(); }, {}, destination,
+                  [&] { rewrite_menu_shell(); }) == 0);
+        if (defect == L"native_read_c_active_mission") {
+            const auto active = owner.campaign_run.snapshot();
+            CHECK(!active.map_active);
+            CHECK(active.source_checkpoint == active.checkpoint);
+            CHECK(active.parser_completed);
+            CHECK(owner.campaign_run.allow_difficulty(difficulty));
+            CHECK(native_transition(difficulty, defect, {}, {}, {}, "game/dlc2/e5m1_spear/e5m1_spear") == 0);
+            CHECK(owner.campaign_run.snapshot().map == "game/dlc2/e5m1_spear/e5m1_spear");
+            std::puts("PASS active Fortress Mission Select presave, source, parser and destination");
+            return 0;
+        }
+        if (defect.rfind(L"native_read_shell", 0) == 0) {
+            if (defect == L"native_read_shell") {
+                CHECK(owner.campaign_run.allow_difficulty(difficulty));
+                CHECK(native_transition(difficulty, L"", {}, {}, {}, "game/dlc2/e5m1_spear/e5m1_spear") == 0);
+                CHECK(owner.campaign_run.snapshot().map == "game/dlc2/e5m1_spear/e5m1_spear");
+            }
+            std::puts("PASS owned Mission Select shell save/readback/load and boundary refusals");
+            return 0;
+        }
+        return confirmed_native_read_case(reader);
+    }
+    int native_read_case() {
+        const bool cold_menu = defect == L"native_read_menu_cold" || defect == L"native_read_c_menu_cold";
+        if (cold_menu) {
+            unhydrated_menu_case();
+        }
+        writer_fixture::Model reader{remote, source, files, payload, directory};
+        const bool corrupt = defect == L"native_read_hash";
+        const std::map<std::wstring, const char*> expected{
+            {L"native_read_missing", "resume_file_count_mismatch"},
+            {L"native_read_duplicate", "resume_file_duplicate"},
+            {L"native_read_mixed", "resume_file_group_mixed"},
+            {L"native_read_failed", "ordinary_native_decode_result"},
+            {L"native_read_wrong_mode", "load_parser_source_not_correlated"},
+            {L"native_read_wrong_caller", "load_parser_source_not_correlated"}};
+        if (!hydrate_native_menu(reader, corrupt, expected)) return 0;
+        CHECK(owner.campaign_run.snapshot().phase == "armed");
+        if (cold_menu) {
+            return cold_menu_case();
+        }
+        navigation_fixture::continue_files();
+        const std::string destination =
+            defect.rfind(L"native_read_mission", 0) == 0 ? "game/dlc2/e5m1_spear/e5m1_spear" : "";
+        CHECK(owner.campaign_run.begin_resume(destination));
+        const bool rollback = defect == L"native_read_c_rollback";
+        if (rollback) {
+            remote.files[directory + "/game_duration.dat"] = std::string(64379, 'd');
+            remote.files[directory + "/game.details"] = "older valid fixture details";
+        }
+        if (corrupt) remote.files[directory + "/game.details"][0] = 'X';
+        const bool loaded = writer_fixture::load(reader, false, defect);
+        if (native_read_refused(loaded, corrupt, expected)) return 0;
+        CHECK(loaded);
+        CHECK(owner.campaign_run.allow_difficulty(difficulty));
+        if (defect == L"native_read_delta_resume" || defect == L"native_read_checkpoint_resume") {
+            CHECK(native_transition(difficulty, L"") == 0);
+            CHECK(owner.campaign_run.snapshot().source_checkpoint == 2);
+            std::puts("PASS separate-process partial-save catalog/parser/resume");
+            return 0;
+        }
+        if (defect.rfind(L"native_read_delta", 0) == 0 || rollback) {
+            return incremental_save_case(reader);
+        }
+        if (defect == L"native_read_mission_wrong_map") {
+            CHECK(!owner.campaign_run.map_begin("game/sp/not_selected", 1, 1));
+            CHECK(owner.campaign_run.snapshot().reason == "lifecycle_resume_map_mismatch");
+            std::puts("PASS native Mission Select rejects a different destination");
+            return 0;
+        }
+        return resume_loaded_gameplay(reader, destination);
+    }
+    void prepare_cross_map_resume() {
+        CHECK(owner.campaign_run.begin_resume());
+        CHECK(owner.campaign_run.allow_access(source, directory, false, false));
+        CHECK(owner.campaign_run.verify_source(memory, source, image));
+        CHECK(owner.campaign_run.parser_enter(source));
+        owner.campaign_run.parser_leave(0);
+        CHECK(owner.campaign_run.allow_difficulty(difficulty));
+    }
+    int cross_map_case() {
+        if (resume) {
+            prepare_cross_map_resume();
+        } else
+            navigation_fixture::create(difficulty, L"");
+        const auto save_with_profile = [&] {
+            if (!profile_overlap) write_profile();
+            writer_fixture::Model next{remote, source, files, payload, directory};
+            if (profile_overlap)
+                next.after_first_payload = [&] {
+                    CHECK(owner.campaign_run.snapshot().phase == "native_save_pending");
+                    write_profile();
+                    CHECK(!owner.campaign_run.snapshot().continuity_persisted);
+                    CHECK(std::strcmp(
+                              owner.btrace.snapshot().stages[static_cast<size_t>(BStage::profile_publish)].predicate,
+                              "selection_deferred_to_native_checkpoint") == 0);
+                    if (defect == L"cross_map_profile_overlap_failed_save") next.failure = true;
+                };
+            writer_fixture::save(next, L"queued_checkpoint");
+        };
+        if (defect == L"cross_map_profile_overlap_failed_save") {
+            native_transition(difficulty, L"", save_with_profile);
+            CHECK(!owner.accepts_requests());
+            CHECK(!owner.campaign_run.snapshot().continuity_persisted);
+            CHECK(owner.campaign_run.snapshot().checkpoint == 0);
+            std::puts("PASS deferred PROFILE cannot certify failed gameplay save");
+            return 0;
+        }
+        return travel_fixture::run(difficulty, defect, save_with_profile);
+    }
+    int fresh_catalog_case() {
+        remote.files[directory + "/game_duration.dat"] = "catalog duration";
+        remote.files[directory + "/game.details"] = payload;
+        writer_fixture::Model reader{remote, source, files, payload, directory};
+        CHECK(writer_fixture::load(reader, true, defect));
+        const auto snapshot = owner.campaign_run.snapshot();
+        CHECK(snapshot.phase == "armed");
+        CHECK(!snapshot.resumed);
+        CHECK(!snapshot.native_saved);
+        CHECK(!snapshot.continuity_persisted);
+        CHECK(!snapshot.source_verified);
+        CHECK(!snapshot.parser_completed);
+        CHECK(!owner.btrace.snapshot().first_failure.sequence);
+        std::puts("PASS complete fresh catalog read leaves gameplay Resume unverified");
+        return 0;
+    }
+    void prepare_payloads() {
+        payload =
+            resume && profile_lifecycle ? "second encoded checkpoint payload" : "synthetic encoded checkpoint payload";
+        relative = "game.details";
+        native_directory = directory;
+
+        store(file, 0, image + 0x2a575a8);
+        store(file, 8, text(relative));
+        const uint64_t length = payload.size();
+        const uintptr_t buffer = reinterpret_cast<uintptr_t>(payload.data());
+        store(file, 0x150, length);
+        store(file, 0x158, length);
+        store(file, 0x168, buffer);
+        file[0x178] = 1;
+
+        store(data, 0, text(native_directory));
+        store(data, 0x1c0, reinterpret_cast<uintptr_t>(file_list.data()));
+        store(data, 0x1c8, int32_t{1});
+        store(data, 0x1cc, int32_t{1});
+
+        if (!resume && defect == L"native_read_c_rollback") extra_payloads[0] = std::string(92135, 'd');
+
+        if (native_read || profile_overlap) {
+            for (size_t i = 0; i < extra_files.size(); ++i) {
+                extra_files[i] = file;
+                store(extra_files[i], 8, text(extra_names[i]));
+                store(extra_files[i], 0x150, uint64_t(extra_payloads[i].size()));
+                store(extra_files[i], 0x158, uint64_t(extra_payloads[i].size()));
+                store(extra_files[i], 0x168, reinterpret_cast<uintptr_t>(extra_payloads[i].data()));
+                all_files[i + 1] = reinterpret_cast<uintptr_t>(extra_files[i].data());
+                if (resume && !recovery_case) remote.files[directory + "/" + extra_names[i]] = extra_payloads[i];
+            }
+            const int32_t file_count = retail_pair || profile_overlap ? 2 : 4;
+            if (profile_overlap) std::swap(all_files[0], all_files[1]); // native duration precedes details
+            store(data, 0x1c0, reinterpret_cast<uintptr_t>(all_files.data()));
+            store(data, 0x1c8, file_count);
+            store(data, 0x1cc, file_count);
+            if (resume && !recovery_case) remote.files[directory + "/game.details"] = payload;
+        }
+    }
+    void prepare_next_checkpoint() {
+        // A later save owns a different native SaveData/file and different bytes;
+        // reopening checkpoint2 must not accidentally validate checkpoint1.
+        next_payload = resume ? "third encoded checkpoint payload" : "second encoded checkpoint payload";
+        next_file = file;
+        next_data = data;
+
+        store(next_file, 0x150, uint64_t{next_payload.size()});
+        store(next_file, 0x158, uint64_t{next_payload.size()});
+        store(next_file, 0x168, reinterpret_cast<uintptr_t>(next_payload.data()));
+        store(next_data, 0x1c0, reinterpret_cast<uintptr_t>(next_list.data()));
+    }
+    int resume_case() {
+        if (defect == L"native_read_c_active_mission" || automatic_resume)
+            CHECK(owner.campaign_run.snapshot().source_checkpoint >= 1);
+        else
+            CHECK(owner.campaign_run.snapshot().source_checkpoint ==
+                  (profile_lifecycle || defect == L"native_read_delta_resume" ||
+                           defect == L"native_read_checkpoint_resume"
+                       ? 2u
+                       : 1u));
         if (native_read) {
-            const bool cold_menu=defect==L"native_read_menu_cold" || defect==L"native_read_c_menu_cold";
-            if (cold_menu) {
-                CampaignTransition unhydrated{};
-                unhydrated.observed=true;
-                CHECK(!owner.campaign_run.prepare_menu_save(unhydrated));
-            }
-            writer_fixture::Model reader{remote,source,files,payload,directory};
-            const bool corrupt=defect==L"native_read_hash";
-            const std::map<std::wstring,const char*> expected{
-                {L"native_read_missing","resume_file_count_mismatch"},
-                {L"native_read_duplicate","resume_file_duplicate"},
-                {L"native_read_mixed","resume_file_group_mixed"},
-                {L"native_read_failed","ordinary_native_decode_result"},
-                {L"native_read_wrong_mode","load_parser_source_not_correlated"},
-                {L"native_read_wrong_caller","load_parser_source_not_correlated"}};
-            const bool metadata_ok=writer_fixture::load(reader,true,corrupt || defect==L"native_read_checkpoint_assign"?L"native_read":defect);
-            if (!metadata_ok) {
-                const auto first=owner.btrace.snapshot().first_failure;
-                CHECK(expected.count(defect) && std::strcmp(first.predicate,expected.at(defect))==0);
-                CHECK(first.operation==0 && !owner.campaign_run.snapshot().parser_completed);
-                CHECK(owner.campaign_run.snapshot().checkpoint==1);
-                std::puts("PASS precise ordinary-read/parser refusal without invented checkpoint completion"); return 0;
-            }
-            CHECK(owner.campaign_run.snapshot().phase=="armed");
-            if (cold_menu) {
-                std::array<unsigned char,0x1000> native_root{};
-                store(native_root,0x44,uint32_t{SC_GAME_MAIN_MENU});
-                engine::Binding binding{};
-                binding.root=reinterpret_cast<uintptr_t>(native_root.data());
-                binding.image.base=image;
-                test_campaign_binding(binding.image.base,binding.root);
-                native::test_cold_events(binding,native_load);
-                const auto boundary=native::checkpoint_transition();
-                CHECK(boundary.observed && !boundary.observation_reason && !boundary.depth && !boundary.generation_after);
-                auto invalid=boundary; invalid.depth=1;
-                CHECK(!owner.campaign_run.prepare_menu_save(invalid));
-                invalid=boundary; invalid.observation_reason=SC_NATIVE_WRONG_THREAD;
-                CHECK(!owner.campaign_run.prepare_menu_save(invalid));
-                CHECK(owner.campaign_run.prepare_menu_save(boundary));
-                CHECK(!owner.campaign_run.prepare_menu_save(boundary));
-                owner.campaign_run.cancel_menu_save();
-                CHECK(owner.campaign_run.prepare_menu_save(boundary));
-                payload += " / native cold MissionSelect shell rewrite";
-                store(file,0x150,uint64_t(payload.size())); store(file,0x158,uint64_t(payload.size()));
-                store(file,0x168,reinterpret_cast<uintptr_t>(payload.data()));
-                writer_fixture::Model presave{remote,source,files,payload,directory};
-                writer_fixture::save(presave,L"queued_checkpoint");
-                const auto rewritten=owner.campaign_run.snapshot();
-                CHECK(rewritten.checkpoint==2 && rewritten.continuity_persisted && rewritten.readback_verified &&
-                      !rewritten.map_active && !rewritten.save_ready);
-                CHECK(owner.campaign_run.begin_resume("game/dlc2/e5m1_spear/e5m1_spear"));
-                CHECK(writer_fixture::load(presave,false,L"native_read"));
-                CHECK(owner.campaign_run.allow_difficulty(difficulty));
-                CHECK(native_transition(difficulty,L"",{},{},{},"game/dlc2/e5m1_spear/e5m1_spear")==0);
-                CHECK(owner.campaign_run.snapshot().map=="game/dlc2/e5m1_spear/e5m1_spear");
-                std::puts("PASS cold Mission Select generation-zero presave, source, parser and destination"); return 0;
-            }
-            navigation_fixture::continue_files();
-            const std::string destination=defect.rfind(L"native_read_mission",0)==0?"game/dlc2/e5m1_spear/e5m1_spear":"";
-            CHECK(owner.campaign_run.begin_resume(destination));
-            const bool rollback=defect==L"native_read_c_rollback";
-            if (rollback) {
-                remote.files[directory+"/game_duration.dat"]=std::string(64379,'d');
-                remote.files[directory+"/game.details"]="older valid fixture details";
-            }
-            if (corrupt) remote.files[directory+"/game.details"][0]='X';
-            const bool loaded=writer_fixture::load(reader,false,defect);
-            if (defect==L"native_read_c_rollback") {
-                CHECK(!loaded && owner.campaign_run.snapshot().checkpoint==1 && !owner.campaign_run.snapshot().parser_completed);
-                CHECK(owner.campaign_run.snapshot().reason=="resume_payload_hash_mismatch");
-                std::puts("PASS provider rollback without confirmed hashes is refused"); return 0;
-            }
-            if (!loaded && expected.count(defect)) {
-                const auto first=owner.btrace.snapshot().first_failure;
-                CHECK(std::strcmp(first.predicate,expected.at(defect))==0);
-                CHECK(owner.campaign_run.snapshot().checkpoint==1 && !owner.campaign_run.snapshot().parser_completed);
-                std::puts("PASS precise gameplay-read refusal without checkpoint completion"); return 0;
-            }
-            if(defect==L"native_read_checkpoint_missing" || defect==L"native_read_checkpoint_wrong" || defect==L"native_read_checkpoint_assign") {
-                CHECK(!loaded && !owner.campaign_run.snapshot().parser_completed);
-                CHECK(owner.campaign_run.snapshot().reason==(defect==L"native_read_checkpoint_assign"?
-                    "native_resume_request_map_failed":"native_mission_checkpoint_missing"));
-                std::puts("PASS persisted mission checkpoint refusal before gameplay"); return 0;
-            }
-            if (corrupt) {
-                CHECK(!loaded); const auto first=owner.btrace.snapshot().first_failure;
-                CHECK(std::strcmp(first.predicate,"resume_payload_hash_mismatch")==0);
-                CHECK(!owner.campaign_run.snapshot().parser_completed);
-                std::puts("PASS native authentication failure after successful menu hydration"); return 0;
-            }
-            CHECK(loaded && owner.campaign_run.allow_difficulty(difficulty));
-            if (defect==L"native_read_delta_resume" || defect==L"native_read_checkpoint_resume") {
-                CHECK(native_transition(difficulty,L"")==0);
-                CHECK(owner.campaign_run.snapshot().source_checkpoint==2);
-                std::puts("PASS separate-process partial-save catalog/parser/resume"); return 0;
-            }
-            if (defect.rfind(L"native_read_delta",0)==0 || rollback) {
-                const auto previous_details=remote.files.at(directory+"/game.details");
-                extra_payloads[0]+=" / incremental checkpoint";
-                store(extra_files[0],0x150,uint64_t(extra_payloads[0].size()));
-                store(extra_files[0],0x158,uint64_t(extra_payloads[0].size()));
-                store(extra_files[0],0x168,reinterpret_cast<uintptr_t>(extra_payloads[0].data()));
-                store(data,0x1c0,reinterpret_cast<uintptr_t>(all_files.data()+1));
-                store(data,0x1c8,int32_t{1}); store(data,0x1cc,int32_t{1});
-                const bool tamper=defect==L"native_read_delta_hash";
-                if (tamper) reader.after_first_payload=[&] { remote.files[directory+"/game.details"][0]^=1; };
-                auto backup=defect==L"native_read_delta_backup"?
-                    std::make_shared<BackupJob>(GetCurrentProcessId(),1,GetTickCount64()+30000,steam_owner):std::shared_ptr<BackupJob>{};
-                CHECK(native_transition(difficulty,L"",[&] {
-                    writer_fixture::save(reader,tamper?L"delta_retained_hash":L"queued_checkpoint",backup);
-                })==0);
-                if (tamper) {
-                    CHECK(!owner.accepts_requests() && owner.campaign_run.snapshot().checkpoint==1);
-                    CHECK(!owner.campaign_run.snapshot().readback_verified);
-                    std::puts("PASS partial-save retained-file tampering refused"); return 0;
-                }
-                CHECK(remote.files.at(directory+"/game.details")==previous_details);
-                CHECK(owner.campaign_run.snapshot().checkpoint==2 && owner.campaign_run.snapshot().continuity_persisted);
-                if (backup) CHECK(backup->progress().state==BackupState::complete);
-                CHECK(writer_fixture::load(reader,true,L"native_read"));
-                CHECK(owner.campaign_run.begin_resume());
-                CHECK(writer_fixture::load(reader,false,L"native_read"));
-                std::puts("PASS partial-save complete inventory/readback/catalog/Continue/backup"); return 0;
-            }
-            if (defect==L"native_read_mission_wrong_map") {
-                CHECK(!owner.campaign_run.map_begin("game/sp/not_selected",1,1));
-                CHECK(owner.campaign_run.snapshot().reason=="lifecycle_resume_map_mismatch");
-                std::puts("PASS native Mission Select rejects a different destination"); return 0;
-            }
-            payload="new primary checkpoint after native Continue";
-            store(file,0x150,uint64_t(payload.size())); store(file,0x158,uint64_t(payload.size()));
-            store(file,0x168,reinterpret_cast<uintptr_t>(payload.data()));
-            CHECK(native_transition(difficulty,defect==L"native_read_c_active_mission"?defect:L"",[&] {
-                CHECK(owner.campaign_run.snapshot().phase=="reopened");
-                if (defect==L"native_read_c_active_mission") return;
-                const auto next_backup=defect==L"native_read_c_backup_next"?
-                    std::make_shared<BackupJob>(GetCurrentProcessId(),1,GetTickCount64()+30000,steam_owner):std::shared_ptr<BackupJob>{};
-                writer_fixture::save(reader,L"queued_checkpoint",next_backup);
-                if(next_backup) {
-                    const auto progress=next_backup->progress(); CHECK(progress.state==BackupState::complete);
-                    std::ofstream selected(std::filesystem::path(argv[2])/"selected-backup.txt");
-                    selected<<std::filesystem::path(progress.output.path).filename().string()<<'\n';
-                }
-            },[&] {
-                if (defect!=L"native_read_c_active_mission") return;
-                const auto active=owner.campaign_run.snapshot();
-                const auto boundary=native::checkpoint_transition();
-                CHECK(active.map_active && !active.continuity_persisted &&
-                    boundary.generation_after==active.generation_after);
-                CHECK(owner.campaign_run.prepare_menu_save(boundary));
-                CHECK(!owner.campaign_run.prepare_menu_save(boundary));
-                owner.campaign_run.cancel_menu_save();
-                CHECK(owner.campaign_run.prepare_menu_save(boundary));
-                payload += " / active Fortress Mission Select rewrite";
-                store(file,0x150,uint64_t(payload.size())); store(file,0x158,uint64_t(payload.size()));
-                store(file,0x168,reinterpret_cast<uintptr_t>(payload.data()));
-                writer_fixture::Model presave{remote,source,files,payload,directory};
-                writer_fixture::save(presave,L"queued_checkpoint");
-                const auto rewritten=owner.campaign_run.snapshot();
-                CHECK(rewritten.checkpoint>active.checkpoint && rewritten.continuity_persisted &&
-                    rewritten.readback_verified && rewritten.map_active && rewritten.map=="game/hub/hub");
-                CHECK(owner.campaign_run.begin_resume("game/dlc2/e5m1_spear/e5m1_spear"));
-                CHECK(writer_fixture::load(presave,false,L"native_read"));
-            },{},destination,[&] {
-                if (defect.rfind(L"native_read_shell",0)!=0) return;
-                const auto boundary=native::checkpoint_transition();
-                CHECK(boundary.generation_after);
-                auto zero=boundary; zero.generation_after=0;
-                CHECK(!owner.campaign_run.prepare_menu_save(zero));
-                if (defect!=L"native_read_shell_unarmed") CHECK(owner.campaign_run.prepare_menu_save(boundary));
-                if (defect==L"native_read_shell_unarmed" || defect==L"native_read_shell_generation") {
-                    auto wrong=boundary; wrong.state_read=true; wrong.game=SC_GAME_MAIN_MENU;
-                    if (defect==L"native_read_shell_generation") ++wrong.generation_after;
-                    CHECK(!owner.campaign_run.checkpoint_ready(wrong));
-                    CHECK(owner.campaign_run.snapshot().checkpoint==2);
-                    return;
-                }
-                payload += " / native MissionSelect shell rewrite";
-                store(file,0x150,uint64_t(payload.size())); store(file,0x158,uint64_t(payload.size()));
-                store(file,0x168,reinterpret_cast<uintptr_t>(payload.data()));
-                writer_fixture::Model presave{remote,source,files,payload,directory};
-                writer_fixture::save(presave,defect==L"native_read_shell_foreign"?L"queued_foreign":
-                    defect==L"native_read_shell_failure"?L"queued_save_failure":L"queued_checkpoint");
-                if (defect==L"native_read_shell_foreign" || defect==L"native_read_shell_failure") {
-                    CHECK(!owner.accepts_requests() && owner.campaign_run.snapshot().checkpoint==2);
-                    return;
-                }
-                const auto rewritten=owner.campaign_run.snapshot();
-                CHECK(rewritten.checkpoint==3 && rewritten.continuity_persisted && rewritten.readback_verified &&
-                      !rewritten.map_active && !rewritten.save_ready && rewritten.map=="game/hub/hub");
-                CHECK(owner.campaign_run.begin_resume("game/dlc2/e5m1_spear/e5m1_spear"));
-                CHECK(writer_fixture::load(presave,false,L"native_read"));
-                CHECK(owner.campaign_run.snapshot().source_checkpoint==3);
-            })==0);
-            if (defect==L"native_read_c_active_mission") {
-                const auto active=owner.campaign_run.snapshot();
-                CHECK(!active.map_active && active.source_checkpoint==active.checkpoint && active.parser_completed);
-                CHECK(owner.campaign_run.allow_difficulty(difficulty));
-                CHECK(native_transition(difficulty,defect,{},{},{},"game/dlc2/e5m1_spear/e5m1_spear")==0);
-                CHECK(owner.campaign_run.snapshot().map=="game/dlc2/e5m1_spear/e5m1_spear");
-                std::puts("PASS active Fortress Mission Select presave, source, parser and destination"); return 0;
-            }
-            if (defect.rfind(L"native_read_shell",0)==0) {
-                if (defect==L"native_read_shell") {
-                    CHECK(owner.campaign_run.allow_difficulty(difficulty));
-                    CHECK(native_transition(difficulty,L"",{},{},{},"game/dlc2/e5m1_spear/e5m1_spear")==0);
-                    CHECK(owner.campaign_run.snapshot().map=="game/dlc2/e5m1_spear/e5m1_spear");
-                }
-                std::puts("PASS owned Mission Select shell save/readback/load and boundary refusals"); return 0;
-            }
-            const auto saved=owner.campaign_run.snapshot();
-            if (automatic_resume) {
-                const auto recovered=owner.btrace.snapshot().stages[static_cast<size_t>(BStage::checkpoint_recovery)];
-                CHECK(recovered.status==BStatus::succeeded && (std::strcmp(recovered.predicate,"previous_checkpoint_restored")==0 ||
-                    std::strcmp(recovered.predicate,"interrupted_save_recovered")==0));
-            }
-            CHECK((automatic_resume ? saved.checkpoint==saved.source_checkpoint+1 : saved.checkpoint==2 && saved.source_checkpoint==1) &&
-                saved.source_verified && saved.parser_completed && saved.native_saved && saved.readback_verified && saved.continuity_persisted);
-            CHECK(remote.files.at(directory+"/game.details")==payload);
-            if (defect==L"native_read_checkpoint") {
-                CHECK(writer_fixture::load(reader,true,L"native_read"));
-                CHECK(owner.campaign_run.begin_resume());
-                CHECK(writer_fixture::load(reader,false,L"native_read"));
-                std::puts("PASS dual Hub/ARC snapshot checkpoint preserved in same process"); return 0;
-            }
-            if (defect==L"native_read_menu_cycle" || defect==L"native_read_menu_cycle_hash") {
-                CHECK(writer_fixture::load(reader,true,L"native_read"));
-                CHECK(writer_fixture::load(reader,true,L"native_read"));
-                CHECK(owner.campaign_run.snapshot().checkpoint==2);
-                CHECK(owner.campaign_run.begin_resume());
-                if (defect==L"native_read_menu_cycle_hash") {
-                    remote.files[directory+"/game.details"][0]='X';
-                    CHECK(!writer_fixture::load(reader,false,L"native_read"));
-                    CHECK(owner.campaign_run.snapshot().checkpoint==2);
-                    CHECK(std::strcmp(owner.btrace.snapshot().first_failure.predicate,"resume_payload_hash_mismatch")==0);
-                    std::puts("PASS repeated Continue rejects changed payload"); return 0;
-                }
-                CHECK(writer_fixture::load(reader,false,L"native_read"));
-                CHECK(owner.campaign_run.allow_difficulty(difficulty));
-                writer_fixture::Model next{remote,source,files,payload,directory};
-                CHECK(native_transition(difficulty,L"",[&] { writer_fixture::save(next,L"queued_checkpoint"); })==0);
-                CHECK(writer_fixture::load(next,true,L"native_read"));
-                CHECK(owner.campaign_run.snapshot().checkpoint==3 && owner.accepts_requests());
-                std::puts("PASS shell/catalog/Continue/save/catalog checkpoint=3"); return 0;
-            }
-            std::printf("PASS separate-process menu/read/parser/Continue/save checkpoint=%llu files=%u pid=%lu\n",saved.checkpoint,retail_pair?2u:4u,GetCurrentProcessId()); return 0;
+            return native_read_case();
         }
         CHECK(owner.campaign_run.begin_resume());
-        CHECK(owner.campaign_run.allow_access(source,directory,false,false));
-        if (defect==L"wrong_source") {
-            remote.files[directory+"/game_duration.dat"]="native fixture duration";
-            remote.files[directory+"/game.details"]=payload;
-            payload[0]='X'; CHECK(!owner.campaign_run.verify_source(memory,source,image));
-            const auto failure=owner.btrace.snapshot().first_failure;
-            CHECK(failure.stage==BStage::resume && std::strcmp(failure.predicate,"resume_payload_hash_mismatch")==0);
-            CHECK(diagnostic_fact(failure,"file_index")==0 && diagnostic_fact(failure,"hash_equal")==0);
-            CHECK(diagnostic_fact(failure,"actual_size")==static_cast<int64_t>(payload.size()));
-            CHECK(diagnostic_fact(failure,"expected_size")==static_cast<int64_t>(payload.size()));
+        CHECK(owner.campaign_run.allow_access(source, directory, false, false));
+        if (defect == L"wrong_source") {
+            remote.files[directory + "/game_duration.dat"] = "native fixture duration";
+            remote.files[directory + "/game.details"] = payload;
+            payload[0] = 'X';
+            CHECK(!owner.campaign_run.verify_source(memory, source, image));
+            const auto failure = owner.btrace.snapshot().first_failure;
+            CHECK(failure.stage == BStage::resume);
+            CHECK(std::strcmp(failure.predicate, "resume_payload_hash_mismatch") == 0);
+            CHECK(diagnostic_fact(failure, "file_index") == 0);
+            CHECK(diagnostic_fact(failure, "hash_equal") == 0);
+            CHECK(diagnostic_fact(failure, "actual_size") == static_cast<int64_t>(payload.size()));
+            CHECK(diagnostic_fact(failure, "expected_size") == static_cast<int64_t>(payload.size()));
             CHECK(!owner.campaign_run.parser_enter(source));
-            const auto after=owner.btrace.snapshot(); CHECK(after.first_failure.sequence==failure.sequence);
-            CHECK(after.stages[static_cast<size_t>(BStage::parser)].status==BStatus::blocked);
-            std::puts("PASS source hash refusal before parser, exact inputs and first cause retained"); return 0;
+            const auto after = owner.btrace.snapshot();
+            CHECK(after.first_failure.sequence == failure.sequence);
+            CHECK(after.stages[static_cast<size_t>(BStage::parser)].status == BStatus::blocked);
+            std::puts("PASS source hash refusal before parser, exact inputs and first cause retained");
+            return 0;
         }
-        CHECK(owner.campaign_run.verify_source(memory,source,image));
+        CHECK(owner.campaign_run.verify_source(memory, source, image));
         CHECK(owner.campaign_run.parser_enter(source));
-        owner.campaign_run.parser_leave(defect==L"failed_parser"?0x10:0);
-        if (defect==L"failed_parser") {
-            const auto failure=owner.btrace.snapshot().first_failure;
-            CHECK(failure.stage==BStage::parser && std::strcmp(failure.predicate,"native_load_parser_failed")==0);
-            CHECK(diagnostic_fact(failure,"native_result")==0x10);
-            CHECK(!owner.campaign_run.map_begin("game/sp/initial",1));
-            CHECK(owner.btrace.snapshot().first_failure.sequence==failure.sequence);
-            std::puts("PASS original parser failure and result retained"); return 0;
+        owner.campaign_run.parser_leave(defect == L"failed_parser" ? 0x10 : 0);
+        if (defect == L"failed_parser") {
+            const auto failure = owner.btrace.snapshot().first_failure;
+            CHECK(failure.stage == BStage::parser);
+            CHECK(std::strcmp(failure.predicate, "native_load_parser_failed") == 0);
+            CHECK(diagnostic_fact(failure, "native_result") == 0x10);
+            CHECK(!owner.campaign_run.map_begin("game/sp/initial", 1));
+            CHECK(owner.btrace.snapshot().first_failure.sequence == failure.sequence);
+            std::puts("PASS original parser failure and result retained");
+            return 0;
         }
-        if (defect==L"wrong_difficulty") { CHECK(!owner.campaign_run.allow_difficulty((difficulty+1)%4)); CHECK(!owner.accepts_requests()); return 0; }
-        if (defect==L"missing_difficulty") { CHECK(!owner.campaign_run.map_begin("game/sp/initial",1)); return 0; }
+        if (defect == L"wrong_difficulty") {
+            CHECK(!owner.campaign_run.allow_difficulty((difficulty + 1) % 4));
+            CHECK(!owner.accepts_requests());
+            return 0;
+        }
+        if (defect == L"missing_difficulty") {
+            CHECK(!owner.campaign_run.map_begin("game/sp/initial", 1));
+            return 0;
+        }
         CHECK(owner.campaign_run.allow_difficulty(difficulty)); // native consumer restores the parsed save field
-        if (defect==L"wrong_map") { CHECK(!owner.campaign_run.map_begin("other/map",1)); return 0; }
-        if (profile_lifecycle) {
-            writer_fixture::Model next{remote,next_source,next_stream,next_payload,directory};
-            CHECK(native_transition(difficulty,L"",[&] {
-                CHECK(owner.campaign_run.snapshot().phase=="reopened");
-                write_profile(); writer_fixture::save(next,L"queued_checkpoint");
-                CHECK(owner.campaign_run.snapshot().checkpoint==3);
-            },{},[&] {
-                CHECK(!owner.campaign_run.snapshot().map_active && !owner.campaign_run.snapshot().save_ready);
-                write_profile();
-            })==0);
-            const auto saved=owner.campaign_run.snapshot();
-            CHECK(saved.source_checkpoint==2 && saved.checkpoint==3 && saved.parser_completed);
-            CHECK(saved.native_saved && saved.readback_verified && saved.continuity_persisted && !saved.map_active);
-            CHECK(saved.operation==next.operation && remote.files.at(directory+"/game.details")==next_payload);
-            CHECK(profile_writes==2);
-            std::printf("PASS profile lifecycle separate-process checkpoint=3 source_checkpoint=2 profile_writes=%u difficulty=%u pid=%lu\n",
-                profile_writes,difficulty,GetCurrentProcessId()); return 0;
+        if (defect == L"wrong_map") {
+            CHECK(!owner.campaign_run.map_begin("other/map", 1));
+            return 0;
         }
-        CHECK(native_transition(difficulty)==0);
-        CHECK(owner.campaign_run.snapshot().phase=="reopened");
-        const auto resumed_trace=owner.btrace.snapshot();
-        for (auto stage:{BStage::resume,BStage::parser,BStage::transition,BStage::difficulty}) diagnostic_stage_observed(resumed_trace,stage);
+        if (profile_lifecycle) {
+            writer_fixture::Model next{remote, next_source, next_stream, next_payload, directory};
+            CHECK(native_transition(
+                      difficulty, L"",
+                      [&] {
+                          CHECK(owner.campaign_run.snapshot().phase == "reopened");
+                          write_profile();
+                          writer_fixture::save(next, L"queued_checkpoint");
+                          CHECK(owner.campaign_run.snapshot().checkpoint == 3);
+                      },
+                      {},
+                      [&] {
+                          CHECK(!owner.campaign_run.snapshot().map_active);
+                          CHECK(!owner.campaign_run.snapshot().save_ready);
+                          write_profile();
+                      }) == 0);
+            const auto saved = owner.campaign_run.snapshot();
+            CHECK(saved.source_checkpoint == 2);
+            CHECK(saved.checkpoint == 3);
+            CHECK(saved.parser_completed);
+            CHECK(saved.native_saved);
+            CHECK(saved.readback_verified);
+            CHECK(saved.continuity_persisted);
+            CHECK(!saved.map_active);
+            CHECK(saved.operation == next.operation);
+            CHECK(remote.files.at(directory + "/game.details") == next_payload);
+            CHECK(profile_writes == 2);
+            std::printf("PASS profile lifecycle separate-process checkpoint=3 source_checkpoint=2 profile_writes=%u "
+                        "difficulty=%u pid=%lu\n",
+                        profile_writes, difficulty, GetCurrentProcessId());
+            return 0;
+        }
+        CHECK(native_transition(difficulty) == 0);
+        CHECK(owner.campaign_run.snapshot().phase == "reopened");
+        const auto resumed_trace = owner.btrace.snapshot();
+        for (auto stage : {BStage::resume, BStage::parser, BStage::transition, BStage::difficulty})
+            diagnostic_stage_observed(resumed_trace, stage);
         CHECK(!resumed_trace.first_failure.sequence);
         profile_write();
-        std::printf("PASS separate-process native source/parser/lifecycle reopen, difficulty=%u pid=%lu\n",difficulty,GetCurrentProcessId()); return 0;
+        std::printf("PASS separate-process native source/parser/lifecycle reopen, difficulty=%u pid=%lu\n", difficulty,
+                    GetCurrentProcessId());
+        return 0;
     }
-    if (defect==L"dirty") {
-        CHECK(!owner.campaign_run.begin_create(false,"AUTOSAVE0",0,true));
-        CHECK(!owner.campaign_run.snapshot().map_active); std::puts("PASS dirty-process refusal before reservation"); return 0;
-    }
-    navigation_fixture::create(difficulty,defect);
-    if (defect==L"extra_life" || defect==L"ultra") return 0;
-    if (profile_lifecycle) {
-        CHECK(!owner.campaign_run.snapshot().map_active && owner.campaign_run.snapshot().phase=="native_start_queued");
-        write_profile(); // new game's profile save precedes map readiness
-    }
-    const bool transition_failure=transition_failure_case(defect);
-    if(transition_failure) { CHECK(native_transition(difficulty,defect)==0); return 0; }
-    writer_fixture::Model writer{remote,source,files,payload,directory};
-    std::shared_ptr<BackupJob> c_backup;
-    if(recovery_case) c_backup=std::make_shared<BackupJob>(GetCurrentProcessId(),1,GetTickCount64()+30000,steam_owner);
-    if (profile_lifecycle) {
-        writer_fixture::Model next{remote,next_source,next_stream,next_payload,directory};
-        CHECK(native_transition(difficulty,L"initial_save",[&] {
-            CHECK(!owner.campaign_run.snapshot().map_active);
-            write_profile(); // initial cutscene: native map transition has not returned
-            writer_fixture::save(writer,L"");
-            CHECK(!owner.campaign_run.snapshot().continuity_persisted);
-        },[&] {
-            CHECK(owner.campaign_run.snapshot().checkpoint==1 && owner.campaign_run.snapshot().continuity_persisted);
-            CHECK(remote.files.at(directory+"/game.details")==payload);
-            write_profile(); writer_fixture::save(next,L"queued_checkpoint");
-            CHECK(next.operation && next.operation!=writer.operation);
-            CHECK(owner.campaign_run.snapshot().checkpoint==2);
-        },[&] {
-            CHECK(!owner.campaign_run.snapshot().map_active && !owner.campaign_run.snapshot().save_ready);
-            write_profile(); // exitmainmenu still emits the native profile save
-        })==0);
-        const auto saved=owner.campaign_run.snapshot();
-        CHECK(saved.checkpoint==2 && saved.native_saved && saved.readback_verified && saved.continuity_persisted);
-        CHECK(!saved.map_active && !saved.save_ready && saved.operation==next.operation);
-        CHECK(remote.files.at(directory+"/game.details")==next_payload && profile_writes==4);
+    int create_profile_lifecycle(writer_fixture::Model& writer) {
+        writer_fixture::Model next{remote, next_source, next_stream, next_payload, directory};
+        CHECK(native_transition(
+                  difficulty, L"initial_save",
+                  [&] {
+                      CHECK(!owner.campaign_run.snapshot().map_active);
+                      write_profile(); // initial cutscene: native map transition has not returned
+                      writer_fixture::save(writer, L"");
+                      CHECK(!owner.campaign_run.snapshot().continuity_persisted);
+                  },
+                  [&] {
+                      CHECK(owner.campaign_run.snapshot().checkpoint == 1);
+                      CHECK(owner.campaign_run.snapshot().continuity_persisted);
+                      CHECK(remote.files.at(directory + "/game.details") == payload);
+                      write_profile();
+                      writer_fixture::save(next, L"queued_checkpoint");
+                      CHECK(next.operation);
+                      CHECK(next.operation != writer.operation);
+                      CHECK(owner.campaign_run.snapshot().checkpoint == 2);
+                  },
+                  [&] {
+                      CHECK(!owner.campaign_run.snapshot().map_active);
+                      CHECK(!owner.campaign_run.snapshot().save_ready);
+                      write_profile(); // exitmainmenu still emits the native profile save
+                  }) == 0);
+        const auto saved = owner.campaign_run.snapshot();
+        CHECK(saved.checkpoint == 2);
+        CHECK(saved.native_saved);
+        CHECK(saved.readback_verified);
+        CHECK(saved.continuity_persisted);
+        CHECK(!saved.map_active);
+        CHECK(!saved.save_ready);
+        CHECK(saved.operation == next.operation);
+        CHECK(remote.files.at(directory + "/game.details") == next_payload);
+        CHECK(profile_writes == 4);
         CHECK(!owner.btrace.snapshot().first_failure.sequence);
-        std::printf("PASS profile lifecycle checkpoint=2 profile_writes=%u difficulty=%u pid=%lu\n",
-            profile_writes,difficulty,GetCurrentProcessId()); return 0;
+        std::printf("PASS profile lifecycle checkpoint=2 profile_writes=%u difficulty=%u pid=%lu\n", profile_writes,
+                    difficulty, GetCurrentProcessId());
+        return 0;
     }
-    CHECK(native_transition(difficulty,defect==L"pending"?L"pending_save":defect,[&] {
-        // native profile preparation receives the user context, then the exact campaign factory/provider/readback chain reaches checkpoint 1
-        if (defect.empty() || defect==L"queued_checkpoint" || defect==L"menu_pending_save") profile_write();
-        if(retail_pair) for(size_t i=1;i<extra_names.size();++i) remote.files[directory+"/"+extra_names[i]]=extra_payloads[i];
-        writer_fixture::save(writer,defect==L"pending"?L"pending_save":defect,c_backup);
-    })==0);
-    if(defect==L"pending" || defect==L"initial_save_return_failed" || defect==L"unassociated" || defect==L"queued_foreign" || defect==L"save_failure" || defect==L"partial_save" || defect==L"unrelated") {
-        CHECK(!owner.campaign_run.snapshot().continuity_persisted); return 0;
+    void save_initial_checkpoint(writer_fixture::Model& writer, const std::shared_ptr<BackupJob>& c_backup) {
+        // native profile preparation receives the user context, then the exact campaign factory/provider/readback chain
+        // reaches checkpoint 1
+        if (defect.empty() || defect == L"queued_checkpoint" || defect == L"menu_pending_save") profile_write();
+        if (retail_pair)
+            for (size_t i = 1; i < extra_names.size(); ++i)
+                remote.files[directory + "/" + extra_names[i]] = extra_payloads[i];
+        writer_fixture::save(writer, defect == L"pending" ? L"pending_save" : defect, c_backup);
     }
-    if (defect==L"archive_payload_failure" || defect==L"archive_manifest_failure") {
-        const auto saved=owner.campaign_run.snapshot();
-        CHECK(!saved.archive_complete && !saved.continuity_persisted && saved.reason=="checkpoint_archive_incomplete");
-        std::puts("PASS archive failure blocks checkpoint confirmation"); return 0;
+    int confirmed_creation_case(writer_fixture::Model& writer, const std::shared_ptr<BackupJob>& c_backup) {
+        const auto observed = owner.campaign_run.snapshot();
+        CHECK(observed.native_saved);
+        CHECK(observed.readback_verified);
+        CHECK(observed.continuity_persisted);
+        CHECK(observed.checkpoint == 1);
+        CHECK(observed.operation == writer.operation);
+        CHECK(observed.effective_difficulty == difficulty);
+        CHECK(observed.native_factory_matched);
+        const auto trace = owner.btrace.snapshot();
+        for (auto stage :
+             {BStage::creation, BStage::difficulty, BStage::transition, BStage::checkpoint_factory, BStage::continuity})
+            diagnostic_stage_observed(trace, stage);
+        CHECK(!trace.first_failure.sequence);
+        if (defect.empty()) {
+            menu_fixture::exercise();
+            menu_fixture::actions();
+        }
+        const auto& continuity = trace.stages[static_cast<size_t>(BStage::continuity)];
+        CHECK(continuity.status == BStatus::succeeded);
+        CHECK(std::strcmp(continuity.predicate, "checkpoint_continuity_persisted") == 0);
+        CHECK(diagnostic_fact(continuity, "checkpoint") == 1);
+        CHECK(diagnostic_fact(continuity, "continuity_persisted") == 1);
+        if (c_backup) {
+            const auto progress = c_backup->progress();
+            CHECK(progress.state == BackupState::complete);
+            CHECK(progress.operation == observed.operation);
+            const auto basename = std::filesystem::path(progress.output.path).filename().string();
+            std::ofstream selected(std::filesystem::path(argv[2]) / "selected-backup.txt");
+            selected << basename << '\n';
+            std::printf("PASS explicit verified backup operation=%llu basename=%s\n",
+                        static_cast<unsigned long long>(progress.operation), basename.c_str());
+        }
+        std::printf("PASS native checkpoint correlation/continuity, difficulty=%u pid=%lu\n", difficulty,
+                    GetCurrentProcessId());
+        return 0;
     }
-    const auto observed=owner.campaign_run.snapshot();
-    CHECK(observed.native_saved && observed.readback_verified && observed.continuity_persisted && observed.checkpoint==1);
-    CHECK(observed.operation==writer.operation && observed.effective_difficulty==difficulty && observed.native_factory_matched);
-    const auto trace=owner.btrace.snapshot();
-    for (auto stage:{BStage::creation,BStage::difficulty,BStage::transition,BStage::checkpoint_factory,BStage::continuity}) diagnostic_stage_observed(trace,stage);
-    CHECK(!trace.first_failure.sequence);
-    if (defect.empty()) { menu_fixture::exercise(); menu_fixture::actions(); }
-    const auto& continuity=trace.stages[static_cast<size_t>(BStage::continuity)];
-    CHECK(continuity.status==BStatus::succeeded && std::strcmp(continuity.predicate,"checkpoint_continuity_persisted")==0);
-    CHECK(diagnostic_fact(continuity,"checkpoint")==1 && diagnostic_fact(continuity,"continuity_persisted")==1);
-    if(c_backup) {
-        const auto progress=c_backup->progress();
-        CHECK(progress.state==BackupState::complete && progress.operation==observed.operation);
-        const auto basename=std::filesystem::path(progress.output.path).filename().string();
-        std::ofstream selected(std::filesystem::path(argv[2])/"selected-backup.txt"); selected<<basename<<'\n';
-        std::printf("PASS explicit verified backup operation=%llu basename=%s\n",static_cast<unsigned long long>(progress.operation),basename.c_str());
+    bool unconfirmed_creation_case() const {
+        return defect == L"pending" || defect == L"initial_save_return_failed" || defect == L"unassociated" ||
+               defect == L"queued_foreign" || defect == L"save_failure" || defect == L"partial_save" ||
+               defect == L"unrelated";
     }
-    std::printf("PASS native checkpoint correlation/continuity, difficulty=%u pid=%lu\n",difficulty,GetCurrentProcessId()); return 0;
-    }();
-    });
-    persist_remote(remote);
-    return outcome;
-}
+    int create_case() {
+        if (defect == L"dirty") {
+            CHECK(!owner.campaign_run.begin_create(false, "AUTOSAVE0", 0, true));
+            CHECK(!owner.campaign_run.snapshot().map_active);
+            std::puts("PASS dirty-process refusal before reservation");
+            return 0;
+        }
+        navigation_fixture::create(difficulty, defect);
+        if (defect == L"extra_life" || defect == L"ultra") return 0;
+        if (profile_lifecycle) {
+            CHECK(!owner.campaign_run.snapshot().map_active);
+            CHECK(owner.campaign_run.snapshot().phase == "native_start_queued");
+            write_profile(); // new game's profile save precedes map readiness
+        }
+        const bool transition_failure = transition_failure_case(defect);
+        if (transition_failure) {
+            CHECK(native_transition(difficulty, defect) == 0);
+            return 0;
+        }
+        writer_fixture::Model writer{remote, source, files, payload, directory};
+        std::shared_ptr<BackupJob> c_backup;
+        if (recovery_case)
+            c_backup = std::make_shared<BackupJob>(GetCurrentProcessId(), 1, GetTickCount64() + 30000, steam_owner);
+        if (profile_lifecycle) {
+            return create_profile_lifecycle(writer);
+        }
+        CHECK(native_transition(difficulty, defect == L"pending" ? L"pending_save" : defect,
+                                [&] { save_initial_checkpoint(writer, c_backup); }) == 0);
+        if (unconfirmed_creation_case()) {
+            CHECK(!owner.campaign_run.snapshot().continuity_persisted);
+            return 0;
+        }
+        if (defect == L"archive_payload_failure" || defect == L"archive_manifest_failure") {
+            const auto saved = owner.campaign_run.snapshot();
+            CHECK(!saved.archive_complete);
+            CHECK(!saved.continuity_persisted);
+            CHECK(saved.reason == "checkpoint_archive_incomplete");
+            std::puts("PASS archive failure blocks checkpoint confirmation");
+            return 0;
+        }
+        return confirmed_creation_case(writer, c_backup);
+    }
+    int run_profile_case() {
+        prepare_payloads();
+        if (descriptor.campaign.restart_stage) {
+            return restart_fixture::run(owner, resume, defect, source, directory, memory, [&] {
+                writer_fixture::Model restart_writer{remote, source, files, payload, directory};
+                profile_write();
+                writer_fixture::save(restart_writer, L"queued_checkpoint");
+            });
+        }
+        prepare_next_checkpoint();
+        if (defect == L"fresh_catalog") {
+            return fresh_catalog_case();
+        }
+        if (run_foreign_access_case(owner, source, defect)) return 0;
+        if (defect.rfind(L"cross_map", 0) == 0) {
+            return cross_map_case();
+        }
+        if (resume) {
+            return resume_case();
+        }
+        return create_case();
+    }
+    void configure_namespace() {
+        descriptor = {{"synthetic-campaign-host", 0, 1, std::string(64, 'b')},
+                      argv[2],
+                      {recover  ? storage::CampaignIntent::recover
+                       : resume ? storage::CampaignIntent::resume
+                                : storage::CampaignIntent::create,
+                       difficulty,
+                       {}}};
+        descriptor.campaign.restart_stage = defect.rfind(L"restart_", 0) == 0;
+        if (recover) {
+            std::ifstream selected(std::filesystem::path(argv[2]) / "selected-backup.txt");
+            std::getline(selected, descriptor.campaign.recovery_basename);
+            CHECK(!descriptor.campaign.recovery_basename.empty());
+        }
+        std::unique_ptr<storage::Namespace> lease;
+        const auto opened =
+            (resume || recover) ? storage::reopen(descriptor, lease) : storage::prepare(descriptor, lease);
+        if (!opened.ok())
+            std::printf("storage=%s win32=%u\n", storage::outcome_name(opened.outcome), opened.win32_error);
+        CHECK(opened.ok());
+        recovery_namespace = lease->metadata().path;
+        configured = owner.configure(descriptor, std::move(lease));
+    }
+    int refused_configuration_case() {
+        if (configured.ok()) {
+            CHECK(!owner.campaign_run.enabled());
+            CHECK(!owner.accepts_requests());
+            std::puts("PASS interrupted checkpoint waits for startup recovery without importing payloads");
+            return 0;
+        }
+        CHECK(!configured.ok());
+        const auto trace = owner.btrace.snapshot();
+        CHECK(trace.first_failure.sequence);
+        CHECK(trace.first_failure.stage == (resume ? BStage::resume : BStage::creation));
+        CHECK(std::strcmp(trace.first_failure.predicate, "resume_checkpoint_incomplete_or_invalid") != 0);
+        std::puts("PASS refused immutable or incomplete campaign contract with exact diagnostic predicate");
+        return 0;
+    }
+    void prepare_recovery_storage() {
+        const auto retail_marker = std::filesystem::path(argv[2]) / "retail-pair.fixture";
+        retail_pair = defect == L"native_read_c_retail_pair" || std::filesystem::exists(retail_marker);
+        if (retail_pair && !resume && !recover) {
+            std::filesystem::create_directories(argv[2]);
+            std::ofstream(retail_marker) << "primary operation; preserved rotation pair\n";
+        }
+        if (recovery_case) recovery_disk = std::filesystem::path(argv[2]) / "remote";
+    }
+    void parse_arguments() {
+        CHECK(argc == 4 || argc == 5);
+        std::filesystem::create_directories(argv[2]);
+
+        const auto length = GetLongPathNameW(argv[2], expanded, MAX_PATH);
+        CHECK(length);
+        CHECK(length < MAX_PATH);
+        argv[2] = expanded;
+        mode = argv[1];
+        resume = mode == L"resume";
+        recover = mode == L"recover";
+        difficulty = static_cast<uint32_t>(std::wcstoul(argv[3], nullptr, 10));
+        defect = argc == 5 ? argv[4] : L"";
+    }
+    int run(int argc_value, wchar_t** argv_value) {
+        argc = argc_value;
+        argv = argv_value;
+        parse_arguments();
+        run_hook_case(defect);
+        if (run_native_fixture_case(defect)) return 0;
+        profile_lifecycle = defect == L"profile_lifecycle";
+        native_read = defect.rfind(L"native_read", 0) == 0;
+        profile_overlap = defect.rfind(L"cross_map_profile_overlap", 0) == 0;
+        recovery_case = recovery_fixture_case(defect);
+        prepare_recovery_storage();
+        navigation_fixture::vanilla();
+        configure_namespace();
+        if (!configured_fixture(recovery_case, configured)) return 2;
+        if (defect == L"refuse_configuration") {
+            return refused_configuration_case();
+        }
+        CHECK(configured.ok());
+
+        table[0] = reinterpret_cast<uintptr_t>(put);
+        table[1] = reinterpret_cast<uintptr_t>(get);
+        table[13] = reinterpret_cast<uintptr_t>(exists);
+        table[15] = reinterpret_cast<uintptr_t>(size);
+        table[18] = reinterpret_cast<uintptr_t>(count);
+        table[19] = reinterpret_cast<uintptr_t>(entry);
+
+        directory = owner.native_root() + "/GAME-AUTOSAVE0";
+        if (recovery_case && (resume || recover))
+            load_remote(remote);
+        else
+            remote.files[owner.native_root() + "/sentinel-owner-" + owner.namespace_id() + ".txt"] =
+                owner.ownership_record();
+        if (defect == L"startup_parser") {
+            startup_parser_refusal(owner);
+            return 0;
+        }
+        startup_route_fixture::exercise(owner);
+        CHECK(owner.startup_enter(0x1000, 0x2000, GetCurrentThreadId()));
+        automatic_resume = resume && defect == L"native_read_c_auto";
+        if (automatic_resume) {
+            if (!owner.recover_startup({provider, steam_owner, put, get, exists, size, count, entry})) {
+                std::printf("REFUSED automatic recovery %s\n",
+                            owner.btrace.snapshot().stages[static_cast<size_t>(BStage::resume)].predicate);
+                persist_remote(remote);
+                return 2;
+            }
+            std::printf("automatic recovery %s\n",
+                        owner.btrace.snapshot().stages[static_cast<size_t>(BStage::resume)].predicate);
+        }
+        if (!recover) CHECK(owner.observe_provider_objects(0x9000, 0x9100, provider));
+        if (recover) return recover_campaign_fixture(owner, remote, provider, defect);
+        CHECK(owner.bind_provider(owner.native_root(), provider, owner.ownership_record()));
+        owner.startup_leave(false);
+        CHECK(owner.provider_operation(provider, 0x7788));
+        CHECK(owner.publish_profile_catalog(provider, owner.ownership_record(),
+                                            resume ? std::vector<std::string>{"AUTOSAVE0"} : std::vector<std::string>{},
+                                            "AUTOSAVE0", 0, !resume, 0));
+        int outcome = 0;
+        exercise_campaign_profile(owner, [&](const std::function<void()>& write_native_profile) {
+            profile_write = write_native_profile;
+            outcome = run_profile_case();
+        });
+        persist_remote(remote);
+        return outcome;
+    }
+};
+int wmain(int argc, wchar_t** argv) { CampaignTestCase test; return test.run(argc, argv); }

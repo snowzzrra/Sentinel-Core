@@ -58,7 +58,8 @@ struct Host {
           ready(CreateEventW(nullptr, TRUE, FALSE, (prefix + L".ready").c_str())),
           stop(CreateEventW(nullptr, TRUE, FALSE, (prefix + L".stop").c_str())),
           child(quote(executable) + (idle ? L" --idle " : L" --host ") + quote(dll) + L" " + quote(prefix)) {
-        CHECK(ready && stop);
+        CHECK(ready);
+        CHECK(stop);
         HANDLE events[] = {ready.value, child.process.value};
         CHECK(WaitForMultipleObjects(2, events, FALSE, 5000) == WAIT_OBJECT_0);
     }
@@ -95,10 +96,13 @@ void permissions(DWORD pid) {
                           &dacl, nullptr, &descriptor) == ERROR_SUCCESS);
     SECURITY_DESCRIPTOR_CONTROL control{}; DWORD revision = 0;
     CHECK(GetSecurityDescriptorControl(descriptor, &control, &revision));
-    CHECK((control & SE_DACL_PROTECTED) != 0 && dacl && dacl->AceCount == 1);
+    CHECK((control & SE_DACL_PROTECTED) != 0);
+    CHECK(dacl);
+    CHECK(dacl->AceCount == 1);
     void* raw = nullptr; CHECK(GetAce(dacl, 0, &raw));
     const auto ace = static_cast<ACCESS_ALLOWED_ACE*>(raw);
-    CHECK(ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && ace->Mask == client_access);
+    CHECK(ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE);
+    CHECK(ace->Mask == client_access);
     Handle token; CHECK(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token.value));
     DWORD size = 0; GetTokenInformation(token.value, TokenGroups, nullptr, 0, &size);
     std::vector<uint8_t> buffer(size);
@@ -112,7 +116,8 @@ void permissions(DWORD pid) {
     LocalFree(descriptor);
     CloseHandle(pipe.value); pipe.value = nullptr;
     Handle excessive(open_pipe(pid, GENERIC_READ | GENERIC_WRITE));
-    CHECK(!excessive && GetLastError() == ERROR_ACCESS_DENIED);
+    CHECK(!excessive);
+    CHECK(GetLastError() == ERROR_ACCESS_DENIED);
 }
 void prelaunch_contract(const std::wstring& dll, const std::wstring& probe_path) {
     namespace fs = std::filesystem;
@@ -139,8 +144,10 @@ void prelaunch_contract(const std::wstring& dll, const std::wstring& probe_path)
     Host prepared(dll, 30);
     CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", nullptr));
     const auto status = query_save_admission(prepared.child.pid, 2000);
-    CHECK(status.result == ProbeResult::ok && status.admission.state == SC_SAVE_SESSION_PREPARED);
-    CHECK(status.admission.namespace_id == namespace_id && status.admission.flags == 0);
+    CHECK(status.result == ProbeResult::ok);
+    CHECK(status.admission.state == SC_SAVE_SESSION_PREPARED);
+    CHECK(status.admission.namespace_id == namespace_id);
+    CHECK(status.admission.flags == 0);
     storage::Metadata metadata;
     CHECK(storage::inspect(descriptor, metadata).outcome == storage::Outcome::ownership_conflict);
     const auto capture = probe(probe_path, L"--pid " + std::to_wstring(prepared.child.pid) + L" --save-admission --json", 8);
@@ -152,10 +159,13 @@ void prelaunch_contract(const std::wstring& dll, const std::wstring& probe_path)
     Host invalid(dll, 31);
     CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", nullptr));
     const auto rejected = query_save_admission(invalid.child.pid, 2000);
-    CHECK(rejected.result == ProbeResult::ok && rejected.admission.state == SC_SAVE_SESSION_REJECTED);
-    CHECK(rejected.admission.fault == 1 && rejected.admission.namespace_id[0] == 0);
+    CHECK(rejected.result == ProbeResult::ok);
+    CHECK(rejected.admission.state == SC_SAVE_SESSION_REJECTED);
+    CHECK(rejected.admission.fault == 1);
+    CHECK(rejected.admission.namespace_id[0] == 0);
     invalid.shutdown();
-    CHECK(fs::canonical(root).parent_path() == parent && root.filename().u8string().find("sentinel-admission-") == 0);
+    CHECK(fs::canonical(root).parent_path() == parent);
+    CHECK(root.filename().u8string().find("sentinel-admission-") == 0);
     fs::remove_all(root);
     std::puts("PASS production prelaunch reader/lease, DLL retention before hooks, sticky shutdown and probe refusal; synthetic hosts only");
 }
@@ -216,7 +226,9 @@ void v2_client_identity() {
 }
 void v2_fairness(DWORD pid) {
     Handle first(open_pipe(pid, client_access)), second(open_pipe(pid, client_access)), third(open_pipe(pid, client_access));
-    CHECK(first && second && third);
+    CHECK(first);
+    CHECK(second);
+    CHECK(third);
     V2Connection active;
     CHECK(active.connect(pid, 1000) == ProbeResult::ok);
     CHECK(active.exchange(6, {}, 1000).transport == ProbeResult::ok);
@@ -239,7 +251,9 @@ void v2_partial_deadline(DWORD pid, bool header_only = false) {
 }
 void v2_shutdown_io(DWORD pid, Host& host) {
     Handle idle(open_pipe(pid, client_access)), partial(open_pipe(pid, client_access)), blocked(open_pipe(pid, client_access));
-    CHECK(idle && partial && blocked);
+    CHECK(idle);
+    CHECK(partial);
+    CHECK(blocked);
     uint8_t byte = 0x53;
     CHECK(transfer_exact(partial.value, true, &byte, 1, nullptr, GetTickCount64() + 1000) == ERROR_SUCCESS);
     generated::Bytes frame, bytes;
@@ -249,13 +263,45 @@ void v2_shutdown_io(DWORD pid, Host& host) {
     const auto start = GetTickCount64(); host.shutdown();
     CHECK(GetTickCount64() - start < 6000);
 }
-int wmain(int argc, wchar_t** argv) {
-    executable = argv[0];
-    if (argc == 4 && (wcscmp(argv[1], L"--host") == 0 || wcscmp(argv[1], L"--idle") == 0)) {
+void watch_target_exit(const std::wstring& dll, const std::wstring& probe_path) {
+    Host exiting(dll, 5);
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    Handle read, writer;
+    CHECK(CreatePipe(&read.value, &writer.value, &sa, 16384));
+    CHECK(SetHandleInformation(read.value, HANDLE_FLAG_INHERIT, 0));
+    Child watcher(quote(probe_path) + L" --pid " + std::to_wstring(exiting.child.pid) +
+        L" --engine --watch-count 2 --interval-ms 1000 --json", writer.value);
+    CloseHandle(writer.value); writer.value = nullptr;
+    std::string stopped_watch;
+    char byte = 0; DWORD count = 0;
+    do {
+        CHECK(ReadFile(read.value, &byte, 1, &count, nullptr));
+        CHECK(count == 1);
+        stopped_watch += byte;
+    } while (byte != '\n');
+    CHECK(stopped_watch.find("\"result\":\"ok\"") != std::string::npos);
+    exiting.shutdown();
+    CHECK(watcher.wait() == 3);
+    char buffer[16384]{};
+    CHECK(ReadFile(read.value, buffer, sizeof(buffer), &count, nullptr));
+    stopped_watch.append(buffer, count);
+    CHECK(stopped_watch.find("endpoint_absent") != std::string::npos);
+}
+auto next_engine_sample(DWORD pid, uint64_t sequence) {
+    auto result = query_engine(pid, 2000);
+    const auto deadline = GetTickCount64() + 5000;
+    while (result.result == ProbeResult::ok && result.engine.sequence <= sequence) {
+        CHECK(GetTickCount64() < deadline);
+        result = query_engine(pid, 2000);
+    }
+    return result;
+}
+int inspection_host(int, wchar_t** argv) {
         const bool idle = wcscmp(argv[1], L"--idle") == 0;
         const std::wstring prefix = argv[3];
         Handle ready(OpenEventW(EVENT_MODIFY_STATE, FALSE, (prefix + L".ready").c_str()));
-        Handle stop(OpenEventW(SYNCHRONIZE, FALSE, (prefix + L".stop").c_str())); CHECK(ready && stop);
+        Handle stop(OpenEventW(SYNCHRONIZE, FALSE, (prefix + L".stop").c_str())); CHECK(ready);
+        CHECK(stop);
         HMODULE core = nullptr;
         if (!idle) {
             core = LoadLibraryExW(argv[2], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32); CHECK(core);
@@ -265,28 +311,35 @@ int wmain(int argc, wchar_t** argv) {
             CHECK(inspect_context(2, sizeof(context), &context) == SC_ABI_MISMATCH);
             CHECK(inspect_context(1, sizeof(context) - 1, &context) == SC_INVALID_ARGUMENT);
             CHECK(inspect_context(1, sizeof(context), nullptr) == SC_INVALID_ARGUMENT);
-            CHECK(inspect_context(1, sizeof(context), &context) == SC_OK && context.pid == GetCurrentProcessId());
+            CHECK(inspect_context(1, sizeof(context), &context) == SC_OK);
+            CHECK(context.pid == GetCurrentProcessId());
             const auto inspect_save = symbol<decltype(&sc_save_inspect)>(core, "sc_save_inspect");
             sc_save_snapshot save{};
             CHECK(inspect_save(2, sizeof(save), &save) == SC_ABI_MISMATCH);
             CHECK(inspect_save(1, sizeof(save) - 1, &save) == SC_INVALID_ARGUMENT);
             CHECK(inspect_save(1, sizeof(save), nullptr) == SC_INVALID_ARGUMENT);
-            CHECK(inspect_save(1, sizeof(save), &save) == SC_OK && save.pid == GetCurrentProcessId());
-            CHECK(save.mutation_available == 0 && save.mutation_reason == SC_SAVE_NATIVE_NAMESPACE_ROUTE_UNPROVEN);
+            CHECK(inspect_save(1, sizeof(save), &save) == SC_OK);
+            CHECK(save.pid == GetCurrentProcessId());
+            CHECK(save.mutation_available == 0);
+            CHECK(save.mutation_reason == SC_SAVE_NATIVE_NAMESPACE_ROUTE_UNPROVEN);
             const auto inspect_admission = symbol<decltype(&sc_save_admission_inspect)>(core, "sc_save_admission_inspect");
             sc_save_admission_snapshot admission{};
             CHECK(inspect_admission(2, sizeof(admission), &admission) == SC_ABI_MISMATCH);
             CHECK(inspect_admission(1, sizeof(admission) - 1, &admission) == SC_INVALID_ARGUMENT);
             CHECK(inspect_admission(1, sizeof(admission), nullptr) == SC_INVALID_ARGUMENT);
-            CHECK(inspect_admission(1, sizeof(admission), &admission) == SC_OK && admission.size == 160);
+            CHECK(inspect_admission(1, sizeof(admission), &admission) == SC_OK);
+            CHECK(admission.size == 160);
             const auto inspect_write = symbol<decltype(&sc_save_write_inspect)>(core, "sc_save_write_inspect");
             sc_save_write_snapshot write{};
             CHECK(inspect_write(2, sizeof(write), 0, &write) == SC_ABI_MISMATCH);
             CHECK(inspect_write(1, sizeof(write) - 1, 0, &write) == SC_INVALID_ARGUMENT);
             CHECK(inspect_write(1, sizeof(write), 0, nullptr) == SC_INVALID_ARGUMENT);
-            CHECK(inspect_write(1, sizeof(write), 0, &write) == SC_OK && write.size == 160 && write.state == SC_SAVE_WRITE_NONE);
-            CHECK(inspect_write(1, sizeof(write), UINT64_MAX, &write) == SC_OK &&
-                write.state == SC_SAVE_WRITE_NOT_RETAINED && write.operation_id == UINT64_MAX);
+            CHECK(inspect_write(1, sizeof(write), 0, &write) == SC_OK);
+            CHECK(write.size == 160);
+            CHECK(write.state == SC_SAVE_WRITE_NONE);
+            CHECK(inspect_write(1, sizeof(write), UINT64_MAX, &write) == SC_OK);
+            CHECK(write.state == SC_SAVE_WRITE_NOT_RETAINED);
+            CHECK(write.operation_id == UINT64_MAX);
         }
         CHECK(SetEvent(ready.value));
         CHECK(WaitForSingleObject(stop.value, 30000) == WAIT_OBJECT_0);
@@ -300,11 +353,17 @@ int wmain(int argc, wchar_t** argv) {
             if (retained) {
                 CHECK(GetModuleHandleW(L"sentinel_core.dll") == core);
                 CHECK(inspect_admission(1, sizeof(admission), &admission) == SC_OK);
-                CHECK(admission.state == SC_SAVE_SESSION_REJECTED && admission.fault == 6);
+                CHECK(admission.state == SC_SAVE_SESSION_REJECTED);
+                CHECK(admission.fault == 6);
                 CHECK(symbol<decltype(&sc_initialize)>(core, "sc_initialize")(SC_ABI_VERSION, 0) == SC_UNLOAD_RETAINED);
             }
         }
         return 0;
+}
+int wmain(int argc, wchar_t** argv) {
+    executable = argv[0];
+    if (argc == 4 && (wcscmp(argv[1], L"--host") == 0 || wcscmp(argv[1], L"--idle") == 0)) {
+        return inspection_host(argc, argv);
     }
     CHECK(argc == 3 || (argc == 4 && wcscmp(argv[3], L"--prelaunch") == 0));
     CHECK(SetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", nullptr));
@@ -320,19 +379,26 @@ int wmain(int argc, wchar_t** argv) {
     const auto initial = query(first.child.pid, 2000);
     if (initial.result != ProbeResult::ok) std::fprintf(stderr, "initial query=%s win32=%u server_pid=%u\n",
         result_name(initial.result), initial.win32_error, initial.server_pid);
-    CHECK(initial.result == ProbeResult::ok && initial.server_pid == first.child.pid);
-    CHECK(initial.snapshot.pid != GetCurrentProcessId() && initial.snapshot.pid == first.child.pid);
-    CHECK(initial.snapshot.core.abi_version == SC_ABI_VERSION && initial.snapshot.core.capabilities == 3);
-    CHECK(initial.snapshot.core.state == SC_READY && initial.snapshot.core.state == SC_READY);
-    CHECK(initial.snapshot.core.initialization_count == 1 && std::strlen(initial.snapshot.core.build_id) == 64);
+    CHECK(initial.result == ProbeResult::ok);
+    CHECK(initial.server_pid == first.child.pid);
+    CHECK(initial.snapshot.pid != GetCurrentProcessId());
+    CHECK(initial.snapshot.pid == first.child.pid);
+    CHECK(initial.snapshot.core.abi_version == SC_ABI_VERSION);
+    CHECK(initial.snapshot.core.capabilities == 3);
+    CHECK(initial.snapshot.core.state == SC_READY);
+    CHECK(initial.snapshot.core.state == SC_READY);
+    CHECK(initial.snapshot.core.initialization_count == 1);
+    CHECK(std::strlen(initial.snapshot.core.build_id) == 64);
     CHECK(std::strcmp(initial.snapshot.core.version, SC_PRODUCT_VERSION) == 0);
     uint64_t created = 0; CHECK(process_time(first.child.process.value, created));
     CHECK(initial.snapshot.process_created == created);
     const auto other = query(second.child.pid, 2000);
-    CHECK(other.result == ProbeResult::ok && initial.snapshot.instance != other.snapshot.instance);
+    CHECK(other.result == ProbeResult::ok);
+    CHECK(initial.snapshot.instance != other.snapshot.instance);
     for (int i = 0; i < 8; ++i) {
         const auto repeated = query(first.child.pid, 2000);
-        CHECK(repeated.result == ProbeResult::ok && repeated.snapshot.instance == initial.snapshot.instance);
+        CHECK(repeated.result == ProbeResult::ok);
+        CHECK(repeated.snapshot.instance == initial.snapshot.instance);
     }
     const auto args = L"--pid " + std::to_wstring(first.child.pid) + L" --timeout-ms 2000";
     sc_save_backup_request backup{};
@@ -342,8 +408,9 @@ int wmain(int argc, wchar_t** argv) {
     backup.execution.nonce[0] = 42; backup.execution.deadline_ms = 1000; backup.work_deadline_ms = 10000;
     std::memset(backup.namespace_id, 'a', 64);
     const auto rejected_backup = query_save_backup(first.child.pid, 2000, save_backup_submit_operation, backup);
-    CHECK(rejected_backup.result == ProbeResult::ok && rejected_backup.backup.state == SC_BACKUP_REJECTED &&
-        !(rejected_backup.backup.flags & SC_BACKUP_NATIVE_ENTERED));
+    CHECK(rejected_backup.result == ProbeResult::ok);
+    CHECK(rejected_backup.backup.state == SC_BACKUP_REJECTED);
+    CHECK(!(rejected_backup.backup.flags & SC_BACKUP_NATIVE_ENTERED));
     CHECK(query_save_backup(first.child.pid, 2000, save_backup_result_operation, backup).backup.state == SC_BACKUP_REJECTED);
     CHECK(query_save_backup(first.child.pid, 2000, save_backup_cancel_operation, backup).backup.state == SC_BACKUP_REJECTED);
     auto wrong_backup = backup; ++wrong_backup.execution.expected.process_created;
@@ -373,30 +440,36 @@ int wmain(int argc, wchar_t** argv) {
         CHECK(query(first.child.pid, 150).result == ProbeResult::ok);
         Sleep(100); engine = query_engine(first.child.pid, 2000);
     }
-    CHECK(engine.result == ProbeResult::ok && engine.snapshot.instance == initial.snapshot.instance);
-    CHECK(engine.engine.pe_reason == SC_REASON_NONE && engine.engine.profile == SC_PROFILE_NONE);
+    CHECK(engine.result == ProbeResult::ok);
+    CHECK(engine.snapshot.instance == initial.snapshot.instance);
+    CHECK(engine.engine.pe_reason == SC_REASON_NONE);
+    CHECK(engine.engine.profile == SC_PROFILE_NONE);
     CHECK(engine.engine.root_locator_reason == SC_REASON_SIGNATURE_MISSING);
     CHECK(engine.engine.fields[SC_ENGINE_PLAYER_PRESENT].validity == SC_OBSERVATION_UNKNOWN);
-    Sleep(150);
-    const auto fresh_engine = query_engine(first.child.pid, 2000);
-    CHECK(fresh_engine.result == ProbeResult::ok && fresh_engine.engine.sequence > engine.engine.sequence);
+    const auto fresh_engine = next_engine_sample(first.child.pid, engine.engine.sequence);
+    CHECK(fresh_engine.result == ProbeResult::ok);
+    CHECK(fresh_engine.engine.sequence > engine.engine.sequence);
     CHECK(query(first.child.pid, 2000).result == ProbeResult::ok);
     const auto engine_json = probe(probe_path, args + L" --engine --json", 0);
     CHECK(engine_json.find("\"operation\":\"engine\"") != std::string::npos);
     CHECK(engine_json.find("\"profile\":\"unrecognized\"") != std::string::npos);
     CHECK(engine_json.find("\"value\":null") != std::string::npos);
     const auto context = query_context(first.child.pid, 2000);
-    CHECK(context.result == ProbeResult::ok && context.snapshot.instance == initial.snapshot.instance);
+    CHECK(context.result == ProbeResult::ok);
+    CHECK(context.snapshot.instance == initial.snapshot.instance);
     CHECK(context.context.current_map.reason == SC_REASON_PROFILE_UNRECOGNIZED);
     CHECK(context.context.fields[SC_CONTEXT_LOAD_SERIAL].reason == SC_CONTEXT_UNSUPPORTED);
     sc_combat_query combat_query{}; std::memset(combat_query.namespace_id, 'a', 64);
     combat_query.map_count = 1; strcpy_s(combat_query.maps[0], "game/sp/hellonearth/hellonearth");
     const auto combat = query_combat(first.child.pid, 2000, combat_query);
-    CHECK(combat.result == ProbeResult::ok && combat.snapshot.instance == initial.snapshot.instance);
-    CHECK(combat.combat.abi_version == SC_COMBAT_ABI_VERSION && combat.combat.scope.pid == first.child.pid);
+    CHECK(combat.result == ProbeResult::ok);
+    CHECK(combat.snapshot.instance == initial.snapshot.instance);
+    CHECK(combat.combat.abi_version == SC_COMBAT_ABI_VERSION);
+    CHECK(combat.combat.scope.pid == first.child.pid);
     CHECK(combat.combat.scope.process_created == initial.snapshot.process_created);
     CHECK(std::memcmp(combat.combat.scope.instance_id, initial.snapshot.instance.data(), 16) == 0);
-    CHECK(combat.combat.qualified_kills == 0 && !std::strcmp(combat.combat.namespace_id, combat_query.namespace_id));
+    CHECK(combat.combat.qualified_kills == 0);
+    CHECK(!std::strcmp(combat.combat.namespace_id, combat_query.namespace_id));
     const auto context_json = probe(probe_path, args + L" --context --json", 0);
     CHECK(context_json.find("\"operation\":\"context\"") != std::string::npos);
     CHECK(context_json.find("\"core_version\":\"" SC_PRODUCT_VERSION "\"") != std::string::npos);
@@ -410,14 +483,21 @@ int wmain(int argc, wchar_t** argv) {
     std::printf("HARNESS_CONTEXT_WATCH_JSON %s", context_watch.c_str());
     const auto save = query_save(first.child.pid, 2000);
     const auto write = query_save_write(first.child.pid, 2000);
-    CHECK(write.result == ProbeResult::ok && write.snapshot.instance == initial.snapshot.instance && write.write.state == SC_SAVE_WRITE_NONE);
+    CHECK(write.result == ProbeResult::ok);
+    CHECK(write.snapshot.instance == initial.snapshot.instance);
+    CHECK(write.write.state == SC_SAVE_WRITE_NONE);
     const auto absent_write = query_save_write(first.child.pid, 2000, UINT64_MAX);
-    CHECK(absent_write.result == ProbeResult::ok && absent_write.write.state == SC_SAVE_WRITE_NOT_RETAINED && absent_write.write.operation_id == UINT64_MAX);
+    CHECK(absent_write.result == ProbeResult::ok);
+    CHECK(absent_write.write.state == SC_SAVE_WRITE_NOT_RETAINED);
+    CHECK(absent_write.write.operation_id == UINT64_MAX);
     const auto write_json = probe(probe_path, args + L" --save-write --json", 0);
-    CHECK(write_json.find("\"operation\":\"save_write\"") != std::string::npos && write_json.find("\"state\":\"none\"") != std::string::npos);
-    CHECK(write_json.find("\"native_result\":null") != std::string::npos && write_json.find("\"persistence_verified\":false") != std::string::npos);
+    CHECK(write_json.find("\"operation\":\"save_write\"") != std::string::npos);
+    CHECK(write_json.find("\"state\":\"none\"") != std::string::npos);
+    CHECK(write_json.find("\"native_result\":null") != std::string::npos);
+    CHECK(write_json.find("\"persistence_verified\":false") != std::string::npos);
     const auto missing_write = probe(probe_path, args + L" --save-write --write-id 18446744073709551615 --json", 0);
-    CHECK(missing_write.find("\"state\":\"not_retained\"") != std::string::npos && missing_write.find("\"operation_id\":\"18446744073709551615\"") != std::string::npos);
+    CHECK(missing_write.find("\"state\":\"not_retained\"") != std::string::npos);
+    CHECK(missing_write.find("\"operation_id\":\"18446744073709551615\"") != std::string::npos);
     const auto write_watch = probe(probe_path, args + L" --save-write --watch-count 2 --interval-ms 100 --json", 0);
     CHECK(std::count(write_watch.begin(), write_watch.end(), '\n') == 2);
     probe(probe_path, args + L" --save-write --save-admission", 2);
@@ -427,16 +507,21 @@ int wmain(int argc, wchar_t** argv) {
     probe(probe_path, args + L" --save-write --write-id 18446744073709551616", 2);
     std::printf("HARNESS_SAVE_WRITE_JSON %s", write_json.c_str());
     const auto admission = query_save_admission(first.child.pid, 2000);
-    CHECK(admission.result == ProbeResult::ok && admission.snapshot.instance == initial.snapshot.instance);
-    CHECK(admission.admission.size == 160 && admission.admission.state == SC_SAVE_SESSION_DISABLED);
-    CHECK(admission.admission.flags == 0 && admission.admission.required_routes == 63);
+    CHECK(admission.result == ProbeResult::ok);
+    CHECK(admission.snapshot.instance == initial.snapshot.instance);
+    CHECK(admission.admission.size == 160);
+    CHECK(admission.admission.state == SC_SAVE_SESSION_DISABLED);
+    CHECK(admission.admission.flags == 0);
+    CHECK(admission.admission.required_routes == 63);
     const auto admission_json = probe(probe_path, args + L" --save-admission --json", 8);
     CHECK(admission_json.find("\"state\":\"disabled\"") != std::string::npos);
     CHECK(admission_json.find("\"route_retained\":false") != std::string::npos);
     probe(probe_path, args + L" --save-admission --save-context", 2);
     probe(probe_path, args + L" --save-admission --watch-count 2", 2);
-    CHECK(save.result == ProbeResult::ok && save.snapshot.instance == initial.snapshot.instance);
-    CHECK(save.save.mutation_available == 0 && save.save.mutation_reason == SC_SAVE_NATIVE_NAMESPACE_ROUTE_UNPROVEN);
+    CHECK(save.result == ProbeResult::ok);
+    CHECK(save.snapshot.instance == initial.snapshot.instance);
+    CHECK(save.save.mutation_available == 0);
+    CHECK(save.save.mutation_reason == SC_SAVE_NATIVE_NAMESPACE_ROUTE_UNPROVEN);
     CHECK(save.save.fields[SC_SAVE_NATIVE_COMPLETION].validity == SC_OBSERVATION_UNKNOWN);
     const auto save_json = probe(probe_path, args + L" --save-context --json", 0);
     CHECK(save_json.find("\"operation\":\"save_context\"") != std::string::npos);
@@ -445,16 +530,10 @@ int wmain(int argc, wchar_t** argv) {
     std::printf("HARNESS_SAVE_JSON %s", save_json.c_str());
     const auto watch_started = GetTickCount64();
     const auto watch = probe(probe_path, args + L" --engine --watch-count 2 --interval-ms 100 --json", 0);
-    CHECK(std::count(watch.begin(), watch.end(), '\n') == 2 && GetTickCount64() - watch_started < 3000);
+    CHECK(std::count(watch.begin(), watch.end(), '\n') == 2);
+    CHECK(GetTickCount64() - watch_started < 3000);
     CHECK(GetTickCount64() - watch_started >= 90);
-    { // target exits between capture records; no retries against a replacement process
-        Host exiting(dll, 5);
-        std::thread exit_host([&] { Sleep(200); exiting.shutdown(); });
-        const auto stopped_watch = probe(probe_path, L"--pid " + std::to_wstring(exiting.child.pid) +
-            L" --engine --watch-count 2 --interval-ms 1000 --json", 3);
-        exit_host.join();
-        CHECK(stopped_watch.find("endpoint_absent") != std::string::npos);
-    }
+    watch_target_exit(dll, probe_path);
     probe(probe_path, args + L" --watch-count 2 --json", 2);
     probe(probe_path, args + L" --engine --watch-count 601 --json", 2);
     probe(probe_path, args + L" --engine --watch-count 2 --interval-ms 1 --json", 2);
@@ -477,7 +556,8 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(query(first.child.pid, 2000).result == ProbeResult::endpoint_absent);
     Host relaunched(dll, 3);
     const auto fresh = query(relaunched.child.pid, 2000);
-    CHECK(fresh.result == ProbeResult::ok && fresh.snapshot.instance != initial.snapshot.instance);
+    CHECK(fresh.result == ProbeResult::ok);
+    CHECK(fresh.snapshot.instance != initial.snapshot.instance);
     CHECK(fresh.snapshot.process_created != initial.snapshot.process_created);
     relaunched.shutdown(); second.shutdown();
     Host idle(dll, 4, true);
@@ -498,8 +578,10 @@ int wmain(int argc, wchar_t** argv) {
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS, 1, 512, 512, 1000, &attributes));
         CHECK(denied);
         const auto response = query(idle.child.pid, 150);
-        CHECK(response.result == ProbeResult::access_denied && response.win32_error == ERROR_ACCESS_DENIED);
-        CHECK(std::strcmp(response.failure_stage, "pipe_open") == 0 && std::strcmp(response.target_state, "live") == 0);
+        CHECK(response.result == ProbeResult::access_denied);
+        CHECK(response.win32_error == ERROR_ACCESS_DENIED);
+        CHECK(std::strcmp(response.failure_stage, "pipe_open") == 0);
+        CHECK(std::strcmp(response.target_state, "live") == 0);
         CHECK(response.verified_process_created != 0);
         const auto captured = probe(probe_path, L"--pid " + std::to_wstring(idle.child.pid) + L" --json", 4);
         CHECK(captured.find("\"failure_stage\":\"pipe_open\"") != std::string::npos);

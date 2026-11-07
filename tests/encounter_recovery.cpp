@@ -55,6 +55,76 @@ void empty_flag_selection() {
     for (const auto i : {0, 1}) assert(ambiguous.history().back().context.managers[i].exclusion == "ambiguous_empty_encounters");
 }
 }
+void check_recipe_refusal(Context& blocked,unsigned refusal) {
+    Queue refused;
+    blocked.managers[0].complete = false;
+    blocked.managers[0].recipe_blocked = refusal != 0;
+    blocked.managers[0].noncombat_wait = refusal == 1;
+    blocked.managers[0].protected_fight = refusal == 2;
+    blocked.map = refusal == 3 ? "game/sp/e1m4_boss/e1m4_boss" : "game/test";
+    refused.enqueue_console(8, 100); refused.observe(blocked, 100);
+    const auto before = calls;
+    assert(refused.tick(refusal == 4 ? 9 : 8, 100, drain) ==
+        std::vector<Outcome>{refusal < 2 ? no_active : refusal < 4 ? unsupported : changed});
+    assert(calls == before);
+}
+
+void check_blocked_recipe(bool partial) {
+    Queue empty;
+    auto blocked = context();
+    blocked.managers.resize(1);
+    blocked.managers[0].actors.clear();
+    blocked.managers[0].recipe_blocked = true;
+    blocked.managers[0].wait = partial ? "combat remainder" : "combat spawn";
+    empty.enqueue_console(8, 100); empty.observe(blocked, 100);
+    const auto bodies = killed;
+    assert(empty.tick(8, 100, drain) == std::vector<Outcome>{pending});
+    assert(empty.history().back().targets.size() == 1 && killed == bodies);
+    empty.observe(blocked, 200);
+    assert(empty.tick(8, 200, drain).empty() && !blocked.managers[0].complete);
+    blocked.managers[0].complete = true;
+    empty.observe(blocked, 300);
+    assert(empty.tick(8, 300, drain) == std::vector<Outcome>{finished});
+    for (unsigned refusal = 0; refusal < 5; ++refusal) {
+        check_recipe_refusal(blocked,refusal);
+}
+}
+
+void check_unavailable_encounter(Outcome result) {
+    Queue attempt;
+    auto current = context();
+    attempt.enqueue_console(8, 100);
+    if (result == no_active) current.managers.clear();
+    if (result == unsupported) current.managers[0].actors[0].protected_actor = true;
+    if (result == unknown) current.readable = false;
+    attempt.observe(current, 100);
+    const auto before = calls;
+    assert(attempt.tick(result == changed ? 9 : 8, 100, drain) == std::vector<Outcome>{result});
+    assert(calls == before && !attempt.has_pending());
+}
+
+void check_changed_encounter(bool empty,unsigned path) {
+    Queue attempt; auto current = context();
+    if (empty) {
+        for (auto& manager : current.managers) { manager.actors.clear(); manager.recipe_blocked = true; }
+        current.managers[1].recipe_blocked = false;
+    }
+    attempt.enqueue_console(8, 100); attempt.observe(current, 100); attempt.tick(8, 100, drain);
+    switch (path) {
+    case 0: current.gameplay = false; break;
+    case 1: ++current.scope.lifecycle_generation; break;
+    case 2: ++current.world; break;
+    case 3: current.map += "other"; break;
+    case 4: ++current.player; break;
+    case 5: ++current.managers[0].identifier; break;
+    case 6: current.namespace_id = "other"; break;
+    }
+    attempt.observe(current, 200);
+    const auto before = calls;
+    assert(attempt.tick(8, 200, drain) == std::vector<Outcome>{changed});
+    assert(calls == before);
+}
+
 int main() {
     empty_flag_selection();
     calls = 0; killed.clear();
@@ -76,49 +146,13 @@ int main() {
     queue.observe(current, 300); assert(queue.tick(8, 300, drain) == std::vector<Outcome>{finished});
     assert(!queue.has_pending());
     for (const bool partial : {false, true}) {
-        Queue empty;
-        auto blocked = context();
-        blocked.managers.resize(1);
-        blocked.managers[0].actors.clear();
-        blocked.managers[0].recipe_blocked = true;
-        blocked.managers[0].wait = partial ? "combat remainder" : "combat spawn";
-        empty.enqueue_console(8, 100); empty.observe(blocked, 100);
-        const auto bodies = killed;
-        assert(empty.tick(8, 100, drain) == std::vector<Outcome>{pending});
-        assert(empty.history().back().targets.size() == 1 && killed == bodies);
-        empty.observe(blocked, 200);
-        assert(empty.tick(8, 200, drain).empty() && !blocked.managers[0].complete);
-        blocked.managers[0].complete = true;
-        empty.observe(blocked, 300);
-        assert(empty.tick(8, 300, drain) == std::vector<Outcome>{finished});
-        for (unsigned refusal = 0; refusal < 5; ++refusal) {
-            Queue refused;
-            blocked.managers[0].complete = false;
-            blocked.managers[0].recipe_blocked = refusal != 0;
-            blocked.managers[0].noncombat_wait = refusal == 1;
-            blocked.managers[0].protected_fight = refusal == 2;
-            blocked.map = refusal == 3 ? "game/sp/e1m4_boss/e1m4_boss" : "game/test";
-            refused.enqueue_console(8, 100); refused.observe(blocked, 100);
-            const auto before = calls;
-            assert(refused.tick(refusal == 4 ? 9 : 8, 100, drain) ==
-                std::vector<Outcome>{refusal < 2 ? no_active : refusal < 4 ? unsupported : changed});
-            assert(calls == before);
-        }
-    }
+        check_blocked_recipe(partial);
+}
     const auto done_calls = calls;
     assert(queue.tick(8, 301, drain).empty() && calls == done_calls);
     for (const auto result : {no_active, unsupported, unknown, changed}) {
-        Queue attempt;
-        current = context();
-        attempt.enqueue_console(8, 100);
-        if (result == no_active) current.managers.clear();
-        if (result == unsupported) current.managers[0].actors[0].protected_actor = true;
-        if (result == unknown) current.readable = false;
-        attempt.observe(current, 100);
-        const auto before = calls;
-        assert(attempt.tick(result == changed ? 9 : 8, 100, drain) == std::vector<Outcome>{result});
-        assert(calls == before && !attempt.has_pending());
-    }
+        check_unavailable_encounter(result);
+}
     for (const auto* map : {"e1m4_boss", "e2m4_boss", "e3m4_boss", "e5m4_boss"}) {
         Queue attempt; current = context(); current.map = std::string("game/sp/") + map + "/" + map;
         attempt.enqueue_console(8, 100); attempt.observe(current, 100);
@@ -132,26 +166,8 @@ int main() {
     assert(protected_actor("renamed", ".?AVidAI2_SamuelBoss@@"));
     assert(!protected_actor("regular_doomhunter", ".?AVidAI2_DoomHunter@@"));
     for (const bool empty : {false, true}) for (unsigned path = 0; path < 7; ++path) {
-        Queue attempt; current = context();
-        if (empty) {
-            for (auto& manager : current.managers) { manager.actors.clear(); manager.recipe_blocked = true; }
-            current.managers[1].recipe_blocked = false;
-        }
-        attempt.enqueue_console(8, 100); attempt.observe(current, 100); attempt.tick(8, 100, drain);
-        switch (path) {
-        case 0: current.gameplay = false; break;
-        case 1: ++current.scope.lifecycle_generation; break;
-        case 2: ++current.world; break;
-        case 3: current.map += "other"; break;
-        case 4: ++current.player; break;
-        case 5: ++current.managers[0].identifier; break;
-        case 6: current.namespace_id = "other"; break;
-        }
-        attempt.observe(current, 200);
-        const auto before = calls;
-        assert(attempt.tick(8, 200, drain) == std::vector<Outcome>{changed});
-        assert(calls == before);
-    }
+        check_changed_encounter(empty,path);
+}
     Queue timeout; current = context();
     timeout.enqueue_console(8, 100); timeout.observe(current, 100); timeout.tick(8, 100, drain);
     current.managers[0].wait = "player trigger";

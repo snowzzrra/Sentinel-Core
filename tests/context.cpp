@@ -55,13 +55,17 @@ struct Fixture {
         memory.put(map, uintptr_t{0x142ab30c8ULL}); memory.bytes(data, value);
         memory.put(map + 0x9a060, NativeString{0x142a67478ULL, data, static_cast<int32_t>(value.size()), 0xc0001000});
     }
-    sc_context_snapshot sample(uint64_t sequence = 1, HANDLE stop = nullptr) { return context::sample(memory, binding, sequence, stop); }
+    sc_context_snapshot sample(uint64_t sequence = 1, HANDLE stop = nullptr) {
+        counter_value = 0; counter_delta = 100000; uptime_value = 1000;
+        const context::Clock clock{controlled_counter, controlled_uptime, 1000000000};
+        return context::sample(memory, binding, sequence, stop, 50, nullptr, &clock);
+    }
 };
 void unknown_map(const sc_context_snapshot& s, uint32_t reason) {
     CHECK(s.current_map.validity == SC_OBSERVATION_UNKNOWN && s.current_map.reason == reason && s.current_map.length == 0);
     for (char c : s.current_map.bytes) CHECK(c == 0);
 }
-int main() {
+static void check_observation_timing() {
     // check the real double-read path with a 0.1 ms observation across a simulated 16 ms uptime tick
     for (const int64_t elapsed : {100000LL, 2000000LL, 4600000LL, 10000000LL, 10000001LL, 15000000LL}) {
         Fixture timed; counter_value = 0; counter_delta = elapsed; uptime_value = 1000;
@@ -74,6 +78,9 @@ int main() {
         CHECK(sample.sample_reason == static_cast<uint32_t>(elapsed > 10000000 ? SC_REASON_BUDGET : SC_REASON_NONE));
         CHECK(!measured.map.reason && !measured.state.reason);
     }
+}
+int main() {
+    check_observation_timing();
     Fixture f; auto s = f.sample();
     CHECK(s.current_map.validity == SC_OBSERVATION_OBSERVED);
     CHECK(std::strcmp(s.current_map.bytes, "game/sp/e3m2_hell_b/e3m2_hell_b") == 0);

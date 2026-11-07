@@ -58,10 +58,12 @@ struct Fixture {
     Fixture() {
         std::array<wchar_t, MAX_PATH> temp{};
         const DWORD length = GetTempPathW(static_cast<DWORD>(temp.size()), temp.data());
-        CHECK(length > 3 && length < temp.size());
+        CHECK(length > 3);
+        CHECK(length < temp.size());
         path = std::wstring(temp.data(), length) + L"sentinel-storage-" + std::to_wstring(GetCurrentProcessId()) +
             L"-" + std::to_wstring(GetTickCount64());
-        CHECK(path.size() < 100 && CreateDirectoryW(path.c_str(), nullptr));
+        CHECK(path.size() < 100);
+        CHECK(CreateDirectoryW(path.c_str(), nullptr));
         wchar_t expanded[MAX_PATH]{};
         CHECK(GetLongPathNameW(path.c_str(), expanded, MAX_PATH));
         path = expanded;
@@ -74,7 +76,8 @@ struct Fixture {
         // All links are removed explicitly by the attack tests before cleanup.
         // Verify this exact newly created temporary target before recursive removal.
         const auto absolute = fs::absolute(path).lexically_normal();
-        CHECK(absolute == fs::path(path) && absolute.filename().wstring().find(L"sentinel-storage-") == 0);
+        CHECK(absolute == fs::path(path));
+        CHECK(absolute.filename().wstring().find(L"sentinel-storage-") == 0);
         std::error_code error;
         fs::remove_all(absolute, error);
         CHECK(!error);
@@ -108,7 +111,8 @@ void junction(const std::wstring& link, const std::wstring& target) {
 void child(const wchar_t* mode, const std::wstring& root) {
     std::array<wchar_t, 512> exe{};
     const DWORD length = GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size()));
-    CHECK(length && length < exe.size());
+    CHECK(length);
+    CHECK(length < exe.size());
     std::wstring command = L"\"" + std::wstring(exe.data()) + L"\" " + mode + L" \"" + root + L"\"";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
@@ -117,21 +121,24 @@ void child(const wchar_t* mode, const std::wstring& root) {
         &startup, &process));
     CHECK(WaitForSingleObject(process.hProcess, 10000) == WAIT_OBJECT_0);
     DWORD exit_code = 1;
-    CHECK(GetExitCodeProcess(process.hProcess, &exit_code) && exit_code == 0);
+    CHECK(GetExitCodeProcess(process.hProcess, &exit_code));
+    CHECK(exit_code == 0);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
 }
 void identities_and_descriptor() {
     auto a = descriptor(L"C:\\synthetic");
     std::string id, changed;
-    CHECK(namespace_id(a.identity, id).ok() && id == expected_id);
+    CHECK(namespace_id(a.identity, id).ok());
+    CHECK(id == expected_id);
     for (unsigned field = 0; field < 4; ++field) {
         auto b = a;
         if (field == 0) b.identity.seed += "-other";
         if (field == 1) b.identity.team = 1;
         if (field == 2) b.identity.slot = 2;
         if (field == 3) b.identity.generation_fingerprint[0] = 'b';
-        CHECK(namespace_id(b.identity, changed).ok() && changed != id);
+        CHECK(namespace_id(b.identity, changed).ok());
+        CHECK(changed != id);
     }
     auto missing = a;
     missing.identity.team.reset(); CHECK(namespace_id(missing.identity, changed).outcome == Outcome::invalid_identity);
@@ -142,13 +149,17 @@ void identities_and_descriptor() {
         "generation_fingerprint=" + std::string(64, 'a') + "\nslot_data_revision=0.7.0\nsession_mod_contract_revision=2\n"
         "provenance=synthetic-fixture\nroot=C:\\synthetic\n";
     Descriptor parsed;
-    CHECK(parse_descriptor(text, parsed).ok() && parsed.root == a.root);
-    CHECK(namespace_id(parsed.identity, changed).ok() && changed == id);
+    CHECK(parse_descriptor(text, parsed).ok());
+    CHECK(parsed.root == a.root);
+    CHECK(namespace_id(parsed.identity, changed).ok());
+    CHECK(changed == id);
     Fixture fixture;
     const auto file = fixture.path + L"\\descriptor.txt";
     write(file, text);
-    CHECK(read_descriptor_file(file.c_str(), parsed).ok() && parsed.root == a.root);
-    CHECK(namespace_id(parsed.identity, changed).ok() && changed == id);
+    CHECK(read_descriptor_file(file.c_str(), parsed).ok());
+    CHECK(parsed.root == a.root);
+    CHECK(namespace_id(parsed.identity, changed).ok());
+    CHECK(changed == id);
     const auto alias = fixture.path + L"\\descriptor-alias.txt";
     CHECK(CreateHardLinkW(alias.c_str(), file.c_str(), nullptr));
     CHECK(read_descriptor_file(file.c_str(), parsed).outcome == Outcome::unsafe_path);
@@ -195,10 +206,12 @@ struct TransportSource {
         if (index == 1) {
             const HANDLE writer = CreateFileW((self.attempt->path + L"\\payload-0.bin").c_str(), GENERIC_WRITE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
-            CHECK(writer == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
+            CHECK(writer == INVALID_HANDLE_VALUE);
+            CHECK(GetLastError() == ERROR_SHARING_VIOLATION);
         }
         if (self.fail_file == static_cast<int>(index)) return false;
-        CHECK(index < self.bytes.size() && offset + count <= self.bytes[index].size());
+        CHECK(index < self.bytes.size());
+        CHECK(offset + count <= self.bytes[index].size());
         std::memcpy(out, self.bytes[index].data() + offset, count); return true;
     }
 };
@@ -219,39 +232,7 @@ TransportMetadata transport_metadata(const Namespace& owner, const TransportSour
     }
     return metadata;
 }
-void transport_backups(Fixture& fixture) {
-    auto value = descriptor(fixture.path + L"\\ap"); value.identity.slot = 40;
-    std::unique_ptr<Namespace> owner; CHECK(prepare(value, owner).ok());
-    Backup attempt; TransportSource source; source.attempt = &attempt;
-    auto metadata = transport_metadata(*owner, source);
-    const auto save = [&] { return owner->backup_transport(metadata, &TransportSource::copy, &source, attempt); };
-    CHECK(save().outcome == Outcome::transport_backup_complete);
-    CHECK(attempt.files == 2 && attempt.bytes == source.bytes[0].size() + source.bytes[1].size());
-    const auto complete = attempt.path, basename = fs::path(complete).filename().wstring();
-    const auto manifest_path = complete + L"\\transport.manifest";
-    const auto original = read(manifest_path);
-    CHECK(original.find("write_operation=18446744073709551615\n") != std::string::npos);
-    CHECK(!fs::exists(complete + L"\\nested"));
-    std::unique_ptr<TransportArchive> archive;
-    CHECK(owner->reopen_transport(basename, archive).ok());
-    CHECK(archive->metadata().files[1].name == "nested/SlotFile" && archive->metadata().operation_id == UINT64_MAX);
-    std::array<char, 64> buffer{};
-    CHECK(archive->read(0, 1, buffer.data(), 2).ok() && std::string(buffer.data(), 2) == "bc");
-    CHECK(!archive->read(0, 2, buffer.data(), 2).ok() && !archive->read(2, 0, buffer.data(), 1).ok());
-    for (const auto& file : {manifest_path, complete + L"\\payload-0.bin"}) {
-        const HANDLE writer = CreateFileW(file.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE |
-            FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
-        CHECK(writer == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
-        CHECK(!DeleteFileW(file.c_str()) && GetLastError() == ERROR_SHARING_VIOLATION);
-    }
-    CHECK(!MoveFileW(complete.c_str(), (complete + L"-moved").c_str()));
-    archive.reset();
-    source.fail_file = 1; CHECK(save().outcome == Outcome::io_error);
-    CHECK(attempt.files == 1 && !fs::exists(attempt.path + L"\\transport.manifest"));
-    CHECK(owner->reopen_transport(fs::path(attempt.path).filename().wstring(), archive).outcome == Outcome::interrupted_preparation);
-    source.fail_file = -1; metadata.files[0].sha256[0] ^= 1;
-    CHECK(save().outcome == Outcome::payload_mismatch && !fs::exists(attempt.path + L"\\transport.manifest"));
-    metadata = transport_metadata(*owner, source);
+void invalid_transport_metadata(Namespace& owner, const TransportMetadata& metadata, TransportSource& source, Backup& attempt) {
     for (int mode = 0; mode < 8; ++mode) {
         auto bad = metadata;
         if (mode == 0) bad.directory = "PROFILE";
@@ -262,17 +243,64 @@ void transport_backups(Fixture& fixture) {
         if (mode == 5) bad.files[0].size = UINT32_MAX;
         if (mode == 6) bad.files.resize(17, bad.files[0]);
         if (mode == 7) bad.process_created = 0;
-        CHECK(!owner->backup_transport(bad, &TransportSource::copy, &source, attempt).ok() && attempt.path.empty());
+        CHECK(!owner.backup_transport(bad, &TransportSource::copy, &source, attempt).ok());
+        CHECK(attempt.path.empty());
     }
-    CHECK(read(manifest_path) == original && read(complete + L"\\payload-0.bin") == "abc");
+}
+void transport_backups(Fixture& fixture) {
+    auto value = descriptor(fixture.path + L"\\ap"); value.identity.slot = 40;
+    std::unique_ptr<Namespace> owner; CHECK(prepare(value, owner).ok());
+    Backup attempt; TransportSource source; source.attempt = &attempt;
+    auto metadata = transport_metadata(*owner, source);
+    const auto save = [&] { return owner->backup_transport(metadata, &TransportSource::copy, &source, attempt); };
+    CHECK(save().outcome == Outcome::transport_backup_complete);
+    CHECK(attempt.files == 2);
+    CHECK(attempt.bytes == source.bytes[0].size() + source.bytes[1].size());
+    const auto complete = attempt.path, basename = fs::path(complete).filename().wstring();
+    const auto manifest_path = complete + L"\\transport.manifest";
+    const auto original = read(manifest_path);
+    CHECK(original.find("write_operation=18446744073709551615\n") != std::string::npos);
+    CHECK(!fs::exists(complete + L"\\nested"));
+    std::unique_ptr<TransportArchive> archive;
+    CHECK(owner->reopen_transport(basename, archive).ok());
+    CHECK(archive->metadata().files[1].name == "nested/SlotFile");
+    CHECK(archive->metadata().operation_id == UINT64_MAX);
+    std::array<char, 64> buffer{};
+    CHECK(archive->read(0, 1, buffer.data(), 2).ok());
+    CHECK(std::string(buffer.data(), 2) == "bc");
+    CHECK(!archive->read(0, 2, buffer.data(), 2).ok());
+    CHECK(!archive->read(2, 0, buffer.data(), 1).ok());
+    for (const auto& file : {manifest_path, complete + L"\\payload-0.bin"}) {
+        const HANDLE writer = CreateFileW(file.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE |
+            FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        CHECK(writer == INVALID_HANDLE_VALUE);
+        CHECK(GetLastError() == ERROR_SHARING_VIOLATION);
+        CHECK(!DeleteFileW(file.c_str()));
+        CHECK(GetLastError() == ERROR_SHARING_VIOLATION);
+    }
+    CHECK(!MoveFileW(complete.c_str(), (complete + L"-moved").c_str()));
+    archive.reset();
+    source.fail_file = 1; CHECK(save().outcome == Outcome::io_error);
+    CHECK(attempt.files == 1);
+    CHECK(!fs::exists(attempt.path + L"\\transport.manifest"));
+    CHECK(owner->reopen_transport(fs::path(attempt.path).filename().wstring(), archive).outcome == Outcome::interrupted_preparation);
+    source.fail_file = -1; metadata.files[0].sha256[0] ^= 1;
+    CHECK(save().outcome == Outcome::payload_mismatch);
+    CHECK(!fs::exists(attempt.path + L"\\transport.manifest"));
+    metadata = transport_metadata(*owner, source);
+    invalid_transport_metadata(*owner, metadata, source, attempt);
+    CHECK(read(manifest_path) == original);
+    CHECK(read(complete + L"\\payload-0.bin") == "abc");
     for (const auto& path : {L"../escape", L"C:\\escape", L"transport-backup-invalid"})
-        CHECK(owner->reopen_transport(path, archive).outcome == Outcome::unsafe_path && !archive);
+        { CHECK(owner->reopen_transport(path, archive).outcome == Outcome::unsafe_path); CHECK(!archive); }
     write(complete + L"\\payload-0.bin", "abd");
-    CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::payload_mismatch && !archive);
+    CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::payload_mismatch);
+    CHECK(!archive);
     write(complete + L"\\payload-0.bin", "abc");
     for (const auto& extra : {L"owner.lock", L"extra.bin"}) {
         write(complete + L"\\" + extra, "unexpected");
-        CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::corrupt_manifest && !archive);
+        CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::corrupt_manifest);
+        CHECK(!archive);
         CHECK(DeleteFileW((complete + L"\\" + extra).c_str()));
     }
     for (int mode = 0; mode < 5; ++mode) {
@@ -283,26 +311,31 @@ void transport_backups(Fixture& fixture) {
         if (mode == 3) text.replace(text.find("files=2"), 7, "files=02");
         if (mode == 4) text += std::string(32768, 'x');
         write(manifest_path, text);
-        CHECK(!owner->reopen_transport(basename, archive).ok() && !archive);
+        CHECK(!owner->reopen_transport(basename, archive).ok());
+        CHECK(!archive);
     }
     auto other = value; other.identity.team = 1; std::unique_ptr<Namespace> foreign;
     CHECK(prepare(other, foreign).ok());
     auto foreign_metadata = transport_metadata(*foreign, source);
     CHECK(foreign->backup_transport(foreign_metadata, &TransportSource::copy, &source, attempt).ok());
     write(manifest_path, read(attempt.path + L"\\transport.manifest"));
-    CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::identity_mismatch && !archive);
+    CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::identity_mismatch);
+    CHECK(!archive);
     write(manifest_path, original);
     write(complete + L"\\payload-0.bin:hidden", "unexpected ADS");
-    CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::unsafe_path && !archive);
+    CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::unsafe_path);
+    CHECK(!archive);
     CHECK(DeleteFileW((complete + L"\\payload-0.bin:hidden").c_str()));
     CHECK(DeleteFileW((complete + L"\\payload-0.bin").c_str()));
     CHECK(CreateHardLinkW((complete + L"\\payload-0.bin").c_str(), (fixture.path + L"\\mock-vanilla\\protected.txt").c_str(), nullptr));
-    CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::unsafe_path && !archive);
+    CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::unsafe_path);
+    CHECK(!archive);
     CHECK(DeleteFileW((complete + L"\\payload-0.bin").c_str()));
     write(complete + L"\\payload-0.bin", "abc");
     CHECK(owner->reopen_transport(basename, archive).ok());
     owner.reset(); // archive independently pins its read set through later recovery reads
-    CHECK(archive->read(0, 0, buffer.data(), 3).ok() && std::string(buffer.data(), 3) == "abc");
+    CHECK(archive->read(0, 0, buffer.data(), 3).ok());
+    CHECK(std::string(buffer.data(), 3) == "abc");
 }
 void campaign_provider_instances(Fixture& f) {
     auto value = descriptor(f.path + L"\\ap"); value.identity.slot = 77;
@@ -315,16 +348,22 @@ void campaign_provider_instances(Fixture& f) {
     value.campaign = {CampaignIntent::create, 1};
     CHECK(prepare(value, owner).ok());
     const auto first = owner->metadata().native_root;
-    CHECK(owner->metadata().namespace_id == id && first.size() == 43 && first != legacy);
+    CHECK(owner->metadata().namespace_id == id);
+    CHECK(first.size() == 43);
+    CHECK(first != legacy);
     CHECK(!DeleteFileW((path + L"\\native.root").c_str()));
     owner.reset();
-    CHECK(reopen(value, owner).ok() && owner->metadata().native_root == first);
+    CHECK(reopen(value, owner).ok());
+    CHECK(owner->metadata().native_root == first);
     owner.reset();
     CHECK(MoveFileW(path.c_str(), (path + L"-kept").c_str()));
-    CHECK(prepare(value, owner).ok() && owner->metadata().namespace_id == id && owner->metadata().native_root != first);
+    CHECK(prepare(value, owner).ok());
+    CHECK(owner->metadata().namespace_id == id);
+    CHECK(owner->metadata().native_root != first);
     owner.reset();
     write(path + L"\\native.root", "partial");
-    CHECK(reopen(value, owner).outcome == Outcome::corrupt_manifest && !owner);
+    CHECK(reopen(value, owner).outcome == Outcome::corrupt_manifest);
+    CHECK(!owner);
 }
 void lifecycle_and_backup(Fixture& f) {
     const auto a = descriptor(f.path + L"\\ap");
@@ -332,14 +371,18 @@ void lifecycle_and_backup(Fixture& f) {
     const auto inspected = inspect(a, info);
     if (inspected.outcome != Outcome::namespace_missing)
         std::fprintf(stderr, "initial inspect outcome=%s error=%u\n", outcome_name(inspected.outcome), inspected.win32_error);
-    CHECK(inspected.outcome == Outcome::namespace_missing && info.path.empty());
+    CHECK(inspected.outcome == Outcome::namespace_missing);
+    CHECK(info.path.empty());
     std::unique_ptr<Namespace> owner, competing;
     const auto prepared = prepare(a, owner);
     if (prepared.outcome != Outcome::storage_prepared)
         std::fprintf(stderr, "initial prepare outcome=%s error=%u\n", outcome_name(prepared.outcome), prepared.win32_error);
-    CHECK(prepared.outcome == Outcome::storage_prepared && owner && !owner->metadata().native_attached);
+    CHECK(prepared.outcome == Outcome::storage_prepared);
+    CHECK(owner);
+    CHECK(!owner->metadata().native_attached);
     const auto path = owner->metadata().path;
-    CHECK(prepare(a, competing).outcome == Outcome::ownership_conflict && !competing);
+    CHECK(prepare(a, competing).outcome == Outcome::ownership_conflict);
+    CHECK(!competing);
     CHECK(inspect(a, info).outcome == Outcome::ownership_conflict);
     child(L"--busy", a.root);
     CHECK(!MoveFileW(a.root.c_str(), (a.root + L"-moved").c_str()));
@@ -351,7 +394,8 @@ void lifecycle_and_backup(Fixture& f) {
         const HANDLE attacker = CreateFileW(held_directory.c_str(), GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-        CHECK(attacker == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION);
+        CHECK(attacker == INVALID_HANDLE_VALUE);
+        CHECK(GetLastError() == ERROR_SHARING_VIOLATION);
     }
     write(path + L"\\synthetic-payload.bin", "OFFLINE SYNTHETIC PAYLOAD A");
     CHECK(CreateDirectoryW((path + L"\\details").c_str(), nullptr));
@@ -361,10 +405,13 @@ void lifecycle_and_backup(Fixture& f) {
         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     CHECK(writer != INVALID_HANDLE_VALUE);
     Backup backup;
-    CHECK(owner->backup_offline(backup).outcome == Outcome::ownership_conflict && backup.path.empty());
+    CHECK(owner->backup_offline(backup).outcome == Outcome::ownership_conflict);
+    CHECK(backup.path.empty());
     CHECK(CloseHandle(writer));
     CHECK(owner->backup_offline(backup).outcome == Outcome::offline_backup_complete);
-    CHECK(backup.files == 4 && backup.bytes > 30 && backup.path.find(a.root + L"\\backup-attempt-") == 0);
+    CHECK(backup.files == 4);
+    CHECK(backup.bytes > 30);
+    CHECK(backup.path.find(a.root + L"\\backup-attempt-") == 0);
     CHECK(read(backup.path + L"\\synthetic-payload.bin") == "OFFLINE SYNTHETIC PAYLOAD A");
     CHECK(read(backup.path + L"\\details\\index.bin") == "SYNTHETIC INDEX");
     CHECK(read(backup.path + L"\\details\\backup.receipt") == "SYNTHETIC NESTED PAYLOAD");
@@ -374,24 +421,29 @@ void lifecycle_and_backup(Fixture& f) {
     CHECK(completed_receipt.find("\nstate=complete\n") != std::string::npos);
     CHECK(!fs::exists(backup.path + L"\\owner.lock"));
     owner.reset();
-    CHECK(inspect(a, info).ok() && info.namespace_id == expected_id && !info.native_attached);
+    CHECK(inspect(a, info).ok());
+    CHECK(info.namespace_id == expected_id);
+    CHECK(!info.native_attached);
     child(L"--reopen", a.root);
     CHECK(reopen(a, owner).outcome == Outcome::storage_reopened);
     auto b = a; b.identity.slot = 2;
     CHECK(prepare(b, competing).outcome == Outcome::storage_prepared);
-    CHECK(competing->metadata().path != path && !fs::exists(competing->metadata().path + L"\\synthetic-payload.bin"));
+    CHECK(competing->metadata().path != path);
+    CHECK(!fs::exists(competing->metadata().path + L"\\synthetic-payload.bin"));
     // A valid older receipt must never enter an output as ordinary root payload,
     // including Windows case aliases and directories using the reserved name.
     const auto root_entries = std::distance(fs::directory_iterator(a.root), fs::directory_iterator());
     for (const auto* name : {L"backup.receipt", L"BACKUP.RECEIPT"}) {
         const auto reserved = path + L"\\" + name;
         write(reserved, completed_receipt);
-        CHECK(owner->backup_offline(backup).outcome == Outcome::unsafe_path && backup.path.empty());
+        CHECK(owner->backup_offline(backup).outcome == Outcome::unsafe_path);
+        CHECK(backup.path.empty());
         CHECK(std::distance(fs::directory_iterator(a.root), fs::directory_iterator()) == root_entries);
         CHECK(read(reserved) == completed_receipt);
         CHECK(DeleteFileW(reserved.c_str()));
         CHECK(CreateDirectoryW(reserved.c_str(), nullptr));
-        CHECK(owner->backup_offline(backup).outcome == Outcome::unsafe_path && backup.path.empty());
+        CHECK(owner->backup_offline(backup).outcome == Outcome::unsafe_path);
+        CHECK(backup.path.empty());
         CHECK(std::distance(fs::directory_iterator(a.root), fs::directory_iterator()) == root_entries);
         CHECK(RemoveDirectoryW(reserved.c_str()));
     }
@@ -420,7 +472,8 @@ void malformed_and_partial(Fixture& f) {
     for (const auto& root : {L"relative", L"C:relative", L"\\\\server\\share", L"C:\\x\\..\\y",
         L"C:\\x\\.\\y", L"C:\\x\\CON", L"C:\\x\\trailing.", L"C:\\x\\stream:ads", L"\\\\?\\C:\\x"}) {
         auto invalid = a; invalid.root = root;
-        CHECK(prepare(invalid, owner).outcome == Outcome::invalid_root && !owner);
+        CHECK(prepare(invalid, owner).outcome == Outcome::invalid_root);
+        CHECK(!owner);
     }
     auto missing = a; missing.root += L"\\missing";
     Metadata info;
@@ -466,7 +519,8 @@ void redirect_and_links(Fixture& f) {
     CHECK(CreateDirectoryW(streamed_directory.c_str(), nullptr));
     write(streamed_directory + L":hidden", "SYNTHETIC DIRECTORY STREAM");
     CHECK(reopen(a, owner).outcome == Outcome::storage_reopened);
-    CHECK(owner->backup_offline(backup).outcome == Outcome::unsafe_path && backup.path.empty());
+    CHECK(owner->backup_offline(backup).outcome == Outcome::unsafe_path);
+    CHECK(backup.path.empty());
     owner.reset();
     CHECK(RemoveDirectoryW(streamed_directory.c_str()));
     write(namespace_path + L":hidden", "SYNTHETIC NAMESPACE ROOT STREAM");
@@ -511,22 +565,26 @@ int metadata_child(const wchar_t* root, const wchar_t* number, const wchar_t* st
     const auto mode = static_cast<FileFault>(std::wcstoul(number, nullptr, 10));
     HANDLE entered = OpenEventW(EVENT_MODIFY_STATE, FALSE, (std::wstring(stem) + L"-entered").c_str());
     HANDLE release = OpenEventW(SYNCHRONIZE, FALSE, (std::wstring(stem) + L"-release").c_str());
-    CHECK(entered && release);
+    CHECK(entered);
+    CHECK(release);
     auto value = metadata_descriptor(root);
     std::unique_ptr<Namespace> owner; CHECK(reopen(value, owner).ok());
     const auto pending = sentinel::save::campaign_contract(value, owner->metadata().namespace_id) + "state=native_save_pending\n";
     file_fault(mode, L"\\campaign.checkpoint", entered, release);
     const auto result = owner->publish_campaign_record(true, pending, false);
-    CHECK(!result.ok() && file_fault_hits() == 1);
+    CHECK(!result.ok());
+    CHECK(file_fault_hits() == 1);
     file_fault(FileFault::none, L"");
-    CHECK(CloseHandle(entered) && CloseHandle(release));
+    CHECK(CloseHandle(entered));
+    CHECK(CloseHandle(release));
     return 0;
 }
 void interrupt_metadata(const std::wstring& root, sentinel::testing::FileFault mode, const wchar_t* archive_file = nullptr) {
     const auto stem = L"Local\\Sentinel-metadata-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(static_cast<unsigned>(mode));
     HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, (stem + L"-entered").c_str());
     HANDLE release = CreateEventW(nullptr, TRUE, FALSE, (stem + L"-release").c_str());
-    CHECK(entered && release);
+    CHECK(entered);
+    CHECK(release);
     wchar_t executable[MAX_PATH]{}; CHECK(GetModuleFileNameW(nullptr, executable, MAX_PATH));
     auto line = L"\"" + std::wstring(executable) + (archive_file ? L"\" --archive-child \"" : L"\" --metadata-child \"") + root + L"\" " +
         std::to_wstring(static_cast<unsigned>(mode)) + L" \"" + stem + L"\"";
@@ -542,8 +600,10 @@ void interrupt_metadata(const std::wstring& root, sentinel::testing::FileFault m
     if (code != (terminate ? sentinel::testing::interrupted_exit : 0))
         std::fprintf(stderr,"child exit=%lu mode=%u suffix=%ls root=%ls\n",code,static_cast<unsigned>(mode),archive_file?archive_file:L"metadata",root.c_str());
     CHECK(code == (terminate ? sentinel::testing::interrupted_exit : 0));
-    CHECK(CloseHandle(process.hThread) && CloseHandle(process.hProcess));
-    CHECK(CloseHandle(entered) && CloseHandle(release));
+    CHECK(CloseHandle(process.hThread));
+    CHECK(CloseHandle(process.hProcess));
+    CHECK(CloseHandle(entered));
+    CHECK(CloseHandle(release));
 }
 void interrupted_metadata(Fixture& fixture) {
     using sentinel::testing::FileFault;
@@ -583,7 +643,8 @@ int wmain(int argc, wchar_t** argv) {
     if (argc == 3) {
         const auto a = descriptor(argv[2]);
         std::string id;
-        CHECK(namespace_id(a.identity, id).ok() && id == expected_id);
+        CHECK(namespace_id(a.identity, id).ok());
+        CHECK(id == expected_id);
         std::unique_ptr<Namespace> owner;
         if (std::wstring_view(argv[1]) == L"--busy")
             return prepare(a, owner).outcome == Outcome::ownership_conflict ? 0 : 1;

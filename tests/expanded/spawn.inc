@@ -71,49 +71,9 @@ using namespace detail;
 
 #ifdef SC_NATIVE_TESTING
 
-bool test_limit_inputs() {
-    const auto previous_spawn = original_spawn;
-    const auto previous_resolve = resolve_actor;
-    const auto previous_name = definition_name;
-    const auto previous_world = world_global;
-    const auto was_stopped = stopped.exchange(false);
-    static unsigned calls;
-    static bool abi;
-    calls = 0; abi = true;
-    original_spawn = [](uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth) -> uint64_t {
-        ++calls; abi = abi && manager == 7 && record == 8 && point == 9 && fourth == 10 && fifth == 11;
-        return 1;
-    };
-    resolve_actor = [](uintptr_t record) { return *reinterpret_cast<const uintptr_t*>(record); };
     struct Definition { uintptr_t unused; const char* name; uint8_t padding[0x158 - 16]; Definition* parent; };
-    static_assert(offsetof(Definition, parent) == 0x158);
-    Definition marauder_type{0, "ai/superheavy/marauder", {}, nullptr};
-    Definition archvile_type{0, "ai/superheavy/archvile", {}, nullptr};
-    Definition spirit_type{0, "ai/ambient/spirit", {}, nullptr};
-    Definition boss_type{0, "ai/boss/darklord", {}, &marauder_type};
-    Definition marauder_definition{0, "native_marauder", {}, &marauder_type};
-    Definition archvile_definition{0, "native_archvile", {}, &archvile_type};
-    Definition spirit_definition{0, "native_spirit", {}, &spirit_type};
-    definition_name = [](uintptr_t actor) -> const char* {
-        if (actor == 9) return "ap_v070_spawn_a_l00000001000000010000000100000002_km__ap_v070_s00100";
-        const auto definition = *reinterpret_cast<Definition**>(actor + 0xa8);
-        return definition ? definition->name : "native_ai";
-    };
-    uintptr_t table[34]{};
     struct Actor { uintptr_t* table; bool dead; uint8_t padding[0xa8 - 9]; Definition* definition; };
-    static_assert(offsetof(Actor, definition) == 0xa8);
-    Actor marauder{table, false, {}, &marauder_definition}, archvile{table, false, {}, &archvile_definition},
-          spirit{table, false, {}, &spirit_definition}, boss{table, false, {}, &boss_type};
-    Definition default_type{0, "ai/default", {}, nullptr};
-    default_type.parent = &default_type;
-    Actor ordinary{table, false, {}, &default_type};
-    bool hierarchy_ok = special_kind(reinterpret_cast<uintptr_t>(&ordinary)) == 3;
-    Definition strict_parent{0,
-        "ap_v070_ai_a_t00000000000000010000000040000000_v"
-        "000000010000000200000001000000000000000000000000000000000000000000000000"
-        "_a1234567812345678_p00000006000000020000000600000203_l00000001000000020000000100000003_ka__ap_v070_s00100", {}, nullptr};
-    ordinary.definition = &strict_parent;
-    auto child_limits = *spawn_limits("ap_v070_ai_a_p00000008000000030000000800000303_l00000004000000040000000400000008_ks__ap_v070_s00100");
+void inherited_population_cases(Actor& ordinary, Definition& strict_parent, SpawnLimits& child_limits, bool& hierarchy_ok) {
     inherit_population(child_limits, reinterpret_cast<uintptr_t>(&ordinary));
     hierarchy_ok &= child_limits.strict && child_limits.maximum == std::array<uint32_t, 4>{1,2,1,3} &&
         child_limits.population == 6 && child_limits.heavy == 2 && child_limits.superheavy == 2 &&
@@ -130,6 +90,8 @@ bool test_limit_inputs() {
     child_limits.maximum = {4,4,4,8};
     inherit_population(child_limits, reinterpret_cast<uintptr_t>(&ordinary));
     hierarchy_ok &= !child_limits.strict && child_limits.maximum == std::array<uint32_t, 4>{4,4,4,8};
+}
+void physical_species_cases(Actor& ordinary, Definition& strict_parent, SpawnLimits& child_limits, bool& hierarchy_ok) {
     constexpr const char* special_types[]{"ai/superheavy/marauder", "ai/superheavy/archvile", "ai/ambient/spirit",
         "ai/ambient/buffpod", "ai/fodder/zombie_t1_screecher", "ai/heavy/bloodangel",
         "ai/fodder/prowler_cursed", "ai/fodder/imp_stone", "ai/superheavy/baron_armored"};
@@ -162,18 +124,73 @@ bool test_limit_inputs() {
         strict_parent.name = type;
         hierarchy_ok &= special_kind(reinterpret_cast<uintptr_t>(&ordinary), &boss_species) == 3;
     }
-    ordinary.definition = &default_type;
+}
+bool countermeasure_mapping_case() {
     NativeRecipe counter;
     counter.blood_punch_alternatives.emplace(11, 22);
     counter.microwave_alternatives.emplace(33, 44);
     counter.stone_alternatives.emplace(55, 66);
     counter.armored_alternatives.emplace(77, 88);
-    hierarchy_ok &= countermeasure_body(counter, 11, false, false, false) == 22 && countermeasure_body(counter, 11, true, false, false) == 11 &&
+    return countermeasure_body(counter, 11, false, false, false) == 22 && countermeasure_body(counter, 11, true, false, false) == 11 &&
                     countermeasure_body(counter, 33, false, false, false) == 44 && countermeasure_body(counter, 33, false, true, false) == 33 &&
                     countermeasure_body(counter, 55, false, false, false) == 66 && countermeasure_body(counter, 55, false, false, true) == 55 &&
                     countermeasure_body(counter, 77, false, false, false, false) == 88 &&
                     countermeasure_body(counter, 77, false, false, false, true) == 77 &&
                     countermeasure_body(counter, 99, false, false, false, false) == 99;
+}
+bool spawn_case(const unsigned& calls, uint64_t result, unsigned count) {
+    return spawn_detour(7, 8, 9, 10, 11) == result && calls == count;
+}
+const char* limited_actor_definition(uintptr_t actor) {
+        if (actor == 9) return "ap_v070_spawn_a_l00000001000000010000000100000002_km__ap_v070_s00100";
+        const auto definition = *reinterpret_cast<Definition**>(actor + 0xa8);
+        return definition ? definition->name : "native_ai";
+
+}
+bool fixture_spawn_abi(uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth) {
+    return manager == 7 && record == 8 && point == 9 && fourth == 10 && fifth == 11;
+}
+bool test_limit_inputs() {
+    const auto previous_spawn = original_spawn;
+    const auto previous_resolve = resolve_actor;
+    const auto previous_name = definition_name;
+    const auto previous_world = world_global;
+    const auto was_stopped = stopped.exchange(false);
+    static unsigned calls;
+    static bool abi;
+    calls = 0; abi = true;
+    original_spawn = [](uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth) -> uint64_t {
+        ++calls; abi = abi && fixture_spawn_abi(manager, record, point, fourth, fifth);
+        return 1;
+    };
+    resolve_actor = [](uintptr_t record) { return *reinterpret_cast<const uintptr_t*>(record); };
+    static_assert(offsetof(Definition, parent) == 0x158);
+    Definition marauder_type{0, "ai/superheavy/marauder", {}, nullptr};
+    Definition archvile_type{0, "ai/superheavy/archvile", {}, nullptr};
+    Definition spirit_type{0, "ai/ambient/spirit", {}, nullptr};
+    Definition boss_type{0, "ai/boss/darklord", {}, &marauder_type};
+    Definition marauder_definition{0, "native_marauder", {}, &marauder_type};
+    Definition archvile_definition{0, "native_archvile", {}, &archvile_type};
+    Definition spirit_definition{0, "native_spirit", {}, &spirit_type};
+    definition_name = limited_actor_definition;
+    uintptr_t table[34]{};
+    static_assert(offsetof(Actor, definition) == 0xa8);
+    Actor marauder{table, false, {}, &marauder_definition}, archvile{table, false, {}, &archvile_definition},
+          spirit{table, false, {}, &spirit_definition}, boss{table, false, {}, &boss_type};
+    Definition default_type{0, "ai/default", {}, nullptr};
+    default_type.parent = &default_type;
+    Actor ordinary{table, false, {}, &default_type};
+    bool hierarchy_ok = special_kind(reinterpret_cast<uintptr_t>(&ordinary)) == 3;
+    Definition strict_parent{0,
+        "ap_v070_ai_a_t00000000000000010000000040000000_v"
+        "000000010000000200000001000000000000000000000000000000000000000000000000"
+        "_a1234567812345678_p00000006000000020000000600000203_l00000001000000020000000100000003_ka__ap_v070_s00100", {}, nullptr};
+    ordinary.definition = &strict_parent;
+    auto child_limits = *spawn_limits("ap_v070_ai_a_p00000008000000030000000800000303_l00000004000000040000000400000008_ks__ap_v070_s00100");
+    inherited_population_cases(ordinary, strict_parent, child_limits, hierarchy_ok);
+    physical_species_cases(ordinary, strict_parent, child_limits, hierarchy_ok);
+    ordinary.definition = &default_type;
+    hierarchy_ok &= countermeasure_mapping_case();
     Definition first{0, "ai/fodder/first", {}, &default_type};
     default_type.parent = &first;
     hierarchy_ok &= special_kind(reinterpret_cast<uintptr_t>(&ordinary)) == 3;
@@ -203,19 +220,19 @@ bool test_limit_inputs() {
     std::memcpy(world.get() + 0x126660, &manager_count, sizeof(manager_count));
     const auto world_address = reinterpret_cast<uintptr_t>(world.get());
     world_global = reinterpret_cast<uintptr_t>(&world_address);
-    bool ok = spawn_detour(7, 8, 9, 10, 11) == 0 && calls == 0;
+    bool ok = spawn_case(calls, 0, 0);
     marauder.dead = true; archvile.dead = true;
-    ok = ok && spawn_detour(7, 8, 9, 10, 11) == 0 && calls == 0;
+    ok = ok && spawn_case(calls, 0, 0);
     references[0][0] = 0;
-    ok = ok && spawn_detour(7, 8, 9, 10, 11) == 0 && calls == 0;
+    ok = ok && spawn_case(calls, 0, 0);
     references[1][0] = 0;
-    ok = ok && spawn_detour(7, 8, 9, 10, 11) == 1 && calls == 1;
+    ok = ok && spawn_case(calls, 1, 1);
     marauder.dead = false; references[0][0] = reinterpret_cast<uintptr_t>(&marauder);
     collection.data = reinterpret_cast<uintptr_t>(references + 1); collection.count = 3;
-    ok = ok && spawn_detour(7, 8, 9, 10, 11) == 1 && calls == 2;
+    ok = ok && spawn_case(calls, 1, 2);
     collection.data = reinterpret_cast<uintptr_t>(references); collection.count = 4;
     stopped.store(true);
-    ok = ok && spawn_detour(7, 8, 9, 10, 11) == 1 && calls == 3 && abi;
+    ok = ok && spawn_case(calls, 1, 3) && abi;
     uint64_t native_scope = 14695981039346656037ull;
     for (const unsigned char character : std::string_view("native_ai")) native_scope = (native_scope ^ character) * 1099511628211ull;
     SpawnLimits strict_scope{};

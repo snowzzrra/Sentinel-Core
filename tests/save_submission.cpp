@@ -25,13 +25,16 @@ bool write(Model& m, const char* name = directory) {
     return captured;
 }
 SaveReference* empty_factory(uintptr_t, SaveReference* out, uint32_t, uintptr_t) { return out; }
+bool submission_write_accepted(const Model& m) {
+    return m.mode != 1 && m.mode != 2 && m.mode != 12 && !(m.mode == 3 && m.native_calls == 2);
+}
 SaveReference* make(uintptr_t manager, SaveReference* out, uint32_t user, uintptr_t request) {
     auto& m = *active; ++m.native_calls;
     CHECK(manager == 0x111 && user == 7 && request == 0x222);
     if (m.mode == 13) RaiseException(0xe0424444, 0, 0, nullptr);
     if (m.mode == 12) native_save_factory(m.writes, caller, caller, manager, out, user, request, empty_factory);
     const bool accepted = write(m, m.mode == 2 ? "ap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/DLC1-AUTOSAVE0" : directory);
-    CHECK(accepted == (m.mode != 1 && m.mode != 2 && m.mode != 12 && !(m.mode == 3 && m.native_calls == 2)));
+    CHECK(accepted == submission_write_accepted(m));
     if (m.mode == 4) CHECK(!write(m));
     if (m.mode == 10) {
         // tls correlation never crosses onto an unrelated worker thread
@@ -60,15 +63,17 @@ SaveReference* root(uintptr_t root_value, SaveReference* out, uint8_t a, uint8_t
     return out;
 }
 }
+static bool submission_exception(unsigned mode) { return mode == 6 || mode == 7 || mode == 13 || mode == 14; }
+static bool submission_releases_reference(unsigned mode) { return mode != 5 && mode != 6 && mode != 8 && mode != 13; }
 void run_submission_contracts() {
     for (unsigned mode = 0; mode < 15; ++mode) {
         Model m; m.mode = mode; active = &m;
         auto job = std::make_shared<BackupJob>(GetCurrentProcessId(), 123456, GetTickCount64() + 10000);
         const auto result = submit_native_save(m.writes, job, directory, {root, release, 0x123, caller});
         CHECK(result.entered && result.operation == m.captured);
-        CHECK(result.exception == (mode == 6 || mode == 7 || mode == 13 || mode == 14 ? 0xe0424444u : 0u));
+        CHECK(result.exception == (submission_exception(mode) ? 0xe0424444u : 0u));
         CHECK(result.matched == (mode == 0 || mode == 9 || mode == 10 || mode == 11));
-        CHECK(m.releases == (mode == 5 || mode == 6 || mode == 8 || mode == 13 ? 0u : 1u));
+        CHECK(m.releases == (submission_releases_reference(mode) ? 1u : 0u));
         const auto progress = job->progress();
         CHECK(!progress.storage_attempted && progress.output.path.empty());
         if (result.matched) CHECK(progress.state == BackupState::pending && progress.operation == result.operation);
