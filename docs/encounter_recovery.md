@@ -3,16 +3,23 @@
 `ap_finish_encounter` takes no arguments. Its console callback queues the captured
 map stamp; `manual_tick` admits and executes the request on the game thread.
 Admission requires a live player in an admitted mission, a stable map generation,
-no menu or alternate controlled entity, and active managers with living AI members.
+no menu or alternate controlled entity, and active managers with living AI members
+(or an empty encounter waiting on its own event flag, below).
 Manager membership selects actors; position is irrelevant.
 
 Recovery stops maintenance and staggered producers, closes the managers' Core
 recipe requests, and applies the vanilla `killAI` sequence to their AI. Each frame
 repeats this operation for those managers, including later waves. The script runs
 its waits and completion effects. Recovery reads its completion latch and stops
-after all selected managers complete, a lifecycle change, or 60 seconds. An external
-event-flag wait with no live AI ends the attempt as unknown after a two-second grace
-period. Diagnostics name the manager and wait type. Repeating the command reports
+after all selected managers complete, a lifecycle change, or 60 seconds.
+
+An encounter with no live AI left that is stuck in its own `WaitForEventFlag` is also
+admitted: recovery sets that local flag (`0x140baef00`), so the script continues and
+completes natively (`0x140bbcc80`). Only the selected manager is touched. A COMMIT
+wait, an unknown wait type or an ambiguous selection is refused, and each refusal
+writes the predicate and the reason to `.recovery.log`. Any other external wait with
+no live AI ends the attempt as unknown after a two-second grace period. Diagnostics
+name the manager and wait type. Repeating the command reports
 the same attempt. History retains 16 attempts; progress reports run every five seconds.
 
 ## Native evidence

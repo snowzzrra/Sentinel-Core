@@ -69,7 +69,7 @@ The DLLs and probe executable are in `build/bin`.
 ## Development and diagnostics
 
 Run `python -B tools/complexity_gate.py` to check `src/` and `tests/`; configure with `-DSC_ENABLE_COMPLEXITY_GATE=ON` and build target `complexity_gate` for the optional development check (default OFF, outside distribution builds).
-The sorted `tools/complexity_exceptions.txt` lists only functions above cognitive 25 or cyclomatic 15. Listed functions cannot exceed either saved number; unlisted functions must meet both limits. Use `--update` to lower or remove exceptions; it never adds or raises them. Use `--write-exceptions` to regenerate explicitly after reviewing scanner changes. Warnings appear only with `--verbose`.
+Every function must stay within cognitive complexity 20 and cyclomatic 15; there is no exception list. When one gets too complex, simplify it in its own file (early returns, a well-named helper next to the caller) rather than moving code to a new file. `--verbose` shows the measurements.
 Apply clang-format only to changed lines or files; keep existing source formatting outside the change.
 
 Start with [sentinel_inspection.h](include/sentinel_inspection.h) for the C++

@@ -1,9 +1,7 @@
-name: Windows x64 qualification
-on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
+name: Windows x64 checks
+'on':
+  push: null
+  pull_request: null
   workflow_dispatch:
     inputs:
       source_commit:
@@ -32,51 +30,63 @@ jobs:
       SELECTED_VERSION: ${{ inputs.version }}
       SELECTED_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ inputs.source_commit || github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-        with:
-          python-version: '3.12.10'
-          architecture: x64
-      - name: Check generated protocol projections
-        run: python -B tools/generate_protocol.py --check
-      - name: Check development function complexity
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
-        run: |
-          python -B -m unittest discover -s tests -p test_complexity_gate.py -q
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -B tools/complexity_gate.py
-      - name: Locate supported installed MSVC and CMake
-        shell: pwsh
-        run: |
-          if ($env:SELECTED_COMMIT -cnotmatch '^[a-f0-9]{40}$') { throw 'Select a full source commit' }
-          $installation = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          $compiler = Join-Path $installation 'VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe'
-          if (!(Test-Path -LiteralPath $compiler)) { throw 'MSVC 14.44.35207 is required' }
-          $cmakeDirectory = Join-Path $installation 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
-          & (Join-Path $cmakeDirectory 'cmake.exe') --version
-          if ($LASTEXITCODE -ne 0) { throw 'Installed CMake is unavailable' }
-          "SC_VCVARS=$installation\VC\Auxiliary\Build\vcvars64.bat" >> $env:GITHUB_ENV
-          "SC_CMAKE=$cmakeDirectory" >> $env:GITHUB_ENV
-      - name: Build Release and run synthetic contracts
-        shell: cmd
-        run: |
-          call "%SC_VCVARS%" -vcvars_ver=14.44
-          if errorlevel 1 exit /b 1
-          "%SC_CMAKE%\cmake.exe" -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-          if errorlevel 1 exit /b 1
-          "%SC_CMAKE%\cmake.exe" --build build
-          if errorlevel 1 exit /b 1
-          "%SC_CMAKE%\ctest.exe" --test-dir build --output-on-failure --timeout 60
-          if errorlevel 1 exit /b 1
-          python -m unittest discover -s tests -p "test_*.py" -q
-          if errorlevel 1 exit /b 1
-          python tools\qualify_distribution.py --output build\distribution\candidate --commit "%SELECTED_COMMIT%" --version "%SELECTED_VERSION%" --tag "%SELECTED_TAG%"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: sentinel-runtime
-          path: build/distribution/candidate/
-          if-no-files-found: error
-          retention-days: 14
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ inputs.source_commit || github.sha }}
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: 3.12.10
+        architecture: x64
+      id: python
+    - name: Install check dependencies
+      run: |
+        python -m pip install pytest==9.0.2 ruff==0.9.9
+    - name: Check generated protocol projections
+      run: |
+        python -B tools/generate_protocol.py --check
+    - name: Check development function complexity
+      run: |
+        python -B tools/complexity_gate.py
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        python -m ruff check tools tests protocol/generated
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        git diff --check
+    - name: Locate supported installed MSVC and CMake
+      shell: pwsh
+      run: |
+        if ($env:SELECTED_COMMIT -cnotmatch '^[a-f0-9]{40}$') { throw 'Select a full source commit' }
+        $installation = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        $cmakeDirectory = Join-Path $installation 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
+        & (Join-Path $cmakeDirectory 'cmake.exe') --version
+        if ($LASTEXITCODE -ne 0) { throw 'Installed CMake is unavailable' }
+        "SC_VCVARS=$installation\VC\Auxiliary\Build\vcvars64.bat" >> $env:GITHUB_ENV
+        "SC_CMAKE=$cmakeDirectory" >> $env:GITHUB_ENV
+    - name: Build Release and run synthetic contracts
+      shell: cmd
+      run: |
+        call "%SC_VCVARS%"
+        if errorlevel 1 exit /b 1
+        "%SC_CMAKE%\cmake.exe" -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DPython3_EXECUTABLE="${{ steps.python.outputs.python-path }}"
+        if errorlevel 1 exit /b 1
+        "%SC_CMAKE%\cmake.exe" --build build --parallel 2
+        if errorlevel 1 exit /b 1
+        "%SC_CMAKE%\ctest.exe" --test-dir build --output-on-failure --timeout 60
+        if errorlevel 1 exit /b 1
+        if not exist ".tmp" mkdir ".tmp"
+        set "TMP=%CD%\.tmp"
+        set "TEMP=%CD%\.tmp"
+        set "LOCALAPPDATA=%CD%\.tmp"
+        python -B -m pytest tests -q --basetemp .tmp/python-tests -p no:cacheprovider
+        if errorlevel 1 exit /b 1
+    - name: Qualify release distribution
+      if: inputs.version != ''
+      run: |
+        python tools\qualify_distribution.py --output build\distribution\candidate --commit "$env:SELECTED_COMMIT" --version "$env:SELECTED_VERSION" --tag "$env:SELECTED_TAG"
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: sentinel-runtime
+        path: build/distribution/candidate/
+        if-no-files-found: error
+        retention-days: 14
+      if: inputs.version != ''
