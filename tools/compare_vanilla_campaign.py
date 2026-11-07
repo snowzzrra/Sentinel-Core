@@ -87,7 +87,8 @@ def main(argv=None):
             protection.pin_ancestors(pins, [path.parent])
             diagnostic = pins.enter_context(protection.io_path(path).open("x", encoding="utf-8"))
         result = compare(args)
-        if diagnostic: json.dump(args.private_comparison, diagnostic, indent=2)
+        if diagnostic:
+            json.dump(args.private_comparison, diagnostic, indent=2)
         print(json.dumps(result))
         return 0 if result["result"] == "vanilla_campaign_unchanged" else 1
     except (protection.Refused, OSError, ValueError, KeyError, TypeError, RecursionError) as error:

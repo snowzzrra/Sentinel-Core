@@ -385,7 +385,8 @@ def differences(entries, current, metadata=None, affected="historical_backup"):
         kind = ("added" if not previous else "removed" if now is None else "content_changed" if prior != now
                 else "metadata_only" if changed_metadata else "unchanged" if previous.get("source_metadata") else "metadata_unavailable")
         counts[kind] += 1
-        if is_campaign(key[1]): campaigns[kind] += 1
+        if is_campaign(key[1]):
+            campaigns[kind] += 1
         if kind not in ("unchanged", "metadata_unavailable"):
             rows.append({"origin": key[0], "relative": key[1], "category": kind, "campaign": is_campaign(key[1]),
                          "before_bytes_sha256": prior, "after_bytes_sha256": now, "metadata": changed_metadata})
@@ -456,7 +457,8 @@ def protect(args):
             refused.errno = getattr(error, "errno", None)
             refused.filename, refused.filename2 = getattr(error, "filename", None), getattr(error, "filename2", None)
             raise refused from error
-        if error.stage == "protection": error.stage = getattr(args, "operation_stage", stage)
+        if error.stage == "protection":
+            error.stage = getattr(args, "operation_stage", stage)
         raise
 
 

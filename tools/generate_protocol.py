@@ -275,7 +275,8 @@ def cpp_codec(entry):
     checks = [part for field in entry["fields"] for part in cpp_field(field)]
     for constraint in entry.get("constraints", []):
         checks.extend(cpp_structural_constraint(constraint))
-    return f"template<class C> bool transfer(C& c, {entry['name']}& v) {{\n    (void)c; (void)v;\n    return " + (" &&\n        ".join(checks) or "true") + ";\n}"
+    parameters = f"C& c, {entry['name']}& v" if checks else f"C&, {entry['name']}&"
+    return f"template<class C> bool transfer({parameters}) {{\n    return " + (" &&\n        ".join(checks) or "true") + ";\n}"
 
 
 def cpp_structural_constraint(constraint):
@@ -713,12 +714,16 @@ def _array_constraints(field, values):
     if field.get("nonzero") and not any(values):
         raise ValueError("zero identity")
     if field.get("encoding", "").startswith("lower_hex"):
-        if field["encoding"].endswith("_or_empty") and not any(values):
-            return
-        if len(values) not in (64, 65) or any(v not in b"0123456789abcdef" for v in values[:64]):
-            raise ValueError("namespace encoding")
-        if len(values) == 65 and values[64]:
-            raise ValueError("namespace terminator")
+        _hex_constraints(field, values)
+
+
+def _hex_constraints(field, values):
+    if field["encoding"].endswith("_or_empty") and not any(values):
+        return
+    if len(values) not in (64, 65) or any(v not in b"0123456789abcdef" for v in values[:64]):
+        raise ValueError("namespace encoding")
+    if len(values) == 65 and values[64]:
+        raise ValueError("namespace terminator")
 
 
 def _decode_type(type_name, data, pos):

@@ -20,7 +20,8 @@ def qualify(args):
         raise ValueError("Tracked CI source is dirty")
     spec = json.loads((ROOT / "version.json").read_text())
     version = ".".join(str(spec[key]) for key in ("major","minor","patch"))
-    if spec["channel"] == "rc": version += f"-rc-{spec['rc_number']}"
+    if spec["channel"] == "rc":
+        version += f"-rc-{spec['rc_number']}"
     if args.version and args.version != version or args.tag and args.tag != "v" + version:
         raise ValueError("Selected tag/version disagrees with version.json")
     for entry in json.loads((ROOT / "build/compile_commands.json").read_text()):

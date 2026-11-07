@@ -1,6 +1,4 @@
-"""Measure C++ function complexity in src/ and tests/ and check saved ceilings.
-This textual estimate ranks functions; it does not replace a C++ parser.
-"""
+"""Check C++ function complexity in src/ and tests/ using a textual estimate."""
 import argparse
 from bisect import bisect_right
 from pathlib import Path
@@ -9,9 +7,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXCEPTIONS = ROOT / "tools/complexity_exceptions.txt"
-HEADER = "# path::qualified_name(signature) cognitive cyclomatic\n"
-LIMITS = {"cognitive": 25, "cyclomatic": 15}
+LIMITS = {"cognitive": 20, "cyclomatic": 15}
 LEX = re.compile(
     r'(?P<skip>//[^\n]*|/\*.*?\*/|^[ \t]*\#(?:[^\n\\]|\\.)*(?:\\\n(?:[^\n\\]|\\.)*)*)'
     r'|(?P<literal>(?:u8|[uUL])?R"(?P<raw>[^ ()\\\t\r\n]{0,16})\(.*?\)(?P=raw)"'
@@ -292,50 +288,9 @@ def scan_tree(root):
     return rows
 
 
-def above_limit(row):
-    return any(row[metric] > limit for metric, limit in LIMITS.items())
-
-
-def read_exceptions(path):
-    lines = path.read_text(encoding="utf-8").splitlines()
-    if not lines or lines[0] != HEADER.rstrip():
-        raise ValueError("invalid exceptions header")
-    ceilings = {}
-    for line in lines[1:]:
-        key, cognitive, cyclomatic = line.rsplit(" ", 2)
-        if "::" not in key or "(" not in key or key in ceilings:
-            raise ValueError("invalid or duplicate exception")
-        metrics = {"cognitive": int(cognitive), "cyclomatic": int(cyclomatic)}
-        if min(metrics.values()) < 0 or not above_limit(metrics):
-            raise ValueError(f"exception must exceed a function limit: {key}")
-        ceilings[key] = metrics
-    if list(ceilings) != sorted(ceilings):
-        raise ValueError("exceptions must be sorted")
-    return ceilings
-
-
-def check(rows, ceilings, updating=False):
-    failures = []
-    for key, row in rows.items():
-        limits = ceilings.get(key, LIMITS)
-        for metric, limit in limits.items():
-            if row[metric] > limit:
-                failures.append(f"{location(row)}: {metric} {row[metric]} > {limit}")
-        if not updating and key in ceilings and not above_limit(row):
-            failures.append(f"{location(row)}: remove exception with --update")
-    for key in (() if updating else ceilings.keys() - rows.keys()):
-        failures.append(f"{key}: remove absent function with --update")
-    return failures
-
-
-def lowered_ceilings(rows, ceilings):
-    return {key: {metric: min(old[metric], rows[key][metric]) for metric in LIMITS}
-            for key, old in ceilings.items() if key in rows and above_limit(rows[key])}
-
-
-def write_exceptions(path, ceilings):
-    lines = [f"{key} {row['cognitive']} {row['cyclomatic']}\n" for key, row in sorted(ceilings.items())]
-    path.write_text(HEADER + "".join(lines), encoding="utf-8")
+def check(rows):
+    return [f"{location(row)}: {metric} {row[metric]} > {limit}"
+            for row in rows.values() for metric, limit in LIMITS.items() if row[metric] > limit]
 
 
 def location(row):
@@ -344,22 +299,18 @@ def location(row):
 
 def report(rows):
     values = list(rows.values())
-    counts = ", ".join(f">{limit}: {sum(row['cognitive'] > limit for row in values)}" for limit in (15, 25, 50))
+    counts = ", ".join(f">{limit}: {sum(row['cognitive'] > limit for row in values)}" for limit in (15, 20, 50))
     print(f"Functions: {len(values)}; cognitive {counts}")
     for row in sorted(values, key=lambda row: (-row["cognitive"], row["file"], row["name"]))[:10]:
         print(f"TOP {location(row)}: cognitive={row['cognitive']} cyclomatic={row['cyclomatic']}")
     for row in values:
-        if 16 <= row["cognitive"] <= 25 or row["nesting"] > 4 or row["lines"] > 150:
+        if 16 <= row["cognitive"] <= 20 or row["nesting"] > 4 or row["lines"] > 150:
             print(f"WARN {location(row)}: cognitive={row['cognitive']} nesting={row['nesting']} lines={row['lines']}")
 
 
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--exceptions", type=Path, default=EXCEPTIONS)
     parser.add_argument("--verbose", action="store_true", help="show measurements and warnings")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--update", action="store_true", help="remove or lower existing exceptions")
-    mode.add_argument("--write-exceptions", action="store_true", help="regenerate exceptions after a reviewed scanner change")
     return parser.parse_args()
 
 
@@ -367,18 +318,12 @@ def main():
     args = arguments()
     try:
         rows = scan_tree(ROOT)
-        ceilings = read_exceptions(args.exceptions) if not args.write_exceptions else {
-            key: {metric: row[metric] for metric in LIMITS} for key, row in rows.items() if above_limit(row)}
-        failures = check(rows, ceilings, args.update)
+        failures = check(rows)
         if args.verbose:
             report(rows)
         if failures:
             print("\n".join("FAIL " + failure for failure in failures), file=sys.stderr)
             return 1
-        if args.update:
-            ceilings = lowered_ceilings(rows, ceilings)
-        if args.write_exceptions or args.update:
-            write_exceptions(args.exceptions, ceilings)
     except (OSError, ValueError) as error:
         print(f"FAIL {error}", file=sys.stderr)
         return 1
