@@ -34,65 +34,104 @@ struct Frame {
     std::array<sc_save_field, observed_count> fields{};
     engine::ReadResult status{};
 };
-Frame frame(engine::Memory& memory, const engine::Binding& b) {
-    Frame f;
+bool read_save_state(engine::Memory& memory, const engine::Binding& b, Frame& f) {
     auto& p = f.pointers;
     f.status = read(memory, b.root, 0, p[0]);
     if (!f.status.reason && p[0] != b.image.base + root_vtable_rva) f.status.reason = SC_REASON_INVALID_VALUE;
-    if (f.status.reason) return f;
+    if (f.status.reason) return false;
     f.fields[SC_SAVE_ROOT] = observed(1);
-    struct State { uint32_t value, changed; } state{};
+    struct State {
+        uint32_t value, changed;
+    } state{};
     f.status = read(memory, b.root, 0x44, state);
-    if (f.status.reason) return f;
-    f.state = state.value; f.state_changed = state.changed;
-    if (f.state > SC_GAME_IN_GAME) { f.status.reason = SC_REASON_INVALID_VALUE; return f; }
-    if (f.state == SC_GAME_LOADING) { f.status.reason = SC_REASON_TRANSITION; return f; }
+    if (f.status.reason) return false;
+    f.state = state.value;
+    f.state_changed = state.changed;
+    if (f.state > SC_GAME_IN_GAME) {
+        f.status.reason = SC_REASON_INVALID_VALUE;
+        return false;
+    }
+    if (f.state == SC_GAME_LOADING) {
+        f.status.reason = SC_REASON_TRANSITION;
+        return false;
+    }
     f.status = read(memory, b.root, 0xb8, f.pending);
-    if (f.status.reason) return f;
-    if (f.pending > 1) { f.status.reason = SC_REASON_INVALID_VALUE; return f; }
-    if (f.pending) { f.status.reason = SC_REASON_TRANSITION; return f; }
+    if (f.status.reason) return false;
+    if (f.pending > 1) {
+        f.status.reason = SC_REASON_INVALID_VALUE;
+        return false;
+    }
+    if (f.pending) {
+        f.status.reason = SC_REASON_TRANSITION;
+        return false;
+    }
     f.fields[SC_SAVE_PENDING_MAP_LOAD] = observed(f.pending);
     f.status = read(memory, b.root, 0x9ca8, f.queued);
-    if (f.status.reason) return f;
-    if (f.queued < 0) { f.status.reason = SC_REASON_INVALID_VALUE; return f; }
+    if (f.status.reason) return false;
+    if (f.queued < 0) {
+        f.status.reason = SC_REASON_INVALID_VALUE;
+        return false;
+    }
     f.fields[SC_SAVE_QUEUED_REQUESTS] = observed(static_cast<uint32_t>(f.queued));
+    return true;
+}
+
+bool read_save_provider(engine::Memory& memory, const engine::Binding& b, Frame& f) {
+    auto& p = f.pointers;
+    f.status = pointer(memory, p[1], 0, p[2]);
+    if (f.status.reason) return false;
+    if (!p[2]) return true;
+    f.status = pointer(memory, p[2], 8, p[3]);
+    if (f.status.reason) return false;
+    if (!p[3]) return true;
+    f.status = pointer(memory, p[3], 0, p[4]);
+    if (f.status.reason) return false;
+    if (!p[4]) {
+        f.status.reason = SC_REASON_INVALID_VALUE;
+        return false;
+    }
+    const auto provider =
+        p[4] == b.image.base + 0x2e90658
+            ? SC_SAVE_PROVIDER_STEAM
+            : (p[4] == b.image.base + 0x2e87db0
+                   ? SC_SAVE_PROVIDER_LOCAL_ENCRYPTED
+                   : (p[4] == b.image.base + 0x2e88198 ? SC_SAVE_PROVIDER_LOCAL : SC_SAVE_PROVIDER_FOREIGN));
+    f.fields[SC_SAVE_PROVIDER] = observed(provider);
+    return true;
+}
+
+bool read_job_witness(engine::Memory& memory, Frame& f, size_t i, size_t at, size_t offset) {
+    auto& p = f.pointers;
+    f.status = pointer(memory, p[1], offset, p[at]);
+    if (f.status.reason) return false;
+    if (p[at]) {
+        f.status = pointer(memory, p[at], 8, p[at + 1]);
+        if (f.status.reason) return false;
+        if (i == 1 && p[at + 1]) {
+            f.status = pointer(memory, p[at + 1], 8, p[at + 2]);
+            if (f.status.reason) return false;
+        }
+    }
+    f.fields[SC_SAVE_JOB_WITNESS + i] = observed(p[at + (i == 1 ? 2 : 1)] != 0);
+    return true;
+}
+
+Frame frame(engine::Memory& memory, const engine::Binding& b) {
+    Frame f;
+    auto& p = f.pointers;
+    if (!read_save_state(memory, b, f)) return f;
     f.status = pointer(memory, b.root, 0x9b38, p[1]);
     if (f.status.reason) return f;
     f.fields[SC_SAVE_MANAGER] = observed(p[1] != 0);
     for (const auto i : {SC_SAVE_PROVIDER, SC_SAVE_JOB_WITNESS, SC_SAVE_REQUEST58_WITNESS, SC_SAVE_REQUEST50_WITNESS})
         f.fields[i] = unknown(SC_REASON_PARENT_NULL);
     if (!p[1]) return f;
-    f.status = pointer(memory, p[1], 0, p[2]);
-    if (f.status.reason) return f;
-    if (p[2]) {
-        f.status = pointer(memory, p[2], 8, p[3]);
-        if (f.status.reason) return f;
-        if (p[3]) {
-            f.status = pointer(memory, p[3], 0, p[4]);
-            if (f.status.reason) return f;
-            if (!p[4]) { f.status.reason = SC_REASON_INVALID_VALUE; return f; }
-            const auto provider = p[4] == b.image.base + 0x2e90658 ? SC_SAVE_PROVIDER_STEAM :
-                (p[4] == b.image.base + 0x2e87db0 ? SC_SAVE_PROVIDER_LOCAL_ENCRYPTED :
-                (p[4] == b.image.base + 0x2e88198 ? SC_SAVE_PROVIDER_LOCAL : SC_SAVE_PROVIDER_FOREIGN));
-            f.fields[SC_SAVE_PROVIDER] = observed(provider);
-        }
-    }
+    if (!read_save_provider(memory, b, f)) return f;
     // The +58 request has an extra nested reference object. Null at any stage is
     // only absence of this witness, never a scheduler-idle/completion conclusion.
     constexpr size_t offsets[] = {0x60, 0x58, 0x50}, starts[] = {5, 7, 10};
     for (size_t i = 0; i < 3; ++i) {
-        const auto at = starts[i];
-        f.status = pointer(memory, p[1], offsets[i], p[at]);
-        if (f.status.reason) return f;
-        if (p[at]) {
-            f.status = pointer(memory, p[at], 8, p[at + 1]);
-            if (f.status.reason) return f;
-            if (i == 1 && p[at + 1]) {
-                f.status = pointer(memory, p[at + 1], 8, p[at + 2]);
-                if (f.status.reason) return f;
-            }
-        }
-        f.fields[SC_SAVE_JOB_WITNESS + i] = observed(p[at + (i == 1 ? 2 : 1)] != 0);
+        if (!read_job_witness(memory, f, i, starts[i], offsets[i])) return f;
     }
     return f;
 }
@@ -111,11 +150,36 @@ sc_save_snapshot unavailable(uint32_t reason) {
     s.fields[SC_SAVE_NATIVE_COMPLETION] = unknown(SC_SAVE_COMPLETION_UNPROVEN);
     return s;
 }
+static bool same_save_frame(const Frame& first, const Frame& second) {
+    return first.pointers == second.pointers && first.state == second.state &&
+           first.state_changed == second.state_changed && first.queued == second.queued &&
+           first.pending == second.pending;
+}
+
+static void observe_save_pair(engine::Memory& memory, const engine::Binding& b, sc_save_snapshot& s,
+                              const context::Clock& clock, bool started, int64_t begin, HANDLE stop) {
+    int64_t end = 0;
+    const auto first = frame(memory, b), second = frame(memory, b);
+    auto status = first.status.reason ? first.status : second.status;
+    if (!status.reason && !same_save_frame(first, second)) status.reason = SC_REASON_TRANSITION;
+    if (!started || !clock.counter(end) || end < begin)
+        status = {SC_REASON_INTERNAL_ERROR, ERROR_INVALID_DATA};
+    else if (static_cast<double>(end - begin) > static_cast<double>(clock.frequency) * 0.05)
+        status = {SC_REASON_BUDGET, 0};
+    if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) status = {SC_REASON_CANCELLED, 0};
+    if (status.reason)
+        suppress(s, status.reason, status.error);
+    else {
+        s.sample_reason = SC_REASON_NONE;
+        std::copy(second.fields.begin(), second.fields.end(), s.fields);
+    }
+}
+
 sc_save_snapshot sample(engine::Memory& memory, const engine::Binding& b, uint64_t sequence,
                         HANDLE stop, const context::Clock* supplied_clock) {
     const auto& clock = supplied_clock ? *supplied_clock : context::observation_clock();
     const auto start = clock.uptime();
-    int64_t begin = 0, end = 0;
+    int64_t begin = 0;
     const bool started = clock.frequency > 0 && clock.counter(begin);
     auto s = unavailable(SC_REASON_NOT_SAMPLED);
     s.sequence = sequence; s.profile = b.metadata.profile;
@@ -126,17 +190,7 @@ sc_save_snapshot sample(engine::Memory& memory, const engine::Binding& b, uint64
     if (!reason) s.layout_revision = 1;
     if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) reason = SC_REASON_CANCELLED;
     if (!reason) {
-        const auto first = frame(memory, b), second = frame(memory, b);
-        auto status = first.status.reason ? first.status : second.status;
-        if (!status.reason && (first.pointers != second.pointers || first.state != second.state ||
-            first.state_changed != second.state_changed || first.queued != second.queued || first.pending != second.pending))
-            status.reason = SC_REASON_TRANSITION;
-        if (!started || !clock.counter(end) || end < begin) status = {SC_REASON_INTERNAL_ERROR, ERROR_INVALID_DATA};
-        else if (static_cast<double>(end - begin) > static_cast<double>(clock.frequency) * 0.05)
-            status = {SC_REASON_BUDGET, 0};
-        if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) status = {SC_REASON_CANCELLED, 0};
-        if (status.reason) suppress(s, status.reason, status.error);
-        else { s.sample_reason = SC_REASON_NONE; std::copy(second.fields.begin(), second.fields.end(), s.fields); }
+        observe_save_pair(memory, b, s, clock, started, begin, stop);
     } else suppress(s, reason);
     s.sampled_at_ms = clock.uptime();
     s.duration_ms = static_cast<uint32_t>(std::min<uint64_t>(s.sampled_at_ms >= start ? s.sampled_at_ms - start : 0, UINT32_MAX));

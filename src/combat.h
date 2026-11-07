@@ -1,3 +1,4 @@
+#include "namespace_id.h"
 #ifndef SENTINEL_COMBAT_MODEL_H
 #define SENTINEL_COMBAT_MODEL_H
 #include "sentinel_combat.h"
@@ -31,17 +32,19 @@ struct DeathRecord {
     uint8_t possessed_by_spirit = 0, spawned_by_archvile = 0;
 };
 DeathRecord decode_record(const std::array<uint8_t, 0x128>&) noexcept;
+inline bool valid_map_name(const char* name) noexcept {
+    const auto* end = static_cast<const char*>(std::memchr(name, 0, SC_CONTEXT_MAP_CAPACITY));
+    if (!end || end == name) return false;
+    for (auto* ch = name; ch != end; ++ch)
+        if (static_cast<unsigned char>(*ch) < 32 || static_cast<unsigned char>(*ch) > 126) return false;
+    return true;
+}
+
 inline bool valid_query(const sc_combat_query& query) noexcept {
-    if (query.namespace_id[64] || !query.map_count || query.map_count > SC_COMBAT_MAX_MAPS) return false;
-    for (size_t n = 0; n < 64; ++n) {
-        const auto ch = query.namespace_id[n];
-        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return false;
-    }
+    if (!valid_namespace_id(query.namespace_id) || !query.map_count || query.map_count > SC_COMBAT_MAX_MAPS)
+        return false;
     for (size_t n = 0; n < query.map_count; ++n) {
-        const auto* end = static_cast<const char*>(std::memchr(query.maps[n], 0, SC_CONTEXT_MAP_CAPACITY));
-        if (!end || end == query.maps[n]) return false;
-        for (auto* ch = query.maps[n]; ch != end; ++ch)
-            if (static_cast<unsigned char>(*ch) < 32 || static_cast<unsigned char>(*ch) > 126) return false;
+        if (!valid_map_name(query.maps[n])) return false;
         for (size_t previous = 0; previous < n; ++previous)
             if (!std::strcmp(query.maps[n], query.maps[previous])) return false;
     }

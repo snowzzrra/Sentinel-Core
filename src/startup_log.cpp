@@ -257,133 +257,139 @@ uint32_t append_telemetry(const char* line, const wchar_t* suffix) noexcept {
 uint32_t darklord(const char* line) noexcept { return append_telemetry(line, L".darklord.log"); }
 uint32_t recipe_fault(const char* line) noexcept { return append_telemetry(line, L".recipe.log"); }
 uint32_t encounter_recovery(const char* line) noexcept { return append_telemetry(line, L".recovery.log"); }
+static void append_history_snapshot(const std::string& line, const std::string& use_json, const special::UseHistory& use_snapshot) {
+    auto history_line = line;
+    const auto use_at = history_line.find(use_json);
+    if (use_at != std::string::npos)
+        history_line.replace(use_at, use_json.size(), special_use_history(use_snapshot, exported_use_sequence));
+    // two limited generations; file work stays on the diagnostic exporter
+    if (file != INVALID_HANDLE_VALUE && history_bytes + history_line.size() > 1024 * 1024) {
+        CloseHandle(file); file = INVALID_HANDLE_VALUE;
+        if (MoveFileExW(history_path.c_str(), (history_path + L".previous").c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            file = CreateFileW(history_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+            history_bytes = 0; ++history_rotations;
+        }
+        if (file == INVALID_HANDLE_VALUE) history_error = GetLastError();
+    }
+    if(file!=INVALID_HANDLE_VALUE) {
+        DWORD written=0;
+        if(!WriteFile(file,history_line.data(),static_cast<DWORD>(history_line.size()),&written,nullptr) || written!=history_line.size()) {
+            history_error=GetLastError(); CloseHandle(file); file=INVALID_HANDLE_VALUE;
+        } else {
+            FlushFileBuffers(file); history_bytes+=history_line.size(); ++count;
+            const auto preceding = use_snapshot.sequence - use_snapshot.count;
+            if (preceding > exported_use_sequence) use_export_lost += preceding - exported_use_sequence;
+            exported_use_sequence = use_snapshot.sequence;
+        }
+    }
+}
+static void record_snapshot(const Snapshot& core, uint32_t engine_reason) {
+    const auto use_snapshot = special::use_history();
+    const auto use_json = special_use_history(use_snapshot);
+    const auto install = save::session().installation.inspect();
+    const auto session = save::session().inspect();
+    const auto campaign = save::session().campaign_run.snapshot();
+    const auto flag=[](bool v){return v?"true":"false";};
+    const auto campaign_json = std::string("{\"enabled\":")+flag(campaign.enabled)+
+        ",\"stage_id\":"+std::to_string(campaign.stage_id)+
+        ",\"native_subtype\":"+std::to_string(campaign.native_subtype)+
+        ",\"restart_pending\":"+flag(campaign.restart_pending)+
+        ",\"restart_status\":"+std::to_string(campaign.restart_status)+
+        ",\"restart_sequence\":"+std::to_string(campaign.restart_sequence)+
+        ",\"restart_stage_id\":"+std::to_string(campaign.restart_stage_id)+
+        ",\"restart_map\":"+quoted(campaign.restart_map.c_str())+
+        ",\"restart_reason\":"+quoted(campaign.restart_reason.c_str())+
+        ",\"parser_trace\":"+parser_trace(campaign.parser_observation)+
+        ",\"resumed\":"+flag(campaign.resumed)+",\"phase\":\""+campaign.phase+"\",\"reason\":\""+campaign.reason+
+        "\",\"slot\":\""+campaign.slot+"\",\"map\":\""+campaign.map+"\",\"difficulty\":"+std::to_string(campaign.difficulty)+
+        ",\"effective_difficulty\":"+std::to_string(campaign.effective_difficulty)+",\"changes_blocked\":"+std::to_string(campaign.changes_blocked)+
+        ",\"source_verified\":"+flag(campaign.source_verified)+",\"parser_completed\":"+flag(campaign.parser_completed)+
+        ",\"parser_result\":"+std::to_string(campaign.parser_result)+",\"loaded_difficulty\":"+std::to_string(campaign.loaded_difficulty)+",\"native_saved\":"+flag(campaign.native_saved)+
+        ",\"readback_verified\":"+flag(campaign.readback_verified)+",\"continuity_persisted\":"+flag(campaign.continuity_persisted)+
+        ",\"native_factory_matched\":"+flag(campaign.native_factory_matched)+
+        ",\"operation\":"+std::to_string(campaign.operation)+",\"checkpoint\":"+std::to_string(campaign.checkpoint)+
+        ",\"source_checkpoint\":"+std::to_string(campaign.source_checkpoint)+
+        ",\"generation_before\":"+std::to_string(campaign.generation_before)+",\"generation_after\":"+std::to_string(campaign.generation_after)+
+        ",\"map_active\":"+flag(campaign.map_active)+",\"save_ready\":"+flag(campaign.save_ready)+
+        ",\"failure_at_ms\":"+std::to_string(campaign.failure_at_ms)+
+        ",\"transition_event\":"+std::to_string(campaign.transition.event_id)+
+        ",\"transition_at_ms\":"+std::to_string(campaign.transition.at_ms)+
+        ",\"native_return\":"+std::to_string(campaign.transition.native_return)+
+        ",\"transition_depth\":"+std::to_string(campaign.transition.depth)+
+        ",\"transition_observation_reason\":"+std::to_string(campaign.transition.observation_reason)+
+        ",\"transition_observed\":"+flag(campaign.transition.observed)+
+        ",\"transition_ended\":"+flag(campaign.transition.ended)+
+        ",\"transition_abnormal\":"+flag(campaign.transition.abnormal)+
+        ",\"transition_state\":"+std::to_string(campaign.transition.game)+
+        ",\"transition_state_read\":"+flag(campaign.transition.state_read)+
+        ",\"transition_map_read\":"+flag(campaign.transition.map_read)+
+        ",\"transition_difficulty_read\":"+flag(campaign.transition.difficulty_read)+
+        ",\"transition_map\":"+quoted(campaign.transition.map.data())+
+        ",\"checkpoint_at_ms\":"+std::to_string(campaign.checkpoint_boundary.at_ms)+
+        ",\"checkpoint_generation\":"+std::to_string(campaign.checkpoint_boundary.generation_after)+
+        ",\"checkpoint_depth\":"+std::to_string(campaign.checkpoint_boundary.depth)+
+        ",\"checkpoint_state\":"+std::to_string(campaign.checkpoint_boundary.game)+
+        ",\"checkpoint_difficulty\":"+std::to_string(campaign.checkpoint_boundary.difficulty)+
+        ",\"checkpoint_state_read\":"+flag(campaign.checkpoint_boundary.state_read)+
+        ",\"checkpoint_map_read\":"+flag(campaign.checkpoint_boundary.map_read)+
+        ",\"checkpoint_difficulty_read\":"+flag(campaign.checkpoint_boundary.difficulty_read)+"}";
+    std::string runtime_history = "[";
+    for (const auto& line : commands::diagnostic_history()) {
+        if (runtime_history.size() > 1) runtime_history += ',';
+        runtime_history += quoted(line.c_str());
+    }
+    runtime_history += ']';
+    const auto facts = "\"runtime_diagnostics\":" + runtime_history + ",\"engine_reason\":" + std::to_string(engine_reason) + ",\"installation\":{\"phase\":" + std::to_string(install.phase) +
+        ",\"sequence\":" + std::to_string(install.sequence) + ",\"startup_observation\":" + std::to_string(install.startup_observation) +
+        ",\"last_completed_stage\":" + std::to_string(install.last_completed_stage) + ",\"validated\":" + std::to_string(install.validated) +
+        ",\"created\":" + std::to_string(install.created) + ",\"enabled\":" + std::to_string(install.enabled) +
+        ",\"primary_failure\":" + event(install.primary_failure) + ",\"cleanup_failure\":" + event(install.cleanup_failure) +
+        ",\"active\":" + event(install.active) + "},\"admission\":{\"state\":" + std::to_string(session.state) +
+        ",\"fault\":" + std::to_string(session.fault) + ",\"flags\":" + std::to_string(session.flags) +
+        ",\"prepared_routes\":" + std::to_string(session.prepared_routes) + ",\"required_routes\":" + std::to_string(session.required_routes) +
+        ",\"namespace_id\":\"" + session.namespace_id + "\"},\"startup_route\":" + startup_route(save::session().unrouted_trace()) +
+        ",\"profile\":" + profile(save::session().profile_trace())+",\"campaign\":"+campaign_json+
+        ",\"b_diagnostics\":"+b_trace(save::session().btrace.snapshot())+
+        ",\"domain_installed\":{\"inventory\":"+flag(inventory::available())+
+        ",\"arsenal\":"+flag(arsenal::available())+",\"runes\":"+flag(runes::available())+
+        ",\"weapon_points\":"+flag(weapon_points::available())+",\"special\":"+flag(special::available())+
+        ",\"special_selection_route\":"+flag(special::selection_route_available())+
+        ",\"deathlink\":"+flag(deathlink::available())+"}"+
+        ",\"special_installation\":"+b_trace(special::installation_diagnostics())+
+        ",\"arsenal_installation\":"+b_trace(arsenal::installation_diagnostics())+
+        ",\"heat_blast_ui\":"+b_trace(arsenal::heat_blast_ui_diagnostics())+
+        ",\"special_input\":"+b_trace(special::input_diagnostics())+
+        ",\"special_route\":"+b_trace(special::route_diagnostics())+
+        ",\"special_hud\":"+b_trace(special::hud_diagnostics())+
+        ",\"combat\":"+b_trace(combat::diagnostics())+
+        ",\"recipe_first_fault\":"+quoted(expanded::recipe_fault_diagnostic().c_str())+
+        ",\"encounter_recovery_history\":"+recovery_history(core)+
+        ",\"special_use_history\":"+use_json+
+        ",\"ammo_refill_history\":"+refill_history(special::refill_history())+
+        ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
+    if (facts != last) {
+        const auto& wide_key = prelaunch::diagnostic_key();
+        std::string control;
+        if (wide_key.size() >= 64) for (auto digit : wide_key.substr(wide_key.size()-64)) control.push_back(static_cast<char>(digit));
+        const auto line = "{\"schema\":\"sentinel-startup-v1\",\"control_sha256\":\"" + control + "\",\"pid\":" + std::to_string(core.pid) +
+            ",\"process_created\":\"" + std::to_string(core.process_created) + "\",\"build_id\":\"" + core.core.build_id +
+            "\",\"at_ms\":" + std::to_string(GetTickCount64()) + ",\"diagnostic_storage\":{\"history_records\":"+
+            std::to_string(count)+",\"history_bytes\":"+std::to_string(history_bytes)+",\"history_error\":"+
+            std::to_string(history_error)+",\"latest_error\":"+std::to_string(latest_error)+
+            ",\"history_rotations\":"+std::to_string(history_rotations)+
+            ",\"use_export_lost\":"+std::to_string(use_export_lost)+"}," + facts + "}\n";
+        if(line.size()>131072) throw std::length_error("diagnostic_snapshot_limit");
+        append_history_snapshot(line, use_json, use_snapshot);
+        if(publish_latest(line)) last=facts;
+    }
+}
 void record(const Snapshot& core, uint32_t engine_reason) noexcept {
     AcquireSRWLockExclusive(&guard);
     try {
         if (!opened) open(core);
         if (!latest_path.empty()) {
-            const auto use_snapshot = special::use_history();
-            const auto use_json = special_use_history(use_snapshot);
-            const auto install = save::session().installation.inspect();
-            const auto session = save::session().inspect();
-            const auto campaign = save::session().campaign_run.snapshot();
-            const auto flag=[](bool v){return v?"true":"false";};
-            const auto campaign_json = std::string("{\"enabled\":")+flag(campaign.enabled)+
-                ",\"stage_id\":"+std::to_string(campaign.stage_id)+
-                ",\"native_subtype\":"+std::to_string(campaign.native_subtype)+
-                ",\"restart_pending\":"+flag(campaign.restart_pending)+
-                ",\"restart_status\":"+std::to_string(campaign.restart_status)+
-                ",\"restart_sequence\":"+std::to_string(campaign.restart_sequence)+
-                ",\"restart_stage_id\":"+std::to_string(campaign.restart_stage_id)+
-                ",\"restart_map\":"+quoted(campaign.restart_map.c_str())+
-                ",\"restart_reason\":"+quoted(campaign.restart_reason.c_str())+
-                ",\"parser_trace\":"+parser_trace(campaign.parser_observation)+
-                ",\"resumed\":"+flag(campaign.resumed)+",\"phase\":\""+campaign.phase+"\",\"reason\":\""+campaign.reason+
-                "\",\"slot\":\""+campaign.slot+"\",\"map\":\""+campaign.map+"\",\"difficulty\":"+std::to_string(campaign.difficulty)+
-                ",\"effective_difficulty\":"+std::to_string(campaign.effective_difficulty)+",\"changes_blocked\":"+std::to_string(campaign.changes_blocked)+
-                ",\"source_verified\":"+flag(campaign.source_verified)+",\"parser_completed\":"+flag(campaign.parser_completed)+
-                ",\"parser_result\":"+std::to_string(campaign.parser_result)+",\"loaded_difficulty\":"+std::to_string(campaign.loaded_difficulty)+",\"native_saved\":"+flag(campaign.native_saved)+
-                ",\"readback_verified\":"+flag(campaign.readback_verified)+",\"continuity_persisted\":"+flag(campaign.continuity_persisted)+
-                ",\"native_factory_matched\":"+flag(campaign.native_factory_matched)+
-                ",\"operation\":"+std::to_string(campaign.operation)+",\"checkpoint\":"+std::to_string(campaign.checkpoint)+
-                ",\"source_checkpoint\":"+std::to_string(campaign.source_checkpoint)+
-                ",\"generation_before\":"+std::to_string(campaign.generation_before)+",\"generation_after\":"+std::to_string(campaign.generation_after)+
-                ",\"map_active\":"+flag(campaign.map_active)+",\"save_ready\":"+flag(campaign.save_ready)+
-                ",\"failure_at_ms\":"+std::to_string(campaign.failure_at_ms)+
-                ",\"transition_event\":"+std::to_string(campaign.transition.event_id)+
-                ",\"transition_at_ms\":"+std::to_string(campaign.transition.at_ms)+
-                ",\"native_return\":"+std::to_string(campaign.transition.native_return)+
-                ",\"transition_depth\":"+std::to_string(campaign.transition.depth)+
-                ",\"transition_observation_reason\":"+std::to_string(campaign.transition.observation_reason)+
-                ",\"transition_observed\":"+flag(campaign.transition.observed)+
-                ",\"transition_ended\":"+flag(campaign.transition.ended)+
-                ",\"transition_abnormal\":"+flag(campaign.transition.abnormal)+
-                ",\"transition_state\":"+std::to_string(campaign.transition.game)+
-                ",\"transition_state_read\":"+flag(campaign.transition.state_read)+
-                ",\"transition_map_read\":"+flag(campaign.transition.map_read)+
-                ",\"transition_difficulty_read\":"+flag(campaign.transition.difficulty_read)+
-                ",\"transition_map\":"+quoted(campaign.transition.map.data())+
-                ",\"checkpoint_at_ms\":"+std::to_string(campaign.checkpoint_boundary.at_ms)+
-                ",\"checkpoint_generation\":"+std::to_string(campaign.checkpoint_boundary.generation_after)+
-                ",\"checkpoint_depth\":"+std::to_string(campaign.checkpoint_boundary.depth)+
-                ",\"checkpoint_state\":"+std::to_string(campaign.checkpoint_boundary.game)+
-                ",\"checkpoint_difficulty\":"+std::to_string(campaign.checkpoint_boundary.difficulty)+
-                ",\"checkpoint_state_read\":"+flag(campaign.checkpoint_boundary.state_read)+
-                ",\"checkpoint_map_read\":"+flag(campaign.checkpoint_boundary.map_read)+
-                ",\"checkpoint_difficulty_read\":"+flag(campaign.checkpoint_boundary.difficulty_read)+"}";
-            std::string runtime_history = "[";
-            for (const auto& line : commands::diagnostic_history()) {
-                if (runtime_history.size() > 1) runtime_history += ',';
-                runtime_history += quoted(line.c_str());
-            }
-            runtime_history += ']';
-            const auto facts = "\"runtime_diagnostics\":" + runtime_history + ",\"engine_reason\":" + std::to_string(engine_reason) + ",\"installation\":{\"phase\":" + std::to_string(install.phase) +
-                ",\"sequence\":" + std::to_string(install.sequence) + ",\"startup_observation\":" + std::to_string(install.startup_observation) +
-                ",\"last_completed_stage\":" + std::to_string(install.last_completed_stage) + ",\"validated\":" + std::to_string(install.validated) +
-                ",\"created\":" + std::to_string(install.created) + ",\"enabled\":" + std::to_string(install.enabled) +
-                ",\"primary_failure\":" + event(install.primary_failure) + ",\"cleanup_failure\":" + event(install.cleanup_failure) +
-                ",\"active\":" + event(install.active) + "},\"admission\":{\"state\":" + std::to_string(session.state) +
-                ",\"fault\":" + std::to_string(session.fault) + ",\"flags\":" + std::to_string(session.flags) +
-                ",\"prepared_routes\":" + std::to_string(session.prepared_routes) + ",\"required_routes\":" + std::to_string(session.required_routes) +
-                ",\"namespace_id\":\"" + session.namespace_id + "\"},\"startup_route\":" + startup_route(save::session().unrouted_trace()) +
-                ",\"profile\":" + profile(save::session().profile_trace())+",\"campaign\":"+campaign_json+
-                ",\"b_diagnostics\":"+b_trace(save::session().btrace.snapshot())+
-                ",\"domain_installed\":{\"inventory\":"+flag(inventory::available())+
-                ",\"arsenal\":"+flag(arsenal::available())+",\"runes\":"+flag(runes::available())+
-                ",\"weapon_points\":"+flag(weapon_points::available())+",\"special\":"+flag(special::available())+
-                ",\"special_selection_route\":"+flag(special::selection_route_available())+
-                ",\"deathlink\":"+flag(deathlink::available())+"}"+
-                ",\"special_installation\":"+b_trace(special::installation_diagnostics())+
-                ",\"arsenal_installation\":"+b_trace(arsenal::installation_diagnostics())+
-                ",\"heat_blast_ui\":"+b_trace(arsenal::heat_blast_ui_diagnostics())+
-                ",\"special_input\":"+b_trace(special::input_diagnostics())+
-                ",\"special_route\":"+b_trace(special::route_diagnostics())+
-                ",\"special_hud\":"+b_trace(special::hud_diagnostics())+
-                ",\"combat\":"+b_trace(combat::diagnostics())+
-                ",\"recipe_first_fault\":"+quoted(expanded::recipe_fault_diagnostic().c_str())+
-                ",\"encounter_recovery_history\":"+recovery_history(core)+
-                ",\"special_use_history\":"+use_json+
-                ",\"ammo_refill_history\":"+refill_history(special::refill_history())+
-                ",\"controls_directory\":"+quoted(std::filesystem::path(special::input_directory()).u8string().c_str());
-            if (facts != last) {
-                const auto& wide_key = prelaunch::diagnostic_key();
-                std::string control;
-                if (wide_key.size() >= 64) for (auto digit : wide_key.substr(wide_key.size()-64)) control.push_back(static_cast<char>(digit));
-                const auto line = "{\"schema\":\"sentinel-startup-v1\",\"control_sha256\":\"" + control + "\",\"pid\":" + std::to_string(core.pid) +
-                    ",\"process_created\":\"" + std::to_string(core.process_created) + "\",\"build_id\":\"" + core.core.build_id +
-                    "\",\"at_ms\":" + std::to_string(GetTickCount64()) + ",\"diagnostic_storage\":{\"history_records\":"+
-                    std::to_string(count)+",\"history_bytes\":"+std::to_string(history_bytes)+",\"history_error\":"+
-                    std::to_string(history_error)+",\"latest_error\":"+std::to_string(latest_error)+
-                    ",\"history_rotations\":"+std::to_string(history_rotations)+
-                    ",\"use_export_lost\":"+std::to_string(use_export_lost)+"}," + facts + "}\n";
-                if(line.size()>131072) throw std::length_error("diagnostic_snapshot_limit");
-                auto history_line = line;
-                const auto use_at = history_line.find(use_json);
-                if (use_at != std::string::npos)
-                    history_line.replace(use_at, use_json.size(), special_use_history(use_snapshot, exported_use_sequence));
-                // two limited generations; file work stays on the diagnostic exporter
-                if (file != INVALID_HANDLE_VALUE && history_bytes + history_line.size() > 1024 * 1024) {
-                    CloseHandle(file); file = INVALID_HANDLE_VALUE;
-                    if (MoveFileExW(history_path.c_str(), (history_path + L".previous").c_str(), MOVEFILE_REPLACE_EXISTING)) {
-                        file = CreateFileW(history_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-                        history_bytes = 0; ++history_rotations;
-                    }
-                    if (file == INVALID_HANDLE_VALUE) history_error = GetLastError();
-                }
-                if(file!=INVALID_HANDLE_VALUE) {
-                    DWORD written=0;
-                    if(!WriteFile(file,history_line.data(),static_cast<DWORD>(history_line.size()),&written,nullptr) || written!=history_line.size()) {
-                        history_error=GetLastError(); CloseHandle(file); file=INVALID_HANDLE_VALUE;
-                    } else {
-                        FlushFileBuffers(file); history_bytes+=history_line.size(); ++count;
-                        const auto preceding = use_snapshot.sequence - use_snapshot.count;
-                        if (preceding > exported_use_sequence) use_export_lost += preceding - exported_use_sequence;
-                        exported_use_sequence = use_snapshot.sequence;
-                    }
-                }
-                if(publish_latest(line)) last=facts;
-            }
+            record_snapshot(core, engine_reason);
         }
     } catch (...) { /* Diagnostics never change admission or inspection availability. */ }
     ReleaseSRWLockExclusive(&guard);

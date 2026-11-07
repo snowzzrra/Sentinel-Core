@@ -59,6 +59,112 @@ sc_mission_access_result Menu::access(uint32_t id, const sc_evidence_scope& scop
     return found->second;
 }
 Menu& menu() { static Menu value; return value; }
+static bool same_row(const Projection& p, const sc_campaign_request& r, const sc_campaign_summary& summary,
+                     const sc_campaign_rewards* rewards) {
+    const auto known = rewards ? rewards->known : 0, count = rewards ? rewards->count : 0;
+    return !std::memcmp(&p.rows[r.index], &r.row, sizeof(r.row)) &&
+           !std::memcmp(&p.summaries[r.index], &summary, sizeof(summary)) &&
+           p.rewards_known[r.index] == known && p.rewards[r.index].size() == count &&
+           (!count ||
+            !std::memcmp(p.rewards[r.index].data(), rewards->entries, count * sizeof(sc_campaign_reward)));
+}
+
+static void validate_rows(const Projection& staged,
+                          const std::array<bool, SC_CAMPAIGN_MENU_MAX_ROWS>& received,
+                          sc_campaign_result& out) {
+    const auto refuse = [&](uint32_t reason) {
+        out.status = SC_CAMPAIGN_REFUSED;
+        out.reason = reason;
+    };
+    unsigned hubs = 0;
+    for (uint32_t i = 0; i < staged.count; ++i) {
+        if (!received[i]) {
+            refuse(SC_CAMPAIGN_INCOMPLETE);
+            break;
+        }
+        const auto& row = staged.rows[i];
+        hubs += (row.flags & SC_CAMPAIGN_HUB) != 0;
+        for (uint32_t j = 0; j < i; ++j)
+            if (row.id == staged.rows[j].id) refuse(SC_CAMPAIGN_ROWS);
+    }
+    if (!out.status && hubs != 1) refuse(SC_CAMPAIGN_ROWS);
+}
+
+void Menu::record_encounter_edge(uint32_t stage_id, const sc_campaign_reward& reward) {
+    for (uint32_t j = 0; j < committed_.count; ++j)
+        if (stage_id == committed_.rows[j].id)
+            for (const auto& previous : committed_.rewards[j])
+                if (previous.location_id == reward.location_id && previous.kind == reward.kind &&
+                    !previous.checked)
+                    encounter_edges_[stage_id] = {GetTickCount64(), reward};
+}
+
+void Menu::record_encounter_edges() {
+    for (uint32_t i = 0; i < staged_.count; ++i)
+        for (const auto& reward : staged_.rewards[i]) {
+            if (reward.kind != SC_REWARD_ENCOUNTER || !reward.checked) continue;
+            record_encounter_edge(staged_.rows[i].id, reward);
+        }
+}
+
+void Menu::stage_request(uint16_t operation, const sc_campaign_request& r,
+                         const sc_campaign_summary& presentation, const sc_campaign_rewards* rewards,
+                         sc_campaign_result& out) {
+    const auto refuse = [&](uint32_t reason) {
+        out.status = SC_CAMPAIGN_REFUSED;
+        out.reason = reason;
+    };
+    if (r.revision != staged_.revision) {
+        staged_ = {};
+        staged_.revision = r.revision;
+        staged_.count = r.count;
+        received_ = {};
+        staged_.namespace_id = namespace_id_;
+    }
+    if (staged_.count != r.count)
+        refuse(SC_CAMPAIGN_REVISION);
+    else if (operation == campaign_row_operation) {
+        if (received_[r.index] && !same_row(staged_, r, presentation, rewards))
+            refuse(SC_CAMPAIGN_REVISION);
+        else {
+            staged_.rows[r.index] = r.row;
+            staged_.summaries[r.index] = presentation;
+            staged_.rewards_known[r.index] = rewards ? rewards->known : 0;
+            if (rewards) staged_.rewards[r.index].assign(rewards->entries, rewards->entries + rewards->count);
+            received_[r.index] = true;
+        }
+    } else {
+        validate_rows(staged_, received_, out);
+        if (!out.status) {
+            record_encounter_edges();
+            staged_.focus_id = r.row.id;
+            committed_ = staged_;
+            access_.clear();
+            pending_access_ = 0;
+        }
+    }
+}
+
+void Menu::update_request(uint16_t operation, const sc_campaign_request& r,
+                          const sc_campaign_summary& presentation, const sc_campaign_rewards* rewards,
+                          sc_campaign_result& out) {
+    const auto refuse = [&](uint32_t reason) {
+        out.status = SC_CAMPAIGN_REFUSED;
+        out.reason = reason;
+    };
+    if (!r.revision || r.revision < committed_.revision || r.revision < staged_.revision)
+        refuse(SC_CAMPAIGN_REVISION);
+    else if (!r.count || r.count > SC_CAMPAIGN_MENU_MAX_ROWS || r.index >= r.count)
+        refuse(SC_CAMPAIGN_ROWS);
+    else if (r.revision == committed_.revision) {
+        if (r.count != committed_.count ||
+            (operation == campaign_row_operation && !same_row(committed_, r, presentation, rewards)))
+            refuse(SC_CAMPAIGN_REVISION);
+    } else {
+        stage_request(operation, r, presentation, rewards, out);
+    }
+}
+
 sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r,bool admitted,
                                 const sc_campaign_summary* summary, const sc_campaign_rewards* rewards) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -73,61 +179,10 @@ sc_campaign_result Menu::request(uint16_t operation,const sc_campaign_request& r
     }
     if (r.reward_presentation) out.abi_version=2;
     const sc_campaign_summary presentation=summary ? *summary : sc_campaign_summary{};
-    const auto same_rewards=[&](const Projection& p) {
-        const auto known=rewards ? rewards->known : 0, count=rewards ? rewards->count : 0;
-        return p.rewards_known[r.index]==known && p.rewards[r.index].size()==count &&
-            (!count || !std::memcmp(p.rewards[r.index].data(),rewards->entries,count*sizeof(sc_campaign_reward)));
-    };
-    if (!admitted) refuse(SC_CAMPAIGN_SCOPE);
+    if (!admitted)
+        refuse(SC_CAMPAIGN_SCOPE);
     else if (operation!=campaign_inspect_operation) {
-        if (!r.revision || r.revision<committed_.revision || r.revision<staged_.revision)
-            refuse(SC_CAMPAIGN_REVISION);
-        else if (!r.count || r.count>SC_CAMPAIGN_MENU_MAX_ROWS || r.index>=r.count)
-            refuse(SC_CAMPAIGN_ROWS);
-        else if (r.revision==committed_.revision) {
-            if (r.count!=committed_.count || (operation==campaign_row_operation &&
-                (std::memcmp(&committed_.rows[r.index],&r.row,sizeof(r.row)) ||
-                 std::memcmp(&committed_.summaries[r.index],&presentation,sizeof(presentation)) ||
-                 !same_rewards(committed_)))) refuse(SC_CAMPAIGN_REVISION);
-        } else {
-            if (r.revision!=staged_.revision) {
-                    staged_={}; staged_.revision=r.revision; staged_.count=r.count; received_={};
-                    staged_.namespace_id=namespace_id_;
-            }
-            if (staged_.count!=r.count) refuse(SC_CAMPAIGN_REVISION);
-            else if (operation==campaign_row_operation) {
-                if (received_[r.index] && (std::memcmp(&staged_.rows[r.index],&r.row,sizeof(r.row)) ||
-                    std::memcmp(&staged_.summaries[r.index],&presentation,sizeof(presentation)) || !same_rewards(staged_)))
-                    refuse(SC_CAMPAIGN_REVISION);
-                else {
-                    staged_.rows[r.index]=r.row; staged_.summaries[r.index]=presentation;
-                    staged_.rewards_known[r.index]=rewards ? rewards->known : 0;
-                    if (rewards) staged_.rewards[r.index].assign(rewards->entries,rewards->entries+rewards->count);
-                    received_[r.index]=true;
-                }
-            } else {
-                unsigned hubs=0;
-                for (uint32_t i=0;i<staged_.count;++i) {
-                    if (!received_[i]) { refuse(SC_CAMPAIGN_INCOMPLETE); break; }
-                    const auto& row=staged_.rows[i];
-                    hubs+=(row.flags&SC_CAMPAIGN_HUB)!=0;
-                    for (uint32_t j=0;j<i;++j) if (row.id==staged_.rows[j].id) refuse(SC_CAMPAIGN_ROWS);
-                }
-                if (!out.status && hubs!=1) refuse(SC_CAMPAIGN_ROWS);
-                if (!out.status) {
-                    for (uint32_t i=0;i<staged_.count;++i)
-                        for (const auto& reward:staged_.rewards[i]) {
-                            if (reward.kind!=SC_REWARD_ENCOUNTER || !reward.checked) continue;
-                            for (uint32_t j=0;j<committed_.count;++j)
-                                if (staged_.rows[i].id==committed_.rows[j].id)
-                                    for (const auto& previous:committed_.rewards[j])
-                                        if (previous.location_id==reward.location_id && previous.kind==reward.kind && !previous.checked)
-                                            encounter_edges_[staged_.rows[i].id]={GetTickCount64(),reward};
-                        }
-                    staged_.focus_id=r.row.id; committed_=staged_; access_.clear(); pending_access_=0;
-                }
-            }
-        }
+        update_request(operation, r, presentation, rewards, out);
     }
     // unauthenticated requests receive no existing menu state
     if (admitted) {

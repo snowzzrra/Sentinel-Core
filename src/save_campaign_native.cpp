@@ -94,6 +94,10 @@ bool effective_difficulty(uintptr_t map,int32_t& value) {
     if (value<0 && !read(map,0xaf368,value)) return unavailable("difficulty_map_fallback_unreadable");
     session().btrace.record(BStage::difficulty,BStatus::succeeded,"effective_difficulty_observed",0,{{"value",value},{"mode",mode}},map); return true;
 }
+static bool clean_creation_lifetime(Session& owner, const sc_native_snapshot& lifetime, bool menu_lifetime) {
+    return !prior_campaign && menu_lifetime && !lifetime.depth && !lifetime.event_gap_count &&
+        !lifetime.history_overwritten && lifetime.game_state == 0 && (owner.inspect().flags & SC_SAVE_SESSION_STARTUP_QUALIFIED);
+}
 void new_game(uintptr_t menu,uint32_t requested,uint8_t extra_life) {
     session().btrace.record(BStage::creation,BStatus::entered,"native_new_game_enter",0,
         {{"navigation_owned",navigation_owned},{"requested",requested},{"extra_life",extra_life}},menu);
@@ -108,9 +112,7 @@ void new_game(uintptr_t menu,uint32_t requested,uint8_t extra_life) {
     const bool menu_observed=read(root,0x44,menu_state) && menu_state==SC_GAME_MAIN_MENU;
     const bool menu_lifetime=lifetime.lifecycle==SC_LIFETIME_MENU ||
         (lifetime.lifecycle==SC_LIFETIME_UNOBSERVED && menu_observed);
-    const bool lifetime_clean=!prior_campaign && !extra_life && menu_lifetime && !lifetime.depth &&
-        !lifetime.event_gap_count && !lifetime.history_overwritten && lifetime.game_state==0 &&
-        (owner.inspect().flags&SC_SAVE_SESSION_STARTUP_QUALIFIED);
+    const bool lifetime_clean=clean_creation_lifetime(owner, lifetime, menu_lifetime);
     const bool prefix_read=lifetime_clean && read_campaign_prefix(memory,image,prefix);
     const bool catalog_read=prefix_read && prefix=="GAME-" && read_native_catalog(owner,memory,"GAME-",catalog,remote);
     const bool clean=catalog_read && catalog.slots.empty();
@@ -172,17 +174,27 @@ uint64_t continue_from_files(uintptr_t screen,uintptr_t action,uintptr_t flags,u
     __finally { *value=static_cast<uint8_t>((*value&~0x10)|(previous&0x10)); }
     return result;
 }
+static bool read_slot_action(uintptr_t action, uint32_t& kind, uint32_t& count, uint32_t& tag, uint32_t& value) {
+    uintptr_t arguments = 0;
+    return read(action, 0, kind) && kind == 1 && read(action, 0x10, count) && count &&
+        read(action, 8, arguments) && read(arguments, 0, tag) && tag == 5 && read(arguments, 8, value);
+}
+static uint64_t continue_campaign_action(uintptr_t screen, uintptr_t action) {
+    uint32_t game_state=UINT32_MAX; uintptr_t game=0; uint8_t flags=0;
+    if (!session().accepts_requests() || !read(root,0x44,game_state) || game_state!=SC_GAME_MAIN_MENU ||
+        !read(image+0x45f7370,0,game) || (game && !read(game,0x1968,flags))) return 1;
+    return game?continue_from_files(screen,action,game+0x1968,flags):original_action(screen,action);
+}
+static bool new_campaign_action(uint32_t value, uint32_t screen_state) {
+    return value == 3 || (value == 0 && screen_state == 2 && !session().campaign_run.snapshot().resumed);
+}
 uint64_t campaign_action(uintptr_t screen,uintptr_t action) {
     if (!session().campaign_run.enabled()) return original_action(screen,action);
-    uint32_t kind=0,count=0,tag=0,value=0; uintptr_t arguments=0;
+    uint32_t kind=0,count=0,tag=0,value=0;
     uint32_t screen_state=0;
     read(screen,0x108,screen_state);
-    if (screen_state==2 && read(action,0,kind) && kind==1 && read(action,0x10,count) && count &&
-        read(action,8,arguments) && read(arguments,0,tag) && tag==5 && read(arguments,8,value) && value==1) {
-        uint32_t game_state=UINT32_MAX; uintptr_t game=0; uint8_t flags=0;
-        if (!session().accepts_requests() || !read(root,0x44,game_state) || game_state!=SC_GAME_MAIN_MENU ||
-            !read(image+0x45f7370,0,game) || (game && !read(game,0x1968,flags))) return 1;
-        return game?continue_from_files(screen,action,game+0x1968,flags):original_action(screen,action);
+    if (screen_state==2 && read_slot_action(action, kind, count, tag, value) && value==1) {
+        return continue_campaign_action(screen, action);
     }
     // native state2 back returns to slots; state1 back exits to the parent
     if (read(action,0,kind) && kind==0xf && screen_state==2 && session().accepts_requests()) {
@@ -190,10 +202,7 @@ uint64_t campaign_action(uintptr_t screen,uintptr_t action) {
         return original_action(screen,action);
     }
     // empty-slot newgame is value3; ordinary fresh-campaign newgame is value0. keep every unrelated native action and vanilla screen path
-    if (!read(action,0,kind) || kind!=1 || !read(action,0x10,count) || !count ||
-        !read(action,8,arguments) || !read(arguments,0,tag) || tag!=5 ||
-        !read(arguments,8,value) || (value!=3 && !(value==0 && screen_state==2 &&
-            !session().campaign_run.snapshot().resumed))) return original_action(screen,action);
+    if (!read_slot_action(action, kind, count, tag, value) || !new_campaign_action(value, screen_state)) return original_action(screen,action);
     session().btrace.record(BStage::creation,BStatus::entered,"new_game_action_observed",0,
         {{"kind",kind},{"count",count},{"tag",tag},{"value",value},{"accepting",session().accepts_requests()},
          {"navigation_owned",navigation_owned},{"armed",session().campaign_run.snapshot().phase=="armed"}},screen);
@@ -362,8 +371,30 @@ bool restore_enemies(uint64_t result,bool metadata_only) {
     const auto campaign=session().campaign_run.snapshot();
     return !result && !metadata_only && !campaign.restart_pending && campaign.native_subtype!=6 && expanded::recipe_checkpoint_enabled();
 }
-uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uintptr_t prepared,uintptr_t request) {
-    uintptr_t object=0; const bool reference_valid=data && read(data->control,8,object);
+static const char* enemy_restore_reason(uintptr_t map, uintptr_t table, uintptr_t serializer) {
+    if (!map) return "map_unreadable";
+    if (table != image + 0x2ab30c8) return "map_table_unreadable_or_unexpected";
+    return !serializer ? "serializer_unreadable" : "enemy_archive_or_state_invalid";
+}
+static uint64_t restore_parsed_enemies(uint64_t result, bool metadata_only, bool mission_checkpoint) {
+    if (restore_enemies(result,metadata_only)) {
+        const auto checkpoint=session().campaign_run.snapshot();
+        if (checkpoint.resumed && (checkpoint.native_subtype==1 || mission_checkpoint)) {
+            uintptr_t map=0,table=0,serializer=0;
+            if (!read(root,0x50,map) || !read(map,0,table) || table!=image+0x2ab30c8 ||
+                !read(map,0xae5e0,serializer) ||
+                !expanded::read_recipe_checkpoint(serializer,checkpoint.map,checkpoint.native_subtype)) {
+                commands::diagnostic_trace("AP_CHECKPOINT stage=parser_enemy_restore result=failed checkpoint=%llu reason=%s map=%llx table=%llx serializer=%llx",
+                    static_cast<unsigned long long>(checkpoint.checkpoint), enemy_restore_reason(map, table, serializer), static_cast<unsigned long long>(map),
+                    static_cast<unsigned long long>(table), static_cast<unsigned long long>(serializer));
+                session().campaign_run.refuse("native_enemy_checkpoint_invalid",BStage::parser); result=0x10;
+            }
+        }
+    }
+    return result;
+}
+static void observe_campaign_parser(uintptr_t caller, SaveReference* data, uintptr_t request, uintptr_t& object, bool& reference_valid, bool& metadata_only) {
+    reference_valid=data && read(data->control,8,object);
     ParserObservation observation; observation.caller=caller; observation.data=object;
     observation.native_completion=observation.caller==image+0x148c1c1;
     observation.directory_read=reference_valid && name(object,0,observation.directory);
@@ -373,11 +404,15 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
     // 140672e10 to apply a gameplay load. Preserve both native consumers.
     uint8_t mode=0;
     const bool mode_read=read(request,0xb8,mode);
-    const bool metadata_only=observation.native_completion && mode_read && mode==1;
+    metadata_only=observation.native_completion && mode_read && mode==1;
     session().btrace.record(BStage::parser,BStatus::entered,"native_parser_purpose",0,
         {{"native_completion",observation.native_completion},{"request_mode_read",mode_read},{"request_mode",mode},
          {"metadata_only",metadata_only},{"caller_rva",caller>=image?caller-image:0}},object);
     session().campaign_run.observe_parser(std::move(observation),metadata_only);
+}
+uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uintptr_t prepared,uintptr_t request) {
+    uintptr_t object = 0; bool reference_valid = false, metadata_only = false;
+    observe_campaign_parser(caller, data, request, object, reference_valid, metadata_only);
     if (!reference_valid) session().btrace.record(BStage::parser,BStatus::refused,"parser_reference_unreadable",0,
         {{"reference_present",data!=nullptr},{"object_present",object!=0}},reinterpret_cast<uintptr_t>(data));
     const bool valid=reference_valid && session().campaign_run.parser_enter(object,metadata_only);
@@ -397,21 +432,7 @@ uint64_t parse_game_at(uintptr_t caller,SaveReference* data,uintptr_t files,uint
     if (!result && mission_checkpoint && !restore_mission_spawn(prepared,request)) {
         session().campaign_run.refuse("native_mission_checkpoint_missing",BStage::parser); result=0x10;
     }
-    if (restore_enemies(result,metadata_only)) {
-        const auto checkpoint=session().campaign_run.snapshot();
-        if (checkpoint.resumed && (checkpoint.native_subtype==1 || mission_checkpoint)) {
-            uintptr_t map=0,table=0,serializer=0;
-            if (!read(root,0x50,map) || !read(map,0,table) || table!=image+0x2ab30c8 ||
-                !read(map,0xae5e0,serializer) ||
-                !expanded::read_recipe_checkpoint(serializer,checkpoint.map,checkpoint.native_subtype)) {
-                commands::diagnostic_trace("AP_CHECKPOINT stage=parser_enemy_restore result=failed checkpoint=%llu reason=%s map=%llx table=%llx serializer=%llx",
-                    static_cast<unsigned long long>(checkpoint.checkpoint), !map ? "map_unreadable" : table!=image+0x2ab30c8 ? "map_table_unreadable_or_unexpected" :
-                    !serializer ? "serializer_unreadable" : "enemy_archive_or_state_invalid", static_cast<unsigned long long>(map),
-                    static_cast<unsigned long long>(table), static_cast<unsigned long long>(serializer));
-                session().campaign_run.refuse("native_enemy_checkpoint_invalid",BStage::parser); result=0x10;
-            }
-        }
-    }
+    result = restore_parsed_enemies(result, metadata_only, mission_checkpoint);
     session().campaign_run.parser_leave(static_cast<uint32_t>(result),metadata_only); return result;
 }
 void new_game_entry(uintptr_t menu, uint32_t requested, uint8_t extra_life) {
@@ -496,6 +517,16 @@ bool admit_stage_descriptor(uintptr_t descriptor,const std::string& map,uint32_t
     }
     return true;
 }
+static bool read_campaign_descriptor(uintptr_t self, uintptr_t descriptor, std::string& map, uint8_t& flags) {
+    const bool flags_read=self==root && read(descriptor,0x1960,flags);
+    const bool map_read=flags_read && name(descriptor,0x10,map);
+    if (self!=root || !flags_read || !map_read) {
+        session().btrace.record(BStage::transition,BStatus::refused,"native_map_descriptor_unreadable",0,
+            {{"root_equal",self==root},{"flags_read",flags_read},{"flags",flags},{"map_read",map_read},{"map_bytes",map.size()}},descriptor);
+        session().campaign_run.refuse("native_map_descriptor_unreadable",BStage::transition); return false;
+    }
+    return true;
+}
 bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransition& transition) {
     if (!session().campaign_run.enabled()) return true;
     session().btrace.record(BStage::transition,BStatus::entered,"native_transition_enter",0,
@@ -515,13 +546,7 @@ bool campaign_change_begin(uintptr_t self,uintptr_t descriptor,CampaignTransitio
             {{"event_id",transition.event_id},{"depth",transition.depth}},descriptor); return true;
     } // outer native operation owns the campaign result
     std::string map; uint8_t flags=0;
-    const bool flags_read=self==root && read(descriptor,0x1960,flags);
-    const bool map_read=flags_read && name(descriptor,0x10,map);
-    if (self!=root || !flags_read || !map_read) {
-        session().btrace.record(BStage::transition,BStatus::refused,"native_map_descriptor_unreadable",0,
-            {{"root_equal",self==root},{"flags_read",flags_read},{"flags",flags},{"map_read",map_read},{"map_bytes",map.size()}},descriptor);
-        session().campaign_run.refuse("native_map_descriptor_unreadable",BStage::transition); return false;
-    }
+    if (!read_campaign_descriptor(self, descriptor, map, flags)) return false;
     // ExecuteMapChange 140666aa0 takes its menu path with bit4 and computes final
     // state0 from it (gameplay state2 otherwise). It needs no campaign parser.
     if (flags & 0x10) {

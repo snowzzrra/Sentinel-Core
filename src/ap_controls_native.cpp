@@ -391,24 +391,12 @@ uintptr_t chat_destroy_detour_entry(uintptr_t chat, uint32_t flags) {
 using builds::Site;
 const auto& sites = builds::steam_20260818().controls;
 constexpr unsigned hook_sites[]{0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26};
-native::Target target(uintptr_t base, const Site& site) {
-    native::Target t{};
-    t.address = base + site.rva;
-    const auto nibble = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
-    for (size_t n = 0; n < t.bytes.size(); ++n)
-        t.bytes[n] = static_cast<uint8_t>((nibble(site.prefix[n * 2]) << 4) | nibble(site.prefix[n * 2 + 1]));
-    return t;
+
 }
-}
-bool install(const engine::Binding& binding, HANDLE stop_event) {
-    if (!save::session().campaign_requested()) return true;
-    engine::LocalMemory memory;
-    const auto deadline = GetTickCount64() + 10000;
-#ifdef SC_NATIVE_TESTING
-    if (testing::real_hook_targets())
-#endif
+static bool validate_control_sites(engine::Memory& memory, const engine::Binding& binding, HANDLE stop_event,
+                                   uint64_t deadline) {
     for (size_t i = 0; i < std::size(sites); ++i) {
-        const auto expected = target(binding.image.base, sites[i]);
+        const auto expected = native::target_from_hex(binding.image.base + sites[i].rva, sites[i].prefix);
         if (i < 8 || i >= 24) {
             if (native::validate_target(memory, binding.image, expected, stop_event, deadline)) return false;
         } else {
@@ -417,6 +405,17 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
                 memory.copy(expected.address, actual.data(), actual.size()).reason || actual != expected.bytes) return false;
         }
     }
+    return true;
+}
+
+bool install(const engine::Binding& binding, HANDLE stop_event) {
+    if (!save::session().campaign_requested()) return true;
+    engine::LocalMemory memory;
+    const auto deadline = GetTickCount64() + 10000;
+#ifdef SC_NATIVE_TESTING
+    if (testing::real_hook_targets())
+#endif
+        if (!validate_control_sites(memory, binding, stop_event, deadline)) return false;
     const auto count = GetFullPathNameW(L"base\\ap_queue", 520, queue_directory, nullptr);
     if (!count || count >= 520) return false;
     const auto at = [&](unsigned i) { return binding.image.base + sites[i].rva; };

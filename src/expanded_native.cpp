@@ -53,6 +53,44 @@ std::atomic<bool> stopped{true};
 namespace sentinel::expanded {
 using namespace detail;
 
+static size_t recipe_leaf_size(size_t index) {
+    switch (index) {
+    case 20: return 47;
+    case 22: return 32;
+    case 28: case 33: return 8;
+    case 38: return 774;
+    case 49: return 39;
+    default: return 0;
+    }
+}
+static bool validate_recipe_targets(const engine::Binding& binding, HANDLE stop_event, uint64_t deadline, std::array<native::Target, builds::BuildDescriptor::recipes_rvas.size()>& recipe_targets) {
+    engine::LocalMemory memory;
+    const auto& recipe_rvas = builds::steam_20260818().recipes_rvas;
+    const auto& recipe_prefixes = builds::steam_20260818().recipes_bytes;
+    for (size_t i = 0; i < std::size(recipe_targets); ++i) {
+        auto& target = recipe_targets[i]; target.address = binding.image.base + recipe_rvas[i];
+        for (size_t byte = 0; byte < target.bytes.size(); ++byte) {
+            unsigned value = 0;
+            if (sscanf_s(recipe_prefixes[i] + byte * 2, "%2x", &value) != 1) return false;
+            target.bytes[byte] = static_cast<uint8_t>(value);
+        }
+        if (i == 5) {
+            target.signature_offset = 0x20;
+            target.signature = {0x92,0x00,0x00,0x00,0x48,0x85,0xc9,0x74,0x21,0xe8,0xd2,0xa5,0xb7,0x01,0x48,0x85,
+                0xc0,0x74,0x0b,0x48,0x8b,0xd3,0x48,0x8b,0xc8,0xe8,0x02,0x74,0x6b,0x00,0x48,0x8b};
+        }
+        if (i == 31) {
+            target.signature_offset = 0x20;
+            target.signature = {0xf2,0x48,0x8b,0xe9,0xb2,0x01,0x48,0x81,0xc1,0x98,0x0c,0x00,0x00,0x33,0xff,0xe8,
+                0xfc,0xd3,0x83,0xff,0x84,0xc0,0x44,0x8b,0xff,0xb9,0x01,0x00,0x00,0x00,0x44,0x0f};
+        }
+        const auto leaf_size = recipe_leaf_size(i);
+        const auto reason = leaf_size ? native::validate_leaf_target(memory, binding.image, target, leaf_size, stop_event, deadline) :
+            native::validate_target(memory, binding.image, target, stop_event, deadline);
+        if (reason) return false;
+    }
+    return true;
+}
 bool install(const engine::Binding& binding, HANDLE stop_event) {
     if (!save::session().campaign_run.enabled()) return true;
     if (binding.metadata.profile != SC_PROFILE_STEAM_20260818) return false;
@@ -80,55 +118,39 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
     const auto manager_reference = builds::resolve(binding.image.base, builds::steam_20260818().expanded[20]);
     const auto ignored = builds::resolve(binding.image.base, builds::steam_20260818().expanded[21]);
     const auto lookup = builds::resolve(binding.image.base, builds::steam_20260818().expanded[22]);
-    const auto& recipe_rvas = builds::steam_20260818().recipes_rvas;
-    const auto& recipe_prefixes = builds::steam_20260818().recipes_bytes;
     std::array<native::Target,builds::BuildDescriptor::recipes_rvas.size()> recipe_targets{};
     engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 10000;
-    for (size_t i = 0; i < std::size(recipe_targets); ++i) {
-        auto& target = recipe_targets[i]; target.address = binding.image.base + recipe_rvas[i];
-        for (size_t byte = 0; byte < target.bytes.size(); ++byte) {
-            unsigned value = 0;
-            if (sscanf_s(recipe_prefixes[i] + byte * 2, "%2x", &value) != 1) return false;
-            target.bytes[byte] = static_cast<uint8_t>(value);
-        }
-        if (i == 5) {
-            target.signature_offset = 0x20;
-            target.signature = {0x92,0x00,0x00,0x00,0x48,0x85,0xc9,0x74,0x21,0xe8,0xd2,0xa5,0xb7,0x01,0x48,0x85,
-                0xc0,0x74,0x0b,0x48,0x8b,0xd3,0x48,0x8b,0xc8,0xe8,0x02,0x74,0x6b,0x00,0x48,0x8b};
-        }
-        if (i == 31) {
-            target.signature_offset = 0x20;
-            target.signature = {0xf2,0x48,0x8b,0xe9,0xb2,0x01,0x48,0x81,0xc1,0x98,0x0c,0x00,0x00,0x33,0xff,0xe8,
-                0xfc,0xd3,0x83,0xff,0x84,0xc0,0x44,0x8b,0xff,0xb9,0x01,0x00,0x00,0x00,0x44,0x0f};
-        }
-        if (i == 20 || i == 22 || i == 28 || i == 33 || i == 38 || i == 49) {
-            if (native::validate_leaf_target(memory, binding.image, target, i == 49 ? 39 : i == 38 ? 774 : i == 20 ? 47 : i == 28 || i == 33 ? 8 : 32, stop_event, deadline)) return false;
-        } else if (native::validate_target(memory, binding.image, target, stop_event, deadline)) return false;
+    if (!validate_recipe_targets(binding, stop_event, deadline, recipe_targets)) return false;
+    for (const auto& check : {
+        std::pair<const native::Target*, size_t>{&movement, 36},
+        std::pair<const native::Target*, size_t>{&haste, 52},
+        std::pair<const native::Target*, size_t>{&name, 25},
+        std::pair<const native::Target*, size_t>{&controller, 0},
+        std::pair<const native::Target*, size_t>{&hosts, 0},
+        std::pair<const native::Target*, size_t>{&spawn, 0},
+        std::pair<const native::Target*, size_t>{&group, 0},
+        std::pair<const native::Target*, size_t>{&registered, 0},
+        std::pair<const native::Target*, size_t>{&single, 0},
+        std::pair<const native::Target*, size_t>{&multiple, 0},
+        std::pair<const native::Target*, size_t>{&spirit, 0},
+        std::pair<const native::Target*, size_t>{&point_factory, 0},
+        std::pair<const native::Target*, size_t>{&point_candidate, 0},
+        std::pair<const native::Target*, size_t>{&point_index, 0},
+        std::pair<const native::Target*, size_t>{&admission, 0},
+        std::pair<const native::Target*, size_t>{&remaining, 0},
+        std::pair<const native::Target*, size_t>{&remaining_added, 0},
+        std::pair<const native::Target*, size_t>{&remaining_dead, 0},
+        std::pair<const native::Target*, size_t>{&entity_reference, 0},
+        std::pair<const native::Target*, size_t>{&manager_reference, 0},
+        std::pair<const native::Target*, size_t>{&lookup, 0},
+        std::pair<const native::Target*, size_t>{&ignored, 18},
+        std::pair<const native::Target*, size_t>{&rewind, 10},
+    }) {
+        const auto reason = check.second ? native::validate_leaf_target(memory, binding.image, *check.first, check.second, stop_event, deadline) :
+            native::validate_target(memory, binding.image, *check.first, stop_event, deadline);
+        if (reason) return false;
     }
-    if (native::validate_leaf_target(memory, binding.image, movement, 36, stop_event, deadline) ||
-        native::validate_leaf_target(memory, binding.image, haste, 52, stop_event, deadline) ||
-        native::validate_leaf_target(memory, binding.image, name, 25, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, controller, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, hosts, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, spawn, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, group, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, registered, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, single, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, multiple, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, spirit, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, point_factory, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, point_candidate, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, point_index, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, admission, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, remaining, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, remaining_added, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, remaining_dead, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, entity_reference, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, manager_reference, stop_event, deadline) ||
-        native::validate_target(memory, binding.image, lookup, stop_event, deadline) ||
-        native::validate_leaf_target(memory, binding.image, ignored, 18, stop_event, deadline) ||
-        native::validate_leaf_target(memory, binding.image, rewind, 10, stop_event, deadline)) return false;
     prepare_recovery(binding, stop_event);
     definition_name = reinterpret_cast<DefinitionName>(name.address);
     resolve_actor = reinterpret_cast<ResolveActor>(binding.image.base + 0x6cb100);
@@ -255,6 +277,104 @@ bool install(const engine::Binding& binding, HANDLE stop_event) {
 
 void stop() { stopped.store(true, std::memory_order_release); stop_recipe_checkpoint(); }
 
+static bool restore_pending_shows(uintptr_t world) {
+    for (auto pending = pending_independent_shows.begin(); pending != pending_independent_shows.end();) {
+        const auto actor = find_entity(world, pending->first.c_str());
+        char origin[21];
+        if (!actor) { ++pending; continue; }
+        if (!independent_origin(actor, origin)) { set_recipe_fault(__func__, __LINE__, "independent_origin_invalid", nullptr, actor); return false; }
+        const auto recipe = native_recipes.find(origin);
+        if (recipe == native_recipes.end()) { set_recipe_fault(__func__, __LINE__, "independent_recipe_missing", nullptr, actor); return false; }
+        if (recipe->second.bodies.empty()) {
+            independent_shows.insert(pending->first);
+            pending = pending_independent_shows.erase(pending);
+            continue;
+        }
+        independent_pose(actor, pending->second.data());
+        independent_shows.insert(pending->first);
+        if (!defer_show(actor)) { set_recipe_fault(__func__, __LINE__, "defer_show_failed", nullptr, actor); return false; }
+        pending = pending_independent_shows.erase(pending);
+    }
+    for (auto pending = deferred_shows.begin(); pending != deferred_shows.end();) {
+        const auto actor = find_entity(world, pending->second.name.c_str());
+        const auto identifier = actor ? actor_identifier(actor) : 0;
+        if (actor == pending->first && identifier == pending->second.identifier) ++pending;
+        else pending = deferred_shows.erase(pending);
+    }
+    return true;
+}
+static void observe_actor_diagnostics(const std::map<uintptr_t, bool>& actors) {
+    const auto now = GetTickCount64();
+    if (now >= actor_diagnostic_next) {
+        actor_diagnostic_next = now + 250;
+        for (const auto& [actor, dead] : actors) if (!dead) trace_actor(actor, "large_jump", 0, true);
+    }
+    for (auto credit = recipe_actor_credits.begin(); credit != recipe_actor_credits.end();) {
+        if (actors.find(credit->first) != actors.end()) { ++credit; continue; }
+        trace_actor(credit->first, "absent_from_observation_cause_unobserved");
+        actor_diagnostics.erase(credit->first);
+        credit = recipe_actor_credits.erase(credit);
+    }
+}
+static void retire_recipe_workers(const std::set<uintptr_t>& workers, const std::set<uintptr_t>& owners) {
+    for (auto worker = worker_recipes.begin(); worker != worker_recipes.end();) {
+        if (workers.find(worker->first) != workers.end()) { ++worker; continue; }
+        const auto diagnostic = worker_diagnostics.find(worker->first);
+        if (diagnostic != worker_diagnostics.end()) trace_recipe_worker("worker_removed", worker->first, diagnostic->second, worker->second);
+        recipe_state.cancel(worker->second);
+        if (diagnostic != worker_diagnostics.end()) {
+            trace_recipe_worker("request_cancelled", worker->first, diagnostic->second, worker->second);
+            worker_diagnostics.erase(diagnostic);
+        }
+        worker = worker_recipes.erase(worker);
+    }
+    for (auto pending = pending_recipes.begin(); pending != pending_recipes.end();) {
+        if (owners.find(pending->first.first) != owners.end()) { ++pending; continue; }
+        recipe_state.cancel(pending->second); pending = pending_recipes.erase(pending);
+    }
+}
+static void retire_summon_components(const std::map<uintptr_t, bool>& actors) {
+    for (auto pending = component_summons.begin(); pending != component_summons.end();) {
+        const auto parent = actors.find(pending->second.parent);
+        if (parent != actors.end() && !parent->second && actor_identifier(pending->second.parent) == pending->second.identifier) {
+            ++pending; continue;
+        }
+        for (const auto& request : pending->second.requests) recipe_state.cancel(request.key);
+        complete_summon_requests(pending->second);
+        pending = component_summons.erase(pending);
+    }
+}
+static void reconcile_recipe_actors(const std::map<uintptr_t, bool>& actors, const std::map<std::string, std::vector<RecipeMembership>>& memberships) {
+    const std::vector<RecipeMembership> none;
+    for (auto actor = recipe_actors.begin(); actor != recipe_actors.end();) {
+        const auto present = actors.find(actor->first);
+        const auto found = memberships.find(actor->second);
+        if (found != memberships.end()) reconcile_recipe_memberships(actor->second, found->second);
+        if (present == actors.end() || present->second) {
+            trace_actor(actor->first, present == actors.end() ? "absent_from_observation_cause_unobserved" : "dead_observed");
+            actor_diagnostics.erase(actor->first);
+            recipe_state.actor_changed(actor->second, present == actors.end() ? RecipeActorState::removed : RecipeActorState::dead);
+            if (present == actors.end()) recipe_actor_credits.erase(actor->first);
+            actor = recipe_actors.erase(actor); continue;
+        }
+        if (found == memberships.end()) reconcile_recipe_memberships(actor->second, none);
+        ++actor;
+    }
+}
+static bool restore_pending_summons(uintptr_t world) {
+    try {
+        if (!restore_autonomous_summons(world)) { set_recipe_fault(__func__, __LINE__, "summon_restore_failed"); return false; }
+        if (pending_summon_checkpoint) return false;
+        std::vector<uintptr_t> points;
+        for (const auto& [point, producer] : direct_points) { (void)producer; points.push_back(point); }
+        for (const auto point : points) drain_direct_point(point);
+    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); return false; }
+    return true;
+}
+static bool recipe_observation_pending() {
+    return !recipe_actors.empty() || !worker_recipes.empty() || !pending_recipes.empty() || !component_summons.empty() ||
+        !recipe_actor_credits.empty() || !deferred_shows.empty() || !pending_independent_shows.empty();
+}
 void observe(uintptr_t world) {
     if (stopped.load(std::memory_order_acquire)) return;
     ObserveCost cost; cost.world=world;
@@ -263,13 +383,7 @@ void observe(uintptr_t world) {
     ++darklord_frame;
     darklord_sample(world, GetTickCount64());
     if (restored_independent && !load_native_recipes()) return;
-    try {
-        if (!restore_autonomous_summons(world)) { set_recipe_fault(__func__, __LINE__, "summon_restore_failed"); return; }
-        if (pending_summon_checkpoint) return;
-        std::vector<uintptr_t> points;
-        for (const auto& [point, producer] : direct_points) { (void)producer; points.push_back(point); }
-        for (const auto point : points) drain_direct_point(point);
-    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); return; }
+    if (!restore_pending_summons(world)) return;
     if (independent_memberships_pending) {
         const auto start=CostClock::now();
         try { if (!synchronize_independent_memberships_safe(world)) set_recipe_fault(__func__, __LINE__, "membership_sync_failed"); }
@@ -277,89 +391,20 @@ void observe(uintptr_t world) {
         cost.sync=elapsed_us(start);
         if (recipe_fault.load()) return;
     }
-    if (recipe_actors.empty() && worker_recipes.empty() && pending_recipes.empty() && component_summons.empty() &&
-        recipe_actor_credits.empty() && deferred_shows.empty() && pending_independent_shows.empty()) return;
+    if (!recipe_observation_pending()) return;
     try {
-        for (auto pending = pending_independent_shows.begin(); pending != pending_independent_shows.end();) {
-            const auto actor = find_entity(world, pending->first.c_str());
-            char origin[21];
-            if (!actor) { ++pending; continue; }
-            if (!independent_origin(actor, origin)) { set_recipe_fault(__func__, __LINE__, "independent_origin_invalid", nullptr, actor); return; }
-            const auto recipe = native_recipes.find(origin);
-            if (recipe == native_recipes.end()) { set_recipe_fault(__func__, __LINE__, "independent_recipe_missing", nullptr, actor); return; }
-            if (recipe->second.bodies.empty()) {
-                independent_shows.insert(pending->first);
-                pending = pending_independent_shows.erase(pending);
-                continue;
-            }
-            independent_pose(actor, pending->second.data());
-            independent_shows.insert(pending->first);
-            if (!defer_show(actor)) { set_recipe_fault(__func__, __LINE__, "defer_show_failed", nullptr, actor); return; }
-            pending = pending_independent_shows.erase(pending);
-        }
-        for (auto pending = deferred_shows.begin(); pending != deferred_shows.end();) {
-            const auto actor = find_entity(world, pending->second.name.c_str());
-            const auto identifier = actor ? actor_identifier(actor) : 0;
-            if (actor == pending->first && identifier == pending->second.identifier) ++pending;
-            else pending = deferred_shows.erase(pending);
-        }
+        if (!restore_pending_shows(world)) return;
         std::map<uintptr_t, bool> actors;
         std::map<std::string, std::vector<RecipeMembership>> memberships;
         std::set<uintptr_t> workers, owners;
-        const std::vector<RecipeMembership> none;
         const auto scan_start=CostClock::now();
         const auto scanned=read_recipe_actors(world, actors, memberships, workers, owners,&cost.living);
         cost.scan=elapsed_us(scan_start);
         if (!scanned) { set_recipe_fault(__func__, __LINE__, "actors_unreadable"); return; }
-        const auto now = GetTickCount64();
-        if (now >= actor_diagnostic_next) {
-            actor_diagnostic_next = now + 250;
-            for (const auto& [actor, dead] : actors) if (!dead) trace_actor(actor, "large_jump", 0, true);
-        }
-        for (auto credit = recipe_actor_credits.begin(); credit != recipe_actor_credits.end();) {
-            if (actors.find(credit->first) != actors.end()) { ++credit; continue; }
-            trace_actor(credit->first, "absent_from_observation_cause_unobserved");
-            actor_diagnostics.erase(credit->first);
-            credit = recipe_actor_credits.erase(credit);
-        }
-        for (auto worker = worker_recipes.begin(); worker != worker_recipes.end();) {
-            if (workers.find(worker->first) != workers.end()) { ++worker; continue; }
-            const auto diagnostic = worker_diagnostics.find(worker->first);
-            if (diagnostic != worker_diagnostics.end()) trace_recipe_worker("worker_removed", worker->first, diagnostic->second, worker->second);
-            recipe_state.cancel(worker->second);
-            if (diagnostic != worker_diagnostics.end()) {
-                trace_recipe_worker("request_cancelled", worker->first, diagnostic->second, worker->second);
-                worker_diagnostics.erase(diagnostic);
-            }
-            worker = worker_recipes.erase(worker);
-        }
-        for (auto pending = pending_recipes.begin(); pending != pending_recipes.end();) {
-            if (owners.find(pending->first.first) != owners.end()) { ++pending; continue; }
-            recipe_state.cancel(pending->second); pending = pending_recipes.erase(pending);
-        }
-        for (auto pending = component_summons.begin(); pending != component_summons.end();) {
-            const auto parent = actors.find(pending->second.parent);
-            if (parent != actors.end() && !parent->second && actor_identifier(pending->second.parent) == pending->second.identifier) {
-                ++pending; continue;
-            }
-            for (const auto& request : pending->second.requests) recipe_state.cancel(request.key);
-            complete_summon_requests(pending->second);
-            pending = component_summons.erase(pending);
-        }
-        for (auto actor = recipe_actors.begin(); actor != recipe_actors.end();) {
-            const auto present = actors.find(actor->first);
-            const auto found = memberships.find(actor->second);
-            if (found != memberships.end()) reconcile_recipe_memberships(actor->second, found->second);
-            if (present == actors.end() || present->second) {
-                trace_actor(actor->first, present == actors.end() ? "absent_from_observation_cause_unobserved" : "dead_observed");
-                actor_diagnostics.erase(actor->first);
-                recipe_state.actor_changed(actor->second, present == actors.end() ? RecipeActorState::removed : RecipeActorState::dead);
-                if (present == actors.end()) recipe_actor_credits.erase(actor->first);
-                actor = recipe_actors.erase(actor); continue;
-            }
-            if (found == memberships.end()) reconcile_recipe_memberships(actor->second, none);
-            ++actor;
-        }
+        observe_actor_diagnostics(actors);
+        retire_recipe_workers(workers, owners);
+        retire_summon_components(actors);
+        reconcile_recipe_actors(actors, memberships);
     } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
 }
 

@@ -40,7 +40,7 @@ bool same(const sc_runes_request& a, const sc_runes_request& b);
 sc_runes_result initial(const sc_runes_request& request);
 void execute(const sc_runes_request& request, sc_runes_result& out, const Calls& calls);
 
-void install(const engine::Binding& binding, HANDLE stop);
+void install(const engine::Binding& binding);
 bool available();
 bool admitted(const char* id);
 void execute_native(const sc_runes_request& request, sc_runes_result& out);

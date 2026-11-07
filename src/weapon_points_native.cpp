@@ -115,15 +115,8 @@ void exchange_hook_entry(uintptr_t self, uintptr_t player) {
     } __finally { hook_set.leave(lease); }
 }
 
-native::Target target(uintptr_t base, uint32_t offset, const char* hex) {
-    native::Target out{}; out.address = base+offset;
-    const auto digit = [](char c) { return c <= '9' ? c-'0' : c-'a'+10; };
-    for (size_t n = 0; n < out.bytes.size(); ++n)
-        out.bytes[n] = static_cast<uint8_t>(digit(hex[n*2])*16+digit(hex[n*2+1]));
-    return out;
-}
 bool leaf(engine::Memory& memory, const engine::Image& image, uint32_t offset, const char* bytes) {
-    const auto t = target(image.base, offset, bytes); std::array<uint8_t, 32> actual{};
+    const auto t = native::target_from_hex(image.base + offset, bytes); std::array<uint8_t, 32> actual{};
     return image.contains(offset, actual.size(), IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ, 0) &&
         !memory.copy(t.address, actual.data(), actual.size()).reason && actual == t.bytes;
 }
@@ -206,6 +199,23 @@ void use_fixture(Calls value, const char* id) {
     calls = value; std::memcpy(fixture_namespace, id, 65); ready.store(true, std::memory_order_release);
 }
 #endif
+static bool validate_currency_calls(engine::Memory& memory, const engine::Image& image) {
+    if (!leaf(memory, image, 0x69af70, "488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc") ||
+        !leaf(memory, image, 0x13e8680, "4863c28b84816ccd0400c3cccccccccc4863c28b848190cd0400c3cccccccccc") ||
+        !leaf(memory, image, 0x13e8690, "4863c28b848190cd0400c3cccccccccc4883ec084c8b91f8f402004c63da4d85"))
+        return false;
+    constexpr uint32_t direct[] = {0xb97fc5, 0xb98238, 0xb98497, 0xb98779,  0xb98ef7,  0xc82e05, 0xc82ad5,
+                                   0xc82c02, 0xd6d273, 0xd6d4b4, 0x105cbf3, 0x147546e, 0x13ce4b8};
+    constexpr uint32_t pairs[] = {0x1474d7f, 0x143404f, 0xc98c2c, 0xd0feee, 0xd101ff};
+    for (auto site : direct)
+        if (!call_site(memory, image_base, site, 0x13ce4c0)) return false;
+    for (auto site : pairs)
+        if (!call_site(memory, image_base, site, 0x13ce4a0)) return false;
+    if (!call_site(memory, image_base, 0xeeaa0a, 0xeea070)) return false;
+    if (!call_site(memory, image_base, 0x13ce5b1, 0x1273710)) return false;
+    return true;
+}
+
 void install(const engine::Binding& binding, HANDLE stop) {
     image_base = binding.image.base; image_size = binding.image.size; engine_root = binding.root;
     engine::LocalMemory memory;
@@ -222,20 +232,11 @@ void install(const engine::Binding& binding, HANDLE stop) {
     };
     const auto deadline = GetTickCount64()+10000;
     for (const auto& s : sites)
-        if (native::validate_target(memory,binding.image,target(image_base,s.rva,s.prefix),stop,deadline)) return;
+        if (native::validate_target(memory,binding.image,native::target_from_hex(image_base + s.rva, s.prefix),stop,deadline)) return;
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets()) {
 #endif
-    if (!leaf(memory,binding.image,0x69af70,"488bc183fa0b77104863ca488b8cc8f81a0000e97851a70133c0c3cccccccccc") ||
-        !leaf(memory,binding.image,0x13e8680,"4863c28b84816ccd0400c3cccccccccc4863c28b848190cd0400c3cccccccccc") ||
-        !leaf(memory,binding.image,0x13e8690,"4863c28b848190cd0400c3cccccccccc4883ec084c8b91f8f402004c63da4d85")) return;
-    constexpr uint32_t direct[] = {0xb97fc5,0xb98238,0xb98497,0xb98779,0xb98ef7,
-        0xc82e05,0xc82ad5,0xc82c02,0xd6d273,0xd6d4b4,0x105cbf3,0x147546e,0x13ce4b8};
-    constexpr uint32_t pairs[] = {0x1474d7f,0x143404f,0xc98c2c,0xd0feee,0xd101ff};
-    for (auto site : direct) if (!call_site(memory,image_base,site,0x13ce4c0)) return;
-    for (auto site : pairs) if (!call_site(memory,image_base,site,0x13ce4a0)) return;
-    if (!call_site(memory,image_base,0xeeaa0a,0xeea070)) return;
-    if (!call_site(memory,image_base,0x13ce5b1,0x1273710)) return;
+        if (!validate_currency_calls(memory, binding.image)) return;
 #ifdef SC_NATIVE_TESTING
     }
 #endif

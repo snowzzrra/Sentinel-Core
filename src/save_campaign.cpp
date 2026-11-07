@@ -156,6 +156,13 @@ bool Campaign::begin_create(bool clean,const std::string& slot,int32_t index,boo
     owner_->btrace.record(diagnostic_stage_,BStatus::succeeded,"create_contract_reserved",0,{{"outcome",result.outcome},{"win32",result.win32_error},{"difficulty",options_.difficulty}});
     return true;
 }
+static bool presave_boundary(const CampaignTransition& boundary, bool catalog) {
+    return boundary.observed && !boundary.observation_reason && !boundary.depth && (catalog || boundary.generation_after);
+}
+bool Campaign::menu_save_available(bool catalog, bool persisted, bool fortress) const {
+    return owner_->accepts_requests() && (catalog || persisted || fortress) && checkpoint_exists_ && !expected_.empty() &&
+        !map_pending_ && state_.phase != "native_save_pending" && !menu_save_pending_;
+}
 bool Campaign::prepare_menu_save(const CampaignTransition& boundary) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled) return true;
@@ -164,9 +171,7 @@ bool Campaign::prepare_menu_save(const CampaignTransition& boundary) {
     const bool persisted=menu_active_ && state_.continuity_persisted;
     const bool fortress=state_.map_active && state_.map=="game/hub/hub" &&
         boundary.generation_after==state_.generation_after;
-    if (!owner_->accepts_requests() || (!catalog && !persisted && !fortress) || !checkpoint_exists_ || expected_.empty() ||
-        map_pending_ || state_.phase=="native_save_pending" || !boundary.observed || boundary.observation_reason ||
-        boundary.depth || (!catalog && !boundary.generation_after) || menu_save_pending_) return false;
+    if (!menu_save_available(catalog, persisted, fortress) || !presave_boundary(boundary, catalog)) return false;
     initiated_=true; if (!fortress) menu_active_=true; menu_save_pending_=true;
     menu_save_source_=fortress ? MenuSaveSource::active_fortress :
         catalog ? MenuSaveSource::cold_catalog : MenuSaveSource::persisted_gameplay;
@@ -261,6 +266,18 @@ bool Campaign::allow_difficulty(uint32_t value) {
         {{"actual",value},{"expected",options_.difficulty},{"blocked_count",state_.changes_blocked}});
     return false; // room managed: reject the change at the native setter, no frame spam
 }
+bool Campaign::hydrate_catalog_access(uintptr_t data, const std::string& directory, bool write, bool erase) {
+    const bool catalog_read=(!initiated_ && state_.phase=="armed") ||
+        (menu_active_ && state_.continuity_persisted && !map_pending_);
+    if (!write && !erase && catalog_read &&
+        owner_->native_io() && directory==directory_) {
+        metadata_data_=data; metadata_verified_=false; catalog_hydrated_=false; return true;
+    }
+    return false;
+}
+bool Campaign::allow_campaign_write() {
+    return state_.save_ready || state_.map_active || reject("campaign_write_before_native_map");
+}
 bool Campaign::allow_access(uintptr_t data,const std::string& directory,bool write,bool erase) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled || directory=="PROFILE") return true;
@@ -272,16 +289,11 @@ bool Campaign::allow_access(uintptr_t data,const std::string& directory,bool wri
     // to the shell. A previously completed gameplay load is not its owner.
     // It never associates a gameplay load; gameplay parser entry requires the
     // explicit later LoadGameSlot operation and its exact SaveData identity.
-    const bool catalog_read=(!initiated_ && state_.phase=="armed") ||
-        (menu_active_ && state_.continuity_persisted && !map_pending_);
-    if (!write && !erase && catalog_read &&
-        owner_->native_io() && directory==directory_) {
-        metadata_data_=data; metadata_verified_=false; catalog_hydrated_=false; return true;
-    }
+    if (hydrate_catalog_access(data, directory, write, erase)) return true;
     if (!owner_->accepts_requests() || !initiated_ || directory!=directory_ || erase)
         return reject("campaign_access_outside_authorized_slot",{{"accepting",owner_->accepts_requests()},
             {"initiated",initiated_},{"directory_equal",directory==directory_},{"erase",erase},{"write",write}});
-    if (write) return state_.save_ready || state_.map_active || reject("campaign_write_before_native_map");
+    if (write) return allow_campaign_write();
     if (!state_.resumed || state_.phase!="resume_requested" || (load_data_ && load_data_!=data))
         return reject("unassociated_campaign_load",{{"resumed",state_.resumed},{"phase",phase_id(state_.phase)},
             {"source_present",load_data_!=0},{"source_equal",load_data_==data}});
@@ -441,6 +453,52 @@ void Campaign::persist_checkpoint(const SdkWriteObservation& manifest,engine::Me
         {{"checkpoint",state_.checkpoint},{"file_count",expected_.size()},{"native_saved",state_.native_saved},
          {"readback_verified",state_.readback_verified},{"continuity_persisted",state_.continuity_persisted}});
 }
+static bool backup_source_name(std::string_view name) {
+        constexpr std::string_view suffix="-BACKUP";
+        return name.size()>=suffix.size() && steam_name_equal(name.substr(name.size()-suffix.size()),suffix);
+}
+
+bool Campaign::read_source_stream(engine::Memory& memory, uintptr_t files, int32_t i, uintptr_t image, uintptr_t& file, std::string& name) {
+    uintptr_t table = 0;
+    if (!read(memory,files,static_cast<size_t>(i)*8,file)) return reject("resume_file_pointer_unreadable");
+    if (!read(memory,file,0,table)) return reject("resume_file_type_unreadable");
+    if (table!=image+0x2a575a8) return reject("resume_file_type_mismatch",{{"file_index",i},{"type_equal",false}});
+    if (!text(memory,file,8,name)) return reject("resume_file_name_unreadable");
+    return true;
+}
+bool Campaign::digest_source_stream(engine::Memory& memory, uintptr_t file, int32_t i, uintptr_t data, const SdkFileWrite& expected, bool backup_group, bool& checkpoint_changed) {
+    uintptr_t buffer = 0; uint64_t size = 0, capacity = 0; std::array<unsigned char, 32> hash{};
+    if (!read(memory,file,0x150,size)) return reject("resume_file_size_unreadable");
+    if (!size || size>100u*1024u*1024u) return reject("resume_file_size_invalid",{{"file_index",i},{"actual_size",size}});
+    if (!read(memory,file,0x158,capacity)) return reject("resume_file_capacity_unreadable");
+    if (size>capacity) return reject("resume_file_exceeds_capacity",{{"file_index",i},{"size",size},{"capacity",capacity}});
+    if (!read(memory,file,0x168,buffer)) return reject("resume_file_buffer_unreadable");
+    const auto begin=GetTickCount64(), deadline=begin+1000;
+    owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_payload_digest",state_.operation,
+        {{"file_index",i},{"size",size},{"expected_size",expected.size},{"buffer_present",buffer!=0},{"deadline_ms",deadline}},data);
+    if (!digest_payload(memory,buffer,static_cast<uint32_t>(size),hash,deadline,&owner_->btrace,BStage::resume,state_.operation,i)) return reject("resume_payload_digest_failed",
+        {{"file_index",i},{"size",size},{"elapsed_ms",GetTickCount64()-begin},{"deadline_elapsed",GetTickCount64()>=deadline},{"buffer_present",buffer!=0}});
+    if (size!=expected.size || hash!=expected.sha256) {
+        checkpoint_changed=true;
+        owner_->btrace.record(diagnostic_stage_,BStatus::pending,"resume_checkpoint_drift",state_.operation,
+            {{"file_index",i},{"actual_size",size},{"expected_size",expected.size},{"hash_equal",hash==expected.sha256},{"backup_group",backup_group}},data);
+    }
+    return true;
+}
+bool Campaign::verify_source_file(engine::Memory& memory, uintptr_t files, int32_t i, int32_t count, uintptr_t data, uintptr_t image, bool& backup_group, std::vector<std::string>& seen, bool& checkpoint_changed) {
+    owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_payload_validate",state_.operation,{{"file_index",i},{"file_count",count}},data);
+    uintptr_t file=0; std::string name;
+    if (!read_source_stream(memory, files, i, image, file, name)) return false;
+    if (!i) backup_group=backup_source_name(name);
+    else if (backup_source_name(name)!=backup_group) return reject("resume_file_group_mixed",{{"file_index",i},{"backup_group",backup_group}});
+    const auto full=directory_+"/"+name;
+    const auto expected=std::find_if(expected_.begin(),expected_.end(),[&](const auto& f){return steam_name_equal(f.name.data(),full);});
+    if (expected==expected_.end()) return reject("resume_file_not_in_checkpoint",{{"file_index",i},{"expected_count",expected_.size()}});
+    if (std::find(seen.begin(),seen.end(),expected->name.data())!=seen.end()) return reject("resume_file_duplicate",{{"file_index",i}});
+    if (!digest_source_stream(memory, file, i, data, *expected, backup_group, checkpoint_changed)) return false;
+    seen.emplace_back(expected->name.data());
+    return true;
+}
 bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t image) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled || (data!=load_data_ && data!=metadata_data_)) return true;
@@ -465,46 +523,14 @@ bool Campaign::verify_source(engine::Memory& memory,uintptr_t data,uintptr_t ima
     // 1414972b0 requests the primary streams OR their -BACKUP counterparts.
     // A native write receipt contains both groups. Require one complete group,
     // not every persisted version and not an arbitrary matching subset.
-    const auto backup=[](std::string_view name) {
-        constexpr std::string_view suffix="-BACKUP";
-        return name.size()>=suffix.size() && steam_name_equal(name.substr(name.size()-suffix.size()),suffix);
-    };
-    const auto primary_count=std::count_if(expected_.begin(),expected_.end(),[&](const auto& f){return !backup(f.name.data());});
+    const auto primary_count=std::count_if(expected_.begin(),expected_.end(),[&](const auto& f){return !backup_source_name(f.name.data());});
     if (count<=0 || count!=primary_count) return reject("resume_file_count_mismatch",
         {{"actual_count",count},{"expected_count",primary_count},{"persisted_count",expected_.size()},{"metadata_only",metadata_only}});
     bool backup_group=false;
     bool checkpoint_changed=false;
     std::vector<std::string> seen;
     for (int32_t i=0;i<count;++i) {
-        owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_payload_validate",state_.operation,{{"file_index",i},{"file_count",count}},data);
-        uintptr_t file=0,table=0,buffer=0; uint64_t size=0,capacity=0; std::string name;
-        if (!read(memory,files,static_cast<size_t>(i)*8,file)) return reject("resume_file_pointer_unreadable");
-        if (!read(memory,file,0,table)) return reject("resume_file_type_unreadable");
-        if (table!=image+0x2a575a8) return reject("resume_file_type_mismatch",{{"file_index",i},{"type_equal",false}});
-        if (!text(memory,file,8,name)) return reject("resume_file_name_unreadable");
-        if (!i) backup_group=backup(name);
-        else if (backup(name)!=backup_group) return reject("resume_file_group_mixed",{{"file_index",i},{"backup_group",backup_group}});
-        const auto full=directory_+"/"+name;
-        const auto expected=std::find_if(expected_.begin(),expected_.end(),[&](const auto& f){return steam_name_equal(f.name.data(),full);});
-        std::array<unsigned char,32> hash{};
-        if (expected==expected_.end()) return reject("resume_file_not_in_checkpoint",{{"file_index",i},{"expected_count",expected_.size()}});
-        if (std::find(seen.begin(),seen.end(),expected->name.data())!=seen.end()) return reject("resume_file_duplicate",{{"file_index",i}});
-        if (!read(memory,file,0x150,size)) return reject("resume_file_size_unreadable");
-        if (!size || size>100u*1024u*1024u) return reject("resume_file_size_invalid",{{"file_index",i},{"actual_size",size}});
-        if (!read(memory,file,0x158,capacity)) return reject("resume_file_capacity_unreadable");
-        if (size>capacity) return reject("resume_file_exceeds_capacity",{{"file_index",i},{"size",size},{"capacity",capacity}});
-        if (!read(memory,file,0x168,buffer)) return reject("resume_file_buffer_unreadable");
-        const auto begin=GetTickCount64(), deadline=begin+1000;
-        owner_->btrace.record(diagnostic_stage_,BStatus::entered,"resume_payload_digest",state_.operation,
-            {{"file_index",i},{"size",size},{"expected_size",expected->size},{"buffer_present",buffer!=0},{"deadline_ms",deadline}},data);
-        if (!digest_payload(memory,buffer,static_cast<uint32_t>(size),hash,deadline,&owner_->btrace,BStage::resume,state_.operation,i)) return reject("resume_payload_digest_failed",
-            {{"file_index",i},{"size",size},{"elapsed_ms",GetTickCount64()-begin},{"deadline_elapsed",GetTickCount64()>=deadline},{"buffer_present",buffer!=0}});
-        if (size!=expected->size || hash!=expected->sha256) {
-            checkpoint_changed=true;
-            owner_->btrace.record(diagnostic_stage_,BStatus::pending,"resume_checkpoint_drift",state_.operation,
-                {{"file_index",i},{"actual_size",size},{"expected_size",expected->size},{"hash_equal",hash==expected->sha256},{"backup_group",backup_group}},data);
-        }
-        seen.emplace_back(expected->name.data());
+        if (!verify_source_file(memory, files, i, count, data, image, backup_group, seen, checkpoint_changed)) return false;
     }
     if (checkpoint_changed) return reject("resume_payload_hash_mismatch");
     state_.source_verified=true; state_.phase="source_verified";
@@ -648,6 +674,22 @@ bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,u
         {{"event_id",event_id},{"generation_before",generation},{"expected_generation",generation+1},{"resumed",state_.resumed}});
     return true;
 }
+static const char* transition_identity_reason(const CampaignTransition& result, uint64_t expected, uint64_t generation) {
+    const char* reason = nullptr;
+    if (result.abnormal) reason="native_transition_abnormal";
+    else if (!result.observed || !result.ended) reason="native_transition_not_observed";
+    else if (!result.native_return) reason="native_transition_return_failed";
+    else if (!result.state_read) reason="native_transition_state_unreadable";
+    else if (result.observation_reason) reason="native_transition_observation_failed";
+    else if (!expected || result.event_id!=expected || result.depth!=1) reason="native_transition_association_mismatch";
+    else if (result.generation_before!=generation || result.generation_after!=generation+1) reason="native_transition_generation_mismatch";
+    return reason;
+}
+static bool transition_completed(const CampaignTransition& result, uint64_t expected, uint64_t generation) {
+    return result.game == SC_GAME_IN_GAME && result.state_read && result.native_return && !result.abnormal &&
+        result.observed && result.ended && !result.observation_reason && result.event_id == expected && result.depth == 1 &&
+        result.generation_before == generation && result.generation_after == generation + 1;
+}
 void Campaign::map_end(const CampaignTransition& result) {
     std::lock_guard<std::recursive_mutex> lock(mutex_); if (!state_.enabled || !map_pending_) return;
     const auto expected=state_.transition.event_id;
@@ -660,13 +702,8 @@ void Campaign::map_end(const CampaignTransition& result) {
     state_.transition=result; state_.generation_after=result.generation_after; state_.effective_difficulty=result.difficulty;
     if (state_.reason!="none") return;
     const char* reason=nullptr;
-    if (result.abnormal) reason="native_transition_abnormal";
-    else if (!result.observed || !result.ended) reason="native_transition_not_observed";
-    else if (!result.native_return) reason="native_transition_return_failed";
-    else if (!result.state_read) reason="native_transition_state_unreadable";
-    else if (result.observation_reason) reason="native_transition_observation_failed";
-    else if (!expected || result.event_id!=expected || result.depth!=1) reason="native_transition_association_mismatch";
-    else if (result.generation_before!=state_.generation_before || result.generation_after!=state_.generation_before+1) reason="native_transition_generation_mismatch";
+    reason = transition_identity_reason(result, expected, state_.generation_before);
+    if (reason) {}
     else if (result.game==SC_GAME_MAIN_MENU || result.game==SC_GAME_LOADING) {
         // ExecuteMapChange also has a successful early return while session
         // readiness is pending. Only this generation's native writer can later
@@ -681,9 +718,7 @@ void Campaign::map_end(const CampaignTransition& result) {
     else if (!result.difficulty_read) reason="native_transition_difficulty_unreadable";
     else if (result.difficulty!=options_.difficulty) reason="native_transition_difficulty_mismatch";
     if (reason) {
-        if (result.game==SC_GAME_IN_GAME && result.state_read && result.native_return && !result.abnormal &&
-            result.observed && result.ended && !result.observation_reason && result.event_id==expected && result.depth==1 &&
-            result.generation_before==state_.generation_before && result.generation_after==state_.generation_before+1)
+        if (transition_completed(result, expected, state_.generation_before))
             reject(reason,{{"map_read",result.map_read},{"map_equal",state_.map==result.map.data()},
                 {"difficulty_read",result.difficulty_read},{"actual_difficulty",result.difficulty},{"expected_difficulty",options_.difficulty}});
         else reject(reason);
@@ -708,6 +743,28 @@ void Campaign::complete_map() {
         checkpoint_awaiting_transition_.reset();
     }
 }
+static bool fortress_checkpoint_matches(const CampaignTransition& result, const CampaignSnapshot& state, uint32_t difficulty) {
+    return result.map_read && state.map == result.map.data() && result.difficulty_read && result.difficulty == difficulty;
+}
+static bool checkpoint_menu_generation(const CampaignTransition& result, uint64_t generation) {
+    return result.observed && !result.observation_reason && !result.depth && result.generation_after == generation && result.state_read;
+}
+bool Campaign::menu_checkpoint_ready(const CampaignTransition& result) {
+    const bool fortress=menu_save_source_==MenuSaveSource::active_fortress;
+    if ((!menu_active_ && !fortress) || !initiated_ || menu_save_source_==MenuSaveSource::none ||
+        (menu_save_source_==MenuSaveSource::persisted_gameplay && !result.generation_after) ||
+        !checkpoint_menu_generation(result, menu_save_generation_) ||
+        result.game!=static_cast<uint32_t>(fortress ? SC_GAME_IN_GAME : SC_GAME_MAIN_MENU) ||
+        (fortress && !fortress_checkpoint_matches(result, state_, options_.difficulty)))
+        return reject("native_mission_presave_boundary_mismatch");
+    state_.save_ready=true;
+    owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"native_mission_presave_ready",state_.operation,
+        {{"generation",result.generation_after},{"checkpoint",state_.checkpoint}});
+    return true;
+}
+static bool checkpoint_associated(const CampaignTransition& result, uint64_t generation) {
+    return result.observed && !result.observation_reason && result.depth <= 1 && result.generation_after == generation;
+}
 bool Campaign::checkpoint_ready(const CampaignTransition& result) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled) return true;
@@ -723,22 +780,9 @@ bool Campaign::checkpoint_ready(const CampaignTransition& result) {
             {{"session_state",owner_->state()},{"session_fault",owner_->fault()}}); return false;
     }
     if (menu_save_pending_) {
-        const bool fortress=menu_save_source_==MenuSaveSource::active_fortress;
-        if ((!menu_active_ && !fortress) || !initiated_ || menu_save_source_==MenuSaveSource::none ||
-            (menu_save_source_==MenuSaveSource::persisted_gameplay && !result.generation_after) ||
-            !result.observed || result.observation_reason || result.depth ||
-            result.generation_after!=menu_save_generation_ || !result.state_read ||
-            result.game!=static_cast<uint32_t>(fortress ? SC_GAME_IN_GAME : SC_GAME_MAIN_MENU) ||
-            (fortress && (!result.map_read || state_.map!=result.map.data() ||
-                !result.difficulty_read || result.difficulty!=options_.difficulty)))
-            return reject("native_mission_presave_boundary_mismatch");
-        state_.save_ready=true;
-        owner_->btrace.record(BStage::checkpoint_factory,BStatus::succeeded,"native_mission_presave_ready",state_.operation,
-            {{"generation",result.generation_after},{"checkpoint",state_.checkpoint}});
-        return true;
+        return menu_checkpoint_ready(result);
     }
-    if (!initiated_ || !result.observed || result.observation_reason || result.depth>1 ||
-        result.generation_after!=state_.transition.generation_after) return reject("native_checkpoint_transition_unassociated");
+    if (!initiated_ || !checkpoint_associated(result, state_.transition.generation_after)) return reject("native_checkpoint_transition_unassociated");
     if (!result.state_read || result.game!=SC_GAME_IN_GAME || !result.map_read || state_.map!=result.map.data())
         return reject("native_checkpoint_map_not_ready",{{"state_read",result.state_read},{"game",result.game},
             {"expected_game",SC_GAME_IN_GAME},{"map_read",result.map_read},{"map_equal",state_.map==result.map.data()}});

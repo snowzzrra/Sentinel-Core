@@ -42,7 +42,7 @@ struct Calls {
 };
 
 void execute(const sc_inventory_request&, sc_inventory_result&, const Calls&);
-void install(const engine::Binding&, HANDLE stop);
+void install(const engine::Binding&);
 bool available();
 bool blood_punch_observed();
 bool microwave_observed();

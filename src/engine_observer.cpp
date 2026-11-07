@@ -36,6 +36,36 @@ bool image_pointer(const Image& image, uintptr_t address, size_t width, uint32_t
     return address >= image.base && address - image.base <= UINT32_MAX &&
         image.contains(static_cast<uint32_t>(address - image.base), width, required, forbidden);
 }
+uint32_t hash_file_data(HANDLE file, HANDLE event, BCRYPT_HASH_HANDLE hash, uint64_t size, HANDLE stop,
+                        uint64_t deadline) {
+    uint32_t reason = SC_REASON_NONE;
+    std::array<uint8_t, chunk_size> buffer{};
+    for (uint64_t offset = 0; reason == SC_REASON_NONE && offset < size;) {
+        reason = interrupted(stop, deadline);
+        if (reason != SC_REASON_NONE) break;
+        const DWORD width = static_cast<DWORD>(std::min<uint64_t>(buffer.size(), size - offset));
+        ResetEvent(event);
+        OVERLAPPED ov{};
+        ov.hEvent = event;
+        ov.Offset = static_cast<DWORD>(offset);
+        ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
+        DWORD count = 0;
+        const BOOL ok = ReadFile(file, buffer.data(), width, &count, &ov);
+        const DWORD error =
+            finish_io(file, ov, ok, ok ? ERROR_SUCCESS : GetLastError(), stop, remaining(deadline), count);
+        if (error != ERROR_SUCCESS)
+            reason = error == ERROR_OPERATION_ABORTED
+                         ? SC_REASON_CANCELLED
+                         : (error == ERROR_TIMEOUT ? SC_REASON_BUDGET : SC_REASON_READ_FAILED);
+        else if (count != width)
+            reason = SC_REASON_PARTIAL_READ;
+        else if (BCryptHashData(hash, buffer.data(), count, 0) < 0)
+            reason = SC_REASON_INTERNAL_ERROR;
+        offset += count;
+    }
+    return reason;
+}
+
 uint32_t disk_hash(const wchar_t* path, char (&out)[65], HANDLE stop, uint64_t deadline) {
     Handle file(CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_FLAG_OVERLAPPED | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
@@ -51,24 +81,9 @@ uint32_t disk_hash(const wchar_t* path, char (&out)[65], HANDLE stop, uint64_t d
     if (BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0) < 0) reason = SC_REASON_INTERNAL_ERROR;
     Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!event) reason = SC_REASON_INTERNAL_ERROR;
-    std::array<uint8_t, chunk_size> buffer{};
-    for (uint64_t offset = 0; reason == SC_REASON_NONE && offset < static_cast<uint64_t>(size.QuadPart);) {
-        reason = interrupted(stop, deadline);
-        if (reason != SC_REASON_NONE) break;
-        const DWORD width = static_cast<DWORD>(std::min<uint64_t>(buffer.size(), size.QuadPart - offset));
-        ResetEvent(event.value);
-        OVERLAPPED ov{}; ov.hEvent = event.value;
-        ov.Offset = static_cast<DWORD>(offset); ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
-        DWORD count = 0;
-        const BOOL ok = ReadFile(file.value, buffer.data(), width, &count, &ov);
-        const DWORD error = finish_io(file.value, ov, ok, ok ? ERROR_SUCCESS : GetLastError(),
-                                     stop, remaining(deadline), count);
-        if (error != ERROR_SUCCESS) reason = error == ERROR_OPERATION_ABORTED ? SC_REASON_CANCELLED :
-            (error == ERROR_TIMEOUT ? SC_REASON_BUDGET : SC_REASON_READ_FAILED);
-        else if (count != width) reason = SC_REASON_PARTIAL_READ;
-        else if (BCryptHashData(hash, buffer.data(), count, 0) < 0) reason = SC_REASON_INTERNAL_ERROR;
-        offset += count;
-    }
+    if (reason == SC_REASON_NONE)
+        reason = hash_file_data(file.value, event.value, hash, static_cast<uint64_t>(size.QuadPart), stop,
+                                deadline);
     uint8_t digest[32]{};
     if (reason == SC_REASON_NONE && BCryptFinishHash(hash, digest, sizeof(digest), 0) < 0)
         reason = SC_REASON_INTERNAL_ERROR;
@@ -91,6 +106,11 @@ bool add(uintptr_t address, size_t offset, size_t width, uintptr_t& result) {
     result = address + offset;
     return width - 1 <= highest_address - result;
 }
+static bool readable_protection(DWORD p) {
+    return p == PAGE_READONLY || p == PAGE_READWRITE || p == PAGE_WRITECOPY || p == PAGE_EXECUTE_READ ||
+           p == PAGE_EXECUTE_READWRITE || p == PAGE_EXECUTE_WRITECOPY;
+}
+
 ReadResult LocalMemory::copy(uintptr_t address, void* out, size_t size) {
     uintptr_t checked = 0;
     if (!out || size > chunk_size || !add(address, 0, size, checked)) return {SC_REASON_OUT_OF_RANGE, 0};
@@ -100,8 +120,7 @@ ReadResult LocalMemory::copy(uintptr_t address, void* out, size_t size) {
         if (VirtualQuery(reinterpret_cast<const void*>(cursor), &region, sizeof(region)) != sizeof(region))
             return {SC_REASON_READ_FAILED, GetLastError()};
         const DWORD p = region.Protect & 0xff;
-        const bool can_read = p == PAGE_READONLY || p == PAGE_READWRITE || p == PAGE_WRITECOPY ||
-            p == PAGE_EXECUTE_READ || p == PAGE_EXECUTE_READWRITE || p == PAGE_EXECUTE_WRITECOPY;
+        const bool can_read = readable_protection(p);
         if (region.State != MEM_COMMIT || !can_read || (region.Protect & PAGE_GUARD))
             return {SC_REASON_READ_FAILED, ERROR_NOACCESS};
         const auto start = reinterpret_cast<uintptr_t>(region.BaseAddress);
@@ -124,6 +143,34 @@ bool Image::contains(uint32_t rva, size_t width, uint32_t required, uint32_t for
             rva >= s.rva && rva - s.rva < s.size && width <= s.size - (rva - s.rva)) return true;
     return false;
 }
+static bool valid_nt_header(const IMAGE_NT_HEADERS64& nt) {
+    const auto& file = nt.FileHeader;
+    const auto& opt = nt.OptionalHeader;
+    if (nt.Signature != IMAGE_NT_SIGNATURE || file.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+        opt.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC || file.SizeOfOptionalHeader != sizeof(opt) ||
+        !file.NumberOfSections || file.NumberOfSections > 32 || opt.SizeOfImage > 256 * 1024 * 1024 ||
+        opt.SizeOfImage < 4096 || opt.SizeOfHeaders > 65536 || opt.SizeOfHeaders > opt.SizeOfImage ||
+        opt.AddressOfEntryPoint >= opt.SizeOfImage)
+        return false;
+    return true;
+}
+
+static ReadResult read_sections(Memory& memory, Image& parsed, size_t section_offset, uint16_t section_count,
+                                uint32_t header_size) {
+    for (unsigned i = 0; i < section_count; ++i) {
+        IMAGE_SECTION_HEADER section{};
+        const auto status = read(memory, parsed.base + section_offset + i * sizeof(section), section);
+        if (status.reason) return status;
+        const uint32_t rva = section.VirtualAddress, size = section.Misc.VirtualSize;
+        if (!size || rva < header_size || rva >= parsed.size || size > parsed.size - rva)
+            return {SC_REASON_INVALID_PE, 0};
+        for (const auto& old : parsed.sections)
+            if (rva < old.rva + old.size && old.rva < rva + size) return {SC_REASON_INVALID_PE, 0};
+        parsed.sections.push_back({rva, size, section.Characteristics});
+    }
+    return {};
+}
+
 ReadResult read_image(Memory& memory, uintptr_t base, Image& image) {
     image = {};
     IMAGE_DOS_HEADER dos{};
@@ -137,28 +184,15 @@ ReadResult read_image(Memory& memory, uintptr_t base, Image& image) {
     status = read(memory, nt_address, nt);
     if (status.reason) return status;
     const auto& file = nt.FileHeader; const auto& opt = nt.OptionalHeader;
-    if (nt.Signature != IMAGE_NT_SIGNATURE || file.Machine != IMAGE_FILE_MACHINE_AMD64 ||
-        opt.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC || file.SizeOfOptionalHeader != sizeof(opt) ||
-        !file.NumberOfSections || file.NumberOfSections > 32 || opt.SizeOfImage > 256 * 1024 * 1024 ||
-        opt.SizeOfImage < 4096 || opt.SizeOfHeaders > 65536 || opt.SizeOfHeaders > opt.SizeOfImage ||
-        opt.AddressOfEntryPoint >= opt.SizeOfImage) return {SC_REASON_INVALID_PE, 0};
+    if (!valid_nt_header(nt)) return {SC_REASON_INVALID_PE, 0};
     uintptr_t end = 0;
     if (!add(base, 0, opt.SizeOfImage, end)) return {SC_REASON_OUT_OF_RANGE, 0};
     const size_t section_offset = static_cast<size_t>(dos.e_lfanew) + sizeof(nt);
     if (section_offset + file.NumberOfSections * sizeof(IMAGE_SECTION_HEADER) > opt.SizeOfHeaders)
         return {SC_REASON_INVALID_PE, 0};
     Image parsed{base, opt.SizeOfImage, file.TimeDateStamp, opt.AddressOfEntryPoint, file.Machine, {}};
-    for (unsigned i = 0; i < file.NumberOfSections; ++i) {
-        IMAGE_SECTION_HEADER section{};
-        status = read(memory, base + section_offset + i * sizeof(section), section);
-        if (status.reason) return status;
-        const uint32_t rva = section.VirtualAddress, size = section.Misc.VirtualSize;
-        if (!size || rva < opt.SizeOfHeaders || rva >= parsed.size || size > parsed.size - rva)
-            return {SC_REASON_INVALID_PE, 0};
-        for (const auto& old : parsed.sections)
-            if (rva < old.rva + old.size && old.rva < rva + size) return {SC_REASON_INVALID_PE, 0};
-        parsed.sections.push_back({rva, size, section.Characteristics});
-    }
+    status = read_sections(memory, parsed, section_offset, file.NumberOfSections, opt.SizeOfHeaders);
+    if (status.reason) return status;
     if (!parsed.contains(parsed.entry, 1, readable | executable, 0)) return {SC_REASON_INVALID_PE, 0};
     image = std::move(parsed);
     return {};
@@ -188,16 +222,10 @@ void bind_globals(Binding& b, const builds::BuildDescriptor& descriptor) {
         if (b.global_reasons[i] == SC_REASON_NONE) b.globals[i] = b.image.base + rvas[i];
     }
 }
-Binding bind(Memory& memory, Image image, const char* hash, uint32_t hash_reason, HANDLE stop, uint64_t deadline, bool exact_layout) {
-    const auto& descriptor = builds::steam_20260818();
-    const auto& signature = descriptor.signature;
-    const auto mask = descriptor.mask;
-    Binding b{}; b.image = std::move(image);
-    auto& s = b.metadata; s = unavailable(SC_REASON_NOT_SAMPLED);
-    s.pe_reason = SC_REASON_NONE; s.machine = b.image.machine; s.timestamp = b.image.timestamp;
-    s.image_size = b.image.size; s.entry_rva = b.image.entry;
-    s.disk_hash_reason = hash_reason; s.locator_revision = 1;
-    if (hash_reason == SC_REASON_NONE) strcpy_s(s.disk_sha256, hash);
+static void identify_profile(Memory& memory, Binding& b, const builds::BuildDescriptor& descriptor,
+                             const char* hash, uint32_t hash_reason, HANDLE stop, uint64_t deadline,
+                             bool exact_layout) {
+    auto& s = b.metadata;
     const bool layout = b.image.machine == descriptor.machine && b.image.size == descriptor.image_size &&
         b.image.timestamp == descriptor.timestamp && b.image.entry == descriptor.entry;
     if (layout && exact_layout) {
@@ -210,46 +238,112 @@ Binding bind(Memory& memory, Image image, const char* hash, uint32_t hash_reason
     } else if (layout && hash_reason == SC_REASON_NONE && std::strcmp(hash, descriptor.hash) == 0)
         s.profile = SC_PROFILE_STEAM_20260818;
     if (s.profile != SC_PROFILE_NONE) b.descriptor = &descriptor;
+}
+
+static void bind_exact_root(Binding& b, const builds::BuildDescriptor& descriptor) {
+    auto& s = b.metadata;
+    if (s.profile == SC_PROFILE_STEAM_20260818 &&
+        b.image.contains(descriptor.root_rva, 8, readable | writable, executable) &&
+        std::all_of(b.global_reasons.begin(), b.global_reasons.end(),
+                    [](auto reason) { return reason == SC_REASON_NONE; })) {
+        s.root_signature_rva = descriptor.locator_rva;
+        s.root_target_rva = descriptor.root_rva;
+        s.root_locator_reason = SC_REASON_NONE;
+        b.root = b.image.base + s.root_target_rva;
+    }
+    return;
+}
+
+static bool root_signature_matches(const uint8_t* bytes, const builds::BuildDescriptor& descriptor) {
+    const auto& signature = descriptor.signature;
+    const auto mask = descriptor.mask;
+    bool match = true;
+    for (size_t k = 0; k < sizeof(signature); ++k)
+        if (mask[k] == 'x' && bytes[k] != signature[k]) {
+            match = false;
+            break;
+        }
+    return match;
+}
+
+static bool locate_root_chunk(const std::array<uint8_t, chunk_size>& buffer, size_t width,
+                              const Section& section, size_t offset,
+                              const builds::BuildDescriptor& descriptor, size_t& matches,
+                              sc_engine_snapshot& s) {
+    const auto& signature = descriptor.signature;
+    for (size_t j = 0; j + sizeof(signature) <= width; ++j) {
+        const bool match = root_signature_matches(buffer.data() + j, descriptor);
+        if (!match) continue;
+        if (++matches > 1) {
+            s.root_locator_reason = SC_REASON_SIGNATURE_AMBIGUOUS;
+            return false;
+        }
+        s.root_signature_rva = section.rva + static_cast<uint32_t>(offset + j);
+        int32_t displacement = 0;
+        std::memcpy(&displacement, buffer.data() + j + 3, sizeof(displacement));
+        const int64_t target = int64_t(s.root_signature_rva) + 7 + displacement;
+        s.root_target_rva = target >= 0 && target <= UINT32_MAX ? static_cast<uint32_t>(target) : 0;
+    }
+    return true;
+}
+
+static bool scan_root_section(Memory& memory, Binding& b, const Section& section,
+                              const builds::BuildDescriptor& descriptor, HANDLE stop, uint64_t deadline,
+                              size_t& matches, size_t& scanned) {
+    auto& s = b.metadata;
+    const auto& signature = descriptor.signature;
+    std::array<uint8_t, chunk_size> buffer{};
+    for (size_t offset = 0; offset < section.size;) {
+        const auto cancellation = interrupted(stop, deadline);
+        if (cancellation) {
+            s.root_locator_reason = cancellation;
+            return false;
+        }
+        const size_t width = std::min(buffer.size(), section.size - offset);
+        if (width < sizeof(signature)) break;
+        scanned += width;
+        if (scanned > 128 * 1024 * 1024) {
+            s.root_locator_reason = SC_REASON_BUDGET;
+            return false;
+        }
+        const auto status = memory.copy(b.image.base + section.rva + offset, buffer.data(), width);
+        if (status.reason) {
+            s.root_locator_reason = status.reason;
+            return false;
+        }
+        if (!locate_root_chunk(buffer, width, section, offset, descriptor, matches, s)) return false;
+        if (width == section.size - offset) break;
+        offset += width - (sizeof(signature) - 1);
+    }
+    return true;
+}
+
+Binding bind(Memory& memory, Image image, const char* hash, uint32_t hash_reason, HANDLE stop,
+             uint64_t deadline, bool exact_layout) {
+    const auto& descriptor = builds::steam_20260818();
+    Binding b{};
+    b.image = std::move(image);
+    auto& s = b.metadata;
+    s = unavailable(SC_REASON_NOT_SAMPLED);
+    s.pe_reason = SC_REASON_NONE;
+    s.machine = b.image.machine;
+    s.timestamp = b.image.timestamp;
+    s.image_size = b.image.size;
+    s.entry_rva = b.image.entry;
+    s.disk_hash_reason = hash_reason;
+    s.locator_revision = 1;
+    if (hash_reason == SC_REASON_NONE) strcpy_s(s.disk_sha256, hash);
+    identify_profile(memory, b, descriptor, hash, hash_reason, stop, deadline, exact_layout);
     bind_globals(b, descriptor);
     s.root_locator_reason = SC_REASON_SIGNATURE_MISSING;
     if (exact_layout) {
-        if (s.profile == SC_PROFILE_STEAM_20260818 &&
-            b.image.contains(descriptor.root_rva, 8, readable | writable, executable) &&
-            std::all_of(b.global_reasons.begin(), b.global_reasons.end(), [](auto reason) { return reason == SC_REASON_NONE; })) {
-            s.root_signature_rva = descriptor.locator_rva;
-            s.root_target_rva = descriptor.root_rva;
-            s.root_locator_reason = SC_REASON_NONE;
-            b.root = b.image.base + s.root_target_rva;
-        }
+        bind_exact_root(b, descriptor);
         return b;
     }
     size_t matches = 0, scanned = 0;
-    std::array<uint8_t, chunk_size> buffer{};
     for (const auto& section : b.image.sections) {
         if ((section.flags & (readable | executable)) != (readable | executable)) continue;
-        for (size_t offset = 0; offset < section.size;) {
-            const auto cancellation = interrupted(stop, deadline);
-            if (cancellation) { s.root_locator_reason = cancellation; return b; }
-            const size_t width = std::min(buffer.size(), section.size - offset);
-            if (width < sizeof(signature)) break;
-            scanned += width;
-            if (scanned > 128 * 1024 * 1024) { s.root_locator_reason = SC_REASON_BUDGET; return b; }
-            const auto status = memory.copy(b.image.base + section.rva + offset, buffer.data(), width);
-            if (status.reason) { s.root_locator_reason = status.reason; return b; }
-            for (size_t j = 0; j + sizeof(signature) <= width; ++j) {
-                bool match = true;
-                for (size_t k = 0; k < sizeof(signature); ++k)
-                    if (mask[k] == 'x' && buffer[j + k] != signature[k]) { match = false; break; }
-                if (!match) continue;
-                if (++matches > 1) { s.root_locator_reason = SC_REASON_SIGNATURE_AMBIGUOUS; return b; }
-                s.root_signature_rva = section.rva + static_cast<uint32_t>(offset + j);
-                int32_t displacement = 0; std::memcpy(&displacement, buffer.data() + j + 3, sizeof(displacement));
-                const int64_t target = int64_t(s.root_signature_rva) + 7 + displacement;
-                s.root_target_rva = target >= 0 && target <= UINT32_MAX ? static_cast<uint32_t>(target) : 0;
-            }
-            if (width == section.size - offset) break;
-            offset += width - (sizeof(signature) - 1);
-        }
+        if (!scan_root_section(memory, b, section, descriptor, stop, deadline, matches, scanned)) return b;
     }
     if (!matches) return b;
     if (s.profile == SC_PROFILE_STEAM_20260818 &&
@@ -287,12 +381,12 @@ struct Frame {
     uintptr_t vtable = 0, first_function = 0, map = 0, player = 0;
     bool failed = false;
 };
-Frame frame(Memory& memory, const Binding& b) {
-    Frame f{};
-    for (auto& field : f.fields) field = unknown(SC_REASON_PARENT_UNAVAILABLE);
-    auto fail = [&](size_t index, ReadResult error) {
-        f.fields[index] = unknown(error.reason, error.error); f.failed = true;
-    };
+void fail_field(Frame& f, size_t index, ReadResult error) {
+    f.fields[index] = unknown(error.reason, error.error);
+    f.failed = true;
+}
+
+void read_global_fields(Memory& memory, const Binding& b, Frame& f) {
     for (size_t i = 0; i < b.globals.size(); ++i) {
         const size_t field = i == 2 ? SC_ENGINE_CUTSCENE_ID : SC_ENGINE_LOADING + i;
         if (b.global_reasons[i]) { f.fields[field] = unknown(b.global_reasons[i]); continue; }
@@ -300,45 +394,86 @@ Frame frame(Memory& memory, const Binding& b) {
         ReadResult status;
         if (i == 2) status = read(memory, b.globals[i], value);
         else { uint8_t byte = 0; status = read(memory, b.globals[i], byte); value = byte; }
-        if (status.reason) fail(field, status);
-        else if (value < 0 || value > (i == 2 ? 100000 : 1)) fail(field, {SC_REASON_INVALID_VALUE, 0});
+        if (status.reason)
+            fail_field(f, field, status);
+        else if (value < 0 || value > (i == 2 ? 100000 : 1))
+            fail_field(f, field, {SC_REASON_INVALID_VALUE, 0});
         else f.fields[field] = observed(value);
     }
-    if (b.metadata.root_locator_reason) { f.fields[SC_ENGINE_ROOT] = unknown(b.metadata.root_locator_reason); return f; }
+}
+
+bool read_engine_root(Memory& memory, const Binding& b, Frame& f) {
+    if (b.metadata.root_locator_reason) {
+        f.fields[SC_ENGINE_ROOT] = unknown(b.metadata.root_locator_reason);
+        return false;
+    }
     auto status = read(memory, b.root, f.vtable);
-    if (status.reason) { fail(SC_ENGINE_ROOT, status); return f; }
+    if (status.reason) {
+        fail_field(f, SC_ENGINE_ROOT, status);
+        return false;
+    }
     const bool provisional = b.metadata.profile == SC_PROFILE_NONE;
     if (!f.vtable) {
         f.fields[SC_ENGINE_ROOT] = observed(0, provisional);
         f.fields[SC_ENGINE_MAP_PRESENT] = f.fields[SC_ENGINE_PLAYER_PRESENT] = unknown(SC_REASON_PARENT_NULL);
-        return f;
+        return false;
     }
     if (!pointer(f.vtable) || !image_pointer(b.image, f.vtable, 8, readable, writable | executable)) {
-        fail(SC_ENGINE_ROOT, {SC_REASON_OUT_OF_RANGE, 0}); return f;
+        fail_field(f, SC_ENGINE_ROOT, {SC_REASON_OUT_OF_RANGE, 0});
+        return false;
     }
     status = read(memory, f.vtable, f.first_function);
-    if (status.reason) { fail(SC_ENGINE_ROOT, status); return f; }
+    if (status.reason) {
+        fail_field(f, SC_ENGINE_ROOT, status);
+        return false;
+    }
     if (!image_pointer(b.image, f.first_function, 1, readable | executable, 0)) {
-        fail(SC_ENGINE_ROOT, {SC_REASON_OUT_OF_RANGE, 0}); return f;
+        fail_field(f, SC_ENGINE_ROOT, {SC_REASON_OUT_OF_RANGE, 0});
+        return false;
     }
     f.fields[SC_ENGINE_ROOT] = observed(1, provisional);
     if (provisional) {
         f.fields[SC_ENGINE_MAP_PRESENT] = f.fields[SC_ENGINE_PLAYER_PRESENT] = unknown(SC_REASON_PROFILE_UNRECOGNIZED);
+        return false;
+    }
+    return true;
+}
+
+Frame frame(Memory& memory, const Binding& b) {
+    Frame f{};
+    for (auto& field : f.fields) field = unknown(SC_REASON_PARENT_UNAVAILABLE);
+    read_global_fields(memory, b, f);
+    if (!read_engine_root(memory, b, f)) return f;
+    uintptr_t address = 0;
+    if (!add(b.root, b.descriptor->map_offset, 8, address) ||
+        !image_pointer(b.image, address, 8, readable | writable, executable)) {
+        fail_field(f, SC_ENGINE_MAP_PRESENT, {SC_REASON_OUT_OF_RANGE, 0});
         return f;
     }
-    uintptr_t address = 0;
-    if (!add(b.root, b.descriptor->map_offset, 8, address) || !image_pointer(b.image, address, 8, readable | writable, executable)) {
-        fail(SC_ENGINE_MAP_PRESENT, {SC_REASON_OUT_OF_RANGE, 0}); return f;
+    auto status = read(memory, address, f.map);
+    if (status.reason) {
+        fail_field(f, SC_ENGINE_MAP_PRESENT, status);
+        return f;
     }
-    status = read(memory, address, f.map);
-    if (status.reason) { fail(SC_ENGINE_MAP_PRESENT, status); return f; }
-    if (f.map && !pointer(f.map)) { fail(SC_ENGINE_MAP_PRESENT, {SC_REASON_INVALID_VALUE, 0}); return f; }
+    if (f.map && !pointer(f.map)) {
+        fail_field(f, SC_ENGINE_MAP_PRESENT, {SC_REASON_INVALID_VALUE, 0});
+        return f;
+    }
     f.fields[SC_ENGINE_MAP_PRESENT] = observed(f.map ? 1 : 0);
     if (!f.map) { f.fields[SC_ENGINE_PLAYER_PRESENT] = unknown(SC_REASON_PARENT_NULL); return f; }
-    if (!add(f.map, b.descriptor->player_offset, 8, address)) { fail(SC_ENGINE_PLAYER_PRESENT, {SC_REASON_OUT_OF_RANGE, 0}); return f; }
+    if (!add(f.map, b.descriptor->player_offset, 8, address)) {
+        fail_field(f, SC_ENGINE_PLAYER_PRESENT, {SC_REASON_OUT_OF_RANGE, 0});
+        return f;
+    }
     status = read(memory, address, f.player);
-    if (status.reason) { fail(SC_ENGINE_PLAYER_PRESENT, status); return f; }
-    if (f.player && !pointer(f.player)) { fail(SC_ENGINE_PLAYER_PRESENT, {SC_REASON_INVALID_VALUE, 0}); return f; }
+    if (status.reason) {
+        fail_field(f, SC_ENGINE_PLAYER_PRESENT, status);
+        return f;
+    }
+    if (f.player && !pointer(f.player)) {
+        fail_field(f, SC_ENGINE_PLAYER_PRESENT, {SC_REASON_INVALID_VALUE, 0});
+        return f;
+    }
     f.fields[SC_ENGINE_PLAYER_PRESENT] = observed(f.player ? 1 : 0);
     return f;
 }

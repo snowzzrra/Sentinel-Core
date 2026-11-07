@@ -65,19 +65,23 @@ bool admitted(const sc_command_request& request) {
     return available() && save::session().state() == save::SessionState::admitted &&
         save::session().accepts_requests() && save::session().namespace_id() == namespace_id;
 }
+static void refill_command(const sc_command_request& request, sc_command_result& result, uintptr_t player) {
+    if (!special::available() || !special::calls.refill) {
+        result.outcome = SC_COMMAND_UNAVAILABLE;
+        return;
+    }
+    result.native_exception = request.kind == SC_COMMAND_CRUCIBLE_REFILL
+                                  ? special::refill_crucible(player)
+                                  : special::calls.refill(special::calls.context, player);
+    result.outcome = result.native_exception ? SC_COMMAND_NATIVE_FAILED : SC_COMMAND_DISPATCHED;
+    return;
+}
+
 void execute_native(const sc_command_request& request, sc_command_result& result, uintptr_t player) {
     if (!available()) { result.outcome = SC_COMMAND_UNAVAILABLE; return; }
     if (!player && request.kind <= SC_COMMAND_CRUCIBLE_REFILL) { result.outcome = SC_COMMAND_NO_PLAYER; return; }
-    if (request.kind == SC_COMMAND_AMMO_REFILL || request.kind == SC_COMMAND_CRUCIBLE_REFILL) {
-        if (!special::available() || !special::calls.refill) {
-            result.outcome = SC_COMMAND_UNAVAILABLE;
-            return;
-        }
-        result.native_exception = request.kind == SC_COMMAND_CRUCIBLE_REFILL ? special::refill_crucible(player) :
-            special::calls.refill(special::calls.context, player);
-        result.outcome = result.native_exception ? SC_COMMAND_NATIVE_FAILED : SC_COMMAND_DISPATCHED;
-        return;
-    }
+    if (request.kind == SC_COMMAND_AMMO_REFILL || request.kind == SC_COMMAND_CRUCIBLE_REFILL)
+        return refill_command(request, result, player);
     if (execute_boon(request.text, result, player)) return;
     if (execute_visual_cleanup(request.text, result)) return;
     engine::LocalMemory memory;

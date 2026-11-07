@@ -239,6 +239,17 @@ uint64_t point_available_detour(uintptr_t point, uintptr_t group, uint8_t time, 
     }();
 }
 
+static const char* recipe_spawn_stage(unsigned stage) {
+    switch (stage) {
+    case 1: return "attempt";
+    case 2: return "retry";
+    case 4: return "created";
+    case 8: return "factory";
+    case 16: return "candidate_rejected";
+    case 32: return "index_rejected";
+    default: return "unavailable";
+    }
+}
 void trace_recipe_spawn(const RecipeCreation& creation, uintptr_t body, uintptr_t point, uint8_t stage) {
     if (!creation.recipe || creation.emission.actor.empty()) return;
     std::string planned;
@@ -253,8 +264,7 @@ void trace_recipe_spawn(const RecipeCreation& creation, uintptr_t body, uintptr_
     if (!native_text(body, definition, 511)) return;
     if (point) read_definition_name(point, point_name);
     const auto request = recipe_state.requests().find(creation.key);
-    commands::enemy_spawn_trace(stage == 1 ? "attempt" : stage == 2 ? "retry" : stage == 4 ? "created" :
-        stage == 8 ? "factory" : stage == 16 ? "candidate_rejected" : stage == 32 ? "index_rejected" : "unavailable",
+    commands::enemy_spawn_trace(recipe_spawn_stage(stage),
         creation.recipe->definition.origin.c_str(), definition.c_str(), point_name, creation.actor, creation.key.c_str(),
         request == recipe_state.requests().end() ? "" : request->second.request.parent_actor.c_str(), creation.emission.ordinal);
     const auto& limits = creation.limits;
@@ -355,43 +365,51 @@ void __fastcall occupied_hosts_detour(HostList* out) {
     }
 }
 
-unsigned special_kind(uintptr_t actor, unsigned* physical) {
-    if (physical) *physical = 9;
+static bool physical_species(std::string_view inherited, unsigned& physical, bool& native_other) {
+    constexpr std::string_view species[]{"ai/superheavy/marauder", "ai/superheavy/archvile", "ai/ambient/spirit",
+        "ai/ambient/buffpod", "ai/fodder/zombie_t1_screecher", "ai/heavy/bloodangel",
+        "ai/fodder/prowler_cursed", "ai/fodder/imp_stone", "ai/superheavy/baron_armored"};
+    for (unsigned index = 0; index < std::size(species); ++index)
+        if (inherited == species[index]) physical = index;
+    native_other |= inherited.substr(0, 10) == "ai/fodder/";
+    for (const auto type : {"ai/ambient/zombie_cueball", "ai/ambient/tentacle", "ai/ambient/tentacle_liquid",
+                           "ai/ambient/super_tentacle", "ai/ambient/turret", "ai/ambient/demonic_trooper"})
+        native_other |= inherited == type;
+    return inherited == "ai/fodder/prowler_cursed" || inherited == "ai/fodder/prowler" || inherited == "ai/fodder/carcass";
+}
+static std::optional<unsigned> inherited_kind(std::string_view inherited, bool physical) {
+    constexpr std::string_view kinds[]{"ai/superheavy/marauder", "ai/superheavy/archvile", "ai/ambient/spirit"};
+    if (inherited=="ai/ambient/buffpod") return 4;
+    if (inherited=="ai/fodder/zombie_t1_screecher") return 5;
+    if (inherited.substr(0, 8) == "ai/boss/") return physical ? 9 : 3;
+    for (unsigned kind = 0; kind < std::size(kinds); ++kind) if (inherited == kinds[kind]) return kind;
+    if (inherited.substr(0, 14) == "ai/superheavy/") return 6;
+    for (const auto fodder : {"ai/fodder/zombie_tier_1", "ai/fodder/zombie_tier_3", "ai/fodder/imp",
+                             "ai/fodder/hell_soldier", "ai/fodder/soldier", "ai/fodder/gargoyle"})
+        if (inherited == fodder) return 7;
+    return {};
+}
+static std::optional<unsigned> frozen_special_kind(uintptr_t actor, unsigned* physical) {
     char name[512];
     if (read_recipe_definition(actor, name) || read_definition_name(actor, name)) {
         if (physical) if (const auto tracking = spawn_tracking(name)) *physical = special_species_index(tracking->physical);
         const auto frozen = spawn_limits(name);
         if (frozen) return frozen->kind;
     }
+    return {};
+}
+unsigned special_kind(uintptr_t actor, unsigned* physical) {
+    if (physical) *physical = 9;
+    if (const auto frozen = frozen_special_kind(actor, physical)) return *frozen;
     // Native summon masks can identify Spirit templates or boss proxies.
-    constexpr std::string_view kinds[]{"ai/superheavy/marauder", "ai/superheavy/archvile", "ai/ambient/spirit"};
-    constexpr std::string_view species[]{"ai/superheavy/marauder", "ai/superheavy/archvile", "ai/ambient/spirit",
-        "ai/ambient/buffpod", "ai/fodder/zombie_t1_screecher", "ai/heavy/bloodangel",
-        "ai/fodder/prowler_cursed", "ai/fodder/imp_stone", "ai/superheavy/baron_armored"};
     bool native_other = false;
     auto definition = *reinterpret_cast<uintptr_t*>(actor + 0xa8);
     for (unsigned depth = 0; definition && depth < 64; ++depth) {
         const auto value = *reinterpret_cast<const char**>(definition + 8);
         if (value) {
             const std::string_view inherited(value);
-            if (physical) {
-                for (unsigned index = 0; index < std::size(species); ++index)
-                    if (inherited == species[index]) *physical = index;
-                native_other |= inherited.substr(0, 10) == "ai/fodder/";
-                for (const auto type : {"ai/ambient/zombie_cueball", "ai/ambient/tentacle", "ai/ambient/tentacle_liquid",
-                                       "ai/ambient/super_tentacle", "ai/ambient/turret", "ai/ambient/demonic_trooper"})
-                    native_other |= inherited == type;
-                if (inherited == "ai/fodder/prowler_cursed" || inherited == "ai/fodder/prowler" ||
-                    inherited == "ai/fodder/carcass") return 3;
-            }
-            if (inherited=="ai/ambient/buffpod") return 4;
-            if (inherited=="ai/fodder/zombie_t1_screecher") return 5;
-            if (inherited.substr(0, 8) == "ai/boss/") return physical ? 9 : 3;
-            for (unsigned kind = 0; kind < std::size(kinds); ++kind) if (inherited == kinds[kind]) return kind;
-            if (inherited.substr(0, 14) == "ai/superheavy/") return 6;
-            for (const auto fodder : {"ai/fodder/zombie_tier_1", "ai/fodder/zombie_tier_3", "ai/fodder/imp",
-                                     "ai/fodder/hell_soldier", "ai/fodder/soldier", "ai/fodder/gargoyle"})
-                if (inherited == fodder) return 7;
+            if (physical && physical_species(inherited, *physical, native_other)) return 3;
+            if (const auto kind = inherited_kind(inherited, physical != nullptr)) return *kind;
         }
         const auto parent = *reinterpret_cast<uintptr_t*>(definition + 0x158);
         if (parent == definition) break;
@@ -400,6 +418,32 @@ unsigned special_kind(uintptr_t actor, unsigned* physical) {
     return physical && native_other ? 8 : 3;
 }
 
+static bool manager_has_actor(uintptr_t manager, uintptr_t actor) {
+    for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
+        const auto records = *reinterpret_cast<const uintptr_t*>(manager + offset);
+        const auto size = *reinterpret_cast<const int32_t*>(manager + offset + 8);
+        if (size < 0 || size > 1000000) return false;
+        for (int32_t entry = 0; entry < size; ++entry)
+            if (record_actor(records + static_cast<uintptr_t>(entry) * 0x68) == actor) return true;
+    }
+    return false;
+}
+static bool population_manager_member(uintptr_t world, uintptr_t actor, uint64_t scope) {
+    const auto managers = *reinterpret_cast<const uintptr_t*>(world + 0x126658);
+    const auto count = *reinterpret_cast<const int32_t*>(world + 0x126660);
+    if (count < 0 || count > 100000) return false;
+    for (int32_t index = 0; index < count; ++index) {
+        const auto manager = *reinterpret_cast<const uintptr_t*>(managers + index * 0x20 + 8);
+        char owner[512];
+        if (!manager || !read_definition_name(manager, owner)) continue;
+        uint64_t hash = 14695981039346656037ull;
+        for (const unsigned char character : std::string_view(owner)) hash = (hash ^ character) * 1099511628211ull;
+        if (hash != scope) continue;
+        return manager_has_actor(manager, actor);
+        return false;
+    }
+    return false;
+}
 bool population_member(uintptr_t world, uintptr_t actor, uint64_t scope, unsigned depth) {
     char name[512];
     if (read_recipe_definition(actor, name) || read_definition_name(actor, name)) {
@@ -414,25 +458,7 @@ bool population_member(uintptr_t world, uintptr_t actor, uint64_t scope, unsigne
             return parent && parent != actor && population_member(world, parent, scope, depth + 1);
         }
     }
-    const auto managers = *reinterpret_cast<const uintptr_t*>(world + 0x126658);
-    const auto count = *reinterpret_cast<const int32_t*>(world + 0x126660);
-    if (count < 0 || count > 100000) return false;
-    for (int32_t index = 0; index < count; ++index) {
-        const auto manager = *reinterpret_cast<const uintptr_t*>(managers + index * 0x20 + 8);
-        char owner[512];
-        if (!manager || !read_definition_name(manager, owner)) continue;
-        uint64_t hash = 14695981039346656037ull;
-        for (const unsigned char character : std::string_view(owner)) hash = (hash ^ character) * 1099511628211ull;
-        if (hash != scope) continue;
-        for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
-            const auto records = *reinterpret_cast<const uintptr_t*>(manager + offset);
-            const auto size = *reinterpret_cast<const int32_t*>(manager + offset + 8);
-            if (size < 0 || size > 1000000) return false;
-            for (int32_t entry = 0; entry < size; ++entry)
-                if (record_actor(records + static_cast<uintptr_t>(entry) * 0x68) == actor) return true;
-        }
-        return false;
-    }
+    return population_manager_member(world, actor, scope);
     return false;
 }
 
@@ -566,6 +592,31 @@ void independent_pose(uintptr_t actor, const float* pose) {
         *reinterpret_cast<const uintptr_t*>(actor) + 0xb8))(actor, reinterpret_cast<uintptr_t>(pose + 3));
 }
 
+static bool rebind_independent_show(uintptr_t actor, const std::string& key, const char* name, uint64_t body, const RecipeProgress& progress, const RecipeLibraryEntry& entry) {
+        const auto id = key + "/" + std::to_string(body);
+        const auto member = progress.actors.find(id);
+        if (member == progress.actors.end()) { independent_shows.erase(name); return false; }
+        if (member->second.native_name != name) { set_recipe_fault(__func__, __LINE__, "body_name_mismatch", key.c_str(), actor); return false; }
+        const auto identifier = actor_identifier(actor);
+        recipe_actors[actor] = id;
+        recipe_actor_credits[actor] = {identifier, {1, entry.physical_count}, key, name, body};
+        return true;
+}
+static bool open_independent_show(uintptr_t actor, IndependentShow& show, const NativeRecipe& recipe, const SpawnRecipe& frozen, const char* body, const std::string& key) {
+    auto& creation = show.creation;
+    const auto emission = recipe_state.reserve(key);
+    if (!emission) return false;
+    creation.emission = *emission; creation.body = recipe.bodies[frozen.body];
+    creation.limits = *spawn_limits(body); creation.creating = true;
+    creation.previous = recipe_creation; recipe_creation = &creation; show.opened = true;
+    initialize_physical_recipe(&creation, actor);
+    return true;
+}
+static std::optional<SpawnRecipe> independent_show_body(const NativeRecipe& recipe, const char* body, const char* name) {
+    const auto frozen = spawn_recipe(body);
+    if (!frozen || frozen->body >= recipe.bodies.size() || independent_body_name(recipe, frozen->body) != name) return {};
+    return frozen;
+}
 bool prepare_independent_show_locked(uintptr_t actor, IndependentShow& show) {
     char origin[21], name[512], body[512];
     if (*reinterpret_cast<const int32_t*>(actor + 0x10) < 0) return true;
@@ -578,8 +629,8 @@ bool prepare_independent_show_locked(uintptr_t actor, IndependentShow& show) {
     if (found == native_recipes.end() || found->second.definition.family != 'd' ||
         !read_instance_name(actor, name) || !read_recipe_definition(actor, body)) return false;
     const auto& recipe = found->second;
-    const auto frozen = spawn_recipe(body);
-    if (!frozen || frozen->body >= recipe.bodies.size() || independent_body_name(recipe, frozen->body) != name) return true;
+    const auto frozen = independent_show_body(recipe, body, name);
+    if (!frozen) return true;
     const auto key = "independent/" + recipe.definition.origin;
     const auto& entry = recipe.definition;
     if (!recipe_state.request(key, {entry.source, entry.origin, "", entry.logical_mask, 1, entry.physical_count,
@@ -588,26 +639,12 @@ bool prepare_independent_show_locked(uintptr_t actor, IndependentShow& show) {
     creation.recipe = &recipe; creation.key = key; show.source = !frozen->body;
     independent_shows.insert(name);
     const auto& progress = recipe_state.requests().at(key);
-    if (frozen->body < progress.emitted) {
-        const auto id = key + "/" + std::to_string(frozen->body);
-        const auto member = progress.actors.find(id);
-        if (member == progress.actors.end()) { independent_shows.erase(name); return false; }
-        if (member->second.native_name != name) { set_recipe_fault(__func__, __LINE__, "body_name_mismatch", key.c_str(), actor); return false; }
-        const auto identifier = actor_identifier(actor);
-        recipe_actors[actor] = id;
-        recipe_actor_credits[actor] = {identifier, {1, entry.physical_count}, key, name, frozen->body};
-        return true;
-    }
+    if (frozen->body < progress.emitted) return rebind_independent_show(actor, key, name, frozen->body, progress, entry);
     if (frozen->body != progress.emitted || progress.reserved) {
         if (!defer_show(actor)) set_recipe_fault(__func__, __LINE__, "defer_show_failed", key.c_str(), actor);
         return false;
     }
-    const auto emission = recipe_state.reserve(key);
-    if (!emission) return false;
-    creation.emission = *emission; creation.body = recipe.bodies[frozen->body];
-    creation.limits = *spawn_limits(body); creation.creating = true;
-    creation.previous = recipe_creation; recipe_creation = &creation; show.opened = true;
-    initialize_physical_recipe(&creation, actor);
+    return open_independent_show(actor, show, recipe, *frozen, body, key);
     return true;
 }
 
@@ -616,6 +653,28 @@ bool prepare_independent_show(uintptr_t actor, IndependentShow& show) {
     catch (...) { set_recipe_fault(__func__, __LINE__, "exception", nullptr, actor); return false; }
 }
 
+static void defer_independent_bodies(uintptr_t actor, const IndependentShow& show) {
+    const auto& recipe = *show.creation.recipe;
+    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
+    for (uint64_t index = 1; index < recipe.bodies.size(); ++index) {
+        const auto name = independent_body_name(recipe, index);
+        const auto extra = find_entity(world, name.c_str());
+        const auto& progress = recipe_state.requests().at(show.creation.key);
+        if (index < progress.emitted && !progress.actors.count(show.creation.key + "/" + std::to_string(index))) continue;
+        if (!extra || !active_actor(extra)) {
+            if (index >= progress.emitted && !independent_shows.count(name)) {
+                if (!extra) {
+                    auto& pose = pending_independent_shows[name];
+                    std::memcpy(pose.data(), reinterpret_cast<const void*>(actor + 0x74), sizeof(pose));
+                } else {
+                    independent_pose(extra, reinterpret_cast<const float*>(actor + 0x74));
+                }
+            }
+            independent_shows.insert(name);
+            if (extra && !defer_show(extra)) set_recipe_fault(__func__, __LINE__, "defer_show_failed", nullptr, extra);
+        }
+    }
+}
 void finish_independent_show(uintptr_t actor, IndependentShow& show) noexcept {
     try {
         if (show.opened) {
@@ -624,26 +683,7 @@ void finish_independent_show(uintptr_t actor, IndependentShow& show) noexcept {
             if (!show.creation.actor && !defer_show(actor)) set_recipe_fault(__func__, __LINE__, "defer_show_failed", show.creation.key.c_str(), actor);
         }
         if (!show.source || !active_actor(actor)) return;
-        const auto& recipe = *show.creation.recipe;
-        const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
-        for (uint64_t index = 1; index < recipe.bodies.size(); ++index) {
-            const auto name = independent_body_name(recipe, index);
-            const auto extra = find_entity(world, name.c_str());
-            const auto& progress = recipe_state.requests().at(show.creation.key);
-            if (index < progress.emitted && !progress.actors.count(show.creation.key + "/" + std::to_string(index))) continue;
-            if (!extra || !active_actor(extra)) {
-                if (index >= progress.emitted && !independent_shows.count(name)) {
-                    if (!extra) {
-                        auto& pose = pending_independent_shows[name];
-                        std::memcpy(pose.data(), reinterpret_cast<const void*>(actor + 0x74), sizeof(pose));
-                    } else {
-                        independent_pose(extra, reinterpret_cast<const float*>(actor + 0x74));
-                    }
-                }
-                independent_shows.insert(name);
-                if (extra && !defer_show(extra)) set_recipe_fault(__func__, __LINE__, "defer_show_failed", nullptr, extra);
-            }
-        }
+        defer_independent_bodies(actor, show);
     } catch (...) {
         if (show.opened) { end_recipe_creation(show.creation); show.opened = false; }
         set_recipe_fault(__func__, __LINE__, "exception", show.creation.key.c_str(), actor);
@@ -658,6 +698,59 @@ bool owns_show_admission(uintptr_t actor, const char* name) {
     recipe_creation->show_actor = actor; return true;
 }
 
+static bool join_empty_show_memberships(uintptr_t actor, const std::string& key) {
+        std::vector<RecipeMembership> members;
+        if (!native_memberships(*reinterpret_cast<const uintptr_t*>(world_global), actor, members)) { set_recipe_fault(__func__, __LINE__, "memberships_unreadable", key.c_str(), actor); return false; }
+        for (const auto& member : members)
+            if (!recipe_state.join_empty(key, member.owner, member.label)) { set_recipe_fault(__func__, __LINE__, "empty_membership_failed", key.c_str(), actor); return false; }
+    return true;
+}
+static bool open_empty_show_request(uintptr_t actor, const RecipeLibraryEntry& entry, const char* source, std::string& key) {
+    key = empty_independent_key(entry.origin);
+    const auto previous = recipe_state.requests().find(key);
+    const bool next = previous != recipe_state.requests().end() && previous->second.empty_completed && !independent_shows.count(source);
+    if (next) {
+        if (next_recipe_request == UINT64_MAX) { set_recipe_fault(__func__, __LINE__, "request_counter_overflow", key.c_str(), actor); return false; }
+        key = "independent/" + entry.origin + "/" + std::to_string(++next_recipe_request);
+    }
+    if (!recipe_state.request(key, {entry.source, entry.origin, "", entry.logical_mask, 1, 0, 0})) {
+        set_recipe_fault(__func__, __LINE__, "empty_request_failed", key.c_str(), actor); return false;
+    }
+    if (next && !join_empty_show_memberships(actor, key)) return false;
+    return true;
+}
+static bool prepare_empty_show(uintptr_t actor) {
+    if (stopped.load()) return false;
+    if (!load_native_recipes()) {
+        if (!defer_show(actor)) set_recipe_fault(__func__, __LINE__, "defer_show_failed", nullptr, actor);
+        return false;
+    }
+    char origin[21], source[512];
+    if (!independent_origin(actor, origin) || !read_instance_name(actor, source)) return false;
+    const auto found = native_recipes.find(origin);
+    if (found == native_recipes.end() || found->second.definition.family != 'd' ||
+        found->second.definition.source != source || found->second.definition.physical_count) {
+        set_recipe_fault(__func__, __LINE__, "empty_recipe_invalid", nullptr, actor); return false;
+    }
+    const auto& entry = found->second.definition;
+    std::string key;
+    if (!open_empty_show_request(actor, entry, source, key)) return false;
+    cancel_deferred_show(actor);
+    independent_shows.insert(source);
+    if (!recipe_state.requests().at(key).empty_completed && !recipe_state.complete_empty(key, true)) set_recipe_fault(__func__, __LINE__, "empty_completion_failed", key.c_str(), actor);
+    return false;
+}
+static bool admit_actor_show(uintptr_t actor, const char* name, const SpawnLimits& limits, bool& owned) {
+    owned = owns_show_admission(actor, name);
+    if (!owned && (recipe_fault.load() || !generated_admission(limits))) {
+        const auto diagnostic = actor_diagnostics.find(actor);
+        trace_spawn_refusal(diagnostic == actor_diagnostics.end() ? 0 : diagnostic->second.manager_address, name,
+            recipe_fault.load() ? "recipe_fault" : admission_diagnostic_reason);
+        if (!defer_show(actor)) set_recipe_fault(__func__, __LINE__, "defer_show_failed", nullptr, actor);
+        return false;
+    }
+    return true;
+}
 bool prepare_show(uintptr_t actor, SpawnLimits& limits, bool& reserved) {
     try {
         char name[512];
@@ -665,39 +758,7 @@ bool prepare_show(uintptr_t actor, SpawnLimits& limits, bool& reserved) {
             cancel_deferred_show(actor); return false;
         }
         if (read_recipe_definition(actor, name, true)) {
-            if (stopped.load()) return false;
-            if (!load_native_recipes()) {
-                if (!defer_show(actor)) set_recipe_fault(__func__, __LINE__, "defer_show_failed", nullptr, actor);
-                return false;
-            }
-            char origin[21], source[512];
-            if (!independent_origin(actor, origin) || !read_instance_name(actor, source)) return false;
-            const auto found = native_recipes.find(origin);
-            if (found == native_recipes.end() || found->second.definition.family != 'd' ||
-                found->second.definition.source != source || found->second.definition.physical_count) {
-                set_recipe_fault(__func__, __LINE__, "empty_recipe_invalid", nullptr, actor); return false;
-            }
-            const auto& entry = found->second.definition;
-            auto key = empty_independent_key(entry.origin);
-            const auto previous = recipe_state.requests().find(key);
-            const bool next = previous != recipe_state.requests().end() && previous->second.empty_completed && !independent_shows.count(source);
-            if (next) {
-                if (next_recipe_request == UINT64_MAX) { set_recipe_fault(__func__, __LINE__, "request_counter_overflow", key.c_str(), actor); return false; }
-                key = "independent/" + entry.origin + "/" + std::to_string(++next_recipe_request);
-            }
-            if (!recipe_state.request(key, {entry.source, entry.origin, "", entry.logical_mask, 1, 0, 0})) {
-                set_recipe_fault(__func__, __LINE__, "empty_request_failed", key.c_str(), actor); return false;
-            }
-            if (next) {
-                std::vector<RecipeMembership> members;
-                if (!native_memberships(*reinterpret_cast<const uintptr_t*>(world_global), actor, members)) { set_recipe_fault(__func__, __LINE__, "memberships_unreadable", key.c_str(), actor); return false; }
-                for (const auto& member : members)
-                    if (!recipe_state.join_empty(key, member.owner, member.label)) { set_recipe_fault(__func__, __LINE__, "empty_membership_failed", key.c_str(), actor); return false; }
-            }
-            cancel_deferred_show(actor);
-            independent_shows.insert(source);
-            if (!recipe_state.requests().at(key).empty_completed && !recipe_state.complete_empty(key, true)) set_recipe_fault(__func__, __LINE__, "empty_completion_failed", key.c_str(), actor);
-            return false;
+            return prepare_empty_show(actor);
         }
         if (stopped.load(std::memory_order_acquire) || active_show_actor == actor || !read_recipe_definition(actor, name)) return true;
         if (*reinterpret_cast<const int32_t*>(actor + 0x10) < 0) return true;
@@ -708,14 +769,8 @@ bool prepare_show(uintptr_t actor, SpawnLimits& limits, bool& reserved) {
         const auto parsed = spawn_limits(name);
         if (!parsed) { set_recipe_fault(__func__, __LINE__, "spawn_limits_invalid", nullptr, actor); return false; }
         limits = *parsed;
-        const bool owned = owns_show_admission(actor, name);
-        if (!owned && (recipe_fault.load() || !generated_admission(limits))) {
-            const auto diagnostic = actor_diagnostics.find(actor);
-            trace_spawn_refusal(diagnostic == actor_diagnostics.end() ? 0 : diagnostic->second.manager_address, name,
-                recipe_fault.load() ? "recipe_fault" : admission_diagnostic_reason);
-            if (!defer_show(actor)) set_recipe_fault(__func__, __LINE__, "defer_show_failed", nullptr, actor);
-            return false;
-        }
+        bool owned = false;
+        if (!admit_actor_show(actor, name, limits, owned)) return false;
         cancel_deferred_show(actor);
         if (!owned) { reserve_admission(limits); reserved = true; }
         return true;
@@ -980,11 +1035,14 @@ uintptr_t buff_detour(uintptr_t manager, uintptr_t output, uintptr_t point, uint
     return original_buff(manager, output, point, label, group);
 }
 
-bool tracked_point_type(uintptr_t manager, uintptr_t point, uint64_t type) {
-    if (recipe_creation && recipe_creation->override_active && !recipe_creation->creating &&
+static bool recipe_point_type(uintptr_t manager, uintptr_t point, uint64_t type) {
+    return recipe_creation && recipe_creation->override_active && !recipe_creation->creating &&
         recipe_creation->selecting_manager == manager && recipe_creation->active_point == point &&
         recipe_creation->source == point && type && !(type & ~encounter_ai_mask) &&
-        *reinterpret_cast<const int32_t*>(point + 0xc40) == 1) return true;
+        *reinterpret_cast<const int32_t*>(point + 0xc40) == 1;
+}
+bool tracked_point_type(uintptr_t manager, uintptr_t point, uint64_t type) {
+    if (recipe_point_type(manager, point, type)) return true;
     return immediate_request && immediate_request->direct_factory && immediate_request->reserved &&
         manager == immediate_request->manager && point == immediate_request->origin &&
         type == immediate_request->tracking.source && *reinterpret_cast<const int32_t*>(point + 0xc40) == 1;
@@ -1037,42 +1095,54 @@ uintptr_t invoke_direct_creation(RecipeCreation* creation, uintptr_t point) {
     } __finally { end_recipe_creation(*creation); }
 }
 
+static uintptr_t create_direct_child(uintptr_t point, const SummonRequest& request, const std::string& name) {
+    RecipeCreation creation;
+    const auto previous = worker_recipe; worker_recipe = &request.key;
+    bool ready = false;
+    try { ready = begin_recipe_creation(creation, point, request.origin, ""); }
+    catch (...) { worker_recipe = previous; throw; }
+    worker_recipe = previous;
+    if (!ready) return 0;
+    const auto actor = invoke_direct_creation(&creation, point);
+    if (!actor) return 0;
+    auto& child = summon_children[creation.emission.actor];
+    child.parent = name; child.body = *reinterpret_cast<const char**>(creation.body + 8);
+    return actor;
+}
+static bool same_direct_point(uintptr_t world, uintptr_t point, const std::string& name, uint32_t identifier) {
+    return find_entity(world, name.c_str()) == point && actor_identifier(point) == identifier;
+}
+static void cancel_direct_point(std::map<uintptr_t, ComponentSummons>::iterator found) {
+    for (const auto& request : found->second.requests) recipe_state.cancel(request.key);
+    direct_points.erase(found);
+}
+static bool direct_emissions_pending(const RecipeProgress& progress) {
+    return !progress.closed && progress.emitted < progress.request.maximum_emissions;
+}
 uintptr_t drain_direct_point(uintptr_t point) {
     const auto found = direct_points.find(point);
     if (found == direct_points.end() || pending_summon_checkpoint) return 0;
     auto& producer = found->second;
     const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
     uintptr_t first = 0;
-    if (find_entity(world, producer.name.c_str()) != point || actor_identifier(point) != producer.identifier) {
-        for (const auto& request : producer.requests) recipe_state.cancel(request.key);
-        direct_points.erase(found); return 0;
+    if (!same_direct_point(world, point, producer.name, producer.identifier)) {
+        cancel_direct_point(found); return 0;
     }
     for (auto request = producer.requests.begin(); request != producer.requests.end();) {
         const auto& progress = recipe_state.requests().at(request->key);
         const auto name = "ap_v070_direct_r" + request->origin;
-        if (find_entity(world, name.c_str()) != point || actor_identifier(point) != producer.identifier) {
-            for (const auto& pending : producer.requests) recipe_state.cancel(pending.key);
-            direct_points.erase(found); return first;
+        if (!same_direct_point(world, point, name, producer.identifier)) {
+            cancel_direct_point(found); return first;
         }
-        while (!progress.closed && progress.emitted < progress.request.maximum_emissions) {
-            if (find_entity(world, name.c_str()) != point || actor_identifier(point) != producer.identifier) {
-                for (const auto& pending : producer.requests) recipe_state.cancel(pending.key);
-                direct_points.erase(found); return first;
+        while (direct_emissions_pending(progress)) {
+            if (!same_direct_point(world, point, name, producer.identifier)) {
+                cancel_direct_point(found); return first;
             }
-            RecipeCreation creation;
-            const auto previous = worker_recipe; worker_recipe = &request->key;
-            bool ready = false;
-            try { ready = begin_recipe_creation(creation, point, request->origin, ""); }
-            catch (...) { worker_recipe = previous; throw; }
-            worker_recipe = previous;
-            if (!ready) break;
-            const auto actor = invoke_direct_creation(&creation, point);
+            const auto actor = create_direct_child(point, *request, name);
             if (!actor) break;
             if (!first) first = actor;
-            auto& child = summon_children[creation.emission.actor];
-            child.parent = name; child.body = *reinterpret_cast<const char**>(creation.body + 8);
         }
-        if (!progress.closed && progress.emitted < progress.request.maximum_emissions) break;
+        if (direct_emissions_pending(progress)) break;
         recipe_state.cancel(request->key); request = producer.requests.erase(request);
     }
     return first;
@@ -1105,6 +1175,17 @@ uintptr_t activate_direct_point(uintptr_t point, std::string_view origin) {
     return drain_direct_point(point);
 }
 
+static void confirm_point_factory(uint64_t result, uintptr_t point) {
+    if (result && immediate_request &&
+        immediate_request->direct_factory && immediate_request->reserved && point == immediate_request->origin) {
+        char name[512];
+        if (read_definition_name(point, name)) {
+            const auto tracking = spawn_tracking(name);
+            if (tracking && tracking->source == immediate_request->tracking.source &&
+                tracking->physical == immediate_request->tracking.physical) immediate_request->succeeded = true;
+        }
+    }
+}
 uintptr_t point_factory_locked(uintptr_t point, uintptr_t group) {
     if (recipe_creation) return recipe_creation->creating ? without_recipe_override(0, 0, point, group, 0, 0) : recipe_factory(point, group);
     if (!stopped.load()) {
@@ -1117,15 +1198,7 @@ uintptr_t point_factory_locked(uintptr_t point, uintptr_t group) {
         }
     }
     const auto result = original_point_factory(point, group);
-    if (result && immediate_request &&
-        immediate_request->direct_factory && immediate_request->reserved && point == immediate_request->origin) {
-        char name[512];
-        if (read_definition_name(point, name)) {
-            const auto tracking = spawn_tracking(name);
-            if (tracking && tracking->source == immediate_request->tracking.source &&
-                tracking->physical == immediate_request->tracking.physical) immediate_request->succeeded = true;
-        }
-    }
+    confirm_point_factory(result, point);
     return result;
 }
 
@@ -1163,6 +1236,18 @@ uint64_t create_tracked(uintptr_t manager, uintptr_t record, uintptr_t point, ui
     return result;
 }
 
+static uint64_t spawn_admitted(uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth, const SpawnLimits* limits, const SpawnTracking* tracking, bool& reserved) {
+    uint64_t result = 0;
+    const auto owned = owns_immediate_admission(manager, *limits, tracking);
+    const auto immediate = immediate_request && immediate_request->manager == manager;
+    if ((immediate && owned) || (!immediate && generated_admission(*limits))) {
+        if (!owned) { reserve_admission(*limits); reserved = true; }
+        result = tracking ? create_tracked(manager, record, point, fourth, fifth, tracking->physical) :
+            original_spawn(manager, record, point, fourth, fifth);
+        if (owned && result) immediate_request->succeeded = true;
+    } else trace_spawn_refusal(manager, "", immediate ? "immediate_admission_unowned" : admission_diagnostic_reason);
+    return result;
+}
 uint64_t spawn_marked(uintptr_t manager, uintptr_t record, uintptr_t point, uintptr_t fourth, uintptr_t fifth,
                       const SpawnLimits* limits, const SpawnTracking* tracking) {
     std::unique_lock<std::recursive_mutex> admission(admission_mutex);
@@ -1170,14 +1255,7 @@ uint64_t spawn_marked(uintptr_t manager, uintptr_t record, uintptr_t point, uint
         uint64_t result = 0;
         bool reserved = false;
         __try {
-            const auto owned = owns_immediate_admission(manager, *limits, tracking);
-            const auto immediate = immediate_request && immediate_request->manager == manager;
-            if ((immediate && owned) || (!immediate && generated_admission(*limits))) {
-                if (!owned) { reserve_admission(*limits); reserved = true; }
-                result = tracking ? create_tracked(manager, record, point, fourth, fifth, tracking->physical) :
-                    original_spawn(manager, record, point, fourth, fifth);
-                if (owned && result) immediate_request->succeeded = true;
-            } else trace_spawn_refusal(manager, "", immediate ? "immediate_admission_unowned" : admission_diagnostic_reason);
+            result = spawn_admitted(manager, record, point, fourth, fifth, limits, tracking, reserved);
         } __finally {
             if (reserved) release_admission(*limits);
             admission.unlock();
@@ -1264,6 +1342,22 @@ void register_independent_copy(uintptr_t manager, uint64_t* copy, uintptr_t acto
     }
 }
 
+static std::optional<bool> independent_membership_present(uintptr_t manager, uintptr_t extra, const std::string& label) {
+    bool present = false;
+    for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
+        const auto data = *reinterpret_cast<const uintptr_t*>(manager + offset);
+        const auto count = *reinterpret_cast<const int32_t*>(manager + offset + 8);
+        if (count < 0 || count > 1000000) { set_recipe_fault(__func__, __LINE__, "actor_count_invalid", nullptr, extra, manager); return {}; }
+        for (int32_t i = 0; i < count; ++i) {
+            const auto record = data + static_cast<uintptr_t>(i) * 0x68;
+            if (record_actor(record) != extra || *reinterpret_cast<const uint32_t*>(record + 12) != actor_identifier(extra)) continue;
+            std::string current;
+            if (!native_text(record + 0x28, current, 1024)) { set_recipe_fault(__func__, __LINE__, "label_unreadable", nullptr, extra, manager); return {}; }
+            present |= current == label;
+        }
+    }
+    return present;
+}
 bool register_independent_extras(uintptr_t manager, const NativeRecipe& recipe,
                                  const std::array<uint64_t, 13>& source, const std::string& label) {
     const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
@@ -1277,20 +1371,9 @@ bool register_independent_extras(uintptr_t manager, const NativeRecipe& recipe,
         if (!frozen || frozen->body != index || std::string(frozen->origin.data(), frozen->origin.size()) != recipe.definition.origin) {
             set_recipe_fault(__func__, __LINE__, "body_recipe_mismatch", nullptr, extra, manager); return false;
         }
-        bool present = false;
-        for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
-            const auto data = *reinterpret_cast<const uintptr_t*>(manager + offset);
-            const auto count = *reinterpret_cast<const int32_t*>(manager + offset + 8);
-            if (count < 0 || count > 1000000) { set_recipe_fault(__func__, __LINE__, "actor_count_invalid", nullptr, extra, manager); return false; }
-            for (int32_t i = 0; i < count; ++i) {
-                const auto record = data + static_cast<uintptr_t>(i) * 0x68;
-                if (record_actor(record) != extra || *reinterpret_cast<const uint32_t*>(record + 12) != actor_identifier(extra)) continue;
-                std::string current;
-                if (!native_text(record + 0x28, current, 1024)) { set_recipe_fault(__func__, __LINE__, "label_unreadable", nullptr, extra, manager); return false; }
-                present |= current == label;
-            }
-        }
-        if (present) continue;
+        const auto present = independent_membership_present(manager, extra, label);
+        if (!present) return false;
+        if (*present) continue;
         auto copy = source;
         copy[0] = (copy[0] & ~encounter_ai_mask) | recipe.definition.logical_mask;
         std::fill(copy.begin() + 1, copy.begin() + 5, 0);
@@ -1302,43 +1385,12 @@ bool register_independent_extras(uintptr_t manager, const NativeRecipe& recipe,
     return complete;
 }
 
-void register_spawn_locked(uintptr_t manager, uint64_t* record) {
-    const auto diagnostic_incoming_mask = *record;
-    const auto actor = record_actor(reinterpret_cast<uintptr_t>(record));
-    char origin[21], instance[512];
-    const NativeRecipe* independent = nullptr;
-    std::string label;
-    std::array<uint64_t, 13> copy{};
-    if (!stopped.load() && independent_origin(actor, origin) && read_instance_name(actor, instance) && load_native_recipes()) {
-        const auto recipe = native_recipes.find(origin);
-        if (recipe != native_recipes.end() && recipe->second.definition.source == instance) {
-            independent = &recipe->second;
-            if (!native_text(reinterpret_cast<uintptr_t>(record) + 0x28, label, 1024)) {
-                set_recipe_fault(__func__, __LINE__, "label_unreadable", nullptr, actor, manager); return;
-            }
-            std::memcpy(copy.data(), record, sizeof(copy));
-            if (independent->bodies.empty()) {
-                const auto& entry = independent->definition;
-                const auto key = empty_independent_key(entry.origin);
-                char owner[512];
-                if (!read_definition_name(manager, owner) ||
-                    !recipe_state.request(key, {entry.source, entry.origin, "", entry.logical_mask, 1, 0, 0}) ||
-                    !recipe_state.join_empty(key, owner, label)) { set_recipe_fault(__func__, __LINE__, "empty_membership_failed", key.c_str(), actor, manager); return; }
-                *record = (*record & ~encounter_ai_mask) | entry.logical_mask;
-            }
-        }
-    }
-    char name[512];
-    if (read_recipe_definition(actor, name) || read_definition_name(actor, name)) {
-        const auto tracking = spawn_tracking(name);
-        // an admitted creation can register after stop is requested.
-        if (tracking) *record = (*record & ~encounter_ai_mask) | tracking->source;
-    }
+static bool join_registered_actor(uintptr_t manager, uint64_t* record, uintptr_t actor, char (&name)[512]) {
     const auto role = recipe_actors.find(actor);
     if (role != recipe_actors.end() || (recipe_creation && recipe_creation->creating && read_recipe_definition(actor, name))) {
         char owner[512]; std::string native_label;
         if (!read_definition_name(manager, owner) || !native_text(reinterpret_cast<uintptr_t>(record) + 0x28, native_label, 1024)) {
-            set_recipe_fault(__func__, __LINE__, "membership_unreadable", nullptr, actor, manager); return;
+            set_recipe_fault(__func__, __LINE__, "membership_unreadable", nullptr, actor, manager); return false;
         }
         if (role != recipe_actors.end()) recipe_state.join_actor(role->second, owner, native_label);
         else {
@@ -1350,6 +1402,45 @@ void register_spawn_locked(uintptr_t manager, uint64_t* record) {
             }
         }
     }
+    return true;
+}
+static bool prepare_independent_registration(uintptr_t manager, uint64_t* record, uintptr_t actor, const NativeRecipe*& independent, std::string& label, std::array<uint64_t, 13>& copy) {
+    char origin[21], instance[512];
+    if (!stopped.load() && independent_origin(actor, origin) && read_instance_name(actor, instance) && load_native_recipes()) {
+        const auto recipe = native_recipes.find(origin);
+        if (recipe != native_recipes.end() && recipe->second.definition.source == instance) {
+            independent = &recipe->second;
+            if (!native_text(reinterpret_cast<uintptr_t>(record) + 0x28, label, 1024)) {
+                set_recipe_fault(__func__, __LINE__, "label_unreadable", nullptr, actor, manager); return false;
+            }
+            std::memcpy(copy.data(), record, sizeof(copy));
+            if (independent->bodies.empty()) {
+                const auto& entry = independent->definition;
+                const auto key = empty_independent_key(entry.origin);
+                char owner[512];
+                if (!read_definition_name(manager, owner) ||
+                    !recipe_state.request(key, {entry.source, entry.origin, "", entry.logical_mask, 1, 0, 0}) ||
+                    !recipe_state.join_empty(key, owner, label)) { set_recipe_fault(__func__, __LINE__, "empty_membership_failed", key.c_str(), actor, manager); return false; }
+                *record = (*record & ~encounter_ai_mask) | entry.logical_mask;
+            }
+        }
+    }
+    return true;
+}
+void register_spawn_locked(uintptr_t manager, uint64_t* record) {
+    const auto diagnostic_incoming_mask = *record;
+    const auto actor = record_actor(reinterpret_cast<uintptr_t>(record));
+    const NativeRecipe* independent = nullptr;
+    std::string label;
+    std::array<uint64_t, 13> copy{};
+    if (!prepare_independent_registration(manager, record, actor, independent, label, copy)) return;
+    char name[512];
+    if (read_recipe_definition(actor, name) || read_definition_name(actor, name)) {
+        const auto tracking = spawn_tracking(name);
+        // an admitted creation can register after stop is requested.
+        if (tracking) *record = (*record & ~encounter_ai_mask) | tracking->source;
+    }
+    if (!join_registered_actor(manager, record, actor, name)) return;
     trace_registration(manager, record, actor, diagnostic_incoming_mask);
     original_register_spawn(manager, record);
     if (!independent) return;

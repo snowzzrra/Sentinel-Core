@@ -17,20 +17,23 @@ inline constexpr KeyName key_names[] = {
     {"PAGEDOWN", VK_NEXT}, {"PGDN", VK_NEXT}, {"BACKSPACE", VK_BACK},
     {"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT}};
 
+inline int function_key(const char* token) {
+    int n = 0;
+    for (size_t i = 1; token[i]; ++i) {
+        if (token[i] < '0' || token[i] > '9' || n > 12) return -1;
+        n = n * 10 + token[i] - '0';
+    }
+    return n >= 1 && n <= 12 ? VK_F1 + n - 1 : -1;
+}
+
+inline char uppercase_ascii(char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c; }
+
 inline int key(const char* text) {
     if (!text || std::strlen(text) > 15) return -1;
     char token[16]{};
-    for (size_t i = 0; text[i]; ++i) token[i] = text[i] >= 'a' && text[i] <= 'z'
-        ? static_cast<char>(text[i] - 'a' + 'A') : text[i];
+    for (size_t i = 0; text[i]; ++i) token[i] = uppercase_ascii(text[i]);
     if (!std::strcmp(token, "UNBOUND")) return 0;
-    if (token[0] == 'F' && token[1]) {
-        int n = 0;
-        for (size_t i = 1; token[i]; ++i) {
-            if (token[i] < '0' || token[i] > '9' || n > 12) return -1;
-            n = n * 10 + token[i] - '0';
-        }
-        return n >= 1 && n <= 12 ? VK_F1 + n - 1 : -1;
-    }
+    if (token[0] == 'F' && token[1]) return function_key(token);
     if (token[0] && !token[1] && ((token[0] >= 'A' && token[0] <= 'Z') ||
                                 (token[0] >= '0' && token[0] <= '9'))) return token[0];
     for (const auto& n : key_names) if (!std::strcmp(token, n.name)) return n.vk;
@@ -74,27 +77,23 @@ inline Bindings read(const std::wstring& directory) {
     return result;
 }
 
+inline bool supported_scan_code(int native) {
+    return (native >= 2 && native <= 11) || native == 14 || native == 15 || (native >= 16 && native <= 25) ||
+           (native >= 30 && native <= 38) || (native >= 44 && native <= 50) || native == 57 ||
+           (native >= 59 && native <= 68) || native == 87 || native == 88;
+}
+
 inline int from_native_key(int native) {
-    int vk = 0;
-    switch (native) {
-    case 199: vk = VK_HOME; break;
-    case 200: vk = VK_UP; break;
-    case 201: vk = VK_PRIOR; break;
-    case 203: vk = VK_LEFT; break;
-    case 205: vk = VK_RIGHT; break;
-    case 207: vk = VK_END; break;
-    case 208: vk = VK_DOWN; break;
-    case 209: vk = VK_NEXT; break;
-    case 210: vk = VK_INSERT; break;
-    case 211: vk = VK_DELETE; break;
-    default:
-        if (!((native >= 2 && native <= 11) || native == 14 || native == 15 ||
-              (native >= 16 && native <= 25) || (native >= 30 && native <= 38) ||
-              (native >= 44 && native <= 50) || native == 57 ||
-              (native >= 59 && native <= 68) || native == 87 || native == 88)) return -1;
-        vk = static_cast<int>(MapVirtualKeyA(static_cast<UINT>(native), MAPVK_VSC_TO_VK_EX));
-        break;
-    }
+    static constexpr struct {
+        int native, vk;
+    } navigation[] = {
+        {199, VK_HOME}, {200, VK_UP},   {201, VK_PRIOR}, {203, VK_LEFT},   {205, VK_RIGHT},
+        {207, VK_END},  {208, VK_DOWN}, {209, VK_NEXT},  {210, VK_INSERT}, {211, VK_DELETE},
+    };
+    for (const auto& key : navigation)
+        if (key.native == native) return key.vk && !token(key.vk).empty() ? key.vk : -1;
+    if (!supported_scan_code(native)) return -1;
+    const auto vk = static_cast<int>(MapVirtualKeyA(static_cast<UINT>(native), MAPVK_VSC_TO_VK_EX));
     return vk && !token(vk).empty() ? vk : -1;
 }
 enum class WriteResult { saved, invalid, conflict, io_error, rollback_error };

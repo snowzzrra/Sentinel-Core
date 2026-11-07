@@ -108,9 +108,37 @@ uintptr_t darklord_resolve(uintptr_t world, uint32_t handle, bool& fault) noexce
     __try { return reinterpret_cast<uintptr_t(*)(uintptr_t, uint32_t*)>(function)(world, &handle); }
     __except(EXCEPTION_EXECUTE_HANDLER) { fault = true; return 0; }
 }
+bool darklord_animation_fields(DarklordState& out, uint8_t& enabled, std::array<uint16_t, 32>& path) noexcept {
+    if (!darklord_read(out.animator, 0x370, enabled) || !darklord_read(out.animator, 0x358, out.animweb) ||
+        !darklord_read(out.animator, 0x5ac, path) || !darklord_read(out.animator, 0x4bc, out.anim_path_seq) ||
+        !darklord_read(out.animator, 0x500, out.anim_state) || !darklord_read(out.animator, 0x5ec, out.anim_depth)) {
+        out.anim_read = "read_fault"; return false;
+    }
+    return true;
+}
+void darklord_animation(DarklordState& out) noexcept {
+    uintptr_t data = 0, anim_table = 0, enable = 0;
+    if (!darklord_read(out.actor, 0x5960, data)) { out.anim_read = "read_fault"; return; }
+    if (!data) return;
+    if (!engine::add(data, 0x9890, sizeof(uintptr_t), out.animator)) { out.anim_read = "read_fault"; return; }
+    if (!darklord_read(out.animator, 0, anim_table) || !darklord_read(anim_table, 0x98, enable)) {
+        out.anim_read = "read_fault"; return;
+    }
+    if (enable != darklord_image + 0x4947b0) { out.anim_read = "unsupported_vtable"; return; }
+    uint8_t enabled = 0;
+    std::array<uint16_t, 32> path{};
+    if (!darklord_animation_fields(out, enabled, path)) return;
+    if (enabled > 1 || out.anim_depth < 0 || out.anim_depth > static_cast<int32_t>(path.size())) {
+        out.anim_read = "invalid_value"; return;
+    }
+    out.anim_read = "ok"; out.anim_enabled = enabled;
+    out.anim_node = out.anim_depth ? static_cast<int16_t>(path[out.anim_depth - 1]) : -1;
+    out.anim_path_hash = 14695981039346656037ull;
+    for (int32_t i = 0; i < out.anim_depth; ++i) { out.anim_path_hash ^= path[i]; out.anim_path_hash *= 1099511628211ull; }
+}
 DarklordState darklord_state(uintptr_t world, uint32_t handle, uintptr_t actor) noexcept {
     DarklordState out; out.actor = actor;
-    uintptr_t registered = 0, flyer = 0, data = 0, anim_table = 0, enable = 0;
+    uintptr_t registered = 0, flyer = 0;
     uint32_t identity = 0, alternate = 0;
     if (!actor) { out.removed = true; return out; }
     if (!darklord_read(actor, 0x10, out.entity)) { out.fault = true; return out; }
@@ -133,29 +161,7 @@ DarklordState darklord_state(uintptr_t world, uint32_t handle, uintptr_t actor) 
     out.fault |= !darklord_read(actor, 0x6654, out.armor);
     out.fault |= !std::isfinite(out.health) || !std::isfinite(out.armor);
     for (auto value : out.position) out.fault |= !std::isfinite(value);
-    if (!darklord_read(actor, 0x5960, data)) out.anim_read = "read_fault";
-    else if (data) {
-        if (!engine::add(data, 0x9890, sizeof(uintptr_t), out.animator)) { out.anim_read = "read_fault"; return out; }
-        if (!darklord_read(out.animator, 0, anim_table) || !darklord_read(anim_table, 0x98, enable))
-            out.anim_read = "read_fault";
-        else if (enable != darklord_image + 0x4947b0) out.anim_read = "unsupported_vtable";
-        else {
-            uint8_t enabled = 0;
-            std::array<uint16_t, 32> path{};
-            if (!darklord_read(out.animator, 0x370, enabled) || !darklord_read(out.animator, 0x358, out.animweb) ||
-                !darklord_read(out.animator, 0x5ac, path) || !darklord_read(out.animator, 0x4bc, out.anim_path_seq) ||
-                !darklord_read(out.animator, 0x500, out.anim_state) || !darklord_read(out.animator, 0x5ec, out.anim_depth))
-                out.anim_read = "read_fault";
-            else if (enabled > 1 || out.anim_depth < 0 || out.anim_depth > static_cast<int32_t>(path.size()))
-                out.anim_read = "invalid_value";
-            else {
-                out.anim_read = "ok"; out.anim_enabled = enabled;
-                out.anim_node = out.anim_depth ? static_cast<int16_t>(path[out.anim_depth - 1]) : -1;
-                out.anim_path_hash = 14695981039346656037ull;
-                for (int32_t i = 0; i < out.anim_depth; ++i) { out.anim_path_hash ^= path[i]; out.anim_path_hash *= 1099511628211ull; }
-            }
-        }
-    }
+    darklord_animation(out);
     return out;
 }
 float darklord_distance(const DarklordState& a, const DarklordState& b) {
@@ -278,6 +284,35 @@ void darklord_watch(std::unique_ptr<DarklordCall> call) noexcept {
     try { const auto seq = call->seq; darklord_calls.emplace(seq, std::move(call)); }
     catch (...) { if (call) darklord_emit(*call, "read_fault", "field=sampler_allocation"); }
 }
+const char* darklord_sample_reason(const DarklordActor& actor) noexcept {
+    if (actor.last.fault) return "read_fault";
+    if (actor.last.removed) return "removed";
+    if (actor.last.flags & 0x10000) return "dead";
+    return actor.finished ? "window_complete" : "changed";
+}
+bool darklord_sample_motion(DarklordActor& actor, const DarklordState& next, uint64_t now, uint64_t elapsed) noexcept {
+    const bool moved = !next.fault && !next.removed && darklord_distance(next, actor.last) >= 0.02f;
+    const bool state_changed = !darklord_same_state(next, actor.last);
+    if (moved && !actor.recovered) actor.recovered = elapsed;
+    if (!moved && !state_changed && !next.fault && !next.removed && !std::strcmp(next.anim_read, "ok"))
+        actor.frozen += now - actor.sampled;
+    if (next.fault || std::strcmp(next.anim_read, "ok")) actor.state_unknown += now - actor.sampled;
+    return moved || state_changed || next.health != actor.last.health || next.armor != actor.last.armor;
+}
+void darklord_sample_actor(DarklordCall& call, DarklordActor& actor, uint64_t now) noexcept {
+    const auto elapsed = now - actor.created;
+    uint64_t due = darklord_sample_ms[actor.next++];
+    while (actor.next < std::size(darklord_sample_ms) && darklord_sample_ms[actor.next] <= elapsed) {
+        due = darklord_sample_ms[actor.next++]; ++actor.skipped;
+    }
+    const auto next = darklord_state(call.world, actor.handle, actor.last.actor);
+    const bool changed = darklord_sample_motion(actor, next, now, elapsed);
+    actor.last = next; actor.sampled = now; ++actor.samples;
+    actor.finished = (!next.fault && (next.removed || (next.flags & 0x10000))) || actor.next == std::size(darklord_sample_ms);
+    call.game_tick = darklord_game_tick(call.world);
+    if (changed || actor.finished) darklord_actor_line(call, actor, actor.finished ? "summary" : "sample",
+        darklord_sample_reason(actor), now, due);
+}
 void darklord_sample(uintptr_t world, uint64_t now) noexcept {
     try {
         for (auto call = darklord_calls.begin(); call != darklord_calls.end();) {
@@ -290,24 +325,7 @@ void darklord_sample(uintptr_t world, uint64_t now) noexcept {
                 if (!active) {
                     darklord_actor_line(value, actor, "summary", "component_inactive", now); actor.finished = true; continue;
                 }
-                const auto elapsed = now - actor.created;
-                uint64_t due = darklord_sample_ms[actor.next++];
-                while (actor.next < std::size(darklord_sample_ms) && darklord_sample_ms[actor.next] <= elapsed) {
-                    due = darklord_sample_ms[actor.next++]; ++actor.skipped;
-                }
-                const auto next = darklord_state(value.world, actor.handle, actor.last.actor);
-                const bool moved = !next.fault && !next.removed && darklord_distance(next, actor.last) >= 0.02f;
-                const bool state_changed = !darklord_same_state(next, actor.last);
-                if (moved && !actor.recovered) actor.recovered = elapsed;
-                if (!moved && !state_changed && !next.fault && !next.removed && !std::strcmp(next.anim_read, "ok"))
-                    actor.frozen += now - actor.sampled;
-                if (next.fault || std::strcmp(next.anim_read, "ok")) actor.state_unknown += now - actor.sampled;
-                const bool changed = moved || state_changed || next.health != actor.last.health || next.armor != actor.last.armor;
-                actor.last = next; actor.sampled = now; ++actor.samples;
-                actor.finished = (!next.fault && (next.removed || (next.flags & 0x10000))) || actor.next == std::size(darklord_sample_ms);
-                value.game_tick = darklord_game_tick(value.world);
-                if (changed || actor.finished) darklord_actor_line(value, actor, actor.finished ? "summary" : "sample",
-                    next.fault ? "read_fault" : next.removed ? "removed" : (next.flags & 0x10000) ? "dead" : actor.finished ? "window_complete" : "changed", now, due);
+                darklord_sample_actor(value, actor, now);
             }
             if (std::all_of(value.actors.begin(), value.actors.end(), [](const auto& actor) { return actor.finished; }))
                 call = darklord_calls.erase(call);

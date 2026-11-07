@@ -47,7 +47,6 @@ bool player_alive(uintptr_t player);
 bool admitted(const char* namespace_id);
 void execute_native(const sc_deathlink_request&, sc_deathlink_result&);
 void reset_session(const char* namespace_id);
-void bind_run_state_if_needed(uintptr_t player);
 
 #ifdef SC_NATIVE_TESTING
 void use_fixture(Calls, const char* namespace_id);

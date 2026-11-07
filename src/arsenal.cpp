@@ -177,6 +177,118 @@ void initial(const sc_arsenal_request& request, sc_arsenal_result& out) {
     out.operations_applied = 0;
 }
 
+static bool ensure_mods_locked(const sc_arsenal_request& request, sc_arsenal_result& out, const Calls& calls,
+                               uintptr_t p, const SnapshotFacts& before, SnapshotFacts& after,
+                               bool& mutated) {
+    const uint32_t missing = request.mods & ~before.mods;
+    if (!missing) {
+        out.outcome = SC_ARSENAL_OUTCOME_NOOP;
+        return true;
+    }
+    // ensure that mod ownership doesn't alter existing mod selection
+    out.flags |= SC_ARSENAL_FLAG_SELECTION_PRESERVED;
+    shared_state.mods |= request.mods;
+    after.mods |= request.mods;
+    if (p && calls.ensure_mods) {
+        ReleaseSRWLockExclusive(&state_lock);
+        const auto err = calls.ensure_mods(calls.context, p, missing);
+        AcquireSRWLockExclusive(&state_lock);
+        if (err) {
+            out.native_exception = err;
+            out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED;
+        }
+    }
+    mutated = true;
+    return true;
+}
+
+static bool select_mod_locked(const sc_arsenal_request& request, sc_arsenal_result& out, const Calls& calls,
+                              uintptr_t p, const SnapshotFacts& before, SnapshotFacts& after, bool& mutated) {
+    const uint8_t w_idx = request.select_weapon;
+    const uint8_t m_idx = request.select_mod;
+    if (m_idx != 0) {
+        const uint32_t target_mod = mod_for_selection(w_idx, m_idx);
+        if (!target_mod || !(after.mods & target_mod)) {
+            out.outcome = SC_ARSENAL_OUTCOME_REJECTED;
+            ReleaseSRWLockExclusive(&state_lock);
+            return false;
+        }
+    }
+    if (before.selected_mods[w_idx] == m_idx) {
+        out.outcome = SC_ARSENAL_OUTCOME_NOOP;
+        return true;
+    }
+    shared_state.selected_mods[w_idx] = m_idx;
+    after.selected_mods[w_idx] = m_idx;
+    if (p && calls.select_mod) {
+        ReleaseSRWLockExclusive(&state_lock);
+        const auto err = calls.select_mod(calls.context, p, w_idx, m_idx);
+        AcquireSRWLockExclusive(&state_lock);
+        if (err) {
+            out.native_exception = err;
+            out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED;
+        }
+    }
+    mutated = true;
+    return true;
+}
+
+static bool project_mastery_locked(const sc_arsenal_request& request, sc_arsenal_result& out,
+                                   const Calls& calls, uintptr_t p, const SnapshotFacts& before,
+                                   SnapshotFacts& after, bool& mutated) {
+    // an ap mastery doesn't grant the base mod or upgrades, or finish the native challenge
+    const uint16_t missing = static_cast<uint16_t>(request.masteries & ~before.masteries_ap);
+    if (!missing) {
+        out.outcome = SC_ARSENAL_OUTCOME_NOOP;
+        return true;
+    }
+    shared_state.masteries_ap |= static_cast<uint16_t>(request.masteries);
+    after.masteries_ap |= static_cast<uint16_t>(request.masteries);
+    if (p && calls.project_mastery) {
+        ReleaseSRWLockExclusive(&state_lock);
+        const auto err = calls.project_mastery(calls.context, p, missing);
+        AcquireSRWLockExclusive(&state_lock);
+        if (err) {
+            out.native_exception = err;
+            out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED;
+        }
+    }
+    mutated = true;
+    return true;
+}
+
+static bool requested_state_present(const sc_arsenal_request& request, const SnapshotFacts& after,
+                                    bool read_ok) {
+    switch (request.kind) {
+    case SC_ARSENAL_ENSURE_MODS:
+        return read_ok && (after.mods & request.mods) == request.mods;
+    case SC_ARSENAL_SELECT_MOD:
+        return read_ok && after.selected_mods[request.select_weapon] == request.select_mod;
+    case SC_ARSENAL_PROJECT_MASTERY:
+        return read_ok && (after.masteries_ap & request.masteries) == request.masteries;
+    default:
+        return read_ok;
+    }
+}
+
+static bool read_mutation_result(const sc_arsenal_request& request, sc_arsenal_result& out,
+                                 const Calls& calls, uintptr_t p, SnapshotFacts& after, bool mutated) {
+    SnapshotFacts actual{};
+    const bool read_ok = calls.read && calls.read(calls.context, p, actual);
+    after = actual;
+    const bool postcondition = requested_state_present(request, after, read_ok);
+    if (read_ok) out.flags |= SC_ARSENAL_FLAG_AFTER_VALID;
+    if (!postcondition || out.native_exception) {
+        out.outcome =
+            out.native_exception ? SC_ARSENAL_OUTCOME_CRASH_PROTECTED : SC_ARSENAL_OUTCOME_UNAVAILABLE;
+        out.flags &= ~SC_ARSENAL_FLAG_SELECTION_PRESERVED;
+    } else if (mutated) {
+        out.flags |= SC_ARSENAL_FLAG_MUTATED;
+        if (p && calls.refresh) calls.refresh(calls.context, p);
+    }
+    return postcondition && !out.native_exception;
+}
+
 void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Calls& calls) {
     initial(request, out);
     if (!valid(request)) {
@@ -214,95 +326,23 @@ void execute(const sc_arsenal_request& request, sc_arsenal_result& out, const Ca
         out.outcome = SC_ARSENAL_OUTCOME_OK;
         break;
 
-    case SC_ARSENAL_ENSURE_MODS: {
-        const uint32_t missing = request.mods & ~before.mods;
-        if (!missing) {
-            out.outcome = SC_ARSENAL_OUTCOME_NOOP;
-            break;
-        }
-        // ensure that mod ownership doesn't alter existing mod selection
-        out.flags |= SC_ARSENAL_FLAG_SELECTION_PRESERVED;
-        shared_state.mods |= request.mods;
-        after.mods |= request.mods;
-        if (p && calls.ensure_mods) {
-            ReleaseSRWLockExclusive(&state_lock);
-            const auto err = calls.ensure_mods(calls.context, p, missing);
-            AcquireSRWLockExclusive(&state_lock);
-            if (err) { out.native_exception = err; out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED; }
-        }
-        mutated = true;
+    case SC_ARSENAL_ENSURE_MODS:
+        if (!ensure_mods_locked(request, out, calls, p, before, after, mutated)) return;
         break;
-    }
 
-    case SC_ARSENAL_SELECT_MOD: {
-        const uint8_t w_idx = request.select_weapon;
-        const uint8_t m_idx = request.select_mod;
-        if (m_idx != 0) {
-            const uint32_t target_mod = mod_for_selection(w_idx, m_idx);
-            if (!target_mod || !(after.mods & target_mod)) {
-                out.outcome = SC_ARSENAL_OUTCOME_REJECTED;
-                ReleaseSRWLockExclusive(&state_lock);
-                return;
-            }
-        }
-        if (before.selected_mods[w_idx] == m_idx) {
-            out.outcome = SC_ARSENAL_OUTCOME_NOOP;
-            break;
-        }
-        shared_state.selected_mods[w_idx] = m_idx;
-        after.selected_mods[w_idx] = m_idx;
-        if (p && calls.select_mod) {
-            ReleaseSRWLockExclusive(&state_lock);
-            const auto err = calls.select_mod(calls.context, p, w_idx, m_idx);
-            AcquireSRWLockExclusive(&state_lock);
-            if (err) { out.native_exception = err; out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED; }
-        }
-        mutated = true;
+    case SC_ARSENAL_SELECT_MOD:
+        if (!select_mod_locked(request, out, calls, p, before, after, mutated)) return;
         break;
-    }
 
-    case SC_ARSENAL_PROJECT_MASTERY: {
-        // an ap mastery doesn't grant the base mod or upgrades, or finish the native challenge
-        const uint16_t missing = static_cast<uint16_t>(request.masteries & ~before.masteries_ap);
-        if (!missing) {
-            out.outcome = SC_ARSENAL_OUTCOME_NOOP;
-            break;
-        }
-        shared_state.masteries_ap |= static_cast<uint16_t>(request.masteries);
-        after.masteries_ap |= static_cast<uint16_t>(request.masteries);
-        if (p && calls.project_mastery) {
-            ReleaseSRWLockExclusive(&state_lock);
-            const auto err = calls.project_mastery(calls.context, p, missing);
-            AcquireSRWLockExclusive(&state_lock);
-            if (err) { out.native_exception = err; out.outcome = SC_ARSENAL_OUTCOME_CRASH_PROTECTED; }
-        }
-        mutated = true;
+    case SC_ARSENAL_PROJECT_MASTERY:
+        if (!project_mastery_locked(request, out, calls, p, before, after, mutated)) return;
         break;
-    }
-
     }
 
     ReleaseSRWLockExclusive(&state_lock);
-    SnapshotFacts actual{};
-    const bool read_ok = calls.read && calls.read(calls.context, p, actual);
-    after = actual;
-    bool postcondition = read_ok;
-    switch (request.kind) {
-    case SC_ARSENAL_ENSURE_MODS: postcondition = postcondition && (after.mods & request.mods) == request.mods; break;
-    case SC_ARSENAL_SELECT_MOD: postcondition = postcondition && after.selected_mods[request.select_weapon] == request.select_mod; break;
-    case SC_ARSENAL_PROJECT_MASTERY: postcondition = postcondition && (after.masteries_ap & request.masteries) == request.masteries; break;
-    default: break;
-    }
-    if (read_ok) out.flags |= SC_ARSENAL_FLAG_AFTER_VALID;
-    if (!postcondition || out.native_exception) {
-        out.outcome = out.native_exception ? SC_ARSENAL_OUTCOME_CRASH_PROTECTED : SC_ARSENAL_OUTCOME_UNAVAILABLE;
-        out.flags &= ~SC_ARSENAL_FLAG_SELECTION_PRESERVED;
-    } else if (mutated) {
-        out.flags |= SC_ARSENAL_FLAG_MUTATED;
-        if (p && calls.refresh) calls.refresh(calls.context, p);
-    }
+    const bool verified = read_mutation_result(request, out, calls, p, after, mutated);
     AcquireSRWLockExclusive(&state_lock);
-    if (mutated && postcondition && !out.native_exception) ++shared_state.operations_applied;
+    if (mutated && verified) ++shared_state.operations_applied;
 
     out.weapons_after = after.weapons;
     out.mods_after = after.mods;

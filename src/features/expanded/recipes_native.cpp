@@ -71,6 +71,19 @@ uint64_t actor_diagnostic_next = 0;
 
 uint32_t registration_trace_count = 0;
 
+static bool actor_position_jump(ActorDiagnostic& value, const std::array<float, 3>& xyz) {
+        double distance = 0;
+        for (size_t i = 0; i < xyz.size(); ++i) distance += std::pow(double(xyz[i]) - value.position[i], 2);
+        value.position = xyz;
+        if (distance < 20 * 20) return false;
+        ++value.jumps;
+    return true;
+}
+static bool readable_actor_position(uintptr_t actor, std::array<float, 3>& xyz) {
+    engine::LocalMemory memory;
+    return !memory.copy(actor + 0x74, xyz.data(), sizeof(xyz)).reason &&
+        std::all_of(xyz.begin(), xyz.end(), [](float value) { return std::isfinite(value); });
+}
 void trace_actor(uintptr_t actor, const char* reason, uintptr_t source, bool position) noexcept {
     try {
         const auto found = actor_diagnostics.find(actor);
@@ -78,18 +91,10 @@ void trace_actor(uintptr_t actor, const char* reason, uintptr_t source, bool pos
         auto& value = found->second;
         if (position && value.positioned && value.jumps >= 3) return;
         std::array<float, 3> xyz{};
-        engine::LocalMemory memory;
-        const bool readable = position && !memory.copy(actor + 0x74, xyz.data(), sizeof(xyz)).reason &&
-            std::all_of(xyz.begin(), xyz.end(), [](float v) { return std::isfinite(v); });
+        const bool readable = position && readable_actor_position(actor, xyz);
         if (position && !readable) return;
         const bool initial = position && !value.positioned;
-        if (position && value.positioned) {
-            double distance = 0;
-            for (size_t i = 0; i < xyz.size(); ++i) distance += std::pow(double(xyz[i]) - value.position[i], 2);
-            value.position = xyz;
-            if (distance < 20 * 20) return;
-            ++value.jumps;
-        }
+        if (position && value.positioned && !actor_position_jump(value, xyz)) return;
         if (readable) { value.position = xyz; value.positioned = true; }
         commands::diagnostic_trace("%s actor=%llx id=%u manager=%.160s encounter=%.192s reason=%s source=%llx position=%d xyz=%g,%g,%g jumps=%u",
             initial ? "AP_ENEMY_SPAWN_POSITION" : "AP_ENEMY_ACTOR", static_cast<unsigned long long>(actor), value.identifier, value.manager.c_str(), value.encounter.c_str(), reason,
@@ -131,19 +136,22 @@ void format_recipe_fault(const char* function, unsigned line, const char* reason
         scope.scope.lifecycle_generation, native::observation_stamp(), GetTickCount64(), line);
 }
 
+static void recipe_fault_context(const char*& key, uintptr_t& actor, uintptr_t& manager) {
+    if (!key) key = recipe_creation ? recipe_creation->key.c_str() : worker_recipe ? worker_recipe->c_str() : "";
+    if (!actor && recipe_creation) actor = recipe_creation->actor;
+    if (!manager && recipe_creation) manager = recipe_creation->selecting_manager;
+    const auto diagnostic = actor_diagnostics.find(actor);
+    if (diagnostic != actor_diagnostics.end()) {
+        if (!*key) key = diagnostic->second.encounter.c_str();
+        if (!manager) manager = diagnostic->second.manager_address;
+    }
+}
 void set_recipe_fault(const char* function, unsigned line, const char* reason, const char* key,
                       uintptr_t actor, uintptr_t manager) noexcept {
     recipe_fault.store(true, std::memory_order_release);
     AcquireSRWLockExclusive(&recipe_fault_lock);
     if (!first_recipe_fault[0]) {
-        if (!key) key = recipe_creation ? recipe_creation->key.c_str() : worker_recipe ? worker_recipe->c_str() : "";
-        if (!actor && recipe_creation) actor = recipe_creation->actor;
-        if (!manager && recipe_creation) manager = recipe_creation->selecting_manager;
-        const auto diagnostic = actor_diagnostics.find(actor);
-        if (diagnostic != actor_diagnostics.end()) {
-            if (!*key) key = diagnostic->second.encounter.c_str();
-            if (!manager) manager = diagnostic->second.manager_address;
-        }
+        recipe_fault_context(key, actor, manager);
         format_recipe_fault(function, line, reason, key, actor, manager);
         const auto error = startup_log::recipe_fault(first_recipe_fault);
         commands::diagnostic_trace("AP_RECIPE_FAULT %.600s log_io_error=%u", first_recipe_fault, error);
@@ -299,11 +307,7 @@ bool native_cstring(uintptr_t string, std::string& out, size_t maximum) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-bool read_recipe_metadata(uintptr_t world, uintptr_t root, std::string& metadata) {
-    if (!native_text(root + 0xbe0, metadata, maximum_recipe_metadata)) return false;
-    if (metadata.rfind("EAPC1|", 0) != 0) return true;
-    if (metadata.size() != 40 || metadata[14] != '|' || metadata[23] != '|') return false;
-    uint64_t count = 0, size = 0, checksum = 0;
+static bool recipe_chunk_header(const std::string& metadata, uint64_t& count, uint64_t& size, uint64_t& checksum) {
     const auto number = [&](size_t at, size_t length, uint64_t& value) {
         const auto field = std::string_view(metadata).substr(at, length);
         const auto parsed = std::from_chars(field.data(), field.data() + field.size(), value, 16);
@@ -311,6 +315,14 @@ bool read_recipe_metadata(uintptr_t world, uintptr_t root, std::string& metadata
     };
     if (!number(6, 8, count) || !number(15, 8, size) || !number(24, 16, checksum) ||
         !size || size > maximum_recipe_metadata || count != (size + 1799) / 1800) return false;
+    return true;
+}
+bool read_recipe_metadata(uintptr_t world, uintptr_t root, std::string& metadata) {
+    if (!native_text(root + 0xbe0, metadata, maximum_recipe_metadata)) return false;
+    if (metadata.rfind("EAPC1|", 0) != 0) return true;
+    if (metadata.size() != 40 || metadata[14] != '|' || metadata[23] != '|') return false;
+    uint64_t count = 0, size = 0, checksum = 0;
+    if (!recipe_chunk_header(metadata, count, size, checksum)) return false;
     std::string combined;
     combined.reserve(static_cast<size_t>(size));
     for (uint64_t i = 0; i < count; ++i) {
@@ -335,6 +347,297 @@ bool load_recipe_metadata(uintptr_t world,uintptr_t root,RecipeLibrary& parsed) 
     return true;
 }
 
+static bool read_primary_recipe_bodies(uintptr_t data, int32_t count, const RecipeLibraryEntry& entry, bool partial, NativeRecipe& recipe) {
+    for (int32_t i = 0; i < count; ++i) {
+        const auto body = data + static_cast<uintptr_t>(i) * 0x80;
+        std::string name;
+        if (!native_text(body, name, 511)) return false;
+        const auto tracking = spawn_recipe(name);
+        if (!tracking || std::string(tracking->origin.data(), tracking->origin.size()) != entry.origin ||
+            tracking->logical_units != entry.logical_count || tracking->physical_units != entry.physical_count) return false;
+        const auto masks = spawn_tracking(name);
+        if (masks->source != entry.logical_mask) return false;
+        if (tracking->credit_units != entry.logical_count) {
+            if (!partial || recipe.tail || tracking->credit_units != entry.final_credit_units ||
+                tracking->body != (entry.maximum_emissions - 1) % entry.physical_count) return false;
+            recipe.tail = body;
+        } else {
+            if (recipe.bodies[tracking->body]) return false;
+            recipe.bodies[tracking->body] = body;
+        }
+    }
+    return true;
+}
+static bool read_recipe_refill(uintptr_t world, const RecipeLibraryEntry& entry, NativeRecipe& recipe) {
+    if (const auto refill = find_entity(world, ("ap_v070_refill_r" + entry.origin).c_str())) {
+        std::string value;
+        if (entry.family != 'm' || entry.maximum_emissions || !native_text(refill + 0xbe0, value, 10)) return false;
+        const auto parsed_limit = std::from_chars(value.data(), value.data() + value.size(), recipe.refill_limit);
+        if (parsed_limit.ec != std::errc{} || parsed_limit.ptr != value.data() + value.size() ||
+            !recipe.refill_limit || recipe.refill_limit > INT32_MAX) return false;
+    }
+    return true;
+}
+static bool read_compatible_recipe_bodies(uintptr_t world, const RecipeLibraryEntry& entry, bool partial, NativeRecipe& recipe) {
+    if (const auto compatible=find_entity(world,("ap_v070_compat_r"+entry.origin).c_str())) {
+        const auto length=*reinterpret_cast<const int32_t*>(compatible+0xc40);
+        const auto values=*reinterpret_cast<const uintptr_t*>(compatible+0xc38);
+        if (length<0 || static_cast<uint64_t>(length)>static_cast<uint64_t>(entry.physical_count)+partial) return false;
+        for (int32_t index=0;index<length;++index) {
+            std::string name;
+            if (!native_text(values+static_cast<uintptr_t>(index)*0x80,name,511)) return false;
+            const auto body=spawn_recipe(name);
+            const auto tracking=spawn_tracking(name);
+            if (!body || !tracking || std::string(body->origin.data(),body->origin.size())!=entry.origin ||
+                body->logical_units!=entry.logical_count || body->physical_units!=entry.physical_count ||
+                tracking->source!=entry.logical_mask) return false;
+            recipe.compatible_bodies.push_back(std::move(name));
+        }
+    }
+    return true;
+}
+static bool add_counter_body(NativeRecipe& recipe, uintptr_t primary, uintptr_t replacement, std::string name, const std::string& original) {
+    if (name != original) {
+        const auto limits = spawn_limits(original);
+        if (!limits) return false;
+        const auto original_tracking = spawn_tracking(original);
+        auto& alternatives = original_tracking && original_tracking->physical == 0x20ull ? recipe.stone_alternatives :
+            original_tracking && original_tracking->physical == 0x20000000ull ? recipe.armored_alternatives :
+            limits->kind == 2 ? recipe.microwave_alternatives : recipe.blood_punch_alternatives;
+        if (!alternatives.emplace(primary, replacement).second) return false;
+        recipe.compatible_bodies.push_back(std::move(name));
+    }
+    return true;
+}
+static bool recipe_body_matches(const SpawnRecipe& body, const SpawnTracking& tracking, const RecipeLibraryEntry& entry) {
+    return std::string_view(body.origin.data(), body.origin.size()) == entry.origin &&
+        std::tie(body.logical_units, body.physical_units, tracking.source) ==
+            std::tie(entry.logical_count, entry.physical_count, entry.logical_mask);
+}
+static bool read_counter_bodies(uintptr_t values, int32_t length, const RecipeLibraryEntry& entry, bool partial, NativeRecipe& recipe) {
+    for (int32_t index = 0; index < length; ++index) {
+        const auto replacement = values + static_cast<uintptr_t>(index) * 0x80;
+        std::string name, original;
+        if (!native_text(replacement, name, 511)) return false;
+        const auto body = spawn_recipe(name);
+        const auto tracking = spawn_tracking(name);
+        if (!body || !tracking || !recipe_body_matches(*body, *tracking, entry) || body->body >= recipe.bodies.size()) return false;
+        const auto primary = body->credit_units == entry.logical_count ? recipe.bodies[body->body] :
+            partial && body->credit_units == entry.final_credit_units ? recipe.tail : 0;
+        if (!primary || !native_text(primary, original, 511)) return false;
+        if (!add_counter_body(recipe, primary, replacement, std::move(name), original)) return false;
+    }
+    return true;
+}
+static bool read_recipe_counters(uintptr_t world, const RecipeLibraryEntry& entry, bool partial, NativeRecipe& recipe) {
+    if (const auto alternate = find_entity(world, ("ap_v070_counter_r" + entry.origin).c_str())) {
+        const auto length = *reinterpret_cast<const int32_t*>(alternate + 0xc40);
+        const auto values = *reinterpret_cast<const uintptr_t*>(alternate + 0xc38);
+        if (length < 0 || static_cast<uint64_t>(length) != static_cast<uint64_t>(entry.physical_count) + partial ||
+            (length && !values)) return false;
+        if (!read_counter_bodies(values, length, entry, partial, recipe)) return false;
+    }
+    return true;
+}
+static bool read_native_recipe(uintptr_t world, const RecipeLibraryEntry& entry, NativeRecipe& recipe) {
+    const auto library = find_entity(world, ("ap_v070_bodies_r" + entry.origin).c_str());
+    if (!library) return false;
+    const auto count = *reinterpret_cast<const int32_t*>(library + 0xc40);
+    const auto data = *reinterpret_cast<const uintptr_t*>(library + 0xc38);
+    const bool partial = entry.maximum_emissions && entry.final_credit_units < entry.logical_count;
+    if (count < 0 || static_cast<uint64_t>(count) != static_cast<uint64_t>(entry.physical_count) + partial) return false;
+    recipe = NativeRecipe{entry, std::vector<uintptr_t>(entry.physical_count), 0};
+    if (!read_primary_recipe_bodies(data, count, entry, partial, recipe)) return false;
+    if (std::any_of(recipe.bodies.begin(), recipe.bodies.end(), [](auto value) { return !value; }) ||
+        (partial && !recipe.tail)) return false;
+    recipe.passthrough=find_entity(world,("ap_v070_passthrough_r"+entry.origin).c_str())!=0;
+    if (!read_recipe_refill(world, entry, recipe)) return false;
+    if (!read_compatible_recipe_bodies(world, entry, partial, recipe)) return false;
+    if (!read_recipe_counters(world, entry, partial, recipe)) return false;
+    return true;
+}
+static bool invalid_recipe_checkpoint() {
+            set_recipe_fault(__func__, __LINE__, "checkpoint_invalid");
+            if (save::session().campaign_run.enabled()) save::session().campaign_run.refuse("native_enemy_checkpoint_invalid");
+            return false;
+}
+
+static bool validate_checkpoint_shows(RecipeNativeCheckpoint& checkpoint, const std::map<std::string, NativeRecipe>& recipes) {
+    std::set<std::string> wanted;
+    for (const auto& [origin, recipe] : recipes) {
+        (void)origin;
+        if (recipe.definition.family == 'd') {
+            if (recipe.bodies.empty()) wanted.insert(recipe.definition.source);
+            for (uint64_t index = 0; index < recipe.bodies.size(); ++index) wanted.insert(independent_body_name(recipe, index));
+        }
+    }
+    for (const auto& [name, pose] : checkpoint.shows) {
+        (void)pose;
+        if (!wanted.count(name)) return invalid_recipe_checkpoint();
+    }
+    for (const auto& [origin,recipe] : recipes) {
+        (void)origin;
+        if (!recipe.passthrough) continue;
+        checkpoint.shows.erase(recipe.definition.source);
+        for (uint64_t index=0;index<recipe.bodies.size();++index)
+            checkpoint.shows.erase(independent_body_name(recipe,index));
+    }
+    return true;
+}
+static bool recipe_sequence(std::string_view key, size_t start, uint64_t maximum) {
+    uint64_t sequence = 0;
+    const auto parsed = std::from_chars(key.data() + (std::min)(start, key.size()), key.data() + key.size(), sequence);
+    return parsed.ec == std::errc{} && parsed.ptr == key.data() + key.size() && sequence && sequence <= maximum;
+}
+static bool independent_request(const RecipeProgress& progress, const RecipeLibraryEntry& entry) {
+    const RecipeRequest expected{entry.source, entry.origin, "", entry.logical_mask, 1, entry.physical_count,
+        entry.maximum_emissions, entry.physical_count, entry.physical_count ? 1U : 0U};
+    return entry.family == 'd' && progress.request == expected && progress.emitted <= progress.request.maximum_emissions;
+}
+static bool autonomous_quantity(const std::string& key, const RecipeRequest& request, const RecipeLibraryEntry& definition) {
+    const auto numerator = definition.quantity_denominator ? definition.quantity_numerator : definition.physical_count;
+    const auto denominator = definition.quantity_denominator ? definition.quantity_denominator : definition.logical_count;
+    if (key.rfind("summon/", 0) == 0) {
+        const auto expected = (uint64_t{request.logical_units} * numerator + denominator - 1) / denominator;
+        if (expected != request.physical_units) return invalid_recipe_checkpoint();
+    } else if (std::tie(request.logical_units, request.physical_units) != std::tie(definition.logical_count, definition.physical_count) ||
+        request.owner != (definition.owner.empty() ? "ap_v070_direct_r" + definition.origin : definition.owner)) return invalid_recipe_checkpoint();
+    return true;
+}
+static bool validate_autonomous_request(const RecipeNativeCheckpoint& checkpoint, const std::string& key, const RecipeProgress& progress, const std::map<std::string, NativeRecipe>& recipes) {
+    const auto recipe = recipes.find(progress.request.origin);
+    const auto& request = progress.request;
+    const auto slash = key.rfind('/');
+    if (recipe == recipes.end()) return invalid_recipe_checkpoint();
+    const auto& entry = recipe->second.definition;
+    const auto final_units = request.physical_units ? request.logical_units : 0U;
+    if (entry.family != (key.rfind("direct/", 0) == 0 ? 'f' : 'u') ||
+        std::tie(request.logical_mask, request.physical_units, request.credit_limit, request.final_credit_units) !=
+            std::tie(entry.logical_mask, request.maximum_emissions, request.maximum_emissions, final_units) ||
+        key.substr(7, 20) != request.origin || !request.parent_actor.empty() || !request.parent_request.empty() ||
+        !recipe_sequence(key, slash + 1, checkpoint.next_request)) return invalid_recipe_checkpoint();
+    return autonomous_quantity(key, request, entry);
+    return true;
+}
+static bool validate_independent_request(const RecipeNativeCheckpoint& checkpoint, const std::string& key, const RecipeProgress& progress, const std::map<std::string, NativeRecipe>& recipes) {
+    const auto recipe = recipes.find(progress.request.origin);
+    const auto base = "independent/" + progress.request.origin;
+    if (key != base) {
+        if (progress.request.physical_units || key.rfind(base + "/", 0) != 0 ||
+            !recipe_sequence(key, base.size() + 1, checkpoint.next_request)) return invalid_recipe_checkpoint();
+    }
+    if (recipe == recipes.end() || !independent_request(progress, recipe->second.definition)) return invalid_recipe_checkpoint();
+    for (const auto& [id, actor] : progress.actors) {
+        (void)id;
+        if (actor.native_name != independent_body_name(recipe->second, actor.ordinal)) return invalid_recipe_checkpoint();
+    }
+    return true;
+}
+static bool validate_checkpoint_requests(const RecipeNativeCheckpoint& checkpoint, const std::map<std::string, NativeRecipe>& recipes, const RecipeState& loaded) {
+    for (const auto& [key, progress] : loaded.requests()) {
+        if (key.rfind("summon/", 0) == 0 || key.rfind("direct/", 0) == 0) {
+            if (!validate_autonomous_request(checkpoint, key, progress, recipes)) return false;
+            continue;
+        }
+        if (!validate_independent_request(checkpoint, key, progress, recipes)) return false;
+    }
+    return true;
+}
+static bool validate_checkpoint_actions(const RecipeNativeCheckpoint& checkpoint, const RecipeState& loaded) {
+    for (const auto& [key, credit] : checkpoint.actions) {
+        (void)credit;
+        if (!loaded.requests().count(key.first) && std::none_of(checkpoint.identities.begin(), checkpoint.identities.end(),
+            [&](const auto& item) { return item.second.request == key.first; })) return invalid_recipe_checkpoint();
+    }
+    return true;
+}
+static bool validate_checkpoint_children(const RecipeNativeCheckpoint& checkpoint, const std::map<std::string, NativeRecipe>& recipes, const RecipeState& loaded) {
+    for (const auto& [role, child] : checkpoint.children) {
+        const auto tracking = spawn_recipe(child.body);
+        const auto& progress = loaded.requests().at(role.substr(0, role.rfind('/')));
+        const auto recipe = recipes.find(progress.request.origin);
+        if (!tracking || recipe == recipes.end() || (recipe->second.definition.family != 'u' && recipe->second.definition.family != 'f') ||
+            std::string(tracking->origin.data(), tracking->origin.size()) != progress.request.origin ||
+            std::none_of(recipe->second.bodies.begin(), recipe->second.bodies.end(), [&](uintptr_t body) {
+                std::string name; return native_text(body, name, 511) && name == child.body;
+            }) && std::find(recipe->second.compatible_bodies.begin(), recipe->second.compatible_bodies.end(),
+                            child.body) == recipe->second.compatible_bodies.end()) return invalid_recipe_checkpoint();
+        (void)role;
+    }
+    return true;
+}
+static bool checkpoint_identity_credit(const RecipeNativeCheckpoint& checkpoint, const RecipeNativeCheckpoint::Identity& identity, const NativeRecipe& recipe, const RecipeState& loaded, const SpawnRecipe& frozen, uint64_t& units, uint32_t& denominator) {
+    const auto progress = loaded.requests().find(identity.request);
+    if (progress != loaded.requests().end()) {
+        const auto& request = progress->second.request;
+        if (request.origin != recipe.definition.origin || identity.ordinal >= progress->second.emitted) return invalid_recipe_checkpoint();
+        units = request.credit_limit && identity.ordinal + 1 == request.credit_limit ? request.final_credit_units : request.logical_units;
+        denominator = request.physical_units;
+    } else {
+        const auto& definition = recipe.definition;
+        const auto prefix = definition.origin + "/";
+        if (std::string_view("duf").find(definition.family) != std::string_view::npos || identity.request.rfind(prefix, 0) != 0 ||
+            !recipe_sequence(identity.request, prefix.size(), checkpoint.next_request) ||
+            (definition.maximum_emissions && identity.ordinal >= definition.maximum_emissions) ||
+            recipe.bodies.empty() || frozen.body != identity.ordinal % recipe.bodies.size()) return invalid_recipe_checkpoint();
+        units = definition.maximum_emissions && identity.ordinal + 1 == definition.maximum_emissions ?
+            definition.final_credit_units : definition.logical_count;
+        denominator = definition.physical_count;
+    }
+    return true;
+}
+static bool validate_checkpoint_identities(const RecipeNativeCheckpoint& checkpoint, const std::map<std::string, NativeRecipe>& recipes, const RecipeState& loaded) {
+    for (const auto& [name, identity] : checkpoint.identities) {
+        (void)name;
+        const auto frozen = spawn_recipe(identity.body);
+        if (!frozen || !recipes.count(std::string(frozen->origin.data(), frozen->origin.size()))) return invalid_recipe_checkpoint();
+        const auto& recipe = recipes.at(std::string(frozen->origin.data(), frozen->origin.size()));
+        if (std::none_of(recipe.bodies.begin(), recipe.bodies.end(), [&](uintptr_t body) {
+            std::string value; return native_text(body, value, 511) && value == identity.body;
+        }) && std::find(recipe.compatible_bodies.begin(),recipe.compatible_bodies.end(),identity.body)==recipe.compatible_bodies.end() &&
+            (!recipe.tail || [&] { std::string value; return !native_text(recipe.tail, value, 511) || value != identity.body; }())) return invalid_recipe_checkpoint();
+        uint64_t units = 0; uint32_t denominator = 0;
+        if (!checkpoint_identity_credit(checkpoint, identity, recipe, loaded, *frozen, units, denominator)) return false;
+        if (identity.units != units || identity.denominator != denominator) return invalid_recipe_checkpoint();
+    }
+    return true;
+}
+static bool apply_recipe_checkpoint(uintptr_t root, const RecipeNativeCheckpoint& checkpoint) {
+    if (recipe_creation || reserved_actors) return invalid_recipe_checkpoint();
+    map_freed();
+    native_string_table = *reinterpret_cast<const uintptr_t*>(root + 0xbe0);
+    restored_actor_identities = checkpoint.identities;
+    pending_independent_shows = checkpoint.shows;
+    for (const auto& [key, credit] : checkpoint.actions) {
+        death_action_credits[key] = {credit.units, credit.sent, credit.denominator};
+    }
+    next_recipe_request = checkpoint.next_request;
+    if (!checkpoint.summons.empty() || !checkpoint.children.empty()) pending_summon_checkpoint = checkpoint;
+    return true;
+}
+static bool restore_recipe_library_checkpoint(uintptr_t root, const RecipeLibrary& parsed, const std::map<std::string, NativeRecipe>& recipes, RecipeState& loaded) {
+    if (!restored_independent) return true;
+    auto checkpoint = *restored_independent;
+    if (checkpoint.plan != parsed.plan || checkpoint.map != parsed.map ||
+        !loaded.restore(checkpoint.state, parsed.plan, parsed.map)) return invalid_recipe_checkpoint();
+    if (!validate_checkpoint_shows(checkpoint, recipes)) return false;
+    if (!validate_checkpoint_requests(checkpoint, recipes, loaded)) return false;
+    if (!validate_checkpoint_actions(checkpoint, loaded)) return false;
+    if (!validate_checkpoint_children(checkpoint, recipes, loaded)) return false;
+    if (!validate_checkpoint_identities(checkpoint, recipes, loaded)) return false;
+    if (!apply_recipe_checkpoint(root, checkpoint)) return false;
+    restored_independent.reset();
+    return true;
+}
+static bool matching_recipe_plan(const RecipeLibrary& parsed) {
+    if (checkpoint_recipe_missing || (!checkpoint_recipe_plan.empty() && parsed.plan != checkpoint_recipe_plan) ||
+        (!session_recipe_plan.empty() && parsed.plan != session_recipe_plan)) {
+        set_recipe_fault(__func__, __LINE__, "checkpoint_plan_mismatch");
+        if (save::session().campaign_run.enabled()) save::session().campaign_run.refuse("native_enemy_checkpoint_plan_mismatch");
+        return false;
+    }
+    return true;
+}
 bool load_native_recipes() {
     if (save::session().campaign_run.snapshot().native_subtype==6) return false;
     if (!native_recipes.empty() && !restored_independent) return true;
@@ -343,230 +646,17 @@ bool load_native_recipes() {
     RecipeLibrary parsed;
     if (!root) return false;
     if (!load_recipe_metadata(world,root,parsed)) return false;
-    if (checkpoint_recipe_missing || (!checkpoint_recipe_plan.empty() && parsed.plan != checkpoint_recipe_plan) ||
-        (!session_recipe_plan.empty() && parsed.plan != session_recipe_plan)) {
-        set_recipe_fault(__func__, __LINE__, "checkpoint_plan_mismatch");
-        if (save::session().campaign_run.enabled()) save::session().campaign_run.refuse("native_enemy_checkpoint_plan_mismatch");
-        return false;
-    }
+    if (!matching_recipe_plan(parsed)) return false;
     native_string_table = *reinterpret_cast<const uintptr_t*>(root + 0xbe0);
     std::map<std::string, NativeRecipe> recipes;
     for (const auto& entry : parsed.recipes) {
-        const auto library = find_entity(world, ("ap_v070_bodies_r" + entry.origin).c_str());
-        if (!library) return false;
-        const auto count = *reinterpret_cast<const int32_t*>(library + 0xc40);
-        const auto data = *reinterpret_cast<const uintptr_t*>(library + 0xc38);
-        const bool partial = entry.maximum_emissions && entry.final_credit_units < entry.logical_count;
-        if (count < 0 || static_cast<uint64_t>(count) != static_cast<uint64_t>(entry.physical_count) + partial) return false;
-        NativeRecipe recipe{entry, std::vector<uintptr_t>(entry.physical_count), 0};
-        for (int32_t i = 0; i < count; ++i) {
-            const auto body = data + static_cast<uintptr_t>(i) * 0x80;
-            std::string name;
-            if (!native_text(body, name, 511)) return false;
-            const auto tracking = spawn_recipe(name);
-            if (!tracking || std::string(tracking->origin.data(), tracking->origin.size()) != entry.origin ||
-                tracking->logical_units != entry.logical_count || tracking->physical_units != entry.physical_count) return false;
-            const auto masks = spawn_tracking(name);
-            if (!masks || masks->source != entry.logical_mask || !spawn_limits(name)) return false;
-            if (tracking->credit_units != entry.logical_count) {
-                if (!partial || recipe.tail || tracking->credit_units != entry.final_credit_units ||
-                    tracking->body != (entry.maximum_emissions - 1) % entry.physical_count) return false;
-                recipe.tail = body;
-            } else {
-                if (recipe.bodies[tracking->body]) return false;
-                recipe.bodies[tracking->body] = body;
-            }
-        }
-        if (std::any_of(recipe.bodies.begin(), recipe.bodies.end(), [](auto value) { return !value; }) ||
-            (partial && !recipe.tail)) return false;
-        recipe.passthrough=find_entity(world,("ap_v070_passthrough_r"+entry.origin).c_str())!=0;
-        if (const auto refill = find_entity(world, ("ap_v070_refill_r" + entry.origin).c_str())) {
-            std::string value;
-            if (entry.family != 'm' || entry.maximum_emissions || !native_text(refill + 0xbe0, value, 10)) return false;
-            const auto parsed_limit = std::from_chars(value.data(), value.data() + value.size(), recipe.refill_limit);
-            if (parsed_limit.ec != std::errc{} || parsed_limit.ptr != value.data() + value.size() ||
-                !recipe.refill_limit || recipe.refill_limit > INT32_MAX) return false;
-        }
-        if (const auto compatible=find_entity(world,("ap_v070_compat_r"+entry.origin).c_str())) {
-            const auto length=*reinterpret_cast<const int32_t*>(compatible+0xc40);
-            const auto values=*reinterpret_cast<const uintptr_t*>(compatible+0xc38);
-            if (length<0 || static_cast<uint64_t>(length)>static_cast<uint64_t>(entry.physical_count)+partial) return false;
-            for (int32_t index=0;index<length;++index) {
-                std::string name;
-                if (!native_text(values+static_cast<uintptr_t>(index)*0x80,name,511)) return false;
-                const auto body=spawn_recipe(name);
-                const auto tracking=spawn_tracking(name);
-                if (!body || !tracking || std::string(body->origin.data(),body->origin.size())!=entry.origin ||
-                    body->logical_units!=entry.logical_count || body->physical_units!=entry.physical_count ||
-                    tracking->source!=entry.logical_mask) return false;
-                recipe.compatible_bodies.push_back(std::move(name));
-            }
-        }
-        if (const auto alternate = find_entity(world, ("ap_v070_counter_r" + entry.origin).c_str())) {
-            const auto length = *reinterpret_cast<const int32_t*>(alternate + 0xc40);
-            const auto values = *reinterpret_cast<const uintptr_t*>(alternate + 0xc38);
-            if (length < 0 || static_cast<uint64_t>(length) != static_cast<uint64_t>(entry.physical_count) + partial ||
-                (length && !values)) return false;
-            for (int32_t index = 0; index < length; ++index) {
-                const auto replacement = values + static_cast<uintptr_t>(index) * 0x80;
-                std::string name, original;
-                if (!native_text(replacement, name, 511)) return false;
-                const auto body = spawn_recipe(name);
-                const auto tracking = spawn_tracking(name);
-                if (!body || !tracking || std::string(body->origin.data(), body->origin.size()) != entry.origin ||
-                    body->logical_units != entry.logical_count || body->physical_units != entry.physical_count ||
-                    body->body >= recipe.bodies.size() || tracking->source != entry.logical_mask || !spawn_limits(name)) return false;
-                const auto primary = body->credit_units == entry.logical_count ? recipe.bodies[body->body] :
-                    partial && body->credit_units == entry.final_credit_units ? recipe.tail : 0;
-                if (!primary || !native_text(primary, original, 511)) return false;
-                if (name != original) {
-                    const auto limits = spawn_limits(original);
-                    if (!limits) return false;
-                    const auto original_tracking = spawn_tracking(original);
-                    auto& alternatives = original_tracking && original_tracking->physical == 0x20ull ? recipe.stone_alternatives :
-                        original_tracking && original_tracking->physical == 0x20000000ull ? recipe.armored_alternatives :
-                        limits->kind == 2 ? recipe.microwave_alternatives : recipe.blood_punch_alternatives;
-                    if (!alternatives.emplace(primary, replacement).second) return false;
-                    recipe.compatible_bodies.push_back(std::move(name));
-                }
-            }
-        }
+        NativeRecipe recipe;
+        if (!read_native_recipe(world, entry, recipe)) return false;
         recipes.emplace(entry.origin, std::move(recipe));
     }
     RecipeState loaded;
     if (!loaded.reset(parsed.plan, parsed.map)) return false;
-    if (restored_independent) {
-        const auto invalid = [] {
-            set_recipe_fault(__func__, __LINE__, "checkpoint_invalid");
-            if (save::session().campaign_run.enabled()) save::session().campaign_run.refuse("native_enemy_checkpoint_invalid");
-            return false;
-        };
-        auto checkpoint = *restored_independent;
-        if (checkpoint.plan != parsed.plan || checkpoint.map != parsed.map ||
-            !loaded.restore(checkpoint.state, parsed.plan, parsed.map)) return invalid();
-        std::set<std::string> wanted;
-        for (const auto& [origin, recipe] : recipes) {
-            (void)origin;
-            if (recipe.definition.family == 'd') {
-                if (recipe.bodies.empty()) wanted.insert(recipe.definition.source);
-                for (uint64_t index = 0; index < recipe.bodies.size(); ++index) wanted.insert(independent_body_name(recipe, index));
-            }
-        }
-        for (const auto& [name, pose] : checkpoint.shows) {
-            (void)pose;
-            if (!wanted.count(name)) return invalid();
-        }
-        for (const auto& [origin,recipe] : recipes) {
-            (void)origin;
-            if (!recipe.passthrough) continue;
-            checkpoint.shows.erase(recipe.definition.source);
-            for (uint64_t index=0;index<recipe.bodies.size();++index)
-                checkpoint.shows.erase(independent_body_name(recipe,index));
-        }
-        for (const auto& [key, progress] : loaded.requests()) {
-            const auto recipe = recipes.find(progress.request.origin);
-            if (key.rfind("summon/", 0) == 0 || key.rfind("direct/", 0) == 0) {
-                const auto& request = progress.request;
-                const auto slash = key.rfind('/'); uint64_t sequence = 0;
-                const auto parsed_sequence = std::from_chars(key.data() + slash + 1, key.data() + key.size(), sequence);
-                if (recipe == recipes.end() || recipe->second.definition.family != (key.rfind("direct/", 0) == 0 ? 'f' : 'u') ||
-                    request.logical_mask != recipe->second.definition.logical_mask ||
-                    key.substr(7, 20) != request.origin || !request.parent_actor.empty() || !request.parent_request.empty() ||
-                    request.physical_units != request.maximum_emissions || request.credit_limit != request.maximum_emissions ||
-                    request.final_credit_units != (request.physical_units ? request.logical_units : 0U) ||
-                    parsed_sequence.ec != std::errc{} || parsed_sequence.ptr != key.data() + key.size() ||
-                    !sequence || sequence > checkpoint.next_request) return invalid();
-                const auto& definition = recipe->second.definition;
-                const auto numerator = definition.quantity_denominator ? definition.quantity_numerator : definition.physical_count;
-                const auto denominator = definition.quantity_denominator ? definition.quantity_denominator : definition.logical_count;
-                if (key.rfind("summon/", 0) == 0) {
-                    const auto expected = (uint64_t{request.logical_units} * numerator + denominator - 1) / denominator;
-                    if (expected != request.physical_units) return invalid();
-                } else if (request.logical_units != definition.logical_count || request.physical_units != definition.physical_count ||
-                    request.owner != (definition.owner.empty() ? "ap_v070_direct_r" + definition.origin : definition.owner)) return invalid();
-                continue;
-            }
-            const auto base = "independent/" + progress.request.origin;
-            if (key != base) {
-                uint64_t activation = 0;
-                const auto parsed_activation = std::from_chars(key.data() + (std::min)(base.size() + 1, key.size()), key.data() + key.size(), activation);
-                if (progress.request.physical_units || key.rfind(base + "/", 0) != 0 || parsed_activation.ec != std::errc{} ||
-                    parsed_activation.ptr != key.data() + key.size() || !activation || activation > checkpoint.next_request) return invalid();
-            }
-            if (recipe == recipes.end() ||
-                recipe->second.definition.family != 'd' || progress.request.owner != recipe->second.definition.source ||
-                progress.request.physical_units != recipe->second.definition.physical_count ||
-                progress.request.logical_mask != recipe->second.definition.logical_mask || progress.request.logical_units != 1 ||
-                progress.request.maximum_emissions != recipe->second.definition.maximum_emissions ||
-                progress.emitted > progress.request.maximum_emissions || progress.request.credit_limit != progress.request.physical_units ||
-                progress.request.final_credit_units != (progress.request.physical_units ? 1U : 0U) || !progress.request.label.empty() ||
-                !progress.request.parent_actor.empty() || !progress.request.parent_request.empty()) return invalid();
-            for (const auto& [id, actor] : progress.actors) {
-                (void)id;
-                if (actor.native_name != independent_body_name(recipe->second, actor.ordinal)) return invalid();
-            }
-        }
-        for (const auto& [key, credit] : checkpoint.actions) {
-            (void)credit;
-            if (!loaded.requests().count(key.first) && std::none_of(checkpoint.identities.begin(), checkpoint.identities.end(),
-                [&](const auto& item) { return item.second.request == key.first; })) return invalid();
-        }
-        for (const auto& [role, child] : checkpoint.children) {
-            const auto tracking = spawn_recipe(child.body);
-            const auto& progress = loaded.requests().at(role.substr(0, role.rfind('/')));
-            const auto recipe = recipes.find(progress.request.origin);
-            if (!tracking || recipe == recipes.end() || (recipe->second.definition.family != 'u' && recipe->second.definition.family != 'f') ||
-                std::string(tracking->origin.data(), tracking->origin.size()) != progress.request.origin ||
-                std::none_of(recipe->second.bodies.begin(), recipe->second.bodies.end(), [&](uintptr_t body) {
-                    std::string name; return native_text(body, name, 511) && name == child.body;
-                }) && std::find(recipe->second.compatible_bodies.begin(), recipe->second.compatible_bodies.end(),
-                                child.body) == recipe->second.compatible_bodies.end()) return invalid();
-            (void)role;
-        }
-        for (const auto& [name, identity] : checkpoint.identities) {
-            (void)name;
-            const auto frozen = spawn_recipe(identity.body);
-            if (!frozen || !recipes.count(std::string(frozen->origin.data(), frozen->origin.size()))) return invalid();
-            const auto& recipe = recipes.at(std::string(frozen->origin.data(), frozen->origin.size()));
-            if (std::none_of(recipe.bodies.begin(), recipe.bodies.end(), [&](uintptr_t body) {
-                std::string value; return native_text(body, value, 511) && value == identity.body;
-            }) && std::find(recipe.compatible_bodies.begin(),recipe.compatible_bodies.end(),identity.body)==recipe.compatible_bodies.end() &&
-                (!recipe.tail || [&] { std::string value; return !native_text(recipe.tail, value, 511) || value != identity.body; }())) return invalid();
-            const auto progress = loaded.requests().find(identity.request);
-            uint64_t units = 0; uint32_t denominator = 0;
-            if (progress != loaded.requests().end()) {
-                const auto& request = progress->second.request;
-                if (request.origin != recipe.definition.origin || identity.ordinal >= progress->second.emitted) return invalid();
-                units = request.credit_limit && identity.ordinal + 1 == request.credit_limit ? request.final_credit_units : request.logical_units;
-                denominator = request.physical_units;
-            } else {
-                const auto& definition = recipe.definition;
-                const auto prefix = definition.origin + "/";
-                uint64_t sequence = 0;
-                const auto parsed_sequence = std::from_chars(identity.request.data() + (std::min)(prefix.size(), identity.request.size()),
-                    identity.request.data() + identity.request.size(), sequence);
-                if (definition.family == 'd' || definition.family == 'u' || definition.family == 'f' || identity.request.rfind(prefix, 0) != 0 ||
-                    parsed_sequence.ec != std::errc{} || parsed_sequence.ptr != identity.request.data() + identity.request.size() || !sequence ||
-                    sequence > checkpoint.next_request || (definition.maximum_emissions && identity.ordinal >= definition.maximum_emissions) ||
-                    recipe.bodies.empty() || frozen->body != identity.ordinal % recipe.bodies.size()) return invalid();
-                units = definition.maximum_emissions && identity.ordinal + 1 == definition.maximum_emissions ?
-                    definition.final_credit_units : definition.logical_count;
-                denominator = definition.physical_count;
-            }
-            if (identity.units != units || identity.denominator != denominator) return invalid();
-        }
-        if (recipe_creation || reserved_actors) return invalid();
-        map_freed();
-        native_string_table = *reinterpret_cast<const uintptr_t*>(root + 0xbe0);
-        restored_actor_identities = checkpoint.identities;
-        pending_independent_shows = checkpoint.shows;
-        for (const auto& [key, credit] : checkpoint.actions) {
-            death_action_credits[key] = {credit.units, credit.sent, credit.denominator};
-        }
-        next_recipe_request = checkpoint.next_request;
-        if (!checkpoint.summons.empty() || !checkpoint.children.empty()) pending_summon_checkpoint = checkpoint;
-        restored_independent.reset();
-    }
+    if (!restore_recipe_library_checkpoint(root, parsed, recipes, loaded)) return false;
     recipe_state = std::move(loaded);
     recipe_stamp = native::observation_stamp();
     session_recipe_plan = parsed.plan;
@@ -660,25 +750,17 @@ bool finite_wave_ready(std::string_view owner) {
     return false;
 }
 
-bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::string_view origin, std::string_view label) {
-    if (recipe_fault.load(std::memory_order_acquire)) { trace_spawn_refusal(manager, origin, "recipe_fault"); return false; }
-    if (!load_native_recipes()) { trace_spawn_refusal(manager, origin, "recipe_library_unavailable"); return false; }
-    const auto found = native_recipes.find(std::string(origin));
-    if (found == native_recipes.end()) { trace_spawn_refusal(manager, origin, "recipe_missing"); return false; }
-    const auto& recipe = found->second;
-    if (vanilla_bridge_group(recipe)) return false;
-    if (worker_recipe) creation.key = *worker_recipe;
-    else {
-        auto& pending = pending_recipes[{manager, std::string(origin)}];
-        if (pending.empty() && !open_native_request(manager, recipe, label, pending)) { trace_spawn_refusal(manager, origin, "request_not_opened"); return false; }
-        creation.key = pending;
-    }
-    if (recipe.definition.family == 'm' && finite_wave_ready(recipe_state.requests().at(creation.key).request.owner)) { trace_spawn_refusal(manager, origin, "finite_wave_ready"); return false; }
-    auto emission = recipe_state.reserve(creation.key);
-    if (!emission) { trace_spawn_refusal(manager, origin, "recipe_reservation_unavailable"); return false; }
-    creation.emission = std::move(*emission); creation.recipe = &recipe;
-    creation.body = recipe.tail && emission->ordinal + 1 == recipe.definition.maximum_emissions ? recipe.tail :
-        recipe.bodies[(emission->ordinal % recipe.bodies.size() + worker_body_offset % recipe.bodies.size()) % recipe.bodies.size()];
+static const char* counter_fallback(bool spirit, bool imp, bool baron) {
+    if (spirit) return "microwave_fallback";
+    if (imp) return "stone_counter_fallback";
+    return baron ? "armored_counter_fallback" : "blood_punch_fallback";
+}
+static const char* counter_species(bool spirit, bool imp, bool baron) {
+    if (spirit) return "cacodemon";
+    if (imp) return "imp";
+    return baron ? "baron" : "prowler";
+}
+static void choose_recipe_counter(RecipeCreation& creation, const NativeRecipe& recipe) {
     const bool microwave = !recipe.microwave_alternatives.count(creation.body) || inventory::microwave_observed();
     const bool stone = !recipe.stone_alternatives.count(creation.body) || inventory::stone_counter_observed();
     const bool armored = !recipe.armored_alternatives.count(creation.body) || inventory::armored_counter_observed();
@@ -689,11 +771,32 @@ bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::str
         const bool baron = recipe.armored_alternatives.count(creation.body) != 0;
         creation.body = chosen;
         if (recipe_spawn_traces.size() < 4096 && recipe_spawn_traces.emplace("counter/" + recipe.definition.origin, uint8_t{1}).second)
-            commands::enemy_spawn_trace(spirit ? "microwave_fallback" : imp ? "stone_counter_fallback" :
-                baron ? "armored_counter_fallback" : "blood_punch_fallback", recipe.definition.origin.c_str(),
-                *reinterpret_cast<const char**>(chosen + 8), spirit ? "cacodemon" : imp ? "imp" : baron ? "baron" : "prowler", 0,
+            commands::enemy_spawn_trace(counter_fallback(spirit, imp, baron), recipe.definition.origin.c_str(),
+                *reinterpret_cast<const char**>(chosen + 8), counter_species(spirit, imp, baron), 0,
                 creation.key.c_str(), recipe_state.requests().at(creation.key).request.parent_actor.c_str(), creation.emission.ordinal);
     }
+}
+static void resolve_recipe_source(RecipeCreation& creation, const NativeRecipe& recipe) {
+    const auto source = immora_breach_group(recipe) ? "breach_wasteland_arena_target_spawn_60" : recipe.definition.source.c_str();
+    creation.source = !*source ? 0 : find_entity(*reinterpret_cast<const uintptr_t*>(world_global), source);
+    if (!creation.source && (recipe.definition.family == 'i' || recipe.definition.family == 'p' || immora_breach_group(recipe))) {
+        // checkpoints can omit passive source entities; the compiler supplies a separate point.
+        char fallback[64];
+        sprintf_s(fallback, "ap_v070_source_%016llx", functional_token(source));
+        const auto alias = find_entity(*reinterpret_cast<const uintptr_t*>(world_global), fallback);
+        if (alias && *reinterpret_cast<const int32_t*>(alias + 0xc40) > 0) creation.source = alias;
+    }
+}
+static bool creation_request_key(RecipeCreation& creation, uintptr_t manager, std::string_view origin, std::string_view label, const NativeRecipe& recipe) {
+    if (worker_recipe) creation.key = *worker_recipe;
+    else {
+        auto& pending = pending_recipes[{manager, std::string(origin)}];
+        if (pending.empty() && !open_native_request(manager, recipe, label, pending)) { trace_spawn_refusal(manager, origin, "request_not_opened"); return false; }
+        creation.key = pending;
+    }
+    return true;
+}
+static bool admit_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::string_view origin, const NativeRecipe& recipe) {
     const auto name = *reinterpret_cast<const char**>(creation.body + 8);
     const auto limits = spawn_limits(name ? name : "");
     if (!limits) { trace_spawn_refusal(manager, origin, "spawn_limits_unavailable"); recipe_state.release(creation.key); return false; }
@@ -705,20 +808,41 @@ bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::str
         creation.limits.pressure = (std::min)(creation.limits.pressure, creation.limits.population);
     }
     if (!generated_admission(creation.limits)) { trace_spawn_refusal(manager, origin, admission_diagnostic_reason); recipe_state.release(creation.key); return false; }
-    const auto source = immora_breach_group(recipe) ? "breach_wasteland_arena_target_spawn_60" : recipe.definition.source.c_str();
-    creation.source = !*source ? 0 : find_entity(*reinterpret_cast<const uintptr_t*>(world_global), source);
-    if (!creation.source && (recipe.definition.family == 'i' || recipe.definition.family == 'p' || immora_breach_group(recipe))) {
-        // checkpoints can omit passive source entities; the compiler supplies a separate point.
-        char fallback[64];
-        sprintf_s(fallback, "ap_v070_source_%016llx", functional_token(source));
-        const auto alias = find_entity(*reinterpret_cast<const uintptr_t*>(world_global), fallback);
-        if (alias && *reinterpret_cast<const int32_t*>(alias + 0xc40) > 0) creation.source = alias;
-    }
+    return true;
+}
+bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::string_view origin, std::string_view label) {
+    if (recipe_fault.load(std::memory_order_acquire)) { trace_spawn_refusal(manager, origin, "recipe_fault"); return false; }
+    if (!load_native_recipes()) { trace_spawn_refusal(manager, origin, "recipe_library_unavailable"); return false; }
+    const auto found = native_recipes.find(std::string(origin));
+    if (found == native_recipes.end()) { trace_spawn_refusal(manager, origin, "recipe_missing"); return false; }
+    const auto& recipe = found->second;
+    if (vanilla_bridge_group(recipe)) return false;
+    if (!creation_request_key(creation, manager, origin, label, recipe)) return false;
+    if (recipe.definition.family == 'm' && finite_wave_ready(recipe_state.requests().at(creation.key).request.owner)) { trace_spawn_refusal(manager, origin, "finite_wave_ready"); return false; }
+    auto emission = recipe_state.reserve(creation.key);
+    if (!emission) { trace_spawn_refusal(manager, origin, "recipe_reservation_unavailable"); return false; }
+    creation.emission = std::move(*emission); creation.recipe = &recipe;
+    creation.body = recipe.tail && emission->ordinal + 1 == recipe.definition.maximum_emissions ? recipe.tail :
+        recipe.bodies[(emission->ordinal % recipe.bodies.size() + worker_body_offset % recipe.bodies.size()) % recipe.bodies.size()];
+    choose_recipe_counter(creation, recipe);
+    if (!admit_recipe_creation(creation, manager, origin, recipe)) return false;
+    resolve_recipe_source(creation, recipe);
     reserve_admission(creation.limits); creation.reserved = true;
     creation.previous = recipe_creation; recipe_creation = &creation;
     return true;
 }
 
+static void remember_creation_diagnostic(const RecipeCreation& creation, uint32_t identifier, const RecipeRequest& request) {
+    try {
+        if (actor_diagnostics.size() < 4096 || actor_diagnostics.count(creation.actor)) {
+            auto& diagnostic = actor_diagnostics[creation.actor];
+            if (diagnostic.identifier != identifier) diagnostic = {};
+            diagnostic.identifier = identifier; diagnostic.encounter = creation.key;
+            diagnostic.manager = request.owner;
+            trace_actor(creation.actor, creation.restoring ? "restored_position" : "spawn_position", 0, true);
+        }
+    } catch (...) {}
+}
 bool settle_recipe_creation(RecipeCreation& creation) noexcept {
     try {
         if (!creation.actor) return creation.restoring || recipe_state.release(creation.key);
@@ -737,15 +861,7 @@ bool settle_recipe_creation(RecipeCreation& creation) noexcept {
         const auto units = request.credit_limit && creation.emission.ordinal + 1 == request.credit_limit ?
             request.final_credit_units : request.logical_units;
         recipe_actor_credits[creation.actor] = {identifier, {units, request.physical_units}, creation.key, native_name, creation.emission.ordinal};
-        try {
-            if (actor_diagnostics.size() < 4096 || actor_diagnostics.count(creation.actor)) {
-                auto& diagnostic = actor_diagnostics[creation.actor];
-                if (diagnostic.identifier != identifier) diagnostic = {};
-                diagnostic.identifier = identifier; diagnostic.encounter = creation.key;
-                diagnostic.manager = request.owner;
-                trace_actor(creation.actor, creation.restoring ? "restored_position" : "spawn_position", 0, true);
-            }
-        } catch (...) {}
+        remember_creation_diagnostic(creation, identifier, request);
         return true;
     } catch (...) { set_recipe_fault(__func__, __LINE__, "exception", creation.key.c_str(), creation.actor, creation.selecting_manager); return false; }
 }
@@ -791,6 +907,27 @@ uint64_t functional_token(std::string_view value) {
     return hash;
 }
 
+static void select_functional_source(RecipeCreation* creation, RecipeCreation::PointState& source, uintptr_t world, uintptr_t group, bool inherited) {
+    if (source.index < 0) {
+        auto& random = *reinterpret_cast<uint32_t*>(world + 0x9a038);
+        random = random * 0x19660dU + 0x3c6ef35fU;
+        source.index = static_cast<int32_t>((random >> 10 & 0x7fff) % source.count);
+        if (inherited) *reinterpret_cast<int32_t*>(group + 0xc54) = source.index;
+        else creation->original.index = source.index;
+    }
+}
+static uintptr_t find_functional_variant(uintptr_t library, const char* variant, bool& readable) {
+    const auto data = *reinterpret_cast<const uintptr_t*>(library + 0xc38);
+    const auto count = *reinterpret_cast<const int32_t*>(library + 0xc40);
+    if (count < 1 || count > 100000 || !data) { readable = false; return 0; }
+    for (int32_t index = 0; index < count; ++index) {
+        const auto entry = data + static_cast<uintptr_t>(index) * 0x80;
+        std::string name;
+        if (!native_text(entry, name, 511)) { readable = false; return 0; }
+        if (name == variant) return entry;
+    }
+    return 0;
+}
 uintptr_t functional_body(RecipeCreation* creation, uintptr_t group) {
     const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
     if (!find_entity(world, "ap_v070_functional_sources")) return creation->body;
@@ -799,13 +936,7 @@ uintptr_t functional_body(RecipeCreation* creation, uintptr_t group) {
     if (inherited) source = read_point_state(group);
     if (source.count < 1) return creation->body;
     if (source.count > 100000 || source.index >= source.count || !source.definitions) return 0;
-    if (source.index < 0) {
-        auto& random = *reinterpret_cast<uint32_t*>(world + 0x9a038);
-        random = random * 0x19660dU + 0x3c6ef35fU;
-        source.index = static_cast<int32_t>((random >> 10 & 0x7fff) % source.count);
-        if (inherited) *reinterpret_cast<int32_t*>(group + 0xc54) = source.index;
-        else creation->original.index = source.index;
-    }
+    select_functional_source(creation, source, world, group, inherited);
     std::string source_name, body_name;
     if (!native_text(source.definitions + static_cast<uintptr_t>(source.index) * 0x80, source_name, 511)) return 0;
     char library_name[64];
@@ -815,15 +946,9 @@ uintptr_t functional_body(RecipeCreation* creation, uintptr_t group) {
     if (!native_text(creation->body, body_name, 511)) return 0;
     char variant[96];
     sprintf_s(variant, "%s_%016llx", library_name, functional_token(body_name));
-    const auto data = *reinterpret_cast<const uintptr_t*>(library + 0xc38);
-    const auto count = *reinterpret_cast<const int32_t*>(library + 0xc40);
-    if (count < 1 || count > 100000 || !data) return 0;
-    for (int32_t index = 0; index < count; ++index) {
-        const auto entry = data + static_cast<uintptr_t>(index) * 0x80;
-        std::string name;
-        if (!native_text(entry, name, 511)) return 0;
-        if (name == variant) return entry;
-    }
+    bool readable = true;
+    if (const auto entry = find_functional_variant(library, variant, readable)) return entry;
+    if (!readable) return 0;
     commands::enemy_spawn_trace("functional_missing", creation->recipe->definition.origin.c_str(), variant, source_name.c_str(), 0,
         creation->key.c_str(), recipe_state.requests().at(creation->key).request.parent_actor.c_str(), creation->emission.ordinal);
     return 0;
@@ -1036,6 +1161,47 @@ void trace_recipe_worker(const char* state, uintptr_t worker, const WorkerDiagno
         progress != recipe_state.requests().end() && progress->second.closed);
 }
 
+static bool finish_bridge_worker(uintptr_t worker, bool maintenance, const NativeRecipe& recipe) {
+    if (!*reinterpret_cast<const uint8_t*>(worker + (maintenance ? 0xcc : 0xb9)) &&
+        *reinterpret_cast<const int32_t*>(worker + (maintenance ? 0x90 : 0xa8)) > 0) {
+        std::string label;
+        if (!native_text(worker + 0x58, label, 1024)) return false;
+        *reinterpret_cast<int32_t*>(worker + (maintenance ? 0x90 : 0xa8)) = 0;
+        *reinterpret_cast<uint8_t*>(worker + (maintenance ? 0xcc : 0xb9)) = 1;
+        alignas(8) uint8_t output[32]{};
+        original_multiple(*reinterpret_cast<const uintptr_t*>(worker + 0x40), reinterpret_cast<uintptr_t>(output),
+            recipe.definition.logical_mask, 1, 0, reinterpret_cast<uintptr_t>(label.c_str()));
+    }
+    const auto found = worker_recipes.find(worker);
+    if (found != worker_recipes.end()) {
+        recipe_state.cancel(found->second);
+        worker_recipes.erase(found);
+    }
+    *reinterpret_cast<int32_t*>(worker + (maintenance ? 0x90 : 0xa8)) = 0;
+    *reinterpret_cast<uint8_t*>(worker + (maintenance ? 0xcc : 0xb9)) = 1;
+    return false;
+}
+static bool open_recipe_worker(uintptr_t worker, bool maintenance, const NativeRecipe& recipe, std::map<uintptr_t, std::string>::iterator& found) {
+    const auto manager = *reinterpret_cast<const uintptr_t*>(worker + 0x40);
+    std::string label, key;
+    if (!manager || !native_text(worker + 0x58, label, 191) ||
+        !open_native_request(manager, recipe, label, key)) return false;
+    const auto& entry = recipe.definition;
+    const auto quantity = static_cast<int32_t>(entry.physical_count);
+    *reinterpret_cast<int32_t*>(worker + 0x90) = quantity;
+    if (maintenance) {
+        *reinterpret_cast<int32_t*>(worker + 0x94) = static_cast<int32_t>(
+            recipe.refill_limit ? recipe.refill_limit : entry.maximum_emissions);
+        if (!quantity) *reinterpret_cast<uint8_t*>(worker + 0xcc) = 1;
+    } else {
+        *reinterpret_cast<int32_t*>(worker + 0xa8) = quantity;
+        if (!quantity) *reinterpret_cast<uint8_t*>(worker + 0xb9) = 1;
+    }
+    found = worker_recipes.emplace(worker, std::move(key)).first;
+    remember_worker_diagnostic(worker);
+    if (!quantity) recipe_state.complete_empty(found->second);
+    return true;
+}
 bool prepare_recipe_worker(uintptr_t worker, bool maintenance, bool& marked) {
     const auto alias = *reinterpret_cast<const uintptr_t*>(worker + (maintenance ? 0xd8 : 0xc8));
     std::string origin;
@@ -1045,45 +1211,11 @@ bool prepare_recipe_worker(uintptr_t worker, bool maintenance, bool& marked) {
     const auto recipe = native_recipes.find(origin);
     if (recipe == native_recipes.end()) { trace_spawn_refusal(*reinterpret_cast<const uintptr_t*>(worker + 0x40), origin, "worker_recipe_missing"); return false; }
     if (vanilla_bridge_group(recipe->second)) {
-        if (!*reinterpret_cast<const uint8_t*>(worker + (maintenance ? 0xcc : 0xb9)) &&
-            *reinterpret_cast<const int32_t*>(worker + (maintenance ? 0x90 : 0xa8)) > 0) {
-            std::string label;
-            if (!native_text(worker + 0x58, label, 1024)) return false;
-            *reinterpret_cast<int32_t*>(worker + (maintenance ? 0x90 : 0xa8)) = 0;
-            *reinterpret_cast<uint8_t*>(worker + (maintenance ? 0xcc : 0xb9)) = 1;
-            alignas(8) uint8_t output[32]{};
-            original_multiple(*reinterpret_cast<const uintptr_t*>(worker + 0x40), reinterpret_cast<uintptr_t>(output),
-                recipe->second.definition.logical_mask, 1, 0, reinterpret_cast<uintptr_t>(label.c_str()));
-        }
-        const auto found = worker_recipes.find(worker);
-        if (found != worker_recipes.end()) {
-            recipe_state.cancel(found->second);
-            worker_recipes.erase(found);
-        }
-        *reinterpret_cast<int32_t*>(worker + (maintenance ? 0x90 : 0xa8)) = 0;
-        *reinterpret_cast<uint8_t*>(worker + (maintenance ? 0xcc : 0xb9)) = 1;
-        return false;
+        return finish_bridge_worker(worker, maintenance, recipe->second);
     }
     auto found = worker_recipes.find(worker);
     if (found == worker_recipes.end()) {
-        const auto manager = *reinterpret_cast<const uintptr_t*>(worker + 0x40);
-        std::string label, key;
-        if (!manager || !native_text(worker + 0x58, label, 191) ||
-            !open_native_request(manager, recipe->second, label, key)) return false;
-        const auto& entry = recipe->second.definition;
-        const auto quantity = static_cast<int32_t>(entry.physical_count);
-        *reinterpret_cast<int32_t*>(worker + 0x90) = quantity;
-        if (maintenance) {
-            *reinterpret_cast<int32_t*>(worker + 0x94) = static_cast<int32_t>(
-                recipe->second.refill_limit ? recipe->second.refill_limit : entry.maximum_emissions);
-            if (!quantity) *reinterpret_cast<uint8_t*>(worker + 0xcc) = 1;
-        } else {
-            *reinterpret_cast<int32_t*>(worker + 0xa8) = quantity;
-            if (!quantity) *reinterpret_cast<uint8_t*>(worker + 0xb9) = 1;
-        }
-        found = worker_recipes.emplace(worker, std::move(key)).first;
-        remember_worker_diagnostic(worker);
-        if (!quantity) recipe_state.complete_empty(found->second);
+        if (!open_recipe_worker(worker, maintenance, recipe->second, found)) return false;
     }
     if (recipe_state.parent_pending(recipe_state.requests().at(found->second).request.parent_actor)) {
         trace_spawn_refusal(*reinterpret_cast<const uintptr_t*>(worker + 0x40), origin, "parent_pending"); return false;
@@ -1201,6 +1333,21 @@ bool queue_recipe_delay(uintptr_t manager) {
     return true;
 }
 
+static bool dispatch_first_recipe(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias, uintptr_t label, bool group, const std::string& origin, const std::string& key, uint64_t& result) {
+    if (!recipe_state.requests().at(key).emitted) {
+        // a native refusal rewinds this event; queuing it too would repeat the wave.
+        if (!native_admission(*reinterpret_cast<const uintptr_t*>(world_global) + 0xafd98, 1)) {
+            trace_spawn_refusal(manager, origin, "native_admission_refused");
+            retry_immediate(manager, "native_admission_refused"); return false;
+        }
+        const auto family = native_recipes.at(origin).definition.family;
+        if (family == 'a' || family == 'b' || family == 's')
+            create_special_recipe(manager, origin, recipe_state.requests().at(key).request.label);
+        else result = group ? original_multiple(manager, output, type, 1, alias, label) :
+            original_single(manager, output, type, alias, label);
+    }
+    return true;
+}
 bool dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
                               uintptr_t label, bool group, const std::string& origin, uintptr_t& result) {
     result = output;
@@ -1226,18 +1373,7 @@ bool dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, 
         }
         recipe_state.complete_empty(key); pending_recipes.erase({manager, origin}); return true;
     }
-    if (!recipe_state.requests().at(key).emitted) {
-        // a native refusal rewinds this event; queuing it too would repeat the wave.
-        if (!native_admission(*reinterpret_cast<const uintptr_t*>(world_global) + 0xafd98, 1)) {
-            trace_spawn_refusal(manager, origin, "native_admission_refused");
-            retry_immediate(manager, "native_admission_refused"); return true;
-        }
-        const auto family = found->second.definition.family;
-        if (family == 'a' || family == 'b' || family == 's')
-            create_special_recipe(manager, origin, recipe_state.requests().at(key).request.label);
-        else result = group ? original_multiple(manager, output, type, 1, alias, label) :
-            original_single(manager, output, type, alias, label);
-    }
+    if (!dispatch_first_recipe(manager, output, type, alias, label, group, origin, key, result)) return true;
     const auto& birth_label = recipe_state.requests().at(key).request.label;
     if (!queue_recipe_remainder(manager, alias, birth_label.c_str(), key)) {
         retry_immediate(manager, "remainder_worker_unavailable"); return true;

@@ -22,6 +22,19 @@ sc_install_event Installation::begin(uint32_t stage, uint32_t group, uint32_t in
  ReleaseSRWLockExclusive(&lock_);
  return event;
 }
+static bool record_success_locked(sc_save_installation_snapshot& state, const sc_install_event& event,
+                                  bool cleanup, bool mirror) {
+    if (!cleanup && !state.primary_failure.sequence) state.last_completed_stage = event.stage;
+    if (event.stage == SC_INSTALL_SAVE_TARGET || event.stage == SC_INSTALL_NATIVE_TARGET) ++state.validated;
+    if (event.stage == SC_INSTALL_SAVE_CREATE || event.stage == SC_INSTALL_NATIVE_CREATE) ++state.created;
+    if (event.stage == SC_INSTALL_SAVE_ENABLE || event.stage == SC_INSTALL_NATIVE_ENABLE) ++state.enabled;
+    if (event.stage == SC_INSTALL_READY && !state.primary_failure.sequence) {
+        state.phase = 3;
+        return mirror;
+    }
+    return false;
+}
+
 void Installation::finish(sc_install_event event, uint32_t reason, uint32_t minhook, uint32_t win32) {
  event.duration_ms = GetTickCount64() - event.at_ms;
  event.reason = reason; event.result = reason ? 2u : 1u; event.minhook_status = minhook;
@@ -35,11 +48,7 @@ void Installation::finish(sc_install_event event, uint32_t reason, uint32_t minh
   else if (!state_.primary_failure.sequence) { state_.primary_failure = event; mirror = mirror_; }
   state_.phase = 2;
  } else {
-  if (!cleanup && !state_.primary_failure.sequence) state_.last_completed_stage = event.stage;
-  if (event.stage == SC_INSTALL_SAVE_TARGET || event.stage == SC_INSTALL_NATIVE_TARGET) ++state_.validated;
-  if (event.stage == SC_INSTALL_SAVE_CREATE || event.stage == SC_INSTALL_NATIVE_CREATE) ++state_.created;
-  if (event.stage == SC_INSTALL_SAVE_ENABLE || event.stage == SC_INSTALL_NATIVE_ENABLE) ++state_.enabled;
-  if (event.stage == SC_INSTALL_READY && !state_.primary_failure.sequence) { state_.phase = 3; mirror = mirror_; }
+     mirror = record_success_locked(state_, event, cleanup, mirror_);
  }
  ReleaseSRWLockExclusive(&lock_);
  // at most first failure + installation-ready. no frame/callback logging

@@ -61,21 +61,28 @@ bool campaign_map(const sc_native_snapshot& snapshot) {
         !std::memcmp(map.bytes, prefix, sizeof(prefix) - 1);
 }
 
+bool read_scope_context(uintptr_t manager, uintptr_t record, engine::Memory& memory, uintptr_t& decl,
+                        uintptr_t& player, uintptr_t& map, uint32_t& flags) {
+    uintptr_t map_identity = 0;
+    if (!manager || !record || memory.copy(record, &decl, sizeof(decl)).reason || !decl ||
+        memory.copy(decl + 0x9c, &flags, sizeof(flags)).reason ||
+        memory.copy(manager + 0x10, &player, sizeof(player)).reason || !player ||
+        memory.copy(engine_root + 0x50, &map, sizeof(map)).reason || !map ||
+        memory.copy(map, &map_identity, sizeof(map_identity)).reason ||
+        map_identity != image_base + 0x2ab30c8)
+        return false;
+    return true;
+}
+
 void capture_scope(uintptr_t manager, uintptr_t record) {
     Scope next{};
     next.manager = manager;
     next.record = record;
     next.thread = GetCurrentThreadId();
     engine::LocalMemory memory;
-    uintptr_t decl = 0, player = 0, map = 0, map_identity = 0;
+    uintptr_t decl = 0, player = 0, map = 0;
     uint32_t flags = 0;
-    if (!manager || !record ||
-        memory.copy(record, &decl, sizeof(decl)).reason || !decl ||
-        memory.copy(decl + 0x9c, &flags, sizeof(flags)).reason ||
-        memory.copy(manager + 0x10, &player, sizeof(player)).reason || !player ||
-        memory.copy(engine_root + 0x50, &map, sizeof(map)).reason || !map ||
-        memory.copy(map, &map_identity, sizeof(map_identity)).reason ||
-        map_identity != image_base + 0x2ab30c8) return;
+    if (!read_scope_context(manager, record, memory, decl, player, map, flags)) return;
     const bool admitted = native::gameplay_admitted();
     if (!admitted) return;
     const auto snapshot = native::inspect();
@@ -134,8 +141,6 @@ bool canonical_group(const Scope& current) {
     for (uint32_t i = 0; i < canonical_group_members; ++i) {
         uint32_t flags = 0;
         if (memory.copy(decls[i] + 0x9c, &flags, sizeof(flags)).reason || !(flags & 2)) return false;
-        for (uint32_t n = 0; n < i; ++n)
-            if (decls[n] == decls[i]) return false;
     }
     return true;
 }
@@ -244,25 +249,7 @@ bool unique_leaf(engine::Memory& memory, const engine::Image& image, uintptr_t a
         return false;
     std::array<uint8_t, 32> actual{};
     if (memory.copy(address, actual.data(), actual.size()).reason || actual != expected) return false;
-    std::array<uint8_t, 65536> chunk{};
-    unsigned matches = 0;
-    for (const auto& section : image.sections) {
-        if (!(section.flags & IMAGE_SCN_MEM_EXECUTE)) continue;
-        for (size_t offset = 0; offset + expected.size() <= section.size;) {
-            if (GetTickCount64() >= deadline || (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT)) return false;
-            const auto count = std::min(chunk.size(), static_cast<size_t>(section.size) - offset);
-            if (memory.copy(image.base + section.rva + offset, chunk.data(), count).reason) return false;
-            auto cursor = chunk.begin();
-            const auto end = chunk.begin() + count;
-            while ((cursor = std::search(cursor, end, expected.begin(), expected.end())) != end) {
-                if (++matches > 1) return false;
-                ++cursor;
-            }
-            if (count <= expected.size()) break;
-            offset += count - expected.size() + 1;
-        }
-    }
-    return matches == 1;
+    return native::unique_signature(memory, image, expected, stop, deadline) == SC_NATIVE_NONE;
 }
 
 bool bytes_match(engine::Memory& memory, uintptr_t address, const char* hex, size_t length) {

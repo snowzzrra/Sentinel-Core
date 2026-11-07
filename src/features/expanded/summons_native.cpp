@@ -83,13 +83,16 @@ std::optional<RecipeNativeCheckpoint> pending_summon_checkpoint;
 
 NativeUnary original_show = nullptr, original_show_now = nullptr, original_hide = nullptr;
 
+static float actor_spawn_lift(const RecipeCreation& creation) {
+    const auto name = creation.body ? *reinterpret_cast<const char**>(creation.body + 8) : nullptr;
+    return name && !creation.restoring ? spawn_lift(name) : 0.0f;
+}
 uintptr_t actor_factory_detour(uintptr_t info) {
     if (stopped.load(std::memory_order_acquire)) return original_actor_factory(info);
     const auto creation = recipe_creation;
     if (!creation || !creation->creating || actor_factory_active)
         return original_actor_factory(info);
-    const auto name = creation->body ? *reinterpret_cast<const char**>(creation->body + 8) : nullptr;
-    const float lift = name && !creation->restoring ? spawn_lift(name) : 0.0f;
+    const float lift = actor_spawn_lift(*creation);
     const bool summoned = creation->recipe->definition.family == 'u';
     float landing[12];
     const bool relocated = recipe_landing_pose(*creation, landing);
@@ -146,7 +149,7 @@ void darklord_summon_detour(uintptr_t component) {
     darklord_watch(std::move(telemetry));
 }
 
-const NativeRecipe* summon_recipe(uintptr_t component, uint64_t monster_type, uint64_t logical_type) {
+static std::string summon_source_name(uintptr_t component) {
     std::string source;
     if (*reinterpret_cast<const uint8_t*>(component + 0x72)) {
         const auto identifier = *reinterpret_cast<const uint32_t*>(component + 0x78);
@@ -157,6 +160,11 @@ const NativeRecipe* summon_recipe(uintptr_t component, uint64_t monster_type, ui
         char name[512];
         if (target && read_definition_name(target, name)) source = name;
     }
+    return source;
+}
+const NativeRecipe* summon_recipe(uintptr_t component, uint64_t monster_type, uint64_t logical_type) {
+    std::string source;
+    source = summon_source_name(component);
     const NativeRecipe* fallback = nullptr;
     for (const auto& [origin, recipe] : native_recipes) {
         (void)origin;
@@ -309,6 +317,56 @@ void summon_cleanup_detour(uintptr_t component) {
     original_summon_cleanup(component);
 }
 
+static bool complete_empty_summon(uintptr_t parent, const std::string& key, const std::string& label, const std::vector<SummonSource>& sources) {
+        if (!recipe_state.complete_empty(key)) return false;
+        std::vector<RecipeMembership> members;
+        if (!summon_memberships(parent, sources.front().template_name, label, members)) return false;
+        for (const auto& member : members) {
+            if (!recipe_state.join_empty(key, member.owner, member.label)) return false;
+        }
+        return true;
+}
+static bool queue_component_summon(uintptr_t parent, uint64_t epoch, const RecipeLibraryEntry& definition, const std::string& key, std::vector<SummonSource>& sources, ComponentSummons& pending) {
+    uint64_t offset = 0;
+    if (definition.source.empty()) {
+        char name[512];
+        if (!read_recipe_definition(parent, name) && !read_instance_name(parent, name)) return false;
+        offset = 14695981039346656037ull;
+        for (auto cursor = name; *cursor; ++cursor) offset = (offset ^ static_cast<unsigned char>(*cursor)) * 1099511628211ull;
+        offset = (offset ^ epoch) * 1099511628211ull;
+    }
+    pending.requests.push_back({key, definition.origin, std::move(sources), offset});
+    return true;
+}
+static bool open_summon_request(uintptr_t parent, const std::pair<std::string, std::string>& identity, const std::vector<SummonSource>& sources, std::string& key, bool& empty) {
+    const auto& definition = native_recipes.at(identity.first).definition;
+    const auto original_count = static_cast<uint32_t>(sources.size());
+    const auto numerator = definition.quantity_denominator ? definition.quantity_numerator : definition.physical_count;
+    const auto denominator = definition.quantity_denominator ? definition.quantity_denominator : definition.logical_count;
+    const auto quantity = (uint64_t{original_count} * numerator + denominator - 1) / denominator;
+    if (quantity > INT32_MAX || next_recipe_request == UINT64_MAX) return false;
+    char owner[512];
+    if (!read_definition_name(parent, owner)) return false;
+    key = "summon/" + definition.origin + "/" + std::to_string(++next_recipe_request);
+    if (!recipe_state.request(key, {owner, definition.origin, identity.second, definition.logical_mask, original_count,
+            static_cast<uint32_t>(quantity), quantity, static_cast<uint32_t>(quantity), quantity ? original_count : 0,
+            "", ""})) return false;
+    if (!quantity) {
+        if (!complete_empty_summon(parent, key, identity.second, sources)) return false;
+        empty = true; return true;
+    }
+    return true;
+}
+static bool open_summon_groups(uintptr_t parent, uint64_t epoch, std::map<std::pair<std::string, std::string>, std::vector<SummonSource>>& groups, ComponentSummons& pending) {
+    for (auto& [identity, sources] : groups) {
+        const auto& definition = native_recipes.at(identity.first).definition;
+        std::string key; bool empty = false;
+        if (!open_summon_request(parent, identity, sources, key, empty)) return false;
+        if (empty) continue;
+        if (!queue_component_summon(parent, epoch, definition, key, sources, pending)) return false;
+    }
+    return true;
+}
 bool open_component_summons(SummonCollection& collection) {
     if (collection.sources.empty() && collection.notifications.empty()) return true;
     const auto parent = *reinterpret_cast<const uintptr_t*>(collection.component + 8);
@@ -327,38 +385,7 @@ bool open_component_summons(SummonCollection& collection) {
     const auto epoch = pending.epoch++;
     std::map<std::pair<std::string, std::string>, std::vector<SummonSource>> groups;
     for (auto& source : collection.sources) groups[{source.origin, source.label}].push_back(std::move(source));
-    for (auto& [identity, sources] : groups) {
-        const auto& definition = native_recipes.at(identity.first).definition;
-        const auto original_count = static_cast<uint32_t>(sources.size());
-        const auto numerator = definition.quantity_denominator ? definition.quantity_numerator : definition.physical_count;
-        const auto denominator = definition.quantity_denominator ? definition.quantity_denominator : definition.logical_count;
-        const auto quantity = (uint64_t{original_count} * numerator + denominator - 1) / denominator;
-        if (quantity > INT32_MAX || next_recipe_request == UINT64_MAX) return false;
-        char owner[512];
-        if (!read_definition_name(parent, owner)) return false;
-        const auto key = "summon/" + definition.origin + "/" + std::to_string(++next_recipe_request);
-        if (!recipe_state.request(key, {owner, definition.origin, identity.second, definition.logical_mask, original_count,
-                static_cast<uint32_t>(quantity), quantity, static_cast<uint32_t>(quantity), quantity ? original_count : 0,
-                "", ""})) return false;
-        if (!quantity) {
-            if (!recipe_state.complete_empty(key)) return false;
-            std::vector<RecipeMembership> members;
-            if (!summon_memberships(parent, sources.front().template_name, identity.second, members)) return false;
-            for (const auto& member : members) {
-                if (!recipe_state.join_empty(key, member.owner, member.label)) return false;
-            }
-            continue;
-        }
-        uint64_t offset = 0;
-        if (definition.source.empty()) {
-            char name[512];
-            if (!read_recipe_definition(parent, name) && !read_instance_name(parent, name)) return false;
-            offset = 14695981039346656037ull;
-            for (auto cursor = name; *cursor; ++cursor) offset = (offset ^ static_cast<unsigned char>(*cursor)) * 1099511628211ull;
-            offset = (offset ^ epoch) * 1099511628211ull;
-        }
-        pending.requests.push_back({key, definition.origin, std::move(sources), offset});
-    }
+    if (!open_summon_groups(parent, epoch, groups, pending)) return false;
     for (const auto& target : collection.notifications) {
         auto& dependencies = pending.notifications[target];
         for (const auto& request : pending.requests)
@@ -418,49 +445,86 @@ bool summon_health(uintptr_t actor, std::array<float, 4>& values, bool write) no
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-bool capture_autonomous_summons(RecipeNativeCheckpoint& checkpoint) {
-    if (pending_summon_checkpoint) return false;
-    checkpoint.next_request = next_recipe_request;
-    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
-    std::set<std::string> parents;
-    for (const auto* producers : {&component_summons, &direct_points}) for (const auto& [component, pending] : *producers) {
-        if (pending.name.empty() || find_entity(world, pending.name.c_str()) != pending.parent) {
-            for (const auto& request : pending.requests) recipe_state.cancel(request.key);
-            continue;
-        }
-        char name[512], definition[512];
-        if (!read_instance_name(pending.parent, name) || !*name || actor_identifier(pending.parent) != pending.identifier ||
-            (!read_recipe_definition(pending.parent, definition) && !read_definition_name(pending.parent, definition))) return false;
-        if (find_entity(world, name) != pending.parent || combat::confirmed_dead(world, pending.parent)) {
-            for (const auto& request : pending.requests) recipe_state.cancel(request.key);
-            continue;
-        }
-        RecipeNativeCheckpoint::Component saved;
-        saved.parent = name; saved.definition = definition; saved.epoch = pending.epoch; saved.completed = pending.completed;
-        if (producers == &component_summons) {
-        saved.phase = *reinterpret_cast<const uint8_t*>(component + 0x48);
-        saved.playback = *reinterpret_cast<const float*>(component + 0x4c);
-        saved.mask = *reinterpret_cast<const uint64_t*>(component + 0x68);
-        saved.paused = *reinterpret_cast<const uint8_t*>(component + 0x71) != 0;
-        saved.template_mode = *reinterpret_cast<const uint8_t*>(component + 0x72) != 0;
-        const auto target = record_actor(component + 0x70);
-        if (target) {
-            if (!read_definition_name(target, name)) return false;
-            saved.template_name = name;
-        }
-        }
-        saved.notifications = pending.notifications;
-        for (const auto& request : pending.requests) {
-            RecipeNativeCheckpoint::Summon record;
-            record.key = request.key; record.origin = request.origin; record.body_offset = request.body_offset; record.completed = request.completed;
-            for (const auto& source : request.sources) record.sources.push_back(freeze_summon_source(source));
-            if (producers == &direct_points) record.memberships = recipe_state.request_memberships(request.key);
-            else if (request.sources.empty() || !summon_memberships(pending.parent, request.sources.front().template_name,
-                    recipe_state.requests().at(request.key).request.label, record.memberships)) return false;
-            saved.requests.push_back(std::move(record));
-        }
-        parents.insert(saved.parent); checkpoint.summons.push_back(std::move(saved));
+static bool capture_summon_component(uintptr_t component, RecipeNativeCheckpoint::Component& saved) {
+    char name[512];
+    saved.phase = *reinterpret_cast<const uint8_t*>(component + 0x48);
+    saved.playback = *reinterpret_cast<const float*>(component + 0x4c);
+    saved.mask = *reinterpret_cast<const uint64_t*>(component + 0x68);
+    saved.paused = *reinterpret_cast<const uint8_t*>(component + 0x71) != 0;
+    saved.template_mode = *reinterpret_cast<const uint8_t*>(component + 0x72) != 0;
+    const auto target = record_actor(component + 0x70);
+    if (target) {
+        if (!read_definition_name(target, name)) return false;
+        saved.template_name = name;
     }
+    return true;
+}
+static bool capture_summon_requests(const ComponentSummons& pending, bool direct, RecipeNativeCheckpoint::Component& saved) {
+    for (const auto& request : pending.requests) {
+        RecipeNativeCheckpoint::Summon record;
+        record.key = request.key; record.origin = request.origin; record.body_offset = request.body_offset; record.completed = request.completed;
+        for (const auto& source : request.sources) record.sources.push_back(freeze_summon_source(source));
+        if (direct) record.memberships = recipe_state.request_memberships(request.key);
+        else if (request.sources.empty() || !summon_memberships(pending.parent, request.sources.front().template_name,
+                recipe_state.requests().at(request.key).request.label, record.memberships)) return false;
+        saved.requests.push_back(std::move(record));
+    }
+    return true;
+}
+static bool capture_summon_producer(uintptr_t world, uintptr_t component, const ComponentSummons& pending, bool direct, RecipeNativeCheckpoint& checkpoint, std::set<std::string>& parents) {
+    if (pending.name.empty() || find_entity(world, pending.name.c_str()) != pending.parent) {
+        for (const auto& request : pending.requests) recipe_state.cancel(request.key);
+        return true;
+    }
+    char name[512], definition[512];
+    if (!read_instance_name(pending.parent, name) || !*name || actor_identifier(pending.parent) != pending.identifier ||
+        (!read_recipe_definition(pending.parent, definition) && !read_definition_name(pending.parent, definition))) return false;
+    if (find_entity(world, name) != pending.parent || combat::confirmed_dead(world, pending.parent)) {
+        for (const auto& request : pending.requests) recipe_state.cancel(request.key);
+        return true;
+    }
+    RecipeNativeCheckpoint::Component saved;
+    saved.parent = name; saved.definition = definition; saved.epoch = pending.epoch; saved.completed = pending.completed;
+    if (!direct && !capture_summon_component(component, saved)) return false;
+    saved.notifications = pending.notifications;
+    if (!capture_summon_requests(pending, direct, saved)) return false;
+    parents.insert(saved.parent); checkpoint.summons.push_back(std::move(saved));
+    return true;
+}
+static bool capture_summon_producers(uintptr_t world, RecipeNativeCheckpoint& checkpoint, std::set<std::string>& parents) {
+    for (const auto* producers : {&component_summons, &direct_points}) for (const auto& [component, pending] : *producers) {
+        if (!capture_summon_producer(world, component, pending, producers == &direct_points, checkpoint, parents)) return false;
+    }
+    return true;
+}
+static bool capture_child_memberships(const std::string& role, const RecipeNativeCheckpoint::Child& saved, std::vector<RecipeMembership>& members) {
+    if (members.empty() && !saved.parent.empty() && role.rfind("summon/", 0) == 0) {
+        const auto producer = std::find_if(component_summons.begin(), component_summons.end(), [&](const auto& item) {
+            char name[512]; return read_instance_name(item.second.parent, name) && saved.parent == name;
+        });
+        if (producer == component_summons.end()) return false;
+        if (*reinterpret_cast<const uint8_t*>(producer->first + 0x48) != 3) {
+            char owner[512]; std::string source_owner;
+            const auto target = record_actor(producer->first + 0x70);
+            if (target) {
+                if (!read_definition_name(target, owner)) return false;
+                source_owner = owner;
+            }
+            const auto key = role.substr(0, role.rfind('/'));
+            if (!summon_memberships(producer->second.parent, source_owner, recipe_state.requests().at(key).request.label, members)) return false;
+        }
+    }
+    return true;
+}
+static bool reconcile_summon_child_members(const std::string& role, const std::vector<RecipeMembership>& members) {
+    const auto key = role.substr(0, role.rfind('/'));
+    const auto previous = recipe_state.requests().at(key).actors.at(role).memberships;
+    for (const auto& member : members) if (!recipe_state.join_actor(role, member.owner, member.label)) return false;
+    for (const auto& member : previous)
+        if (std::find(members.begin(), members.end(), member) == members.end()) recipe_state.detach_actor(role, member.owner, member.label);
+    return true;
+}
+static bool capture_summon_children(uintptr_t world, RecipeNativeCheckpoint& checkpoint, const std::set<std::string>& parents) {
     for (const auto& [actor, role] : recipe_actors) {
         if (role.rfind("summon/", 0) != 0 && role.rfind("direct/", 0) != 0) continue;
         const auto found = summon_children.find(role);
@@ -471,29 +535,19 @@ bool capture_autonomous_summons(RecipeNativeCheckpoint& checkpoint) {
         if (!summon_health(actor, saved.health, false)) return false;
         std::vector<RecipeMembership> members;
         if (!native_memberships(world, actor, members)) return false;
-        if (members.empty() && !saved.parent.empty() && role.rfind("summon/", 0) == 0) {
-            const auto producer = std::find_if(component_summons.begin(), component_summons.end(), [&](const auto& item) {
-                char name[512]; return read_instance_name(item.second.parent, name) && saved.parent == name;
-            });
-            if (producer == component_summons.end()) return false;
-            if (*reinterpret_cast<const uint8_t*>(producer->first + 0x48) != 3) {
-                char owner[512]; std::string source_owner;
-                const auto target = record_actor(producer->first + 0x70);
-                if (target) {
-                    if (!read_definition_name(target, owner)) return false;
-                    source_owner = owner;
-                }
-                const auto key = role.substr(0, role.rfind('/'));
-                if (!summon_memberships(producer->second.parent, source_owner, recipe_state.requests().at(key).request.label, members)) return false;
-            }
-        }
-        const auto key = role.substr(0, role.rfind('/'));
-        const auto previous = recipe_state.requests().at(key).actors.at(role).memberships;
-        for (const auto& member : members) if (!recipe_state.join_actor(role, member.owner, member.label)) return false;
-        for (const auto& member : previous)
-            if (std::find(members.begin(), members.end(), member) == members.end()) recipe_state.detach_actor(role, member.owner, member.label);
+        if (!capture_child_memberships(role, saved, members)) return false;
+        if (!reconcile_summon_child_members(role, members)) return false;
         checkpoint.children.emplace(role, std::move(saved));
     }
+    return true;
+}
+bool capture_autonomous_summons(RecipeNativeCheckpoint& checkpoint) {
+    if (pending_summon_checkpoint) return false;
+    checkpoint.next_request = next_recipe_request;
+    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
+    std::set<std::string> parents;
+    if (!capture_summon_producers(world, checkpoint, parents)) return false;
+    if (!capture_summon_children(world, checkpoint, parents)) return false;
     return true;
 }
 
@@ -582,9 +636,7 @@ bool adopt_summon_child(uintptr_t component, uintptr_t actor) {
     return true;
 }
 
-bool restore_autonomous_summons(uintptr_t world) {
-    if (!pending_summon_checkpoint) return true;
-    auto& checkpoint = *pending_summon_checkpoint;
+static bool restore_unparented_children(uintptr_t world, RecipeNativeCheckpoint& checkpoint) {
     for (auto child = checkpoint.children.begin(); child != checkpoint.children.end();) {
         if (!child->second.parent.empty()) { ++child; continue; }
         uintptr_t actor = 0; bool waiting = false;
@@ -595,81 +647,151 @@ bool restore_autonomous_summons(uintptr_t world) {
         if (waiting) { ++child; continue; }
         summon_children[child->first] = child->second; child = checkpoint.children.erase(child);
     }
+    return true;
+}
+static bool restore_direct_credits(uintptr_t parent, const RecipeNativeCheckpoint::Component& saved) {
+        auto& credits = point_credits[parent];
+        credits.observed = *reinterpret_cast<const int32_t*>(parent + 0xd90);
+        if (credits.observed < 0) return false;
+        const auto origin = saved.definition.substr(std::string("ap_v070_direct_r").size());
+        for (const auto& [key, progress] : recipe_state.requests()) {
+            if (key.rfind("direct/", 0) != 0 || progress.request.origin != origin || !progress.request.physical_units) continue;
+            const auto& request = progress.request;
+            auto units = progress.emitted * request.logical_units;
+            if (request.credit_limit && progress.emitted == request.credit_limit) units -= request.logical_units - request.final_credit_units;
+            auto& value = credits.units[request.physical_units];
+            if (value > UINT64_MAX - units) return false;
+            value += units;
+        }
+    return true;
+}
+static void restore_pending_requests(uintptr_t parent, const RecipeNativeCheckpoint::Component& saved, ComponentSummons& pending) {
+    pending.parent = parent; pending.identifier = actor_identifier(parent); pending.name = saved.parent;
+    pending.epoch = saved.epoch; pending.completed = saved.completed;
+    pending.notifications = saved.notifications;
+    for (const auto& request : saved.requests) {
+        SummonRequest item{request.key, request.origin, {}, request.body_offset, request.completed};
+        for (const auto& source : request.sources) item.sources.push_back(thaw_summon_source(source));
+        pending.requests.push_back(std::move(item));
+    }
+}
+static bool restore_parented_children(uintptr_t world, uintptr_t component, bool direct, const RecipeNativeCheckpoint::Component& saved, RecipeNativeCheckpoint& checkpoint, bool& waiting) {
+    for (auto child = checkpoint.children.begin(); child != checkpoint.children.end();) {
+        if (child->second.parent != saved.parent) { ++child; continue; }
+        const auto& role = child->first; auto& record = child->second;
+        const auto key = role.substr(0, role.rfind('/'));
+        const auto& progress = recipe_state.requests().at(key);
+        const auto& frozen = progress.actors.at(role);
+        uintptr_t actor = 0;
+        if (!restore_checkpoint_actor(world, role, record, actor)) return false;
+        if (!actor) { waiting = true; ++child; continue; }
+        if (!direct && !adopt_summon_child(component, actor)) return false;
+        bool bindings_waiting = false;
+        if (!restore_memberships(world, actor, progress.request.logical_mask, frozen.memberships, bindings_waiting)) return false;
+        if (bindings_waiting) { waiting = true; ++child; continue; }
+        summon_children[role] = record;
+        child = checkpoint.children.erase(child);
+    }
+    return true;
+}
+static bool restore_summon_template(uintptr_t world, uintptr_t component, const RecipeNativeCheckpoint::Component& saved) {
+    const auto target = saved.template_name.empty() ? 0 : find_entity(world, saved.template_name.c_str());
+    if (!saved.template_name.empty() && !target) return false;
+    assign_manager(component + 0x78, target);
+    *reinterpret_cast<uint8_t*>(component + 0x48) = saved.phase;
+    *reinterpret_cast<float*>(component + 0x4c) = saved.playback;
+    *reinterpret_cast<uint64_t*>(component + 0x68) = saved.mask;
+    *reinterpret_cast<uint8_t*>(component + 0x71) = saved.paused;
+    *reinterpret_cast<uint8_t*>(component + 0x72) = saved.template_mode;
+    return true;
+}
+static void complete_restored_summon(uintptr_t component, ComponentSummons& pending) {
+        original_summon_cleanup(component);
+        *reinterpret_cast<uint8_t*>(component + 0x48) = 3;
+        pending.completed = true;
+        for (auto& request : pending.requests) request.completed = true;
+}
+static bool restored_summon_component(uintptr_t parent, const RecipeNativeCheckpoint::Component& saved, bool& direct, uintptr_t& component) {
+    char definition[512];
+    if ((!read_recipe_definition(parent, definition) && !read_definition_name(parent, definition)) || saved.definition != definition) return false;
+    direct = saved.definition.rfind("ap_v070_direct_r", 0) == 0;
+    component = direct ? parent : *reinterpret_cast<const uintptr_t*>(parent + 0x165e0);
+    if (!component || (!direct && *reinterpret_cast<const uintptr_t*>(component + 8) != parent)) return false;
+    return true;
+}
+static bool initialize_restored_producer(uintptr_t world, uintptr_t parent, uintptr_t component, bool direct, const RecipeNativeCheckpoint::Component& saved, ComponentSummons& pending, bool& waiting) {
+    if (!pending.parent) {
+        if (!direct && !restore_summon_template(world, component, saved)) { waiting = true; return true; }
+        restore_pending_requests(parent, saved, pending);
+        if (direct && !restore_direct_credits(parent, saved)) return false;
+    }
+    return true;
+}
+static bool restore_summon_producer(uintptr_t world, uintptr_t parent, const RecipeNativeCheckpoint::Component& saved, RecipeNativeCheckpoint& checkpoint, bool& waiting) {
+    bool direct = false; uintptr_t component = 0;
+    if (!restored_summon_component(parent, saved, direct, component)) return false;
+    auto& pending = direct ? direct_points[parent] : component_summons[component];
+    bool template_waiting = false;
+    if (!initialize_restored_producer(world, parent, component, direct, saved, pending, template_waiting)) return false;
+    if (template_waiting) { waiting = true; return true; }
+    if (pending.parent != parent || pending.identifier != actor_identifier(parent)) return false;
+    if (!restore_parented_children(world, component, direct, saved, checkpoint, waiting)) return false;
+    if (waiting) { waiting = true; return true; }
+    if (!direct) complete_restored_summon(component, pending);
+    return true;
+}
+bool restore_autonomous_summons(uintptr_t world) {
+    if (!pending_summon_checkpoint) return true;
+    auto& checkpoint = *pending_summon_checkpoint;
+    if (!restore_unparented_children(world, checkpoint)) return false;
     for (auto saved = checkpoint.summons.begin(); saved != checkpoint.summons.end();) {
         const auto parent = find_entity(world, saved->parent.c_str());
         if (!parent) { ++saved; continue; }
-        char definition[512];
-        if ((!read_recipe_definition(parent, definition) && !read_definition_name(parent, definition)) || saved->definition != definition) return false;
-        const bool direct = saved->definition.rfind("ap_v070_direct_r", 0) == 0;
-        const auto component = direct ? parent : *reinterpret_cast<const uintptr_t*>(parent + 0x165e0);
-        if (!component || (!direct && *reinterpret_cast<const uintptr_t*>(component + 8) != parent)) return false;
-        auto& pending = direct ? direct_points[parent] : component_summons[component];
-        if (!pending.parent) {
-            if (!direct) {
-            const auto target = saved->template_name.empty() ? 0 : find_entity(world, saved->template_name.c_str());
-            if (!saved->template_name.empty() && !target) { ++saved; continue; }
-            assign_manager(component + 0x78, target);
-            *reinterpret_cast<uint8_t*>(component + 0x48) = saved->phase;
-            *reinterpret_cast<float*>(component + 0x4c) = saved->playback;
-            *reinterpret_cast<uint64_t*>(component + 0x68) = saved->mask;
-            *reinterpret_cast<uint8_t*>(component + 0x71) = saved->paused;
-            *reinterpret_cast<uint8_t*>(component + 0x72) = saved->template_mode;
-            }
-            pending.parent = parent; pending.identifier = actor_identifier(parent); pending.name = saved->parent;
-            pending.epoch = saved->epoch; pending.completed = saved->completed;
-            pending.notifications = saved->notifications;
-            for (const auto& request : saved->requests) {
-                SummonRequest item{request.key, request.origin, {}, request.body_offset, request.completed};
-                for (const auto& source : request.sources) item.sources.push_back(thaw_summon_source(source));
-                pending.requests.push_back(std::move(item));
-            }
-            if (direct) {
-                auto& credits = point_credits[parent];
-                credits.observed = *reinterpret_cast<const int32_t*>(parent + 0xd90);
-                if (credits.observed < 0) return false;
-                const auto origin = saved->definition.substr(std::string("ap_v070_direct_r").size());
-                for (const auto& [key, progress] : recipe_state.requests()) {
-                    if (key.rfind("direct/", 0) != 0 || progress.request.origin != origin || !progress.request.physical_units) continue;
-                    const auto& request = progress.request;
-                    auto units = progress.emitted * request.logical_units;
-                    if (request.credit_limit && progress.emitted == request.credit_limit) units -= request.logical_units - request.final_credit_units;
-                    auto& value = credits.units[request.physical_units];
-                    if (value > UINT64_MAX - units) return false;
-                    value += units;
-                }
-            }
-        }
-        if (pending.parent != parent || pending.identifier != actor_identifier(parent)) return false;
         bool waiting = false;
-        for (auto child = checkpoint.children.begin(); child != checkpoint.children.end();) {
-            if (child->second.parent != saved->parent) { ++child; continue; }
-            const auto& role = child->first; auto& record = child->second;
-            const auto key = role.substr(0, role.rfind('/'));
-            const auto& progress = recipe_state.requests().at(key);
-            const auto& frozen = progress.actors.at(role);
-            uintptr_t actor = 0;
-            if (!restore_checkpoint_actor(world, role, record, actor)) return false;
-            if (!actor) { waiting = true; ++child; continue; }
-            if (!direct && !adopt_summon_child(component, actor)) return false;
-            bool bindings_waiting = false;
-            if (!restore_memberships(world, actor, progress.request.logical_mask, frozen.memberships, bindings_waiting)) return false;
-            if (bindings_waiting) { waiting = true; ++child; continue; }
-            summon_children[role] = record;
-            child = checkpoint.children.erase(child);
-        }
+        if (!restore_summon_producer(world, parent, *saved, checkpoint, waiting)) return false;
         if (waiting) { ++saved; continue; }
-        if (!direct) {
-            original_summon_cleanup(component);
-            *reinterpret_cast<uint8_t*>(component + 0x48) = 3;
-            pending.completed = true;
-            for (auto& request : pending.requests) request.completed = true;
-        }
         saved = checkpoint.summons.erase(saved);
     }
     if (checkpoint.summons.empty() && checkpoint.children.empty()) pending_summon_checkpoint.reset();
     return true;
 }
 
+static bool create_pending_summon(uintptr_t component, uintptr_t parent, SummonRequest& request, const RecipeProgress& progress, bool& created, bool& retry) {
+    RecipeCreation creation;
+    const auto previous = worker_recipe; worker_recipe = &request.key;
+    const auto previous_offset = worker_body_offset; worker_body_offset = request.body_offset;
+    bool ready = false;
+    try { ready = begin_recipe_creation(creation, parent, request.origin, progress.request.label); }
+    catch (...) { worker_recipe = previous; worker_body_offset = previous_offset; throw; }
+    worker_recipe = previous; worker_body_offset = previous_offset;
+    if (!ready) { retry = true; return true; }
+    const auto source_index = static_cast<size_t>(creation.emission.ordinal * request.sources.size() /
+        progress.request.maximum_emissions);
+    invoke_summon_creation(&creation, component, &request.sources[source_index]);
+    if (recipe_fault.load(std::memory_order_acquire)) return false;
+    if (!creation.actor) { retry = true; return true; }
+    char parent_name[512];
+    if (!read_instance_name(parent, parent_name) || !*parent_name) return false;
+    auto& child = summon_children[creation.emission.actor];
+    child.parent = parent_name;
+    child.body = *reinterpret_cast<const char**>(creation.body + 8);
+    created = true;
+    return true;
+}
+static bool drain_summon_requests(uintptr_t component, uintptr_t parent, ComponentSummons& pending, bool& created) {
+    for (auto request = pending.requests.begin(); request != pending.requests.end();) {
+        const auto& progress = recipe_state.requests().at(request->key);
+        while (!progress.closed && progress.emitted < progress.request.maximum_emissions) {
+            bool retry = false;
+            if (!create_pending_summon(component, parent, *request, progress, created, retry)) return false;
+            if (retry) break;
+        }
+        if (!progress.closed && progress.emitted < progress.request.maximum_emissions) { ++request; continue; }
+        recipe_state.cancel(request->key);
+        request = pending.requests.erase(request);
+    }
+    return true;
+}
 bool drain_component_summons(uintptr_t component) {
     if (pending_summon_checkpoint) return true;
     const auto found = component_summons.find(component);
@@ -684,33 +806,7 @@ bool drain_component_summons(uintptr_t component) {
         component_summons.erase(found); return true;
     }
     bool created = false;
-    for (auto request = pending.requests.begin(); request != pending.requests.end();) {
-        const auto& progress = recipe_state.requests().at(request->key);
-        while (!progress.closed && progress.emitted < progress.request.maximum_emissions) {
-            RecipeCreation creation;
-            const auto previous = worker_recipe; worker_recipe = &request->key;
-            const auto previous_offset = worker_body_offset; worker_body_offset = request->body_offset;
-            bool ready = false;
-            try { ready = begin_recipe_creation(creation, parent, request->origin, progress.request.label); }
-            catch (...) { worker_recipe = previous; worker_body_offset = previous_offset; throw; }
-            worker_recipe = previous; worker_body_offset = previous_offset;
-            if (!ready) break;
-            const auto source_index = static_cast<size_t>(creation.emission.ordinal * request->sources.size() /
-                progress.request.maximum_emissions);
-            invoke_summon_creation(&creation, component, &request->sources[source_index]);
-            if (recipe_fault.load(std::memory_order_acquire)) return false;
-            if (!creation.actor) break;
-            char parent_name[512];
-            if (!read_instance_name(parent, parent_name) || !*parent_name) return false;
-            auto& child = summon_children[creation.emission.actor];
-            child.parent = parent_name;
-            child.body = *reinterpret_cast<const char**>(creation.body + 8);
-            created = true;
-        }
-        if (!progress.closed && progress.emitted < progress.request.maximum_emissions) { ++request; continue; }
-        recipe_state.cancel(request->key);
-        request = pending.requests.erase(request);
-    }
+    if (!drain_summon_requests(component, parent, pending, created)) return false;
     if (created && pending.completed && *reinterpret_cast<const uint8_t*>(component + 0x48) != 1)
         original_summon_complete(component);
     complete_summon_requests(pending);
@@ -798,6 +894,18 @@ uint64_t create_from_recipe(uintptr_t manager, uintptr_t record, uintptr_t fourt
     return invoke_recipe_creation(&creation, manager, record, fourth, fifth, group, admission);
 }
 
+static bool open_possessed_request(uintptr_t manager, uintptr_t label, const std::string& host_origin, const NativeRecipe& host_recipe, const NativeRecipe& spirit_recipe, std::string& child) {
+    if (child.empty()) {
+        auto& parent = pending_recipes[{manager, host_origin}];
+        std::string label_text;
+        if (!native_cstring(label, label_text, 1024) || (parent.empty() && !open_native_request(manager, host_recipe, label_text, parent)) ||
+            !open_native_request(manager, spirit_recipe, "", child,
+                host_recipe.definition.physical_count ? parent + "/0" : "", parent)) {
+            retry_immediate(manager); return false;
+        }
+    }
+    return true;
+}
 uintptr_t possessed_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t host, uintptr_t label,
                                    uintptr_t spirit, const std::string& host_origin, const std::string& spirit_origin) {
     if (!load_native_recipes()) { if (!recipe_fault.load()) retry_immediate(manager); return output; }
@@ -807,15 +915,7 @@ uintptr_t possessed_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t 
         set_recipe_fault(__func__, __LINE__, "possessed_recipe_invalid", nullptr, 0, manager); retry_immediate(manager); return output;
     }
     auto& child = pending_recipes[{manager, spirit_origin}];
-    if (child.empty()) {
-        auto& parent = pending_recipes[{manager, host_origin}];
-        std::string label_text;
-        if (!native_cstring(label, label_text, 1024) || (parent.empty() && !open_native_request(manager, host_recipe->second, label_text, parent)) ||
-            !open_native_request(manager, spirit_recipe->second, "", child,
-                host_recipe->second.definition.physical_count ? parent + "/0" : "", parent)) {
-            retry_immediate(manager); return output;
-        }
-    }
+    if (!open_possessed_request(manager, label, host_origin, host_recipe->second, spirit_recipe->second, child)) return output;
     const auto parent = recipe_state.requests().at(child).request.parent_request;
     if (pending_recipes.find({manager, host_origin}) != pending_recipes.end()) {
         uintptr_t result = output;

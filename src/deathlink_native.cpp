@@ -94,6 +94,23 @@ bool valid_code_pointer(uintptr_t address) {
     return address >= image_base && address - image_base < image_size;
 }
 
+void trace_lethal_application(uint32_t error, bool damage_called, float health_before, float health_after,
+                              const ApplicationOutcome& outcome) {
+    const bool health_valid =
+        health_before >= 0 && health_before <= 10000 && health_after >= 0 && health_after <= 10000;
+    save::session().btrace.record(save::BStage::deathlink,
+                                  error ? save::BStatus::refused : save::BStatus::succeeded,
+                                  "native_lethal_application", 0,
+                                  {{"damage_called", damage_called},
+                                   {"health_before", health_valid ? static_cast<int>(health_before) : -10001},
+                                   {"health_after", health_valid ? static_cast<int>(health_after) : -10001},
+                                   {"health_valid", health_valid},
+                                   {"true_death_delta", outcome.true_death},
+                                   {"extra_life_delta", outcome.extra_life},
+                                   {"protection", outcome.protection},
+                                   {"native_exception", error}});
+}
+
 uint32_t apply_lethal(void*, uintptr_t p, ApplicationOutcome& outcome) {
     if (!p) return 1;
     uint32_t error = 0;
@@ -135,17 +152,7 @@ uint32_t apply_lethal(void*, uintptr_t p, ApplicationOutcome& outcome) {
         application_active.store(false, std::memory_order_release);
         error = GetExceptionCode();
     }
-    const bool health_valid = health_before >= 0 && health_before <= 10000 &&
-                              health_after >= 0 && health_after <= 10000;
-    save::session().btrace.record(save::BStage::deathlink,
-        error ? save::BStatus::refused : save::BStatus::succeeded,
-        "native_lethal_application", 0,
-        {{"damage_called", damage_called}, {"health_before", health_valid ? static_cast<int>(health_before) : -10001},
-         {"health_after", health_valid ? static_cast<int>(health_after) : -10001},
-         {"health_valid", health_valid},
-         {"true_death_delta", outcome.true_death}, {"extra_life_delta", outcome.extra_life},
-         {"protection", outcome.protection},
-         {"native_exception", error}});
+    trace_lethal_application(error, damage_called, health_before, health_after, outcome);
     return error;
 }
 
@@ -211,14 +218,6 @@ void reload_checkpoint_entry() {
     } __finally { hook_set.leave(lease); }
 }
 
-native::Target target(uintptr_t base, uint32_t offset, const char* hex) {
-    native::Target out{}; out.address = base + offset;
-    const auto digit = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
-    for (size_t n = 0; n < out.bytes.size(); ++n)
-        out.bytes[n] = static_cast<uint8_t>(digit(hex[n * 2]) * 16 + digit(hex[n * 2 + 1]));
-    return out;
-}
-
 bool matches(engine::Memory& memory, const engine::Image& image, const native::Target& t) {
     std::array<uint8_t, 32> actual{};
     const auto rva = static_cast<uint32_t>(t.address - image.base);
@@ -274,9 +273,9 @@ void install(const engine::Binding& binding, HANDLE stop) {
 
     engine::LocalMemory memory;
     const native::Target required[] = {
-        target(image_base, builds::steam_20260818().deathlink[0].rva, builds::steam_20260818().deathlink[0].prefix),
-        target(image_base, builds::steam_20260818().deathlink[1].rva, builds::steam_20260818().deathlink[1].prefix),
-        target(image_base, builds::steam_20260818().deathlink[2].rva, builds::steam_20260818().deathlink[2].prefix),
+        native::target_from_hex(image_base + builds::steam_20260818().deathlink[0].rva, builds::steam_20260818().deathlink[0].prefix),
+        native::target_from_hex(image_base + builds::steam_20260818().deathlink[1].rva, builds::steam_20260818().deathlink[1].prefix),
+        native::target_from_hex(image_base + builds::steam_20260818().deathlink[2].rva, builds::steam_20260818().deathlink[2].prefix),
     };
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets())
@@ -285,12 +284,12 @@ void install(const engine::Binding& binding, HANDLE stop) {
 
     const auto deadline = GetTickCount64() + 10000;
     const native::Target hooks[] = {
-        target(image_base, builds::steam_20260818().deathlink[3].rva, builds::steam_20260818().deathlink[3].prefix),
-        target(image_base, builds::steam_20260818().deathlink[4].rva, builds::steam_20260818().deathlink[4].prefix),
-        target(image_base, builds::steam_20260818().deathlink[5].rva, builds::steam_20260818().deathlink[5].prefix),
-        target(image_base, builds::steam_20260818().deathlink[6].rva, builds::steam_20260818().deathlink[6].prefix),
-        target(image_base, builds::steam_20260818().deathlink[7].rva, builds::steam_20260818().deathlink[7].prefix),
-        target(image_base, builds::steam_20260818().deathlink[8].rva, builds::steam_20260818().deathlink[8].prefix),
+        native::target_from_hex(image_base + builds::steam_20260818().deathlink[3].rva, builds::steam_20260818().deathlink[3].prefix),
+        native::target_from_hex(image_base + builds::steam_20260818().deathlink[4].rva, builds::steam_20260818().deathlink[4].prefix),
+        native::target_from_hex(image_base + builds::steam_20260818().deathlink[5].rva, builds::steam_20260818().deathlink[5].prefix),
+        native::target_from_hex(image_base + builds::steam_20260818().deathlink[6].rva, builds::steam_20260818().deathlink[6].prefix),
+        native::target_from_hex(image_base + builds::steam_20260818().deathlink[7].rva, builds::steam_20260818().deathlink[7].prefix),
+        native::target_from_hex(image_base + builds::steam_20260818().deathlink[8].rva, builds::steam_20260818().deathlink[8].prefix),
     };
     for (const auto& t : hooks) if (native::validate_target(memory, binding.image, t, stop, deadline)) return;
     hooks::HookSpec specs[3]{
@@ -299,7 +298,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
     size_t count=2;
     if (save::session().campaign_run.snapshot().restart_enabled) {
         const auto& site=builds::steam_20260818().deathlink[9];
-        const auto reload=target(image_base,site.rva,site.prefix);
+        const auto reload=native::target_from_hex(image_base + site.rva, site.prefix);
         if (native::validate_target(memory,binding.image,reload,stop,deadline)) return;
         specs[count++]=hooks::bind(reload.address,reload_checkpoint_entry,original_reload_checkpoint);
     }

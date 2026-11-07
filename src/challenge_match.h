@@ -1,6 +1,3 @@
-// Pure suppression predicate for the hardcoded campaign mission challenge
-// Sentinel Battery grant. Facts only; every native read, admission check and
-// lifetime comparison is supplied by the caller so the contract stays testable.
 #pragma once
 #include <cstdint>
 
@@ -37,8 +34,7 @@ struct CallFacts {
     uint8_t notify = 0;
 };
 
-// match the exact player, map, thread and epoch, all three scanned campaign members, the caller/return site and currency arguments
-inline const char* suppression_mismatch(const ScopeFacts& scope, const CallFacts& call) {
+inline const char* scope_mismatch(const ScopeFacts& scope) {
     if (!scope.active) return "active";
     if (!scope.admitted) return "admitted";
     if (!scope.map_qualified) return "map_qualified";
@@ -47,6 +43,12 @@ inline const char* suppression_mismatch(const ScopeFacts& scope, const CallFacts
     if (!scope.epoch) return "epoch";
     if (!scope.thread) return "scope_thread";
     if (!scope.player || !scope.map) return "scope_player_map";
+    return nullptr;
+}
+
+// and currency arguments
+inline const char* suppression_mismatch(const ScopeFacts& scope, const CallFacts& call) {
+    if (const auto reason = scope_mismatch(scope)) return reason;
     if (!call.admitted || !call.session_admitted) return "call_admission";
     if (call.thread != scope.thread || call.epoch != scope.epoch ||
         call.player != scope.player || call.map != scope.map) return "call_identity";

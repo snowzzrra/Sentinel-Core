@@ -42,11 +42,8 @@ bool identifier(std::string_view value, bool path = false) {
               (c >= '0' && c <= '9') || c == '_' || c == '-' || (path && c == '/'))) return false;
     return true;
 }
-uint32_t kind(std::string_view text) {
-    if (text.empty() || text.size() >= SC_COMMAND_TEXT_CAPACITY) return 0;
-    for (const unsigned char c : text) if (c < 32 || c > 126 || c == ';' || c == '"' || c == '\\') return 0;
-    if (text.substr(0, 5) == "echo ") return text.size() > 5 ? SC_COMMAND_ECHO : 0;
-    std::array<std::string_view, 5> words{};
+using CommandWords=std::array<std::string_view,5>;
+size_t command_words(std::string_view text,CommandWords& words) {
     size_t count = 0, start = 0;
     while (start < text.size()) {
         if (count == words.size()) return 0;
@@ -57,23 +54,22 @@ uint32_t kind(std::string_view text) {
         start = end + 1;
         if (start == text.size()) return 0;
     }
-    if (text == "give ammo") return SC_COMMAND_AMMO_REFILL;
-    if (text == "judgementMeter_Set 3") return SC_COMMAND_CRUCIBLE_REFILL;
-    if (text == "listInventory player1") return SC_COMMAND_LIST_INVENTORY;
-    if (count == 2 && (words[0] == "g_damageScaleAllToAI" || words[0] == "g_damageScaleAllToSlayer" || words[0] == "g_infiniteAmmo")) {
-        double value = 0;
-        const auto number = words[1];
-        const auto parsed = std::from_chars(number.data(), number.data() + number.size(), value);
-        if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size() || !std::isfinite(value)) return 0;
-        if (words[0] == "g_infiniteAmmo") return number == "0" || number == "1" ? SC_COMMAND_TRANSIENT_POLICY : 0;
-        return value >= 0.01 && value <= 100.0 ? SC_COMMAND_TRANSIENT_POLICY : 0;
-    }
-    if (count == 2 && words[0] == "condump") {
-        const auto file = words[1];
-        if (file.size() < 8 || file.size() > 128 || file.substr(0, 3) != "AP_" ||
-            file.substr(file.size() - 4) != ".txt") return 0;
-        return identifier(file.substr(0, file.size() - 4)) ? SC_COMMAND_CONDUMP : 0;
-    }
+    return count;
+}
+uint32_t policy_kind(const CommandWords& words) {
+    double value = 0;
+    const auto number = words[1];
+    const auto parsed = std::from_chars(number.data(), number.data() + number.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size() || !std::isfinite(value)) return 0;
+    if (words[0] == "g_infiniteAmmo") return number == "0" || number == "1" ? SC_COMMAND_TRANSIENT_POLICY : 0;
+    return value >= 0.01 && value <= 100.0 ? SC_COMMAND_TRANSIENT_POLICY : 0;
+}
+uint32_t condump_kind(std::string_view file) {
+    if (file.size() < 8 || file.size() > 128 || file.substr(0, 3) != "AP_" ||
+        file.substr(file.size() - 4) != ".txt") return 0;
+    return identifier(file.substr(0, file.size() - 4)) ? SC_COMMAND_CONDUMP : 0;
+}
+uint32_t script_kind(const CommandWords& words,size_t count) {
     if (count >= 3 && words[0] == "ai_ScriptCmdEnt" && identifier(words[1])) {
         if (words[2] == "activate" && (count == 3 || (count == 4 && words[3] == "player1")))
             return SC_COMMAND_ACTIVATE;
@@ -81,6 +77,42 @@ uint32_t kind(std::string_view text) {
             return SC_COMMAND_PLAYER_PERK;
     }
     return 0;
+}
+bool command_text(std::string_view text) {
+    if (text.empty() || text.size()>=SC_COMMAND_TEXT_CAPACITY) return false;
+    for (const unsigned char c:text) if (c<32 || c>126 || c==';' || c=='"' || c=='\\') return false;
+    return true;
+}
+uint32_t kind(std::string_view text) {
+    if (!command_text(text)) return 0;
+    if (text.substr(0,5)=="echo ") return text.size()>5 ? SC_COMMAND_ECHO : 0;
+    CommandWords words{};
+    const auto count=command_words(text,words);
+    if (!count) return 0;
+    if (text=="give ammo") return SC_COMMAND_AMMO_REFILL;
+    if (text=="judgementMeter_Set 3") return SC_COMMAND_CRUCIBLE_REFILL;
+    if (text=="listInventory player1") return SC_COMMAND_LIST_INVENTORY;
+    if (count==2) {
+        constexpr std::string_view policies[]={"g_damageScaleAllToAI","g_damageScaleAllToSlayer","g_infiniteAmmo"};
+        for (const auto policy:policies) if (words[0]==policy) return policy_kind(words);
+        if (words[0]=="condump") return condump_kind(words[1]);
+    }
+    return script_kind(words,count);
+}
+uint32_t noclip_kind(int argc,const char* const* argv) {
+    uint32_t kind=0;
+    if (argc == 1) kind = 1;
+    else if (argc == 2 && (std::string_view(argv[1]) == "off" || std::string_view(argv[1]) == "0")) kind = 2;
+    else if (argc == 2 && (std::string_view(argv[1]) == "on" || std::string_view(argv[1]) == "1")) kind = 3;
+    return kind;
+}
+bool spawn_position(const char* const* argv,float (&position)[3]) {
+    for (size_t i=0;i<3;++i) {
+        const std::string_view text=argv[i+2];
+        const auto parsed=std::from_chars(text.data(),text.data()+text.size(),position[i]);
+        if (parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size() || !std::isfinite(position[i])) return false;
+    }
+    return true;
 }
 }
 bool parse(std::string_view text, sc_command_request& request) {
@@ -96,20 +128,14 @@ bool parse_manual(int argc, const char* const* argv, ManualRequest& out) {
     if (argc < 1 || argc > 5 || !argv) return false;
     for (int i = 0; i < argc; ++i) if (!argv[i]) return false;
     const std::string_view command = argv[0];
-    if (command == "noclip") {
-        if (argc == 1) out.kind = 1;
-        else if (argc == 2 && (std::string_view(argv[1]) == "off" || std::string_view(argv[1]) == "0")) out.kind = 2;
-        else if (argc == 2 && (std::string_view(argv[1]) == "on" || std::string_view(argv[1]) == "1")) out.kind = 3;
-        return out.kind != 0;
+    if (command=="noclip") {
+        out.kind=noclip_kind(argc,argv);
+        return out.kind!=0;
     }
     if (command != "chrispy" || (argc != 2 && argc != 5) || !identifier(argv[1], true)) return false;
     out.kind = 4; std::memcpy(out.entity_def, argv[1], std::strlen(argv[1]) + 1);
     out.explicit_position = argc == 5;
-    if (out.explicit_position) for (size_t i = 0; i < 3; ++i) {
-        const std::string_view text = argv[i + 2];
-        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), out.position[i]);
-        if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || !std::isfinite(out.position[i])) return false;
-    }
+    if (out.explicit_position && !spawn_position(argv,out.position)) return false;
     return true;
 }
 bool valid(const sc_command_request& request) {

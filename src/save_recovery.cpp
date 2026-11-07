@@ -172,111 +172,88 @@ bool recovery_checkpoint_matches(const storage::TransportMetadata& source, const
         return false;
     return true;
 }
-RecoveryResult recover_campaign(storage::Namespace& lease,const storage::Descriptor& descriptor,const RecoveryTransport& t) {
-    RecoveryResult result;
-    const auto refuse=[&](const char* why) { result.reason=why; return result; };
-    if (descriptor.campaign.intent!=storage::CampaignIntent::recover || descriptor.campaign.recovery_basename.empty()) return refuse("recovery_explicit_archive_required");
-    std::string old_journal;
-    auto r=lease.recovery_record(false,old_journal);
-    if(r.ok() || r.win32_error!=ERROR_FILE_NOT_FOUND) return refuse("recovery_previous_attempt_requires_review");
-    if(!t.remote || !t.owner || !t.write || !t.read || !t.exists || !t.size || !t.count || !t.name) return refuse("recovery_provider_unavailable");
-    const auto user=t.owner(t.remote);
-    std::unique_ptr<storage::TransportArchive> archive;
-    const auto& basename=descriptor.campaign.recovery_basename;
-    if(!lease.reopen_transport(std::wstring(basename.begin(),basename.end()),archive).ok()) return refuse("recovery_archive_verification_failed");
-    const auto& source=archive->metadata();
-    const auto id=lease.metadata().namespace_id;
-    const auto directory=lease.metadata().native_root+"/GAME-AUTOSAVE0";
-    const auto contract=campaign_contract(descriptor,id);
-    std::string current_contract,current_record;
-    if(!user || source.steam_user!=user || source.provider!=recovery_provider || source.quarantine) return refuse("recovery_native_user_or_provider_mismatch");
+static bool recovery_failure(RecoveryResult& result, const char* reason) { result.reason = reason; return false; }
+static bool recovery_provider_available(const RecoveryTransport& t) {
+    return t.remote && t.owner && t.write && t.read && t.exists && t.size && t.count && t.name;
+}
+struct RecoveryOwnership {
+    const RecoveryTransport& t; uint64_t user; const std::string& marker; const std::string& ownership; const std::string& directory;
+    bool matches() const {
+        std::string bytes(ownership.size(), '\0');
+        return t.owner(t.remote) == user && t.size(t.remote, marker.c_str()) == static_cast<int32_t>(bytes.size()) &&
+            t.read(t.remote, marker.c_str(), bytes.data(), static_cast<int32_t>(bytes.size())) == static_cast<int32_t>(bytes.size()) && bytes == ownership;
+    }
+};
+static bool validate_recovery_archive(const storage::Descriptor& descriptor, storage::Namespace& lease, const storage::TransportMetadata& source, uint64_t user, const std::string& contract, const std::string& directory, Checkpoint& saved, RecoveryResult& result) {
+    std::string current_contract;
+    if(!user || source.steam_user!=user || source.provider!=recovery_provider || source.quarantine) return recovery_failure(result, "recovery_native_user_or_provider_mismatch");
     if(descriptor.campaign.difficulty>3 || source.contract!=contract || source.directory!=directory ||
-        !lease.campaign_record(false,current_contract).ok() || current_contract!=contract) return refuse("recovery_contract_or_options_mismatch");
-    Checkpoint saved;
+        !lease.campaign_record(false,current_contract).ok() || current_contract!=contract) return recovery_failure(result, "recovery_contract_or_options_mismatch");
     if (!recovery_checkpoint_matches(source, contract, directory, saved))
-        return refuse("recovery_archive_checkpoint_mismatch");
-    const auto marker=lease.metadata().native_root+"/sentinel-owner-"+id+".txt";
-    const auto& identity=descriptor.identity;
-    const auto ownership="sentinel-native-session-v1\nnamespace_id="+id+"\nseed_hex="+hex(identity.seed)+"\nteam="+std::to_string(*identity.team)+
-        "\nslot="+std::to_string(*identity.slot)+"\ngeneration_fingerprint="+identity.generation_fingerprint+"\nprovenance=synthetic-fixture\n";
-    const auto owned=[&] {
-        std::string bytes(ownership.size(),'\0');
-        return t.owner(t.remote)==user && t.size(t.remote,marker.c_str())==static_cast<int32_t>(bytes.size()) &&
-            t.read(t.remote,marker.c_str(),bytes.data(),static_cast<int32_t>(bytes.size()))==static_cast<int32_t>(bytes.size()) && bytes==ownership;
-    };
-    if(!owned()) return refuse("recovery_native_marker_mismatch");
-    const auto selection_key=lease.metadata().native_root+"/sentinel-selection-GAME.txt";
-    std::string previous_selection;
-    const bool had_selection=t.exists(t.remote,selection_key.c_str());
+        return recovery_failure(result, "recovery_archive_checkpoint_mismatch");
+    return true;
+}
+static bool read_recovery_selection(const RecoveryTransport& t, const std::string& selection_key, bool had_selection, std::string& previous_selection, RecoveryResult& result) {
     if(had_selection) {
         const auto length=t.size(t.remote,selection_key.c_str());
-        if(length<=0 || length>2048) return refuse("recovery_selection_unavailable");
+        if(length<=0 || length>2048) return recovery_failure(result, "recovery_selection_unavailable");
         previous_selection.resize(static_cast<size_t>(length));
-        if(t.read(t.remote,selection_key.c_str(),previous_selection.data(),length)!=length) return refuse("recovery_selection_unavailable");
+        if(t.read(t.remote,selection_key.c_str(),previous_selection.data(),length)!=length) return recovery_failure(result, "recovery_selection_unavailable");
     }
-    storage::TransportMetadata current=source; Payloads before;
-    if(!capture(t,directory,current,before)) return refuse("recovery_target_inventory_unavailable_or_unknown");
-    r=lease.campaign_record(true,current_record);
-    if(!r.ok() && r.win32_error!=ERROR_FILE_NOT_FOUND) return refuse("recovery_target_metadata_unavailable");
-    storage::CheckpointPlan ab_plan;
-    const bool ab=current_record=="sentinel-checkpoint-ab-v1\n";
-    if (ab) {
-        if (!lease.checkpoint_plan(descriptor,ab_plan).ok() || ab_plan.text.empty()) return refuse("recovery_target_metadata_unavailable");
-        current_record=ab_plan.text;
-    }
-    Checkpoint target;
-    const bool recorded=checkpoint(current_record,contract,directory,target);
-    // A normal retail write owns the primary pair. Native rotation can leave
-    // a separate BACKUP pair which that operation/continuity never claimed.
-    // Keep these opaque bytes: quarantine and recheck the FULL inventory, but
-    // classify/restore only the operation's files. Never infer backup validity.
-    auto tracked=current, expected_after=source;
-    if (!preserve_recovery_auxiliaries(source, recorded, target, current, tracked, expected_after, result))
-        return refuse("recovery_auxiliary_pair_incomplete");
-    const bool valid=recorded && matches(target,tracked);
-    const bool same=equal(source,tracked);
-    if(recorded && target.number>saved.number) { result.state=RecoveryState::newer; return refuse("recovery_newer_recorded_progress"); }
-    if(valid && same && current_record==source.checkpoint) {
-        result.state=RecoveryState::same; result.complete=true; result.reason="recovery_already_exact"; return result;
-    }
-    if(valid && target.number==saved.number) { result.state=RecoveryState::conflict; return refuse("recovery_valid_ordering_conflict"); }
-    result.state=valid?RecoveryState::older:tracked.files.size()<source.files.size()?RecoveryState::missing_incomplete:RecoveryState::corrupt_unknown;
+    return true;
+}
+static bool recovery_subset_known(bool valid, bool recorded, const storage::TransportMetadata& tracked, const Checkpoint& target, RecoveryResult& result) {
     if(!valid && !tracked.files.empty()) {
         bool known_subset=recorded && tracked.files.size()<target.files.size();
         for(const auto& f:tracked.files) {
             const auto expected=target.files.find(f.name);
             known_subset=known_subset && expected!=target.files.end() && expected->second==std::make_pair(f.size,hash(f));
         }
-        if(!known_subset) { result.state=RecoveryState::corrupt_unknown; return refuse("recovery_unknown_requires_conflict_decision"); }
+        if(!known_subset) { result.state=RecoveryState::corrupt_unknown; return recovery_failure(result, "recovery_unknown_requires_conflict_decision"); }
     }
+    return true;
+}
+static bool recovery_requires_write(const storage::TransportMetadata& source, const storage::TransportMetadata& tracked, bool recorded, const Checkpoint& target, const Checkpoint& saved, const std::string& current_record, RecoveryResult& result) {
+    const bool valid=recorded && matches(target,tracked);
+    const bool same=equal(source,tracked);
+    if(recorded && target.number>saved.number) { result.state=RecoveryState::newer; return recovery_failure(result, "recovery_newer_recorded_progress"); }
+    if(valid && same && current_record==source.checkpoint) {
+        result.state=RecoveryState::same; result.complete=true; result.reason="recovery_already_exact"; return false;
+    }
+    if(valid && target.number==saved.number) { result.state=RecoveryState::conflict; return recovery_failure(result, "recovery_valid_ordering_conflict"); }
+    result.state=valid?RecoveryState::older:tracked.files.size()<source.files.size()?RecoveryState::missing_incomplete:RecoveryState::corrupt_unknown;
+    if (!recovery_subset_known(valid, recorded, tracked, target, result)) return false;
     // No deletion API: unknown/extra files are never swept away. A complete
     // source must cover every tracked target file before any write is possible.
     // Any untracked native auxiliary pair remains byte-identical in expected.
-    for(const auto& f:tracked.files) if(std::none_of(source.files.begin(),source.files.end(),[&](const auto& s){return s.name==f.name;})) return refuse("recovery_target_extra_payload_conflict");
-    Payloads replacement;
+    for(const auto& f:tracked.files) if(std::none_of(source.files.begin(),source.files.end(),[&](const auto& s){return s.name==f.name;})) return recovery_failure(result, "recovery_target_extra_payload_conflict");
+    return true;
+}
+static bool stage_recovery_payloads(storage::TransportArchive& archive, const storage::TransportMetadata& source, Payloads& replacement, RecoveryResult& result) {
     for(size_t i=0;i<source.files.size();++i) {
         std::string bytes(source.files[i].size,'\0');
-        if(!archive->read(i,0,bytes.data(),source.files[i].size).ok()) return refuse("recovery_staging_failed");
+        if(!archive.read(i,0,bytes.data(),source.files[i].size).ok()) return recovery_failure(result, "recovery_staging_failed");
         replacement.bytes.push_back(std::move(bytes));
     }
-    current.checkpoint=current_record;
+    return true;
+}
+static bool quarantine_recovery_target(storage::Namespace& lease, const storage::TransportMetadata& current, Payloads& before, RecoveryResult& result) {
     if(!current.files.empty()) {
         storage::Backup quarantine;
         auto evidence=current; evidence.quarantine=true; evidence.operation_id=0; evidence.process_id=GetCurrentProcessId();
         FILETIME created{},exit{},kernel{},cpu{};
-        if(!GetProcessTimes(GetCurrentProcess(),&created,&exit,&kernel,&cpu)) return refuse("recovery_quarantine_process_identity_failed");
+        if(!GetProcessTimes(GetCurrentProcess(),&created,&exit,&kernel,&cpu)) return recovery_failure(result, "recovery_quarantine_process_identity_failed");
         evidence.process_created=(uint64_t(created.dwHighDateTime)<<32)|created.dwLowDateTime;
-        if(!lease.backup_transport(evidence,Payloads::read,&before,quarantine).ok()) return refuse("recovery_quarantine_failed");
+        if(!lease.backup_transport(evidence,Payloads::read,&before,quarantine).ok()) return recovery_failure(result, "recovery_quarantine_failed");
         result.quarantine=quarantine.path;
         const auto leaf=result.quarantine.substr(result.quarantine.find_last_of(L"\\/")+1);
         std::unique_ptr<storage::TransportArchive> verified;
-        if(!lease.reopen_transport(leaf,verified).ok() || !equal(verified->metadata(),current)) return refuse("recovery_quarantine_verification_failed");
+        if(!lease.reopen_transport(leaf,verified).ok() || !equal(verified->metadata(),current)) return recovery_failure(result, "recovery_quarantine_verification_failed");
     }
-    const auto leaf=result.quarantine.substr(result.quarantine.find_last_of(L"\\/")+1);
-    std::string quarantine_basename; for(const auto c:leaf) quarantine_basename+=static_cast<char>(c);
-    const auto journal="sentinel-recovery-v1\nnamespace="+id+"\nbackup="+basename+"\nquarantine="+quarantine_basename+
-        "\nprevious_checkpoint_hex="+hex(current_record)+"\nprevious_selection_present="+(had_selection?"1":"0")+
-        "\nprevious_selection_hex="+hex(previous_selection)+"\n";
+    return true;
+}
+static bool recovery_target_unchanged(storage::Namespace& lease, const RecoveryOwnership& owned, const storage::TransportMetadata& source, const storage::TransportMetadata& current, const std::string& current_record, const storage::Result& r, bool ab, const storage::CheckpointPlan& ab_plan, const std::string& selection_key, bool had_selection, const std::string& previous_selection, RecoveryResult& result) {
+    const auto& t = owned.t; const auto& directory = owned.directory;
     // Re-observe after staging/quarantine, still before the durable write-ahead
     // barrier. No native campaign job exists at this qualified startup boundary.
     storage::TransportMetadata check=source; Payloads check_bytes;
@@ -284,31 +261,133 @@ RecoveryResult recover_campaign(storage::Namespace& lease,const storage::Descrip
     const auto checked=lease.campaign_record(true,check_record);
     if (ab && check_record=="sentinel-checkpoint-ab-v1\n") check_record=ab_plan.text;
     std::string selection_before(previous_selection.size(),'\0');
-    if(!owned() || !capture(t,directory,check,check_bytes) || !equal(check,current) ||
+    if(!owned.matches() || !capture(t,directory,check,check_bytes) || !equal(check,current) ||
         (checked.ok()!=r.ok()) || check_record!=current_record || t.exists(t.remote,selection_key.c_str())!=had_selection ||
         (had_selection && (t.size(t.remote,selection_key.c_str())!=static_cast<int32_t>(previous_selection.size()) ||
             t.read(t.remote,selection_key.c_str(),selection_before.data(),static_cast<int32_t>(selection_before.size()))!=static_cast<int32_t>(selection_before.size()) ||
-            selection_before!=previous_selection))) return refuse("recovery_concurrent_target_change");
-    if(!lease.publish_recovery_record(false,journal).ok()) return refuse("recovery_journal_failed");
+            selection_before!=previous_selection))) return recovery_failure(result, "recovery_concurrent_target_change");
+    return true;
+}
+static bool write_recovery_payloads(const RecoveryOwnership& owned, const storage::TransportMetadata& source, const storage::TransportMetadata& expected_after, const Payloads& replacement, RecoveryResult& result) {
+    const auto& t = owned.t; const auto& directory = owned.directory;
+    storage::TransportMetadata check = source; Payloads check_bytes;
     for(size_t i=0;i<source.files.size();++i) {
-        if(!owned()) return refuse("recovery_provider_changed_during_transaction");
+        if(!owned.matches()) return recovery_failure(result, "recovery_provider_changed_during_transaction");
         const auto key=directory+"/"+source.files[i].name;
         result.mutated=true;
-        if(!t.write(t.remote,key.c_str(),replacement.bytes[i].data(),static_cast<int32_t>(replacement.bytes[i].size()))) return refuse("recovery_native_write_failed");
+        if(!t.write(t.remote,key.c_str(),replacement.bytes[i].data(),static_cast<int32_t>(replacement.bytes[i].size()))) return recovery_failure(result, "recovery_native_write_failed");
     }
-    if(!owned() || !capture(t,directory,check,check_bytes) || !equal(expected_after,check)) return refuse("recovery_target_verification_failed");
+    if(!owned.matches() || !capture(t,directory,check,check_bytes) || !equal(expected_after,check)) return recovery_failure(result, "recovery_target_verification_failed");
+    return true;
+}
+static bool write_recovery_selection(const RecoveryOwnership& owned, const std::string& id, const std::string& selection_key, RecoveryResult& result) {
+    const auto& t = owned.t;
     const auto selection="sentinel-native-selection-v1\nnamespace_id="+id+"\ncampaign=GAME-\nname=AUTOSAVE0\n";
-    if(!t.write(t.remote,selection_key.c_str(),selection.data(),static_cast<int32_t>(selection.size()))) return refuse("recovery_selection_failed");
+    if(!t.write(t.remote,selection_key.c_str(),selection.data(),static_cast<int32_t>(selection.size()))) return recovery_failure(result, "recovery_selection_failed");
     std::string selection_check(selection.size(),'\0');
     if(t.size(t.remote,selection_key.c_str())!=static_cast<int32_t>(selection.size()) ||
         t.read(t.remote,selection_key.c_str(),selection_check.data(),static_cast<int32_t>(selection.size()))!=static_cast<int32_t>(selection.size()) ||
-        selection_check!=selection || !owned()) return refuse("recovery_selection_verification_failed");
+        selection_check!=selection || !owned.matches()) return recovery_failure(result, "recovery_selection_verification_failed");
+    return true;
+}
+static bool publish_recovery_checkpoint(storage::Namespace& lease, const storage::Descriptor& descriptor, uint64_t user, const std::string& basename, const storage::TransportMetadata& source, const Checkpoint& saved, bool ab, const storage::CheckpointPlan& ab_plan, const storage::Result& r, RecoveryResult& result) {
     if (ab && source.checkpoint!=ab_plan.text) {
         storage::CheckpointWrite next;
         if (!lease.begin_checkpoint(descriptor,user,next).ok() || next.number!=saved.number ||
             !lease.stage_checkpoint(next,std::wstring(basename.begin(),basename.end())).ok() ||
-            !lease.receipt_checkpoint(next).ok() || !lease.commit_checkpoint(next).ok()) return refuse("recovery_continuity_publication_failed");
-    } else if (!ab && !lease.publish_campaign_record(true,source.checkpoint,!r.ok()).ok()) return refuse("recovery_continuity_publication_failed");
+            !lease.receipt_checkpoint(next).ok() || !lease.commit_checkpoint(next).ok()) return recovery_failure(result, "recovery_continuity_publication_failed");
+    } else if (!ab && !lease.publish_campaign_record(true,source.checkpoint,!r.ok()).ok()) return recovery_failure(result, "recovery_continuity_publication_failed");
+    return true;
+}
+static bool open_recovery_archive(const storage::Descriptor& descriptor, storage::Namespace& lease, const RecoveryTransport& t, std::unique_ptr<storage::TransportArchive>& archive, uint64_t& user, RecoveryResult& result) {
+    if (descriptor.campaign.intent!=storage::CampaignIntent::recover || descriptor.campaign.recovery_basename.empty()) return recovery_failure(result, "recovery_explicit_archive_required");
+    std::string old_journal;
+    auto r=lease.recovery_record(false,old_journal);
+    if(r.ok() || r.win32_error!=ERROR_FILE_NOT_FOUND) return recovery_failure(result, "recovery_previous_attempt_requires_review");
+    if(!recovery_provider_available(t)) return recovery_failure(result, "recovery_provider_unavailable");
+    user=t.owner(t.remote);
+    const auto& basename=descriptor.campaign.recovery_basename;
+    if(!lease.reopen_transport(std::wstring(basename.begin(),basename.end()),archive).ok()) return recovery_failure(result, "recovery_archive_verification_failed");
+    return true;
+}
+static bool read_recovery_checkpoint(storage::Namespace& lease, const storage::Descriptor& descriptor, const storage::Result& r, std::string& current_record, bool& ab, storage::CheckpointPlan& ab_plan, RecoveryResult& result) {
+    if(!r.ok() && r.win32_error!=ERROR_FILE_NOT_FOUND) return recovery_failure(result, "recovery_target_metadata_unavailable");
+    ab=current_record=="sentinel-checkpoint-ab-v1\n";
+    if (ab) {
+        if (!lease.checkpoint_plan(descriptor,ab_plan).ok() || ab_plan.text.empty()) return recovery_failure(result, "recovery_target_metadata_unavailable");
+        current_record=ab_plan.text;
+    }
+    return true;
+}
+struct RecoveryTarget {
+    storage::TransportMetadata current, expected_after;
+    Payloads before;
+    std::string record;
+    storage::Result status;
+    storage::CheckpointPlan plan;
+    bool ab = false;
+};
+static bool inspect_recovery_target(const storage::Descriptor& descriptor, storage::Namespace& lease, const RecoveryTransport& t, const storage::TransportMetadata& source, const std::string& contract, const std::string& directory, const Checkpoint& saved, RecoveryTarget& state, RecoveryResult& result) {
+    auto& current = state.current; auto& expected_after = state.expected_after; auto& before = state.before;
+    auto& current_record = state.record; auto& r = state.status; auto& ab_plan = state.plan; auto& ab = state.ab;
+    current = source; expected_after = source;
+    if(!capture(t,directory,current,before)) return recovery_failure(result, "recovery_target_inventory_unavailable_or_unknown");
+    r=lease.campaign_record(true,current_record);
+    if (!read_recovery_checkpoint(lease, descriptor, r, current_record, ab, ab_plan, result)) return false;
+    Checkpoint target;
+    const bool recorded=checkpoint(current_record,contract,directory,target);
+    // A normal retail write owns the primary pair. Native rotation can leave
+    // a separate BACKUP pair which that operation/continuity never claimed.
+    // Keep these opaque bytes: quarantine and recheck the FULL inventory, but
+    // classify/restore only the operation's files. Never infer backup validity.
+    auto tracked=current;
+    if (!preserve_recovery_auxiliaries(source, recorded, target, current, tracked, expected_after, result))
+        return recovery_failure(result, "recovery_auxiliary_pair_incomplete");
+    if (!recovery_requires_write(source, tracked, recorded, target, saved, current_record, result)) return false;
+    return true;
+}
+static std::string recovery_journal(const std::string& id, const std::string& basename, const std::wstring& quarantine, const std::string& previous_record, bool had_selection, const std::string& previous_selection) {
+    const auto leaf=quarantine.substr(quarantine.find_last_of(L"\\/")+1);
+    std::string quarantine_basename; for(const auto c:leaf) quarantine_basename+=static_cast<char>(c);
+    const auto journal="sentinel-recovery-v1\nnamespace="+id+"\nbackup="+basename+"\nquarantine="+quarantine_basename+
+        "\nprevious_checkpoint_hex="+hex(previous_record)+"\nprevious_selection_present="+(had_selection?"1":"0")+
+        "\nprevious_selection_hex="+hex(previous_selection)+"\n";
+    return journal;
+}
+RecoveryResult recover_campaign(storage::Namespace& lease,const storage::Descriptor& descriptor,const RecoveryTransport& t) {
+    RecoveryResult result;
+    const auto refuse=[&](const char* why) { result.reason=why; return result; };
+    std::unique_ptr<storage::TransportArchive> archive; uint64_t user = 0;
+    if (!open_recovery_archive(descriptor, lease, t, archive, user, result)) return result;
+    const auto& basename = descriptor.campaign.recovery_basename;
+    const auto& source=archive->metadata();
+    const auto id=lease.metadata().namespace_id;
+    const auto directory=lease.metadata().native_root+"/GAME-AUTOSAVE0";
+    const auto contract=campaign_contract(descriptor,id);
+    Checkpoint saved;
+    if (!validate_recovery_archive(descriptor, lease, source, user, contract, directory, saved, result)) return result;
+    const auto marker=lease.metadata().native_root+"/sentinel-owner-"+id+".txt";
+    const auto& identity=descriptor.identity;
+    const auto ownership="sentinel-native-session-v1\nnamespace_id="+id+"\nseed_hex="+hex(identity.seed)+"\nteam="+std::to_string(*identity.team)+
+        "\nslot="+std::to_string(*identity.slot)+"\ngeneration_fingerprint="+identity.generation_fingerprint+"\nprovenance=synthetic-fixture\n";
+    RecoveryOwnership owned{t, user, marker, ownership, directory};
+    if(!owned.matches()) return refuse("recovery_native_marker_mismatch");
+    const auto selection_key=lease.metadata().native_root+"/sentinel-selection-GAME.txt";
+    std::string previous_selection;
+    const bool had_selection=t.exists(t.remote,selection_key.c_str());
+    if (!read_recovery_selection(t, selection_key, had_selection, previous_selection, result)) return result;
+    RecoveryTarget target;
+    if (!inspect_recovery_target(descriptor, lease, t, source, contract, directory, saved, target, result)) return result;
+    Payloads replacement;
+    if (!stage_recovery_payloads(*archive, source, replacement, result)) return result;
+    target.current.checkpoint=target.record;
+    if (!quarantine_recovery_target(lease, target.current, target.before, result)) return result;
+    const auto journal = recovery_journal(id, basename, result.quarantine, target.record, had_selection, previous_selection);
+    if (!recovery_target_unchanged(lease, owned, source, target.current, target.record, target.status, target.ab, target.plan, selection_key, had_selection, previous_selection, result)) return result;
+    if(!lease.publish_recovery_record(false,journal).ok()) return refuse("recovery_journal_failed");
+    if (!write_recovery_payloads(owned, source, target.expected_after, replacement, result)) return result;
+    if (!write_recovery_selection(owned, id, selection_key, result)) return result;
+    if (!publish_recovery_checkpoint(lease, descriptor, user, basename, source, saved, target.ab, target.plan, target.status, result)) return result;
     if(!lease.publish_recovery_record(true,journal).ok()) return refuse("recovery_completion_publication_failed");
     result.complete=true; result.reason="recovery_native_payload_verified"; return result;
 }

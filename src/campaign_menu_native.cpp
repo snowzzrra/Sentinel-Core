@@ -23,8 +23,7 @@ namespace sentinel::campaign_menu {
 namespace {
 decltype(&MH_EnableHook) menu_enable_operation = MH_EnableHook;
 MH_STATUS WINAPI enable_menu_hook(void* target) { return menu_enable_operation(target); }
-hooks::HookSet menu_hooks("campaign_menu", {MH_CreateHook, enable_menu_hook, MH_DisableHook, MH_RemoveHook},
-    &save::session().installation, 6);
+hooks::HookSet menu_hooks("campaign_menu", {MH_CreateHook, enable_menu_hook, MH_DisableHook, MH_RemoveHook}, &save::session().installation, 6);
 using Populate=void(*)(uintptr_t,uintptr_t);
 using Update=void(*)(uintptr_t);
 using Load=void(*)(uintptr_t,int);
@@ -112,9 +111,7 @@ std::atomic<uint64_t> meter_update_suppressed{0};
 std::atomic<uint64_t> meter_update_delegated{0};
 std::atomic<uint64_t> ap_meter_retire_count{0};
 void retire_ap_meter() {
-    if (ap_meter_published.exchange(0,std::memory_order_acq_rel)!=0) {
-        ap_meter_retire_count.fetch_add(1,std::memory_order_relaxed);
-    }
+    if (ap_meter_published.exchange(0,std::memory_order_acq_rel)!=0) { ap_meter_retire_count.fetch_add(1,std::memory_order_relaxed); }
 }
 engine::LocalMemory memory;
 std::atomic<bool> ready{false};
@@ -139,29 +136,30 @@ struct RootLayout {
     std::array<uintptr_t,9> sprites{};
     std::array<std::array<float,2>,9> positions{};
 } root_layout;
+bool read_root_layout_row(uintptr_t screen,size_t offset,size_t i,RootLayout& observed,std::array<uintptr_t,9>& translations) {
+    uintptr_t widget=0,renderer=0,transforms=0; int32_t index=-1;
+    if (!read(screen,offset,widget) || !read(widget,0x18,observed.sprites[i]) || !observed.sprites[i] || !read(observed.sprites[i],0xc,index) || index<0 ||
+        !read(observed.sprites[i],0x10,renderer) || !read(renderer,0x80,transforms) || !transforms) {
+        save::session().btrace.record(save::BStage::root_layout,save::BStatus::pending,"root_layout_widget_pending",0,
+            {{"row",i},{"widget_offset",offset},{"widget_present",widget!=0},
+             {"sprite_present",observed.sprites[i]!=0},{"transform_index",index}},screen);
+        return false;
+    }
+    // native x/y setters use this translation and refresh sprite render/hit-test children with 0x1857110
+    if (!engine::add(transforms,size_t(index)*0x40+0x14,sizeof(observed.positions[i]),translations[i]) ||
+        memory.copy(translations[i],observed.positions[i].data(),sizeof(observed.positions[i])).reason ||
+        !std::isfinite(observed.positions[i][0]) || !std::isfinite(observed.positions[i][1])) {
+        save::session().btrace.record(save::BStage::root_layout,save::BStatus::pending,"root_layout_transform_pending",0,{{"row",i}},screen);
+        return false;
+    }
+    return true;
+}
 void compact_root(uintptr_t screen) {
     // hidden root widgets keep their positions, bindings and actions; fill the two empty spots
     constexpr size_t offsets[]{0x140,0x148,0x150,0x158,0x160,0x168,0x178,0x180,0x188};
     RootLayout observed;
     std::array<uintptr_t,9> translations{};
-    for (size_t i=0;i<observed.sprites.size();++i) {
-        uintptr_t widget=0,renderer=0,transforms=0; int32_t index=-1;
-        if (!read(screen,offsets[i],widget) || !read(widget,0x18,observed.sprites[i]) || !observed.sprites[i] ||
-            !read(observed.sprites[i],0xc,index) || index<0 ||
-            !read(observed.sprites[i],0x10,renderer) || !read(renderer,0x80,transforms) || !transforms) {
-            save::session().btrace.record(save::BStage::root_layout,save::BStatus::pending,"root_layout_widget_pending",0,
-                {{"row",i},{"widget_offset",offsets[i]},{"widget_present",widget!=0},
-                 {"sprite_present",observed.sprites[i]!=0},{"transform_index",index}},screen);
-            return;
-        }
-        // native x/y setters use this translation and refresh sprite render/hit-test children with 0x1857110
-        if (!engine::add(transforms,size_t(index)*0x40+0x14,sizeof(observed.positions[i]),translations[i]) ||
-            memory.copy(translations[i],observed.positions[i].data(),sizeof(observed.positions[i])).reason ||
-            !std::isfinite(observed.positions[i][0]) || !std::isfinite(observed.positions[i][1])) {
-            save::session().btrace.record(save::BStage::root_layout,save::BStatus::pending,"root_layout_transform_pending",0,{{"row",i}},screen);
-            return;
-        }
-    }
+    for (size_t i=0;i<observed.sprites.size();++i) { if (!read_root_layout_row(screen,offsets[i],i,observed,translations)) return; }
     if (observed.sprites!=root_layout.sprites) root_layout=observed;
     constexpr size_t remaining[]{0,3,4,5,6,7,8};
     for (size_t slot=1;slot<std::size(remaining);++slot) {
@@ -188,8 +186,7 @@ void root_navigation(uintptr_t screen,uint8_t reset) {
     if (active()) compact_root(screen);
     __try { present_logo(screen,false); }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
-                                      "main_logo_widget_fault",0,{},screen);
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked, "main_logo_widget_fault",0,{},screen);
     }
 }
 void root_campaign(uintptr_t screen,uintptr_t declaration) {
@@ -198,16 +195,13 @@ void root_campaign(uintptr_t screen,uintptr_t declaration) {
     shown_screen=0;
     if (active()) {
         const auto definitions=campaign_definitions();
-        if (!definitions || !read(definitions,0x148,declaration) || !declaration) {
-            fault("campaign_root_main_declaration_unavailable"); return;
-        }
+        if (!definitions || !read(definitions,0x148,declaration) || !declaration) { fault("campaign_root_main_declaration_unavailable"); return; }
         *reinterpret_cast<uint32_t*>(screen+0x1c8)=0;
     }
     original_root_campaign(screen,declaration);
     __try { present_logo(screen,false); }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
-                                      "main_logo_widget_fault",0,{},screen);
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked, "main_logo_widget_fault",0,{},screen);
     }
 }
 uintptr_t list_for(uintptr_t screen) {
@@ -231,8 +225,7 @@ uintptr_t swf_child(uintptr_t parent,const char* name,bool text=false,uint32_t* 
 }
 int challenge_slot(const sc_physical_challenge& challenge) {
     const auto suffix=std::strrchr(challenge.unlockable,'_');
-    return challenge.required && suffix && suffix[1]>='1' && suffix[1]<='3' && !suffix[2]
-        ? suffix[1]-'1' : -1;
+    return challenge.required && suffix && suffix[1]>='1' && suffix[1]<='3' && !suffix[2] ? suffix[1]-'1' : -1;
 }
 void present_logo(uintptr_t screen,bool start) {
     const auto stage=start?save::BStage::start_logo:save::BStage::main_logo;
@@ -250,32 +243,15 @@ void start_show(uintptr_t screen) {
     original_start_show(screen);
     __try { present_logo(screen,true); }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
-                                      "start_logo_widget_fault",0,{},screen);
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked, "start_logo_widget_fault",0,{},screen);
     }
 }
-void present_save_preview(uintptr_t screen,const save::CampaignSnapshot& snapshot) {
-    uintptr_t table=0,method=0;
-    if (!read(screen,0,table) || !read(table,0x70,method) || !method) return;
-    const auto root=reinterpret_cast<uintptr_t(*)(uintptr_t)>(method)(screen);
-    const auto preview=swf_child(swf_child(root,"_center"),"saveInfo");
-    if (!preview) return;
-    uintptr_t declaration=0,material=0,registry=0;
-    if (snapshot.checkpoint && !snapshot.map.empty()) {
-        const auto manager=map_manager();
-        if (manager && read(manager,8,registry) && registry)
-            declaration=map_lookup(registry,snapshot.map.c_str(),1,0);
-        if (declaration) read(declaration,0x138,material);
-    }
-    original_sprite_visibility(preview,material!=0,1);
-    if (!material) return;
-    if (const auto image=swf_child(preview,"mapImage")) {
-        original_sprite_visibility(image,1,1);
-        swf_set_material(image,material,0);
-    }
-    const auto bar=swf_child(preview,"saveInfoBar");
-    if (bar) original_sprite_visibility(bar,1,1);
-    const auto name=swf_child(swf_child(bar,"mapName"),"txtVal",true);
+uint32_t unlockable_id(std::string_view name) {
+    uint32_t key=0;
+    for (const auto c:name) key=31*key+static_cast<uint8_t>(c);
+    return key;
+}
+void present_save_title(uintptr_t screen,uintptr_t name,const save::CampaignSnapshot& snapshot) {
     const auto row_projection=menu().projection();
     const char* title=nullptr;
     for (uint32_t i=0;i<row_projection.count;++i) {
@@ -287,11 +263,9 @@ void present_save_preview(uintptr_t screen,const save::CampaignSnapshot& snapsho
     if (name && title && *title) {
         swf_set_text(name,title);
         save::NativeString actual{};
-        const bool verified=read(name,0x40,actual) && actual.data &&
-            actual.length==static_cast<int32_t>(std::strlen(title)) &&
+        const bool verified=read(name,0x40,actual) && actual.data && actual.length==static_cast<int32_t>(std::strlen(title)) &&
             !std::memcmp(actual.data,title,static_cast<size_t>(actual.length));
-        save::session().btrace.record(save::BStage::profile_output,
-            verified?save::BStatus::succeeded:save::BStatus::pending,
+        save::session().btrace.record(save::BStage::profile_output, verified?save::BStatus::succeeded:save::BStatus::pending,
             verified?"checkpoint_title_bound":"checkpoint_title_readback_pending",0,
             {{"title",name!=0},{"row",title!=nullptr},{"readback",verified}},screen);
     } else {
@@ -299,18 +273,39 @@ void present_save_preview(uintptr_t screen,const save::CampaignSnapshot& snapsho
             "checkpoint_title_binding_pending",0,{{"title",name!=0},{"row",title!=nullptr}},screen);
     }
 }
+void present_save_preview(uintptr_t screen,const save::CampaignSnapshot& snapshot) {
+    uintptr_t table=0,method=0;
+    if (!read(screen,0,table) || !read(table,0x70,method) || !method) return;
+    const auto root=reinterpret_cast<uintptr_t(*)(uintptr_t)>(method)(screen);
+    const auto preview=swf_child(swf_child(root,"_center"),"saveInfo");
+    if (!preview) return;
+    uintptr_t declaration=0,material=0,registry=0;
+    if (snapshot.checkpoint && !snapshot.map.empty()) {
+        const auto manager=map_manager();
+        if (manager && read(manager,8,registry) && registry) declaration=map_lookup(registry,snapshot.map.c_str(),1,0);
+        if (declaration) read(declaration,0x138,material);
+    }
+    original_sprite_visibility(preview,material!=0,1);
+    if (!material) return;
+    if (const auto image=swf_child(preview,"mapImage")) {
+        original_sprite_visibility(image,1,1);
+        swf_set_material(image,material,0);
+    }
+    const auto bar=swf_child(preview,"saveInfoBar");
+    if (bar) original_sprite_visibility(bar,1,1);
+    const auto name=swf_child(swf_child(bar,"mapName"),"txtVal",true);
+    present_save_title(screen,name,snapshot);
+}
 void safe_present_save_preview(uintptr_t screen,const save::CampaignSnapshot& snapshot) {
     __try { present_save_preview(screen,snapshot); }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
-                                      "campaign_save_preview_widget_fault",0,{},screen);
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked, "campaign_save_preview_widget_fault",0,{},screen);
     }
 }
 void userinfo_point(uintptr_t widget,int kind,uintptr_t material,int count,int width,int delta) {
     // dossier/pause currency ids are 1 for praetor and 2 for mastery; kept rows set positions and dividers
     if (active() && (kind==1 || kind==2)) {
-        save::session().btrace.record(save::BStage::dossier_points,save::BStatus::succeeded,
-            "native_currency_row_suppressed",0,{{"kind",kind}},widget);
+        save::session().btrace.record(save::BStage::dossier_points,save::BStatus::succeeded, "native_currency_row_suppressed",0,{{"kind",kind}},widget);
         return;
     }
     original_userinfo_point(widget,kind,material,count,width,delta);
@@ -319,16 +314,14 @@ bool present_hud_found(uintptr_t meter);
 void present_dossier_map(uintptr_t screen) {
     uintptr_t meter=0,widget=0,content=0;
     if (read(screen,0x150,meter) && meter) present_hud_found(meter);
-    if (read(screen,0x138,widget) && read(widget,0x18,content) && content)
-        original_sprite_visibility(content,0,1);
+    if (read(screen,0x138,widget) && read(widget,0x18,content) && content) original_sprite_visibility(content,0,1);
 }
 void dossier_map(uintptr_t screen) {
     original_dossier_map(screen);
     if (!active()) return;
     __try { present_dossier_map(screen); }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
-                                      "dossier_items_widget_fault",0,{},screen);
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked, "dossier_items_widget_fault",0,{},screen);
     }
 }
 sc_physical_challenge challenge_projection(uint32_t id,bool end=false) {
@@ -337,8 +330,7 @@ sc_physical_challenge challenge_projection(uint32_t id,bool end=false) {
     const auto& map=end && campaign.map=="game/hub/hub" ? campaign.end_summary_map : campaign.map;
     const auto projection=menu().projection();
     for (uint32_t i=0;i<projection.count;++i) {
-        if (!(projection.rows[i].flags&SC_CAMPAIGN_DETAILS) || map!=projection.rows[i].map ||
-            projection.summaries[i].known!=1) continue;
+        if (!(projection.rows[i].flags&SC_CAMPAIGN_DETAILS) || map!=projection.rows[i].map || projection.summaries[i].known!=1) continue;
         for (const auto& challenge:projection.summaries[i].challenges) {
             // iddeclunlockable::getdisplayinfo hashes its exact name with unsigned 31*x+c
             uint32_t key=0;
@@ -367,12 +359,10 @@ sc_campaign_reward mission_reward(uint32_t id,bool end=false) {
 bool reward_represented(uintptr_t screen,const sc_campaign_reward& reward) {
     for (unsigned i=0;i<3;++i) {
         uintptr_t widget=0; uint32_t id=0; char name=0;
-        if (!read(screen,0x640+i*8,widget) || !read(widget,0x2b0,id) || !id ||
-            !read(widget,0x2b4,name) || !name) continue;
+        if (!read(screen,0x640+i*8,widget) || !read(widget,0x2b0,id) || !id || !read(widget,0x2b4,name) || !name) continue;
         for (unsigned n=1;n<=(reward.kind==SC_REWARD_AGGREGATE ? 3u : 1u);++n) {
             const auto identity=std::string(reward.unlockable)+(reward.kind==SC_REWARD_AGGREGATE ? "/challenge_"+std::to_string(n) : "");
-            uint32_t key=0;
-            for (const auto c:identity) key=31*key+static_cast<uint8_t>(c);
+            const auto key=unlockable_id(identity);
             if (key==id) return true;
         }
     }
@@ -380,8 +370,7 @@ bool reward_represented(uintptr_t screen,const sc_campaign_reward& reward) {
 }
 bool aggregate_visible(uintptr_t screen) {
     uintptr_t widget=0,root=0; uint8_t visible=0;
-    return read(screen,0x638,widget) && read(widget,0x18,root) &&
-        read(swf_child(root,"apAggregate"),0x51,visible) && visible;
+    return read(screen,0x638,widget) && read(widget,0x18,root) && read(swf_child(root,"apAggregate"),0x51,visible) && visible;
 }
 void mission_hint_intents(uintptr_t screen) {
     if (!active()) return;
@@ -389,10 +378,8 @@ void mission_hint_intents(uintptr_t screen) {
     const auto projection=menu().projection();
     const auto& ns=save::session().namespace_id();
     if (projection.namespace_id!=ns) return;
-    for (uint32_t i=0;i<projection.count;++i)
-        if ((projection.rows[i].flags&SC_CAMPAIGN_REVEALED) && campaign.map==projection.rows[i].map)
-            for (const auto& reward:projection.rewards[i])
-                if ((reward.kind==SC_REWARD_MISSION && reward_represented(screen,reward)) ||
+    for (uint32_t i=0;i<projection.count;++i) if ((projection.rows[i].flags&SC_CAMPAIGN_REVEALED) && campaign.map==projection.rows[i].map)
+            for (const auto& reward:projection.rewards[i]) if ((reward.kind==SC_REWARD_MISSION && reward_represented(screen,reward)) ||
                     (reward.kind==SC_REWARD_AGGREGATE && aggregate_visible(screen)))
                     menu().hint_intent(ns.c_str(),reward.location_id);
 }
@@ -403,8 +390,7 @@ SwfColor swf_color=nullptr;
 uintptr_t question_material(uintptr_t sprite) {
     uintptr_t swf=0;
     if (!sprite || !read(sprite,0x30,swf) || !swf) return 0;
-    if (*reinterpret_cast<const uint32_t*>(sprite+0x58)!=1 ||
-        *reinterpret_cast<const uint8_t*>(sprite+0x50)) swf_frame(sprite,1);
+    if (*reinterpret_cast<const uint32_t*>(sprite+0x58)!=1 || *reinterpret_cast<const uint8_t*>(sprite+0x50)) swf_frame(sprite,1);
     const int image_type=1;
     // the shared codex question texture belongs to the native ui cache class
     const auto cache_class=reinterpret_cast<uint8_t*>(swf+0x128);
@@ -434,25 +420,20 @@ void capture_encounter_popup(uintptr_t screen,bool escalation) {
     uintptr_t widget=0;
     const auto now=GetTickCount64();
     const bool known=menu().encounter_reward(campaign.stage_id,ns,now,reward);
-    if (known && read(screen,0x158,widget) && widget)
-        popup={screen,widget,campaign.map,ns,campaign.stage_id,now};
-    save::session().btrace.record(save::BStage::encounter_rewards,
-        popup.screen ? save::BStatus::succeeded : save::BStatus::pending,"encounter_popup_binding",0,
+    if (known && read(screen,0x158,widget) && widget) popup={screen,widget,campaign.map,ns,campaign.stage_id,now};
+    save::session().btrace.record(save::BStage::encounter_rewards, popup.screen ? save::BStatus::succeeded : save::BStatus::pending,"encounter_popup_binding",0,
         {{"projection",known},{"widget",widget},{"location",reward.location_id}},screen);
 }
 bool popup_reward(uintptr_t owner,bool screen,sc_campaign_reward& reward) {
     const auto campaign=save::session().campaign_run.snapshot();
     const auto& ns=save::session().namespace_id();
     if (!active() || !save::session().accepts_requests()) return false;
-    for (const auto& popup:encounter_popups)
-        if (owner==(screen ? popup.screen : popup.widget) && popup.since &&
+    for (const auto& popup:encounter_popups) if (owner==(screen ? popup.screen : popup.widget) && popup.since &&
             GetTickCount64()-popup.since<15000 && campaign.stage_id==popup.stage_id && ns==popup.namespace_id)
             return menu().encounter_reward(popup.stage_id,ns,popup.since,reward);
     return false;
 }
-const char* encounter_text(const sc_campaign_reward& reward) {
-    return reward.location_id ? reward.text : player_strings::menu_reward_title;
-}
+const char* encounter_text(const sc_campaign_reward& reward) { return reward.location_id ? reward.text : player_strings::menu_reward_title; }
 void present_encounter_card(uintptr_t widget,const sc_campaign_reward& reward) {
     if (!cached_text || !cached_sprite) return;
     const auto title=cached_text(widget+0x210,"txtVal");
@@ -464,8 +445,7 @@ void present_encounter_card(uintptr_t widget,const sc_campaign_reward& reward) {
     }
     swf_set_text(title,encounter_text(reward));
     swf_set_text(category,player_strings::menu_reward_category);
-    for (const size_t offset:{0x1b0u,0x1e0u,0x270u,0x300u})
-        if (const auto child=cached_sprite(widget+offset)) original_sprite_visibility(child,0,1);
+    for (const size_t offset:{0x1b0u,0x1e0u,0x270u,0x300u}) if (const auto child=cached_sprite(widget+offset)) original_sprite_visibility(child,0,1);
     for (const size_t offset:{0x380u,0x388u,0x390u}) {
         uintptr_t child=0;
         if (read(widget,offset,child) && child) widget_state(child,0);
@@ -476,8 +456,7 @@ void present_encounter_card(uintptr_t widget,const sc_campaign_reward& reward) {
         if (material) swf_set_material(image,material,0);
         original_sprite_visibility(image,material!=0,1);
     }
-    save::session().btrace.record(save::BStage::encounter_rewards,
-        reward.location_id ? save::BStatus::succeeded : save::BStatus::pending,
+    save::session().btrace.record(save::BStage::encounter_rewards, reward.location_id ? save::BStatus::succeeded : save::BStatus::pending,
         "encounter_reward_card",0,{{"location",reward.location_id},{"image",material!=0}},widget);
 }
 void secret_rewards_show(uintptr_t screen) {
@@ -500,9 +479,7 @@ void escalation_card(uintptr_t widget,uintptr_t declaration) {
 }
 void escalation_perk(uintptr_t screen,const char* root_name,const void* pack) {
     sc_campaign_reward reward{};
-    if (!pack || !popup_reward(screen,true,reward)) {
-        original_escalation_perk(screen,root_name,pack); return;
-    }
+    if (!pack || !popup_reward(screen,true,reward)) { original_escalation_perk(screen,root_name,pack); return; }
     std::array<char,0x340> replacement{};
     std::memcpy(replacement.data(),pack,replacement.size());
     strcpy_s(replacement.data(),0xc0,player_strings::menu_reward_category);
@@ -517,9 +494,16 @@ void escalation_perk(uintptr_t screen,const char* root_name,const void* pack) {
             original_sprite_visibility(image,material!=0,1);
         }
     }
-    save::session().btrace.record(save::BStage::encounter_rewards,
-        reward.location_id ? save::BStatus::succeeded : save::BStatus::pending,
+    save::session().btrace.record(save::BStage::encounter_rewards, reward.location_id ? save::BStatus::succeeded : save::BStatus::pending,
         "encounter_reward_perk",0,{{"location",reward.location_id}},screen);
+}
+bool present_gate_icon(uintptr_t icon,uintptr_t material,bool owned) {
+    const bool bound=icon && material;
+    if (bound) {
+        swf_frame(icon,1); swf_set_material(icon,material,0);
+        swf_color(icon,owned ? 54 : 57);
+    }
+    return bound;
 }
 void present_gate_status(uintptr_t root,uint32_t flags) {
     const auto region=swf_child(root,"apSlayerStatus");
@@ -529,22 +513,14 @@ void present_gate_status(uintptr_t root,uint32_t flags) {
     if (region) original_sprite_visibility(region,known,1);
     const auto key_material=known ? find_material(material_manager,(flags&SC_CAMPAIGN_GATE_KEY)
         ? "art/ui/dossier/icons/ico_slayerkey_on" : "art/ui/dossier/icons/ico_slayerkey_off",1) : 0;
-    const auto gate_material=known ? find_material(material_manager,
-        "art/ui/icons/end_of_level/ico_eol_encounter_slayer_gate",1) : 0;
-    if (key && key_material) {
-        swf_frame(key,1); swf_set_material(key,key_material,0);
-        swf_color(key,(flags&SC_CAMPAIGN_GATE_KEY) ? 54 : 57);
-    }
-    if (gate && gate_material) {
-        swf_frame(gate,1); swf_set_material(gate,gate_material,0);
-        swf_color(gate,(flags&SC_CAMPAIGN_GATE_COMPLETE) ? 54 : 57);
-    }
+    const auto gate_material=known ? find_material(material_manager, "art/ui/icons/end_of_level/ico_eol_encounter_slayer_gate",1) : 0;
+    const bool key_bound=present_gate_icon(key,key_material,(flags&SC_CAMPAIGN_GATE_KEY)!=0);
+    const bool gate_bound=present_gate_icon(gate,gate_material,(flags&SC_CAMPAIGN_GATE_COMPLETE)!=0);
     if (key) original_sprite_visibility(key,key_material!=0,1);
     if (gate) original_sprite_visibility(gate,gate_material!=0,1);
-    save::session().btrace.record(save::BStage::mission_details,
-        !known || (key && key_material && gate && gate_material) ? save::BStatus::succeeded : save::BStatus::pending,
+    save::session().btrace.record(save::BStage::mission_details, !known || (key_bound && gate_bound) ? save::BStatus::succeeded : save::BStatus::pending,
         "mission_gate_status",shown.revision,{{"available",known},{"key_owned",(flags&SC_CAMPAIGN_GATE_KEY)!=0},
-        {"completed",(flags&SC_CAMPAIGN_GATE_COMPLETE)!=0},{"key_bound",key && key_material},{"gate_bound",gate && gate_material}},root);
+        {"completed",(flags&SC_CAMPAIGN_GATE_COMPLETE)!=0},{"key_bound",key_bound},{"gate_bound",gate_bound}},root);
 }
 void present_aggregate(uintptr_t root,const sc_campaign_reward& reward,const char* battery_name="sentinelBattery") {
     const bool completed=reward.checked!=0;
@@ -574,8 +550,7 @@ sc_campaign_reward aggregate_reward(bool end=false) {
     const auto& map=end && campaign.map=="game/hub/hub" ? campaign.end_summary_map : campaign.map;
     const auto projection=menu().projection();
     if (projection.namespace_id!=save::session().namespace_id()) return {};
-    for (uint32_t i=0;i<projection.count;++i)
-        if ((projection.rows[i].flags&SC_CAMPAIGN_REVEALED) && map==projection.rows[i].map)
+    for (uint32_t i=0;i<projection.count;++i) if ((projection.rows[i].flags&SC_CAMPAIGN_REVEALED) && map==projection.rows[i].map)
             for (const auto& reward:projection.rewards[i]) if (reward.kind==SC_REWARD_AGGREGATE) return reward;
     return {};
 }
@@ -587,8 +562,7 @@ void present_mission_rewards(uintptr_t screen) {
         bool discovered=true;
         for (unsigned i=0;i<3;++i) {
             uintptr_t card=0; uint32_t id=0; char name=0;
-            discovered=discovered && read(screen,0x640+i*8,card) && read(card,0x2b0,id) &&
-                read(card,0x2b4,name) && name && mission_reward(id).location_id;
+            discovered=discovered && read(screen,0x640+i*8,card) && read(card,0x2b0,id) && read(card,0x2b4,name) && name && mission_reward(id).location_id;
         }
         present_aggregate(root,discovered ? reward : sc_campaign_reward{},"sentinelBattery");
         if (const auto arrow=swf_child(root,"arrow")) original_sprite_visibility(arrow,0,1);
@@ -633,9 +607,7 @@ void challenges_show(uintptr_t screen) {
     __try { original_challenges_show(screen); }
     __finally { explicit_challenges_page=previous; }
     __try { present_mission_rewards(screen); }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::dossier_challenges,save::BStatus::blocked,"dossier_reward_fault");
-    }
+    __except(EXCEPTION_EXECUTE_HANDLER) { save::session().btrace.record(save::BStage::dossier_challenges,save::BStatus::blocked,"dossier_reward_fault"); }
     if (!previous) publish_mission_page(screen);
 }
 uintptr_t challenges_action(uintptr_t screen,uintptr_t action,uintptr_t event,uintptr_t source) {
@@ -645,17 +617,13 @@ uintptr_t challenges_action(uintptr_t screen,uintptr_t action,uintptr_t event,ui
     __try { result=original_challenges_action(screen,action,event,source); }
     __finally { explicit_challenges_page=previous; }
     __try { present_mission_rewards(screen); }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::dossier_challenges,save::BStatus::blocked,"dossier_reward_fault");
-    }
+    __except(EXCEPTION_EXECUTE_HANDLER) { save::session().btrace.record(save::BStage::dossier_challenges,save::BStatus::blocked,"dossier_reward_fault"); }
     if (!previous) publish_mission_page(screen);
     return result;
 }
 void mission_tab(uintptr_t screen) {
     original_mission_tab(screen);
-    __try {
-        present_mission_rewards(screen);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { present_mission_rewards(screen); } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 uintptr_t native_card(uintptr_t widget) {
     uintptr_t table=0,method=0;
@@ -671,8 +639,7 @@ void present_card_reward(uintptr_t widget,uint32_t id) {
     if (text) { swf_set_text(text,reward.location_id ? reward.text : ""); reward_scroll(text); }
     if (region) original_sprite_visibility(region,reward.location_id!=0 && text,1);
     const bool written=text && reward.location_id;
-    save::session().btrace.record(save::BStage::dossier_challenges,
-        written ? save::BStatus::succeeded : save::BStatus::pending,
+    save::session().btrace.record(save::BStage::dossier_challenges, written ? save::BStatus::succeeded : save::BStatus::pending,
         written ? "dossier_reward_bound" : "dossier_reward_pending",0,
         {{"id",id},{"location",reward.location_id},{"card",card!=0},{"text",text!=0},
          {"region",region!=0}},widget);
@@ -681,8 +648,7 @@ void challenge_card_update(uintptr_t widget,uintptr_t context,uintptr_t flags) {
     uint32_t id=0; read(widget,0x2b0,id);
     const auto challenge=challenge_projection(id);
     uint32_t found=0,required=0; uint8_t checked=0;
-    if (!challenge.required || !read(widget,0x448,found) || !read(widget,0x44c,required) ||
-        !read(widget,0x450,checked)) {
+    if (!challenge.required || !read(widget,0x448,found) || !read(widget,0x44c,required) || !read(widget,0x450,checked)) {
         original_challenge_card_update(widget,context,flags);
         __try { present_card_reward(widget,id); }
         __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -730,8 +696,7 @@ void present_physical_completion(uintptr_t widget,uint32_t id,const sc_physical_
     const auto title=player_strings::menu_challenge_completed(reward.name);
     if (special::present_challenge_completion(widget,title.c_str(),reward.text)) {
         toast.checked=true;
-        save::session().btrace.record(save::BStage::hud_challenges,save::BStatus::succeeded,
-            "physical_challenge_completion_presented",0,{{"id",id}},widget);
+        save::session().btrace.record(save::BStage::hud_challenges,save::BStatus::succeeded, "physical_challenge_completion_presented",0,{{"id",id}},widget);
     }
 }
 void present_hud_challenge(uintptr_t widget) {
@@ -768,9 +733,7 @@ void hud_challenge_update(uintptr_t widget) {
     original_hud_challenge_update(widget);
     if (!active()) return;
     __try { present_hud_challenge(widget); }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::hud_challenges,save::BStatus::blocked,"hud_challenge_fault");
-    }
+    __except(EXCEPTION_EXECUTE_HANDLER) { save::session().btrace.record(save::BStage::hud_challenges,save::BStatus::blocked,"hud_challenge_fault"); }
 }
 void present_eol_challenge(uintptr_t widget) {
     uint32_t id=0; uintptr_t row=0;
@@ -814,11 +777,8 @@ void eol_challenge_update(uintptr_t widget) {
             if (region) original_sprite_visibility(region,reward.location_id!=0,1);
         }
     }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::end_challenges,save::BStatus::blocked,"end_challenge_fault");
-    }
+    __except(EXCEPTION_EXECUTE_HANDLER) { save::session().btrace.record(save::BStage::end_challenges,save::BStatus::blocked,"end_challenge_fault"); }
 }
-
 bool text_matches(uintptr_t field,const char* expected);
 bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     const auto campaign=save::session().campaign_run.snapshot();
@@ -831,8 +791,7 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     const auto title=swf_child(text_root,"txtVal",true);
     if (!title) {
         special::present_combat_progress(root,0,false);
-        save::session().btrace.record(stage,save::BStatus::blocked,
-            "hud_found_text_missing",0,{{"root",root},{"label",label},{"text",text_root}},root);
+        save::session().btrace.record(stage,save::BStatus::blocked, "hud_found_text_missing",0,{{"root",root},{"label",label},{"text",text_root}},root);
         return false;
     }
     sc_campaign_summary summary{};
@@ -862,8 +821,7 @@ bool present_found_root(uintptr_t root,uintptr_t meter_root,bool independent) {
     original_sprite_visibility(label,1,1);
     if (!independent) original_sprite_visibility(root,1,1);
     special::present_combat_progress(root,label,true);
-    save::session().btrace.record(stage,
-        question ? save::BStatus::succeeded : save::BStatus::pending,"hud_found_presentation",0,
+    save::session().btrace.record(stage, question ? save::BStatus::succeeded : save::BStatus::pending,"hud_found_presentation",0,
         {{"named_color",*reinterpret_cast<const uint32_t*>(text_root+0x6c)},{"material",question!=0},
          {"found",summary.found},{"total",summary.total},{"playing",*reinterpret_cast<const uint8_t*>(label+0x50)},
          {"question_color",image?*reinterpret_cast<const uint32_t*>(image+0x6c):0},
@@ -881,8 +839,7 @@ void present_score_found(uintptr_t score) {
     const bool fortress=hub && native::gameplay_admitted();
     static uintptr_t fortress_root=0;
     if (!read(score,0x10,swf) || !read(swf,0x18,root) || !root) {
-        save::session().btrace.record(stage,save::BStatus::blocked,
-            "hud_score_root_missing",0,{{"swf",swf},{"root",root}},score);
+        save::session().btrace.record(stage,save::BStatus::blocked, "hud_score_root_missing",0,{{"swf",swf},{"root",root}},score);
         return;
     }
     if (!active() || !read(score,0xb8,visible) || (!visible && !fortress)) {
@@ -898,11 +855,9 @@ void present_score_found(uintptr_t score) {
 }
 void hud_score_init(uintptr_t score) {
     original_hud_score_init(score);
-    save::session().btrace.record(save::BStage::hud_score_init,save::BStatus::entered,
-        "hud_score_initialized",0,{},score);
+    save::session().btrace.record(save::BStage::hud_score_init,save::BStatus::entered, "hud_score_initialized",0,{},score);
     __try { present_score_found(score); } __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::hud_score_init,save::BStatus::blocked,
-            "hud_score_init_fault",0,{},score);
+        save::session().btrace.record(save::BStage::hud_score_init,save::BStatus::blocked, "hud_score_init_fault",0,{},score);
     }
 }
 void hud_score_update(uintptr_t score) {
@@ -914,8 +869,7 @@ void hud_score_update(uintptr_t score) {
         hud_score_frame_ticks.fetch_add(1,std::memory_order_relaxed);
         present_score_found(score);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::hud_score_frame,save::BStatus::blocked,
-            "hud_score_update_fault",0,{},score);
+        save::session().btrace.record(save::BStage::hud_score_frame,save::BStatus::blocked, "hud_score_update_fault",0,{},score);
     }
     LARGE_INTEGER end{},frequency{}; QueryPerformanceCounter(&end); QueryPerformanceFrequency(&frequency);
     static uint64_t total=0,maximum=0,next=0;
@@ -941,6 +895,12 @@ bool text_matches(uintptr_t field,const char* expected) {
     if (!field || !read(field,0x40,value) || !value.data || value.length!=static_cast<int32_t>(std::strlen(expected))) return false;
     return std::memcmp(value.data,expected,static_cast<size_t>(value.length))==0;
 }
+unsigned count_text_matches(uintptr_t label,uintptr_t current,uintptr_t maximum,const char* value,const char* max_value) {
+    const bool label_ok=text_matches(label,player_strings::menu_items_found);
+    const bool current_ok=text_matches(current,value);
+    const bool maximum_ok=text_matches(maximum,max_value);
+    return unsigned(label_ok)|(unsigned(current_ok)<<1)|(unsigned(maximum_ok)<<2);
+}
 bool present_found_counts(uintptr_t root,const sc_campaign_summary& summary,const char* label_name="header",bool nested_label=true) {
     uint32_t label_type=0,current_type=0,max_type=0;
     const auto header=swf_child(root,"header");
@@ -959,7 +919,7 @@ bool present_found_counts(uintptr_t root,const sc_campaign_summary& summary,cons
     char value[24]{},max_value[24]{};
     std::snprintf(value,sizeof(value),"%u",summary.found);
     std::snprintf(max_value,sizeof(max_value),"/%u",summary.total);
-    const unsigned before=(text_matches(label,player_strings::menu_items_found)?1u:0u)|(text_matches(current,value)?2u:0u)|(text_matches(maximum,max_value)?4u:0u);
+    const unsigned before=count_text_matches(label,current,maximum,value,max_value);
     static uintptr_t last_header=0;
     static uint64_t last_revision=0;
     if (nested_label && header==last_header && shown.revision==last_revision && before!=7)
@@ -969,10 +929,10 @@ bool present_found_counts(uintptr_t root,const sc_campaign_summary& summary,cons
     swf_set_text(current,value);
     swf_set_text(maximum,max_value);
     original_sprite_visibility(header,1,1);
-    const bool label_ok=text_matches(label,player_strings::menu_items_found),current_ok=text_matches(current,value),max_ok=text_matches(maximum,max_value);
-    const bool verified=label_ok && current_ok && max_ok;
+    const auto after=count_text_matches(label,current,maximum,value,max_value);
+    const bool verified=after==7;
     save::session().btrace.record(stage,verified?save::BStatus::succeeded:save::BStatus::pending,"count_text_readback",shown.revision,
-        {{"label",label_ok},{"current",current_ok},{"maximum",max_ok},{"label_type",label_type},
+        {{"label",(after&1)!=0},{"current",(after&2)!=0},{"maximum",(after&4)!=0},{"label_type",label_type},
          {"current_type",current_type},{"max_type",max_type},{"found",summary.found},{"total",summary.total}},header);
     if (nested_label && verified) { last_header=header; last_revision=shown.revision; }
     return verified;
@@ -990,32 +950,38 @@ void category_counts(uintptr_t category) {
         save::session().btrace.record(save::BStage::mission_counts,save::BStatus::blocked,"count_writer_fault");
     }
 }
+const sc_campaign_summary& end_items_summary(const Projection& projection,const std::string& map) {
+    const sc_campaign_summary* summary=nullptr;
+    for (uint32_t i=0;i<projection.count;++i) if ((projection.rows[i].flags&SC_CAMPAIGN_DETAILS) && map==projection.rows[i].map) {
+            summary=&projection.summaries[i]; break;
+        }
+    static const sc_campaign_summary unknown{};
+    if (!summary) summary=&unknown;
+    return *summary;
+}
+bool end_items_owner(uintptr_t screen,uintptr_t& root,uintptr_t& screen_root) {
+    uintptr_t category=0,vtable=0,screen_table=0,method=0;
+    if (!read(screen,0x118,category) || !category || !read(category,0,vtable) || vtable!=end_items_category_vtable || !read(category,0x18,root) || !root ||
+        !read(screen,0,screen_table) || !read(screen_table,0x70,method) || !method) {
+        save::session().btrace.record(save::BStage::end_counts,save::BStatus::pending,"end_counts_owner_pending",0,{},screen);
+        return false;
+    }
+    screen_root=reinterpret_cast<uintptr_t(*)(uintptr_t)>(method)(screen);
+    return true;
+}
 void present_end_items(uintptr_t screen) {
     if (!active()) return;
     const auto campaign=save::session().campaign_run.snapshot();
     const auto& map=campaign.map=="game/hub/hub" ? campaign.end_summary_map : campaign.map;
     if (map.empty()) return;
     const auto projection=menu().projection();
-    const sc_campaign_summary* summary=nullptr;
-    for (uint32_t i=0;i<projection.count;++i)
-        if ((projection.rows[i].flags&SC_CAMPAIGN_DETAILS) && map==projection.rows[i].map) {
-            summary=&projection.summaries[i]; break;
-        }
-    const sc_campaign_summary unknown{};
-    if (!summary) summary=&unknown;
-    uintptr_t category=0,vtable=0,root=0,screen_table=0,method=0;
-    if (!read(screen,0x118,category) || !category || !read(category,0,vtable) ||
-        vtable!=end_items_category_vtable || !read(category,0x18,root) || !root ||
-        !read(screen,0,screen_table) || !read(screen_table,0x70,method) || !method) {
-        save::session().btrace.record(save::BStage::end_counts,save::BStatus::pending,"end_counts_owner_pending",0,{},screen);
-        return;
-    }
-    const auto screen_root=reinterpret_cast<uintptr_t(*)(uintptr_t)>(method)(screen);
+    const auto* summary=&end_items_summary(projection,map);
+    uintptr_t root=0,screen_root=0;
+    if (!end_items_owner(screen,root,screen_root)) return;
     const bool bound=present_found_counts(root,*summary,"itemsFound",false);
     if (bound) {
         const auto main=swf_child(screen_root,"main");
-        if (const auto item_list=swf_child(swf_child(main,"itemsFound"),"itemList"))
-            original_sprite_visibility(item_list,0,1);
+        if (const auto item_list=swf_child(swf_child(main,"itemsFound"),"itemList")) original_sprite_visibility(item_list,0,1);
         if (const auto categories=swf_child(root,"itemsFound")) original_sprite_visibility(categories,0,1);
         original_sprite_visibility(root,1,1);
     }
@@ -1027,8 +993,7 @@ void end_items(uintptr_t screen) {
     original_end_items(screen);
     __try { present_end_items(screen); }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
-                                      "end_items_presentation_widget_fault",0,{},screen);
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked, "end_items_presentation_widget_fault",0,{},screen);
     }
 }
 void end_combat_init(uintptr_t screen) {
@@ -1041,16 +1006,31 @@ void end_combat_init(uintptr_t screen) {
         const auto earned=swf_child(swf_child(swf_child(root,"_center"),"demonicCorruption"),"earnedInfo");
         if (earned) original_sprite_visibility(earned,0,1);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
-                                      "end_combat_points_widget_fault",0,{},screen);
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked, "end_combat_points_widget_fault",0,{},screen);
     }
 }
 bool boss_points_scope(uintptr_t screen) {
     const auto map=save::session().campaign_run.snapshot().map;
     uint32_t count=0;
-    return read(screen,0x120,count) && count==5 &&
-        (map=="game/sp/e1m4_boss/e1m4_boss" || map=="game/sp/e2m4_boss/e2m4_boss" ||
+    return read(screen,0x120,count) && count==5 && (map=="game/sp/e1m4_boss/e1m4_boss" || map=="game/sp/e2m4_boss/e2m4_boss" ||
          map=="game/sp/e3m3_maykr/e3m3_maykr");
+}
+void present_boss_artwork(uintptr_t screen,uintptr_t reward) {
+    std::array<uintptr_t,40> artwork{}; unsigned leaves=0;
+    // the tier and count card visibility drive native completion; only item artwork is hidden
+    for (unsigned i=1;i<=5;++i) {
+        char name[]="item1_c"; name[4]+=static_cast<char>(i-1);
+        const auto item=swf_child(reward,name);
+        if (!item || !swf_child(item,"icon_g")) {
+            save::session().btrace.record(save::BStage::boss_presentation,save::BStatus::pending, "boss_points_art_unavailable",0,{{"item",i}},screen);
+            return;
+        }
+        for (const char* leaf:{"completed","hex_bg_gold_b","bg_b","gradient_g","glow_b","fill","icon_g","pulse_b"})
+            if (const auto child=swf_child(item,leaf)) artwork[leaves++]=child;
+    }
+    for (unsigned i=0;i<leaves;++i) original_sprite_visibility(artwork[i],0,1);
+    save::session().btrace.record(save::BStage::boss_presentation, leaves?save::BStatus::succeeded:save::BStatus::pending,
+        leaves?"boss_points_art_hidden":"boss_points_art_unavailable",0,{{"leaves",leaves}},screen);
 }
 void boss_update(uintptr_t screen,uintptr_t event) {
     original_boss_update(screen,event);
@@ -1064,33 +1044,114 @@ void boss_update(uintptr_t screen,uintptr_t event) {
         const auto punch=swf_child(root,"tier2_connected");
         for (const auto leaf:{"info","description","icon_c","combat_icon","cta","bmp_hex_grid_b"})
             if (const auto sprite=swf_child(punch,leaf)) original_sprite_visibility(sprite,0,1);
-        std::array<uintptr_t,40> artwork{}; unsigned leaves=0;
-        // the tier and count card visibility drive native completion; only item artwork is hidden
-        for (unsigned i=1;i<=5;++i) {
-            char name[]="item1_c"; name[4]+=static_cast<char>(i-1);
-            const auto item=swf_child(reward,name);
-            if (!item || !swf_child(item,"icon_g")) {
-                save::session().btrace.record(save::BStage::boss_presentation,save::BStatus::pending,
-                    "boss_points_art_unavailable",0,{{"item",i}},screen);
-                return;
-            }
-            for (const char* leaf:{"completed","hex_bg_gold_b","bg_b","gradient_g","glow_b","fill","icon_g","pulse_b"})
-                if (const auto child=swf_child(item,leaf)) artwork[leaves++]=child;
-        }
-        for (unsigned i=0;i<leaves;++i) original_sprite_visibility(artwork[i],0,1);
-        save::session().btrace.record(save::BStage::boss_presentation,
-            leaves?save::BStatus::succeeded:save::BStatus::pending,
-            leaves?"boss_points_art_hidden":"boss_points_art_unavailable",0,{{"leaves",leaves}},screen);
+        present_boss_artwork(screen,reward);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
-                                      "boss_reward_widget_fault",0,{},screen);
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked, "boss_reward_widget_fault",0,{},screen);
     }
+}
+sc_campaign_reward detail_mission_reward(uintptr_t details,int32_t index,unsigned slot) {
+    sc_campaign_reward placement{};
+    uint32_t id=0;
+    char native_name=0;
+    if (shown.namespace_id==save::session().namespace_id() && read(details,0x1d0+slot*0x1b0,id) && read(details,0x1d4+slot*0x1b0,native_name) && native_name)
+        for (const auto& reward:shown.rewards[index]) if (reward.kind==SC_REWARD_MISSION) {
+            const auto key=unlockable_id(reward.unlockable);
+            if (key==id) placement=reward;
+        }
+    return placement;
+}
+void present_detail_rewards(uintptr_t details,uintptr_t details_root,int32_t index) {
+    const auto challenge_rows=swf_child(swf_child(details_root,"challenges"),"list");
+    for (unsigned slot=0;slot<3;++slot) {
+        char name[]="item0"; name[4]+=static_cast<char>(slot);
+        const auto item=swf_child(challenge_rows,name);
+        const auto region=swf_child(item,"apReward");
+        const auto description=swf_child(item,"desc");
+        const auto native_text=swf_child(description,"txtVal",true);
+        const auto placement=detail_mission_reward(details,index,slot);
+        save::NativeString base{};
+        const auto text=swf_child(region,"txtVal",true);
+        const bool combined=placement.location_id && text && read(native_text,0x40,base) && base.data;
+        if (combined) {
+            char value[768]{};
+            std::snprintf(value,sizeof(value),"%.*s\n%s",base.length,base.data,placement.text);
+            swf_set_text(text,value);
+            reward_scroll(text);
+        }
+        if (region) original_sprite_visibility(region,combined,1);
+        if (description) original_sprite_visibility(description,!combined,1);
+    }
+}
+struct DetailCounts { uintptr_t root; bool bound; };
+DetailCounts present_detail_counts(uintptr_t details,int32_t index,const sc_campaign_summary& summary) {
+    uintptr_t category=0,root=0,vtable=0;
+    if (read(details,0x1b8,category) && category && read(category,0,vtable) && vtable==end_items_category_vtable) read(category,0x18,root);
+    const bool counts=present_found_counts(root,summary);
+    save::session().btrace.record(save::BStage::mission_counts, counts?save::BStatus::succeeded:save::BStatus::pending,
+        counts?"mission_counts_bound":"mission_counts_pending",shown.revision,
+        {{"index",static_cast<uint64_t>(index)},{"known",summary.known},{"root",root!=0},{"found",summary.found},{"total",summary.total}},details);
+
+    return {root,counts};
+}
+bool detail_icon_sized(uintptr_t icon) {
+    uint16_t width=0,height=0;
+    return read(icon,0x68,width) && read(icon,0x6a,height) && width==150 && height==150;
+}
+void present_detail_rating(uintptr_t details,uintptr_t details_root,int32_t index,const sc_campaign_summary& summary,DetailCounts count_view) {
+    const auto icon=swf_child(details_root,"apDifficulty");
+    const auto tier=summary.band&255;
+    static constexpr const char* donor[]={"", "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Too_Young_",
+        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Hurt_Me_Plenty_",
+        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Ultra_Violence_",
+        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Nightmare_"};
+    const auto material=tier>=1 && tier<=4 ? find_material(material_manager,donor[tier],1) : 0;
+    const bool rating_bound=icon && material;
+    if (rating_bound) {
+        swf_frame(icon,tier);
+        swf_set_material(icon,material,0);
+    }
+    if (icon) original_sprite_visibility(icon,rating_bound,1);
+    if (const auto item_list=swf_child(count_view.root,"itemsFound")) original_sprite_visibility(item_list,0,1);
+    if (count_view.root) original_sprite_visibility(count_view.root,count_view.bound,1);
+    uintptr_t applied_material=0;
+    read(icon,0x60,applied_material);
+    const bool sized=detail_icon_sized(icon);
+    const bool applied=rating_bound && applied_material==material && sized;
+    save::session().btrace.record(save::BStage::mission_rating, applied?save::BStatus::succeeded:save::BStatus::pending,
+        applied?"preview_skull_bound":"preview_skull_pending",shown.revision,
+        {{"index",static_cast<uint64_t>(index)},{"tier",tier},{"icon",icon!=0},
+          {"material",material!=0},{"readback",material!=0 && applied_material==material},
+          {"sized",sized}},details);
+}
+void present_detail_challenges(uintptr_t details,uintptr_t details_root,const sc_campaign_summary& summary) {
+    const auto challenge_root=swf_child(swf_child(details_root,"challenges"),"list");
+    if (summary.known!=1) return;
+    unsigned requested=0,bound=0;
+    for (const auto& challenge:summary.challenges) {
+        const auto slot=challenge_slot(challenge);
+        if (slot<0) continue;
+        ++requested;
+        uint32_t present=0; char title=0;
+        if (!read(details,0x1d0+slot*0x1b0,present) || !present || !read(details,0x1d4+slot*0x1b0,title) || !title) continue;
+        char row_name[]="item0"; row_name[4]+=static_cast<char>(slot);
+        const auto row=swf_child(challenge_root,row_name);
+        const auto field=swf_child(swf_child(swf_child(row,"progress"),"txt"),"txtVal",true);
+        if (!field) continue;
+        char progress[32]{};
+        std::snprintf(progress,sizeof(progress),"%u/%u",challenge.found,challenge.required);
+        swf_set_text(field,progress);
+        uintptr_t normal=0; read(details,0x1d0+slot*0x1b0+0x190,normal);
+        if (!challenge_icon(swf_child(row,"icon"),normal)) continue;
+        ++bound;
+    }
+    save::session().btrace.record(save::BStage::mission_challenges,bound==requested?save::BStatus::succeeded:save::BStatus::pending,
+        bound==requested?"mission_challenges_bound":"mission_challenges_pending",shown.revision,
+        {{"requested",requested},{"bound",bound}},details);
 }
 void present_details(uintptr_t details) {
     const auto list=list_for(shown_screen);
     int32_t index=-1;
-    if (!list || !read(list,0x150,index) || index<0 || static_cast<uint32_t>(index)>=shown.count ||
-        !(shown.rows[index].flags&SC_CAMPAIGN_DETAILS)) {
+    if (!list || !read(list,0x150,index) || index<0 || static_cast<uint32_t>(index)>=shown.count || !(shown.rows[index].flags&SC_CAMPAIGN_DETAILS)) {
         save::session().btrace.record(save::BStage::mission_details,save::BStatus::blocked,
                                       "details_focus_unavailable",0,{{"index",static_cast<uint64_t>(index)},
                                                                        {"rows",shown.count}}); return;
@@ -1107,100 +1168,14 @@ void present_details(uintptr_t details) {
     }
     sc_campaign_reward aggregate{};
     for (const auto& reward:shown.rewards[index]) if (reward.kind==SC_REWARD_AGGREGATE) aggregate=reward;
-    const auto challenge_rows=swf_child(swf_child(details_root,"challenges"),"list");
-    for (unsigned slot=0;slot<3;++slot) {
-        char name[]="item0"; name[4]+=static_cast<char>(slot);
-        const auto item=swf_child(challenge_rows,name);
-        const auto region=swf_child(item,"apReward");
-        const auto description=swf_child(item,"desc");
-        const auto native_text=swf_child(description,"txtVal",true);
-        sc_campaign_reward placement{};
-        uint32_t id=0;
-        char native_name=0;
-        if (shown.namespace_id==save::session().namespace_id() && read(details,0x1d0+slot*0x1b0,id) &&
-            read(details,0x1d4+slot*0x1b0,native_name) && native_name)
-            for (const auto& reward:shown.rewards[index]) if (reward.kind==SC_REWARD_MISSION) {
-                uint32_t key=0;
-                for (const unsigned char* c=reinterpret_cast<const unsigned char*>(reward.unlockable);*c;++c) key=31*key+*c;
-                if (key==id) placement=reward;
-            }
-        save::NativeString base{};
-        const auto text=swf_child(region,"txtVal",true);
-        const bool combined=placement.location_id && text && read(native_text,0x40,base) && base.data;
-        if (combined) {
-            char value[768]{};
-            std::snprintf(value,sizeof(value),"%.*s\n%s",base.length,base.data,placement.text);
-            swf_set_text(text,value);
-            reward_scroll(text);
-        }
-        if (region) original_sprite_visibility(region,combined,1);
-        if (description) original_sprite_visibility(description,!combined,1);
-    }
+    present_detail_rewards(details,details_root,index);
     present_aggregate(details_root,aggregate,"batteries");
     present_gate_status(details_root,shown.rows[index].flags);
-    if (const auto completion=swf_child(details_root,"completionInfo"))
-        original_sprite_visibility(completion,0,1);
-    uintptr_t category=0,root=0,vtable=0;
-    if (read(details,0x1b8,category) && category && read(category,0,vtable) &&
-        vtable==end_items_category_vtable) read(category,0x18,root);
-    const bool counts=present_found_counts(root,summary);
-    save::session().btrace.record(save::BStage::mission_counts,
-        counts?save::BStatus::succeeded:save::BStatus::pending,
-        counts?"mission_counts_bound":"mission_counts_pending",shown.revision,
-        {{"index",static_cast<uint64_t>(index)},{"known",summary.known},{"root",root!=0},{"found",summary.found},{"total",summary.total}},details);
+    if (const auto completion=swf_child(details_root,"completionInfo")) original_sprite_visibility(completion,0,1);
+    const auto count_view=present_detail_counts(details,index,summary);
 
-    const auto icon=swf_child(details_root,"apDifficulty");
-    const auto tier=summary.band&255;
-    static constexpr const char* donor[]={"",
-        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Too_Young_",
-        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Hurt_Me_Plenty_",
-        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Ultra_Violence_",
-        "swf/main_menu/screens/mission_select_textures/swf_images/difficulty/Nightmare_"};
-    const auto material=tier>=1 && tier<=4 ? find_material(material_manager,donor[tier],1) : 0;
-    const bool rating_bound=icon && material;
-    if (rating_bound) {
-        swf_frame(icon,tier);
-        swf_set_material(icon,material,0);
-    }
-    if (icon) original_sprite_visibility(icon,rating_bound,1);
-    if (const auto item_list=swf_child(root,"itemsFound")) original_sprite_visibility(item_list,0,1);
-    if (root) original_sprite_visibility(root,counts,1);
-    uintptr_t applied_material=0;
-    read(icon,0x60,applied_material);
-    uint16_t applied_width=0,applied_height=0;
-    const bool sized=read(icon,0x68,applied_width) && read(icon,0x6a,applied_height) &&
-        applied_width==150 && applied_height==150;
-    const bool applied=rating_bound && applied_material==material && sized;
-    save::session().btrace.record(save::BStage::mission_rating,
-        applied?save::BStatus::succeeded:save::BStatus::pending,
-        applied?"preview_skull_bound":"preview_skull_pending",shown.revision,
-        {{"index",static_cast<uint64_t>(index)},{"tier",tier},{"icon",icon!=0},
-          {"material",material!=0},{"readback",material!=0 && applied_material==material},
-          {"sized",sized}},details);
-    const auto challenge_root=swf_child(swf_child(details_root,"challenges"),"list");
-    if (summary.known!=1) return;
-    unsigned requested=0,bound=0;
-    for (const auto& challenge:summary.challenges) {
-        const auto slot=challenge_slot(challenge);
-        if (slot<0) continue;
-        ++requested;
-        uint32_t present=0; char title=0;
-        if (!read(details,0x1d0+slot*0x1b0,present) || !present ||
-            !read(details,0x1d4+slot*0x1b0,title) || !title) continue;
-        char row_name[]="item0"; row_name[4]+=static_cast<char>(slot);
-        const auto row=swf_child(challenge_root,row_name);
-        const auto field=swf_child(swf_child(swf_child(row,"progress"),"txt"),"txtVal",true);
-        if (!field) continue;
-        char progress[32]{};
-        std::snprintf(progress,sizeof(progress),"%u/%u",challenge.found,challenge.required);
-        swf_set_text(field,progress);
-        uintptr_t normal=0; read(details,0x1d0+slot*0x1b0+0x190,normal);
-        if (!challenge_icon(swf_child(row,"icon"),normal)) continue;
-        ++bound;
-    }
-    save::session().btrace.record(save::BStage::mission_challenges,bound==requested?save::BStatus::succeeded:save::BStatus::pending,
-        bound==requested?"mission_challenges_bound":"mission_challenges_pending",shown.revision,
-        {{"requested",requested},{"bound",bound}},details);
+    present_detail_rating(details,details_root,index,summary,count_view);
+    present_detail_challenges(details,details_root,summary);
 }
 bool is_ap_meter(uintptr_t meter) {
     if (!meter) return false;
@@ -1241,28 +1216,21 @@ void sprite_visibility_detour(uintptr_t sprite,uint32_t visible,uint32_t flag, v
 }
 void render_details(uintptr_t details) {
     if (!ap_details(details)) {
-        if (active() && shown_screen)
-            save::session().btrace.record(save::BStage::mission_details,save::BStatus::blocked,
-                                          "details_owner_mismatch");
+        if (active() && shown_screen) save::session().btrace.record(save::BStage::mission_details,save::BStatus::blocked, "details_owner_mismatch");
         retire_ap_meter();
         details_update(details); return;
     }
     uintptr_t meter=0;
-    if (read(details,0x6f8,meter) && meter) {
-        ap_meter_published.store(meter,std::memory_order_release);
-    }
+    if (read(details,0x6f8,meter) && meter) { ap_meter_published.store(meter,std::memory_order_release); }
     current_ap_details=details;
     __try { details_update(details); }
     __finally { current_ap_details=0; }
     __try { present_details(details); }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked,
-                                      "campaign_presentation_widget_fault",0,{},details);
+        save::session().btrace.record(save::BStage::profile_output,save::BStatus::blocked, "campaign_presentation_widget_fault",0,{},details);
     }
     uintptr_t sprite=0;
-    if (meter && read(meter,0x18,sprite) && sprite) {
-        if (original_sprite_visibility) original_sprite_visibility(sprite,0,1);
-    }
+    if (meter && read(meter,0x18,sprite) && sprite) { if (original_sprite_visibility) original_sprite_visibility(sprite,0,1); }
 }
 void hide_details(uintptr_t screen) {
     uintptr_t details=0;
@@ -1278,9 +1246,7 @@ void focus(uintptr_t screen) {
     int32_t index=-1,count=0; uintptr_t rows=0;
     if (building || screen!=shown_screen || !read(list,0x150,index) || index<0 ||
         static_cast<uint32_t>(index)>=shown.count || !(shown.rows[index].flags&SC_CAMPAIGN_DETAILS) ||
-        !read(screen,0x128,count) || index>=count || !read(screen,0x120,rows) || !rows) {
-        hide_details(screen); return;
-    }
+        !read(screen,0x128,count) || index>=count || !read(screen,0x120,rows) || !rows) { hide_details(screen); return; }
     // list every row without marking it complete; read native stats only for the focused unlocked row
     native_completed(screen,reinterpret_cast<uintptr_t>(&entries[index]));
     const auto row=rows+static_cast<size_t>(index)*0x550;
@@ -1307,6 +1273,45 @@ bool bind_campaign_source(const sc_campaign_row& row,Entry& entry,uintptr_t sour
     if (route && route->variant==6) entry.dependencies={};
     return true;
 }
+bool prepare_campaign_rows(const Projection& projection,uintptr_t previous) {
+    if (!initialized) {
+        for (auto& entry:entries) string_init(reinterpret_cast<uintptr_t>(&entry.name));
+        initialized=true;
+    }
+    uintptr_t source_entries=0; int32_t source_count=0;
+    if (!read(previous,0x88,source_entries) || !read(previous,0x90,source_count) || source_count<1) {
+        fault("native_campaign_source_roster_unreadable"); return false;
+    }
+    for (uint32_t i=0;i<projection.count;++i) {
+        entries[i].dependencies={};
+        const auto& row=projection.rows[i];
+        if (row.flags&SC_CAMPAIGN_REVEALED) {
+            if (!bind_campaign_source(row,entries[i],source_entries,source_count)) { fault("native_campaign_source_entry_mismatch"); return false; }
+        }
+        string_assign(reinterpret_cast<uintptr_t>(&entries[i].name),projection.rows[i].map);
+    }
+    map_list.entries.data=reinterpret_cast<uintptr_t>(entries.data());
+    map_list.entries.count=static_cast<int32_t>(projection.count);
+    map_list.entries.capacity=static_cast<int32_t>(entries.size());
+    return true;
+}
+bool label_campaign_rows(uintptr_t widgets) {
+    for (uint32_t i=0;i<shown.count;++i) {
+        uintptr_t widget=0;
+        if (!read(widgets,static_cast<size_t>(i)*8,widget) || !widget) { fault("native_campaign_widget_missing"); return false; }
+        std::string label=shown.rows[i].title;
+        if (shown.rows[i].flags&SC_CAMPAIGN_GOAL) label+=" / GOAL";
+        if (!(shown.rows[i].flags&SC_CAMPAIGN_UNLOCKED)) label+=" / LOCKED";
+        else if (shown.rows[i].flags&SC_CAMPAIGN_COMPLETED) label+=" / COMPLETED";
+        string_assign(widget+0x188,label.c_str());
+        if (!(shown.rows[i].flags&SC_CAMPAIGN_UNLOCKED)) widget_state(widget,5);
+    }
+    return true;
+}
+void publish_campaign_meter(uintptr_t screen) {
+    uintptr_t details=0,meter=0;
+    if (read(screen,0x118,details) && details && read(details,0x6f8,meter) && meter) { ap_meter_published.store(meter,std::memory_order_release); }
+}
 void populate(uintptr_t screen,uintptr_t list) {
     shown_verified = false;
     if (!active()) { original_populate(screen,list); return; }
@@ -1317,49 +1322,15 @@ void populate(uintptr_t screen,uintptr_t list) {
         !read(screen,0x870,pending)) { fault("native_campaign_list_unreadable"); return; }
     // keep the mission row in place while its native save callback holds it
     if (pending) return;
-    if (!initialized) {
-        for (auto& entry:entries) string_init(reinterpret_cast<uintptr_t>(&entry.name));
-        initialized=true;
-    }
-    uintptr_t source_entries=0; int32_t source_count=0;
-    if (!read(previous,0x88,source_entries) || !read(previous,0x90,source_count) || source_count<1) {
-        fault("native_campaign_source_roster_unreadable"); return;
-    }
-    for (uint32_t i=0;i<projection.count;++i) {
-        entries[i].dependencies={};
-        const auto& row=projection.rows[i];
-        if (row.flags&SC_CAMPAIGN_REVEALED) {
-            if (!bind_campaign_source(row,entries[i],source_entries,source_count)) {
-                fault("native_campaign_source_entry_mismatch"); return;
-            }
-        }
-        string_assign(reinterpret_cast<uintptr_t>(&entries[i].name),projection.rows[i].map);
-    }
-    map_list.entries.data=reinterpret_cast<uintptr_t>(entries.data());
-    map_list.entries.count=static_cast<int32_t>(projection.count);
-    map_list.entries.capacity=static_cast<int32_t>(entries.size());
+    if (!prepare_campaign_rows(projection,previous)) return;
     shown=projection; shown_screen=screen;
-    uintptr_t details=0,meter=0;
-    if (read(screen,0x118,details) && details && read(details,0x6f8,meter) && meter) {
-        ap_meter_published.store(meter,std::memory_order_release);
-    }
+    publish_campaign_meter(screen);
     populate_owned(screen,list,campaign,previous);
     uintptr_t widgets=0; int32_t count=0;
     if (!read(list,0xa0,widgets) || !read(list,0xa8,count) || count!=static_cast<int32_t>(shown.count)) {
         fault("native_campaign_widget_count_mismatch"); hide_details(screen); return;
     }
-    for (uint32_t i=0;i<shown.count;++i) {
-        uintptr_t widget=0;
-        if (!read(widgets,static_cast<size_t>(i)*8,widget) || !widget) {
-            fault("native_campaign_widget_missing"); return;
-        }
-        std::string label=shown.rows[i].title;
-        if (shown.rows[i].flags&SC_CAMPAIGN_GOAL) label+=" / GOAL";
-        if (!(shown.rows[i].flags&SC_CAMPAIGN_UNLOCKED)) label+=" / LOCKED";
-        else if (shown.rows[i].flags&SC_CAMPAIGN_COMPLETED) label+=" / COMPLETED";
-        string_assign(widget+0x188,label.c_str());
-        if (!(shown.rows[i].flags&SC_CAMPAIGN_UNLOCKED)) widget_state(widget,5);
-    }
+    if (!label_campaign_rows(widgets)) return;
     shown_verified = true;
     focus(screen);
 }
@@ -1398,8 +1369,7 @@ void load(uintptr_t screen,int index) {
     }
     __except(EXCEPTION_EXECUTE_HANDLER) {}
     const auto& namespace_id=session.namespace_id();
-    fast_travel::entry_policy().selected(namespace_id.c_str(),shown.rows[index].map,
-        boundary.generation_after,completion_known,completed);
+    fast_travel::entry_policy().selected(namespace_id.c_str(),shown.rows[index].map, boundary.generation_after,completion_known,completed);
     menu().selected(shown.rows[index].id);
     menu().load_requested(shown.rows[index].id, shown, native::evidence_scope());
     session.btrace.record(save::BStage::checkpoint_factory,save::BStatus::entered,"mission_native_load_invoked",0,
@@ -1413,33 +1383,34 @@ bool is_available(uintptr_t screen) {
     if (!active()) return original_available(screen);
     return save::session().accepts_requests() && menu().projection().count!=0;
 }
-void observe_menu_entries() {
-    if (shown_verified) menu().entries_usable(shown, native::evidence_scope());
+void observe_menu_entries() { if (shown_verified) menu().entries_usable(shown, native::evidence_scope()); }
+void restore_campaign_focus(uintptr_t screen) {
+    const auto wanted=menu().focus_id();
+    const auto list=list_for(screen);
+    uintptr_t table=0,method=0;
+    if (list && read(list,0,table) && read(table,0x68,method) && method) for (uint32_t i=0;i<shown.count;++i) if (shown.rows[i].id==wanted) {
+            reinterpret_cast<void(*)(uintptr_t,int,int)>(method)(list,static_cast<int>(i),0); break;
+        }
+}
+bool request_campaign_rebuild(uintptr_t screen) {
+    if (active() && screen==shown_screen && shown.revision!=menu().projection().revision) {
+        uintptr_t pending=0; int32_t state=-1;
+        if (read(screen,0x870,pending) && !pending && read(screen,0x108,state) && state==0) {
+            *reinterpret_cast<int32_t*>(screen+0x108)=-1; // native update owns clear/repopulate/focus
+            return true;
+        }
+    }
+    return false;
 }
 void update(uintptr_t screen) {
     int32_t before=0;
     read(screen,0x108,before);
     bool rebuild=before==-1;
-    if (active() && screen==shown_screen && shown.revision!=menu().projection().revision) {
-        uintptr_t pending=0; int32_t state=-1;
-        if (read(screen,0x870,pending) && !pending && read(screen,0x108,state) && state==0) {
-            *reinterpret_cast<int32_t*>(screen+0x108)=-1; // native update owns clear/repopulate/focus
-            rebuild=true;
-        }
-    }
+    if (request_campaign_rebuild(screen)) rebuild=true;
     original_update(screen);
-    if (active() && rebuild && screen==shown_screen) {
-        const auto wanted=menu().focus_id();
-        const auto list=list_for(screen);
-        uintptr_t table=0,method=0;
-        if (list && read(list,0,table) && read(table,0x68,method) && method)
-            for (uint32_t i=0;i<shown.count;++i) if (shown.rows[i].id==wanted) {
-                reinterpret_cast<void(*)(uintptr_t,int,int)>(method)(list,static_cast<int>(i),0); break;
-            }
-    }
+    if (active() && rebuild && screen==shown_screen) { restore_campaign_focus(screen); }
     int32_t state=-1;
-    if (active() && save::session().accepts_requests() && screen==shown_screen &&
-        read(screen,0x108,state) && state==0) {
+    if (active() && save::session().accepts_requests() && screen==shown_screen && read(screen,0x108,state) && state==0) {
         menu().rendered(shown.revision);
         observe_menu_entries();
     }
@@ -1467,8 +1438,7 @@ sc_campaign_reward mastery_reward(const char* perk) {
     if (projection.namespace_id!=save::session().namespace_id()) return {};
     for (uint32_t i=0;i<projection.count;++i) {
         if (!(projection.rows[i].flags&SC_CAMPAIGN_HUB)) continue;
-        for (const auto& reward:projection.rewards[i])
-            if (reward.kind==SC_REWARD_MASTERY && !std::strcmp(reward.unlockable,perk)) return reward;
+        for (const auto& reward:projection.rewards[i]) if (reward.kind==SC_REWARD_MASTERY && !std::strcmp(reward.unlockable,perk)) return reward;
     }
     return {};
 }
@@ -1487,12 +1457,9 @@ bool request_map(uintptr_t request,const std::string& map) {
     save::NativeString value{};
     char bytes[192]{};
     return read(request,0x30,value) && value.length==static_cast<int32_t>(map.size()) &&
-        !memory.copy(reinterpret_cast<uintptr_t>(value.data),bytes,map.size()+1).reason &&
-        !std::strcmp(bytes,map.c_str());
+        !memory.copy(reinterpret_cast<uintptr_t>(value.data),bytes,map.size()+1).reason && !std::strcmp(bytes,map.c_str());
 }
-uintptr_t mapload_for(const StageRoute& route) {
-    return find_material(mapload_registry,route.entry,0);
-}
+uintptr_t mapload_for(const StageRoute& route) { return find_material(mapload_registry,route.entry,0); }
 void configure_stage_request(uintptr_t request,uint32_t variant,uintptr_t entry) {
     string_assign(request+0x60,"");
     *reinterpret_cast<uint32_t*>(request+0x90)=0;
@@ -1530,8 +1497,7 @@ uintptr_t restart_entry(const sc_campaign_row& row) {
     const std::string map=row.map;
     save::NativeString native_name{}; char actual[192]{};
     if (!read(entry,0,native_name) || native_name.length!=static_cast<int32_t>(map.size()) ||
-        memory.copy(reinterpret_cast<uintptr_t>(native_name.data),actual,map.size()+1).reason ||
-        std::strcmp(actual,map.c_str())) return 0;
+        memory.copy(reinterpret_cast<uintptr_t>(native_name.data),actual,map.size()+1).reason || std::strcmp(actual,map.c_str())) return 0;
     return entry;
 }
 bool restart_request(uintptr_t request,uint32_t stage_id,const std::string& map) {
@@ -1602,6 +1568,35 @@ const char* resume_label(const save::CampaignSnapshot& snapshot) {
     if (snapshot.restart_pending) return player_strings::menu_restart_stage;
     return snapshot.map=="game/hub/hub"?player_strings::menu_return_to_fortress:player_strings::menu_resume_checkpoint;
 }
+bool campaign_action_widgets(uintptr_t screen,uintptr_t list,uintptr_t& resume,uintptr_t& choose,uintptr_t& focused) {
+    uintptr_t children=0;
+    int32_t count=0,index=-1;
+    if (!read(screen,0x118,resume) || !resume || !read(screen,0x120,choose) || !choose ||
+        !read(list,0xa0,children) || !read(list,0xa8,count) || !read(list,0x150,index)) return false;
+    bool contains_choose=false;
+    for (int32_t i=0;i<count;++i) {
+        uintptr_t child=0; if (!read(children,size_t(i)*8,child)) return false;
+        contains_choose|=child==choose;
+        if (i==index) focused=child;
+    }
+    return contains_choose;
+}
+void label_campaign_action(uintptr_t widget,const char* wanted) {
+        save::NativeString current{}; char text[96]{};
+        if (read(widget,0x188,current) && current.length>=0 && current.length<96 && current.data &&
+            !memory.copy(reinterpret_cast<uintptr_t>(current.data),text,size_t(current.length)+1).reason && !std::strcmp(text,wanted)) return;
+        string_assign(widget+0x188,wanted);
+}
+void select_campaign_action(uintptr_t list,uintptr_t choose,uintptr_t focused,uintptr_t resume,bool hub,bool entered) {
+    uintptr_t table=0,select=0;
+    int32_t choose_state=0;
+    const bool projected=menu().projection().count!=0;
+    if (!read(choose,0x154,choose_state)) return;
+    const bool became_available=projected && choose_state==5;
+    if (became_available) widget_state(choose,focused==choose?3:1);
+    if (projected && hub && (entered || (became_available && focused==resume)) && read(list,0,table) && read(table,0x70,select) && select)
+        reinterpret_cast<void(*)(uintptr_t,uintptr_t)>(select)(list,choose);
+}
 void present_campaign_actions(uintptr_t screen,bool entered) {
     if (!available() || !active() || !save::session().accepts_requests()) return;
     int32_t state=-1;
@@ -1611,35 +1606,12 @@ void present_campaign_actions(uintptr_t screen,bool entered) {
     safe_present_save_preview(screen,snapshot);
     if (!snapshot.checkpoint) return;
     const auto list=list_for(screen);
-    uintptr_t resume=0,choose=0,children=0,table=0,select=0;
-    int32_t count=0,index=-1,choose_state=0;
-    if (!read(screen,0x118,resume) || !resume || !read(screen,0x120,choose) || !choose ||
-        !read(list,0xa0,children) || !read(list,0xa8,count) || !read(list,0x150,index)) return;
-    bool contains_choose=false;
-    uintptr_t focused=0;
-    for (int32_t i=0;i<count;++i) {
-        uintptr_t child=0; if (!read(children,size_t(i)*8,child)) return;
-        contains_choose|=child==choose;
-        if (i==index) focused=child;
-    }
-    if (!contains_choose) return; // keep native action membership and permissions
+    uintptr_t resume=0,choose=0,focused=0;
+    if (!campaign_action_widgets(screen,list,resume,choose,focused)) return;
     const bool hub=snapshot.map=="game/hub/hub";
-    const auto label=[&](uintptr_t widget,const char* wanted) {
-        save::NativeString current{}; char text[96]{};
-        if (read(widget,0x188,current) && current.length>=0 && current.length<96 && current.data &&
-            !memory.copy(reinterpret_cast<uintptr_t>(current.data),text,size_t(current.length)+1).reason &&
-            !std::strcmp(text,wanted)) return;
-        string_assign(widget+0x188,wanted);
-    };
-    label(resume,resume_label(snapshot));
-    label(choose,player_strings::menu_choose_mission);
-    const bool projected=menu().projection().count!=0;
-    if (!read(choose,0x154,choose_state)) return;
-    const bool became_available=projected && choose_state==5;
-    if (became_available) widget_state(choose,focused==choose?3:1);
-    if (projected && hub && (entered || (became_available && focused==resume)) &&
-        read(list,0,table) && read(table,0x70,select) && select)
-        reinterpret_cast<void(*)(uintptr_t,uintptr_t)>(select)(list,choose);
+    label_campaign_action(resume,resume_label(snapshot));
+    label_campaign_action(choose,player_strings::menu_choose_mission);
+    select_campaign_action(list,choose,focused,resume,hub,entered);
 }
 void pump_campaign(uintptr_t screen,void (*pump)(uintptr_t)) {
     uintptr_t declaration=0;
@@ -1654,87 +1626,6 @@ void pump_campaign(uintptr_t screen,void (*pump)(uintptr_t)) {
 }
 #ifdef SC_NATIVE_TESTING
 Update test_pump=nullptr;
-bool test_hud_score_root() {
-    std::array<unsigned char,0x180> score{},swf{},widget{},root{};
-    const auto owner=reinterpret_cast<uintptr_t>(score.data());
-    const auto expected=reinterpret_cast<uintptr_t>(root.data());
-    *reinterpret_cast<uintptr_t*>(score.data()+0x10)=reinterpret_cast<uintptr_t>(swf.data());
-    *reinterpret_cast<uintptr_t*>(score.data()+0x88)=reinterpret_cast<uintptr_t>(widget.data());
-    *reinterpret_cast<uintptr_t*>(swf.data()+0x18)=expected;
-    static uintptr_t observed=0;
-    observed=0;
-    const auto saved=swf_lookup;
-    swf_lookup=+[](uintptr_t parent,SwfValue*,const char*)->SwfValue* {
-        observed=parent; return nullptr;
-    };
-    present_score_found(owner);
-    swf_lookup=saved;
-    return observed==expected && !*reinterpret_cast<uintptr_t*>(widget.data()+0x18) &&
-        !*reinterpret_cast<uintptr_t*>(score.data()+0xf8);
-}
-bool test_question_material() {
-    uintptr_t sprite[0x130/sizeof(uintptr_t)]{};
-    std::array<uint8_t,0x130> owner{};
-    sprite[0x30/sizeof(uintptr_t)]=reinterpret_cast<uintptr_t>(owner.data());
-    owner[0x128]=1;
-    const auto previous=swf_create_material;
-    const auto previous_frame=swf_frame;
-    static unsigned frames=0;
-    frames=0;
-    swf_frame=[](uintptr_t instance,uint32_t frame) {
-        ++frames;
-        if (frame==1) {
-            *reinterpret_cast<uint8_t*>(instance+0x50)=0;
-            *reinterpret_cast<uint32_t*>(instance+0x58)=1;
-        }
-    };
-    *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(sprite)+0x50)=1;
-    swf_create_material=[](uintptr_t swf,const int* type,const char*,const char* texture)->uintptr_t {
-        return !*reinterpret_cast<const uint8_t*>(swf+0x128) && *type==1 &&
-            !std::strcmp(texture,"textures/swf_images/dossier/codex/hud_codex_questionmark.png") ? 0x123 : 0;
-    };
-    const bool created=question_material(reinterpret_cast<uintptr_t>(sprite))==0x123 && owner[0x128]==1 &&
-        !*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(sprite)+0x50);
-    swf_create_material=[](uintptr_t,const int*,const char*,const char*)->uintptr_t { return 0; };
-    const bool refused=!question_material(reinterpret_cast<uintptr_t>(sprite)) && owner[0x128]==1;
-    swf_create_material=previous;
-    swf_frame=previous_frame;
-    const auto saved_text=cached_text;
-    const auto saved_sprite=cached_sprite;
-    const auto saved_set_text=swf_set_text;
-    static uintptr_t card=0;
-    static unsigned written=0;
-    std::array<uint8_t,0x398> reward_widget{};
-    card=reinterpret_cast<uintptr_t>(reward_widget.data());
-    written=0;
-    cached_text=[](uintptr_t field,const char*)->uintptr_t {
-        return field==card+0x210 ? 1 : field==card+0x240 ? 2 : 0;
-    };
-    cached_sprite=[](uintptr_t)->uintptr_t { return 0; };
-    swf_set_text=[](uintptr_t field,const char* text) {
-        if (field==1 && !std::strcmp(text,"Ballista")) written|=1;
-        if (field==2 && !std::strcmp(text,player_strings::menu_reward_category)) written|=2;
-    };
-    sc_campaign_reward reward{};
-    reward.location_id=7770001;
-    std::memcpy(reward.text,"Ballista",9);
-    present_encounter_card(card,reward);
-    cached_text=saved_text;
-    cached_sprite=saved_sprite;
-    swf_set_text=saved_set_text;
-    return created && refused && frames==1 && written==3;
-}
-bool test_physical_completion_edges() {
-    CompletionToast toast{};
-    if (completion_edge(toast,1,true) || completion_edge(toast,1,true)) return false;
-    toast={};
-    if (completion_edge(toast,1,false) || completion_edge(toast,1,false) || !completion_edge(toast,1,true)) return false;
-    if (!completion_edge(toast,1,true)) return false;
-    toast.checked=true;
-    if (completion_edge(toast,1,true) || completion_edge(toast,2,true)) return false;
-    toast={};
-    return !completion_edge(toast,1,true);
-}
 void test_calls(const NativeCalls& c) {
     original_populate=c.populate; original_focus=c.focus; original_load=c.load; original_available=c.available;
     original_update=c.update; string_init=c.string_init; string_assign=c.string_assign;
@@ -1758,9 +1649,7 @@ void test_root_navigation(uintptr_t screen,uint8_t reset) { root_navigation(scre
 void test_root_campaign(uintptr_t screen,uintptr_t declaration) { root_campaign(screen,declaration); }
 void test_campaign_pump(uintptr_t screen) { pump_campaign(screen,test_pump); }
 void test_meter_allocate(uintptr_t meter,uintptr_t encounters,uintptr_t decl) { meter_allocate_detour(meter,encounters,decl); }
-void test_sprite_visibility(uintptr_t sprite,uint32_t visible,uint32_t flag) {
-    sprite_visibility_detour(sprite,visible,flag,_ReturnAddress());
-}
+void test_sprite_visibility(uintptr_t sprite,uint32_t visible,uint32_t flag) { sprite_visibility_detour(sprite,visible,flag,_ReturnAddress()); }
 void test_meter_update(uintptr_t meter) { meter_update_detour(meter); }
 #endif
 #include "physical_contact_observer.h"
@@ -1772,7 +1661,6 @@ void populate_entry(uintptr_t screen,uintptr_t list) {
         return populate(screen, list);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void focus_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(1);
     __try {
@@ -1780,7 +1668,6 @@ void focus_entry(uintptr_t screen) {
         return focus(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void load_entry(uintptr_t screen,int index) {
     const auto lease = menu_hooks.enter(2);
     __try {
@@ -1788,7 +1675,6 @@ void load_entry(uintptr_t screen,int index) {
         return load(screen, index);
     } __finally { menu_hooks.leave(lease); }
 }
-
 bool is_available_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(3);
     __try {
@@ -1796,7 +1682,6 @@ bool is_available_entry(uintptr_t screen) {
         return is_available(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void update_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(4);
     __try {
@@ -1804,7 +1689,6 @@ void update_entry(uintptr_t screen) {
         return update(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void root_navigation_entry(uintptr_t screen,uint8_t reset) {
     const auto lease = menu_hooks.enter(5);
     __try {
@@ -1812,7 +1696,6 @@ void root_navigation_entry(uintptr_t screen,uint8_t reset) {
         return root_navigation(screen, reset);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void root_campaign_entry(uintptr_t screen,uintptr_t declaration) {
     const auto lease = menu_hooks.enter(6);
     __try {
@@ -1820,7 +1703,6 @@ void root_campaign_entry(uintptr_t screen,uintptr_t declaration) {
         return root_campaign(screen, declaration);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void render_details_entry(uintptr_t details) {
     const auto lease = menu_hooks.enter(7);
     __try {
@@ -1828,7 +1710,6 @@ void render_details_entry(uintptr_t details) {
         return render_details(details);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void meter_allocate_detour_entry(uintptr_t meter,uintptr_t encounters,uintptr_t decl) {
     const auto lease = menu_hooks.enter(8);
     __try {
@@ -1836,7 +1717,6 @@ void meter_allocate_detour_entry(uintptr_t meter,uintptr_t encounters,uintptr_t 
         return meter_allocate_detour(meter, encounters, decl);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void sprite_visibility_detour_entry(uintptr_t sprite,uint32_t visible,uint32_t flag) {
     const auto caller = _ReturnAddress();
     const auto lease = menu_hooks.enter(9);
@@ -1845,7 +1725,6 @@ void sprite_visibility_detour_entry(uintptr_t sprite,uint32_t visible,uint32_t f
         return sprite_visibility_detour(sprite, visible, flag, caller);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void meter_update_detour_entry(uintptr_t meter) {
     const auto lease = menu_hooks.enter(10);
     __try {
@@ -1853,7 +1732,6 @@ void meter_update_detour_entry(uintptr_t meter) {
         return meter_update_detour(meter);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void userinfo_point_entry(uintptr_t widget,int kind,uintptr_t material,int count,int width,int delta) {
     const auto lease = menu_hooks.enter(11);
     __try {
@@ -1861,7 +1739,6 @@ void userinfo_point_entry(uintptr_t widget,int kind,uintptr_t material,int count
         return userinfo_point(widget, kind, material, count, width, delta);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void hud_score_init_entry(uintptr_t score) {
     const auto lease = menu_hooks.enter(12);
     __try {
@@ -1869,7 +1746,6 @@ void hud_score_init_entry(uintptr_t score) {
         return hud_score_init(score);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void end_items_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(13);
     __try {
@@ -1877,7 +1753,6 @@ void end_items_entry(uintptr_t screen) {
         return end_items(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void end_combat_init_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(14);
     __try {
@@ -1885,7 +1760,6 @@ void end_combat_init_entry(uintptr_t screen) {
         return end_combat_init(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void dossier_map_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(15);
     __try {
@@ -1893,7 +1767,6 @@ void dossier_map_entry(uintptr_t screen) {
         return dossier_map(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void challenge_card_update_entry(uintptr_t widget,uintptr_t context,uintptr_t flags) {
     const auto lease = menu_hooks.enter(16);
     __try {
@@ -1901,7 +1774,6 @@ void challenge_card_update_entry(uintptr_t widget,uintptr_t context,uintptr_t fl
         return challenge_card_update(widget, context, flags);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void start_show_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(17);
     __try {
@@ -1909,7 +1781,6 @@ void start_show_entry(uintptr_t screen) {
         return start_show(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void boss_update_entry(uintptr_t screen,uintptr_t event) {
     const auto lease = menu_hooks.enter(18);
     __try {
@@ -1917,7 +1788,6 @@ void boss_update_entry(uintptr_t screen,uintptr_t event) {
         return boss_update(screen, event);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void hud_challenge_update_entry(uintptr_t widget) {
     const auto lease = menu_hooks.enter(19);
     __try {
@@ -1925,7 +1795,6 @@ void hud_challenge_update_entry(uintptr_t widget) {
         return hud_challenge_update(widget);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void eol_challenge_update_entry(uintptr_t widget) {
     const auto lease = menu_hooks.enter(20);
     __try {
@@ -1933,7 +1802,6 @@ void eol_challenge_update_entry(uintptr_t widget) {
         return eol_challenge_update(widget);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void category_counts_entry(uintptr_t category) {
     const auto lease = menu_hooks.enter(21);
     __try {
@@ -1941,7 +1809,6 @@ void category_counts_entry(uintptr_t category) {
         return category_counts(category);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void hud_score_update_entry(uintptr_t score) {
     const auto lease = menu_hooks.enter(23);
     __try {
@@ -1949,7 +1816,6 @@ void hud_score_update_entry(uintptr_t score) {
         return hud_score_update(score);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void challenges_show_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(24);
     __try {
@@ -1957,7 +1823,6 @@ void challenges_show_entry(uintptr_t screen) {
         return challenges_show(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 uintptr_t challenges_action_entry(uintptr_t screen,uintptr_t action,uintptr_t event,uintptr_t source) {
     const auto lease = menu_hooks.enter(25);
     __try {
@@ -1965,7 +1830,6 @@ uintptr_t challenges_action_entry(uintptr_t screen,uintptr_t action,uintptr_t ev
         return challenges_action(screen, action, event, source);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void mission_tab_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(26);
     __try {
@@ -1973,7 +1837,6 @@ void mission_tab_entry(uintptr_t screen) {
         return mission_tab(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void end_challenges_show_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(27);
     __try {
@@ -1981,7 +1844,6 @@ void end_challenges_show_entry(uintptr_t screen) {
         return end_challenges_show(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void secret_rewards_show_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(28);
     __try {
@@ -1989,7 +1851,6 @@ void secret_rewards_show_entry(uintptr_t screen) {
         return secret_rewards_show(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void escalation_rewards_show_entry(uintptr_t screen) {
     const auto lease = menu_hooks.enter(29);
     __try {
@@ -1997,7 +1858,6 @@ void escalation_rewards_show_entry(uintptr_t screen) {
         return escalation_rewards_show(screen);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void reward_card_entry(uintptr_t widget,uintptr_t declaration) {
     const auto lease = menu_hooks.enter(30);
     __try {
@@ -2005,7 +1865,6 @@ void reward_card_entry(uintptr_t widget,uintptr_t declaration) {
         return reward_card(widget, declaration);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void escalation_card_entry(uintptr_t widget,uintptr_t declaration) {
     const auto lease = menu_hooks.enter(31);
     __try {
@@ -2013,7 +1872,6 @@ void escalation_card_entry(uintptr_t widget,uintptr_t declaration) {
         return escalation_card(widget, declaration);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void escalation_perk_entry(uintptr_t screen,const char* root_name,const void* pack) {
     const auto lease = menu_hooks.enter(32);
     __try {
@@ -2021,7 +1879,6 @@ void escalation_perk_entry(uintptr_t screen,const char* root_name,const void* pa
         return escalation_perk(screen, root_name, pack);
     } __finally { menu_hooks.leave(lease); }
 }
-
 bool trigger_gate_entry(uintptr_t entity) {
     const auto lease = menu_hooks.enter(22);
     __try {
@@ -2030,14 +1887,11 @@ bool trigger_gate_entry(uintptr_t entity) {
     } __finally { menu_hooks.leave(lease); }
 }
 
-std::array<native::Target,46> native_targets(uintptr_t base) {
-    return builds::steam_20260818().menu_targets(base);
-}
+std::array<native::Target,46> native_targets(uintptr_t base) { return builds::steam_20260818().menu_targets(base); }
 bool validate_native_targets(save::Installation& record,engine::Memory& source_memory,
                               const engine::Image& image,HANDLE stop,const std::array<native::Target,46>& targets) {
     if (!image.contains(0x5e05200,sizeof(uintptr_t),IMAGE_SCN_MEM_READ,IMAGE_SCN_MEM_EXECUTE)) return false;
-    // Populate's actual CALL owns this list-copy contract. Record failures here
-    // as well as in the target validator so startup refusal remains actionable.
+    // the populate call must target the qualified list-copy function
     auto call_event=record.begin(SC_INSTALL_SAVE_TARGET,6,8,0x10d2d99);
     native::ValidationDetail detail;
     if (!native::function_window(source_memory,image,image.base+0x10d2c00,image.base+0x10d2d99,5,&detail)) {
@@ -2056,7 +1910,8 @@ bool validate_native_targets(save::Installation& record,engine::Memory& source_m
     if (!call_matches) return false;
     for (unsigned i=0;i<targets.size();++i) {
         const auto rva=static_cast<uint32_t>(targets[i].address-image.base);
-        if (i==5 || i==10 || i==16 || i==23 || i==31) {
+        constexpr unsigned leaves[]{5,10,16,23,31};
+        if (std::find(std::begin(leaves),std::end(leaves),i)!=std::end(leaves)) {
             // these leaf callees have no unwind entry and are not detoured
             std::array<uint8_t,32> actual{};
             if (!image.contains(rva,actual.size(),IMAGE_SCN_MEM_EXECUTE|IMAGE_SCN_MEM_READ,0) ||
@@ -2065,8 +1920,7 @@ bool validate_native_targets(save::Installation& record,engine::Memory& source_m
     }
     return true;
 }
-static bool install_hooks(const engine::Binding& binding,HANDLE stop,
-                          const std::array<native::Target,46>& targets,
+static bool install_hooks(const engine::Binding& binding,HANDLE stop, const std::array<native::Target,46>& targets,
                           decltype(&MH_EnableHook) enable_hook=MH_EnableHook) {
     menu_enable_operation = enable_hook;
     meter_visibility_return=binding.image.base+0x1116e07;
@@ -2074,8 +1928,7 @@ static bool install_hooks(const engine::Binding& binding,HANDLE stop,
     void* detours[]={reinterpret_cast<void*>(populate_entry),reinterpret_cast<void*>(focus_entry),reinterpret_cast<void*>(load_entry),
         reinterpret_cast<void*>(is_available_entry),reinterpret_cast<void*>(update_entry),
         reinterpret_cast<void*>(root_navigation_entry),reinterpret_cast<void*>(root_campaign_entry),
-        reinterpret_cast<void*>(render_details_entry),
-        reinterpret_cast<void*>(meter_allocate_detour_entry),
+        reinterpret_cast<void*>(render_details_entry), reinterpret_cast<void*>(meter_allocate_detour_entry),
         reinterpret_cast<void*>(sprite_visibility_detour_entry),
         reinterpret_cast<void*>(meter_update_detour_entry),reinterpret_cast<void*>(userinfo_point_entry),
         reinterpret_cast<void*>(hud_score_init_entry),reinterpret_cast<void*>(end_items_entry),reinterpret_cast<void*>(end_combat_init_entry),
@@ -2084,33 +1937,20 @@ static bool install_hooks(const engine::Binding& binding,HANDLE stop,
         reinterpret_cast<void*>(hud_challenge_update_entry),reinterpret_cast<void*>(eol_challenge_update_entry),reinterpret_cast<void*>(category_counts_entry),
         reinterpret_cast<void*>(trigger_gate_entry),reinterpret_cast<void*>(hud_score_update_entry)};
     constexpr unsigned hooked[]={0,1,2,3,4,11,12,9,15,16,17,27,28,29,30,31,32,34,35,38,39,41,42,45};
-    void** originals[]{reinterpret_cast<void**>(&original_populate),
-        reinterpret_cast<void**>(&original_focus),
-        reinterpret_cast<void**>(&original_load),
-        reinterpret_cast<void**>(&original_available),
-        reinterpret_cast<void**>(&original_update),
-        reinterpret_cast<void**>(&original_root_navigation),
-        reinterpret_cast<void**>(&original_root_campaign),
-        reinterpret_cast<void**>(&details_update),
-        reinterpret_cast<void**>(&original_meter_allocate),
-        reinterpret_cast<void**>(&original_sprite_visibility),
-        reinterpret_cast<void**>(&original_meter_update),
-        reinterpret_cast<void**>(&original_userinfo_point),
-        reinterpret_cast<void**>(&original_hud_score_init),
-        reinterpret_cast<void**>(&original_end_items),
-        reinterpret_cast<void**>(&original_end_combat_init),
-        reinterpret_cast<void**>(&original_dossier_map),
-        reinterpret_cast<void**>(&original_challenge_card_update),
-        reinterpret_cast<void**>(&original_start_show),
-        reinterpret_cast<void**>(&original_boss_update),
-        reinterpret_cast<void**>(&original_hud_challenge_update),
-        reinterpret_cast<void**>(&original_eol_challenge_update),
-        reinterpret_cast<void**>(&original_category_counts),
-        reinterpret_cast<void**>(&original_trigger_gate),
-        reinterpret_cast<void**>(&original_hud_score_update)};
+    void** originals[]{reinterpret_cast<void**>(&original_populate), reinterpret_cast<void**>(&original_focus),
+        reinterpret_cast<void**>(&original_load), reinterpret_cast<void**>(&original_available),
+        reinterpret_cast<void**>(&original_update), reinterpret_cast<void**>(&original_root_navigation),
+        reinterpret_cast<void**>(&original_root_campaign), reinterpret_cast<void**>(&details_update),
+        reinterpret_cast<void**>(&original_meter_allocate), reinterpret_cast<void**>(&original_sprite_visibility),
+        reinterpret_cast<void**>(&original_meter_update), reinterpret_cast<void**>(&original_userinfo_point),
+        reinterpret_cast<void**>(&original_hud_score_init), reinterpret_cast<void**>(&original_end_items),
+        reinterpret_cast<void**>(&original_end_combat_init), reinterpret_cast<void**>(&original_dossier_map),
+        reinterpret_cast<void**>(&original_challenge_card_update), reinterpret_cast<void**>(&original_start_show),
+        reinterpret_cast<void**>(&original_boss_update), reinterpret_cast<void**>(&original_hud_challenge_update),
+        reinterpret_cast<void**>(&original_eol_challenge_update), reinterpret_cast<void**>(&original_category_counts),
+        reinterpret_cast<void**>(&original_trigger_gate), reinterpret_cast<void**>(&original_hud_score_update)};
     std::vector<hooks::HookSpec> specs;
-    for (unsigned i = 0; i < 24; ++i)
-        specs.push_back({targets[hooked[i]].address, detours[i], originals[i], hooked[i],
+    for (unsigned i = 0; i < 24; ++i) specs.push_back({targets[hooked[i]].address, detours[i], originals[i], hooked[i],
             static_cast<uint32_t>(targets[hooked[i]].address - binding.image.base)});
 
     campaign_definitions=reinterpret_cast<CampaignDefinitions>(targets[13].address);
@@ -2154,20 +1994,14 @@ static bool install_hooks(const engine::Binding& binding,HANDLE stop,
     engine::LocalMemory optional_memory;
     for (const auto& page:pages) {
         native::Target target; target.address=binding.image.base+page.rva;
-        for (size_t n=0;n<32;++n) {
-            unsigned value=0; sscanf_s(page.bytes+n*2,"%2x",&value); target.bytes[n]=static_cast<uint8_t>(value);
-        }
+        for (size_t n=0;n<32;++n) { unsigned value=0; sscanf_s(page.bytes+n*2,"%2x",&value); target.bytes[n]=static_cast<uint8_t>(value); }
         auto reason=native::validate_target(optional_memory,binding.image,target,stop,GetTickCount64()+3000);
-        if (page.hook)
-            specs.push_back({target.address, page.hook, page.original, SC_INSTALL_UNKNOWN, page.rva, !reason});
+        if (page.hook) specs.push_back({target.address, page.hook, page.original, SC_INSTALL_UNKNOWN, page.rva, !reason});
         else if (!reason) *page.original = reinterpret_cast<void*>(target.address);
-        save::session().btrace.record(save::BStage::dossier_challenges,
-            reason ? save::BStatus::refused : save::BStatus::succeeded,"campaign_page_binding",0,
+        save::session().btrace.record(save::BStage::dossier_challenges, reason ? save::BStatus::refused : save::BStatus::succeeded,"campaign_page_binding",0,
             {{"rva",page.rva},{"reason",reason}});
     }
-    if (!menu_hooks.install(specs.data(), specs.size(), stop)) {
-        ready.store(false, std::memory_order_release); return false;
-    }
+    if (!menu_hooks.install(specs.data(), specs.size(), stop)) { ready.store(false, std::memory_order_release); return false; }
     ready.store(true,std::memory_order_release); return true;
 }
 bool install(const engine::Binding& binding,HANDLE stop) {

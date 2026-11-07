@@ -65,83 +65,49 @@ uintptr_t find_perk(uintptr_t p, const char* target_name) {
     return 0;
 }
 
+int rune_index(uintptr_t perk, const char* const* paths, int count) {
+    if (!perk) return -1;
+    const auto name = *reinterpret_cast<const char**>(perk + 8);
+    if (!name) return -1;
+    for (int i = 0; i < count; ++i)
+        if (!std::strcmp(name, paths[i])) return i;
+    return -1;
+}
+
+bool read_registered_runes(uintptr_t manager, unsigned offset, int limit, const char* const* paths,
+                           int path_count, uint32_t& owned, int& count) {
+    const auto list = *reinterpret_cast<const uintptr_t**>(manager + offset);
+    count = *reinterpret_cast<const int*>(manager + offset + 8);
+    if (count < 0 || count > limit || (count && !list)) return false;
+    for (int i = 0; i < count; ++i) {
+        if (!list[i]) return false;
+        const auto index = rune_index(list[i], paths, path_count);
+        if (index >= 0) owned |= 1u << index;
+    }
+    return true;
+}
+
 bool read(void*, uintptr_t p, SnapshotFacts& facts) {
     if (!p) return false;
     __try {
         const uintptr_t rm = p + 0x19168;
         facts = {};
-        // pair projection isn't a native capacity observation (a01/d05)
         facts.derived_pairs = native_facts.derived_pairs;
 
-        // registered normal runes
-        const auto reg_list = *reinterpret_cast<const uintptr_t**>(rm + 0x50);
-        const auto reg_count = *reinterpret_cast<const int*>(rm + 0x58);
-        if (reg_count < 0 || reg_count > 64 || (reg_count && !reg_list)) return false;
-        if (reg_list && reg_count > 0 && reg_count <= 64) {
-            for (int i = 0; i < reg_count; ++i) {
-                const auto perk = reg_list[i];
-                if (!perk) return false;
-                const auto name = *reinterpret_cast<const char**>(perk + 8);
-                if (!name) continue;
-                for (int r = 0; r < 9; ++r) {
-                    if (std::strcmp(name, NORMAL_RUNE_PATHS[r]) == 0) {
-                        facts.owned_normal |= (1u << r);
-                        break;
-                    }
-                }
-            }
-        }
-
-        // registered support runes
-        const auto supp_list = *reinterpret_cast<const uintptr_t**>(rm + 0x68);
-        const auto supp_count = *reinterpret_cast<const int*>(rm + 0x70);
-        if (supp_count < 0 || supp_count > 16 || (supp_count && !supp_list)) return false;
-        if (supp_list && supp_count > 0 && supp_count <= 16) {
-            for (int i = 0; i < supp_count; ++i) {
-                const auto perk = supp_list[i];
-                if (!perk) return false;
-                const auto name = *reinterpret_cast<const char**>(perk + 8);
-                if (!name) continue;
-                for (int s = 0; s < 3; ++s) {
-                    if (std::strcmp(name, SUPPORT_RUNE_PATHS[s]) == 0) {
-                        facts.owned_support |= (1u << s);
-                        break;
-                    }
-                }
-            }
-        }
-
-        // equipped normal slots
+        int reg_count = 0, support_count = 0;
+        if (!read_registered_runes(rm, 0x50, 64, NORMAL_RUNE_PATHS, 9, facts.owned_normal, reg_count))
+            return false;
+        if (!read_registered_runes(rm, 0x68, 16, SUPPORT_RUNE_PATHS, 3, facts.owned_support, support_count))
+            return false;
         for (int slot = 0; slot < 3; ++slot) {
-            const auto equipped_perk = *reinterpret_cast<const uintptr_t*>(rm + 0x80 + slot * 8);
-            if (equipped_perk) {
-                const auto name = *reinterpret_cast<const char**>(equipped_perk + 8);
-                if (name) {
-                    for (int r = 0; r < 9; ++r) {
-                        if (std::strcmp(name, NORMAL_RUNE_PATHS[r]) == 0) {
-                            facts.selected_slots[slot] = static_cast<int8_t>(r);
-                            break;
-                        }
-                    }
-                }
-            }
+            const auto perk = *reinterpret_cast<const uintptr_t*>(rm + 0x80 + slot * 8);
+            const auto index = rune_index(perk, NORMAL_RUNE_PATHS, 9);
+            if (index >= 0) facts.selected_slots[slot] = static_cast<int8_t>(index);
         }
+        const auto support = *reinterpret_cast<const uintptr_t*>(rm + 0x98);
+        const auto index = rune_index(support, SUPPORT_RUNE_PATHS, 3);
+        if (index >= 0) facts.selected_support = static_cast<int8_t>(index);
 
-        // equipped support slot
-        const auto equipped_supp = *reinterpret_cast<const uintptr_t*>(rm + 0x98);
-        if (equipped_supp) {
-            const auto name = *reinterpret_cast<const char**>(equipped_supp + 8);
-            if (name) {
-                for (int s = 0; s < 3; ++s) {
-                    if (std::strcmp(name, SUPPORT_RUNE_PATHS[s]) == 0) {
-                        facts.selected_support = static_cast<int8_t>(s);
-                        break;
-                    }
-                }
-            }
-        }
-
-        // unlocked slots
         facts.unlocked_slots = 0;
         const auto req0 = *reinterpret_cast<const int*>(rm + 0x40);
         const auto req1 = *reinterpret_cast<const int*>(rm + 0x44);
@@ -150,100 +116,77 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         if (reg_count >= req1) facts.unlocked_slots |= (1u << 1);
         if (reg_count >= req2) facts.unlocked_slots |= (1u << 2);
 
-        // derived crystal pairs
         native_facts = facts;
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-uint32_t ensure_normal_runes(void*, uintptr_t p, uint32_t normal_mask) {
-    if (!p) return 1;
-    uint32_t error = 0;
-    __try {
-        const uintptr_t rm = p + 0x19168;
-        const auto unlock_perk = reinterpret_cast<void(*)(uintptr_t, uintptr_t, char, char, uintptr_t, char)>(image_base + 0xfe2500);
-        const auto assure_size = reinterpret_cast<char(*)(uintptr_t)>(image_base + 0x357040);
-        const auto level_event = reinterpret_cast<void(*)(uintptr_t, uint64_t)>(image_base + 0x13ef6a0);
-
-        for (int r = 0; r < 9; ++r) {
-            if (!(normal_mask & (1u << r))) continue;
-            const auto perk = find_perk(p, NORMAL_RUNE_PATHS[r]);
-            if (!perk) return 2;
-
-            auto reg_list = *reinterpret_cast<uintptr_t**>(rm + 0x50);
-            auto reg_count = *reinterpret_cast<int*>(rm + 0x58);
-            const auto reg_cap = *reinterpret_cast<int*>(rm + 0x5c);
-            if (reg_count < 0 || reg_count > 64 || reg_cap < reg_count ||
-                (reg_count && !reg_list)) return 3;
-            bool found = false;
-            if (reg_list && reg_count > 0) {
-                for (int i = 0; i < reg_count; ++i) {
-                    if (reg_list[i] == perk) { found = true; break; }
-                }
-            }
-            if (!found) {
-                if (reg_count >= 64) return 3;
-                if (reg_count >= reg_cap && assure_size) {
-                    if (!assure_size(rm + 0x50)) return 4;
-                    reg_list = *reinterpret_cast<uintptr_t**>(rm + 0x50);
-                }
-                const auto capacity = *reinterpret_cast<int*>(rm + 0x5c);
-                if (!reg_list || *reinterpret_cast<int*>(rm + 0x58) != reg_count ||
-                    capacity <= reg_count) return 4;
-                reg_list[reg_count] = perk;
-                *reinterpret_cast<int*>(rm + 0x58) = reg_count + 1;
-            }
-            if (unlock_perk) unlock_perk(p + 0x3b40, perk, 0, 0, 0, 0);
-            if (!found && level_event) level_event(p, 0x457);
-            native_facts.owned_normal |= (1u << r);
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
-    return error;
+uint32_t append_registered_rune(uintptr_t manager, uintptr_t perk, int limit, int count, int capacity,
+                                uintptr_t* list) {
+    const auto assure_size = reinterpret_cast<char (*)(uintptr_t)>(image_base + 0x357040);
+    if (count >= limit) return 3;
+    if (count >= capacity && assure_size) {
+        if (!assure_size(manager)) return 4;
+        list = *reinterpret_cast<uintptr_t**>(manager);
+    }
+    capacity = *reinterpret_cast<int*>(manager + 12);
+    if (!list || *reinterpret_cast<int*>(manager + 8) != count || capacity <= count) return 4;
+    list[count] = perk;
+    *reinterpret_cast<int*>(manager + 8) = count + 1;
+    return 0;
 }
 
-uint32_t ensure_support_runes(void*, uintptr_t p, uint32_t support_mask) {
-    if (!p) return 1;
-    uint32_t error = 0;
-    __try {
-        const uintptr_t rm = p + 0x19168;
-        const auto unlock_perk = reinterpret_cast<void(*)(uintptr_t, uintptr_t, char, char, uintptr_t, char)>(image_base + 0xfe2500);
-        const auto assure_size = reinterpret_cast<char(*)(uintptr_t)>(image_base + 0x357040);
-        const auto level_event = reinterpret_cast<void(*)(uintptr_t, uint64_t)>(image_base + 0x13ef6a0);
-
-        for (int s = 0; s < 3; ++s) {
-            if (!(support_mask & (1u << s))) continue;
-            const auto perk = find_perk(p, SUPPORT_RUNE_PATHS[s]);
-            if (!perk) return 2;
-
-            auto supp_list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
-            auto supp_count = *reinterpret_cast<int*>(rm + 0x70);
-            const auto supp_cap = *reinterpret_cast<int*>(rm + 0x74);
-            if (supp_count < 0 || supp_count > 16 || supp_cap < supp_count ||
-                (supp_count && !supp_list)) return 3;
-            bool found = false;
-            if (supp_list && supp_count > 0) {
-                for (int i = 0; i < supp_count; ++i) {
-                    if (supp_list[i] == perk) { found = true; break; }
-                }
-            }
-            if (!found) {
-                if (supp_count >= 16) return 3;
-                if (supp_count >= supp_cap && assure_size) {
-                    if (!assure_size(rm + 0x68)) return 4;
-                    supp_list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
-                }
-                const auto capacity = *reinterpret_cast<int*>(rm + 0x74);
-                if (!supp_list || *reinterpret_cast<int*>(rm + 0x70) != supp_count ||
-                    capacity <= supp_count) return 4;
-                supp_list[supp_count] = perk;
-                *reinterpret_cast<int*>(rm + 0x70) = supp_count + 1;
-            }
-            if (unlock_perk) unlock_perk(p + 0x3b40, perk, 0, 0, 0, 0);
-            if (!found && level_event) level_event(p, 0x457);
-            native_facts.owned_support |= (1u << s);
+uint32_t register_rune(uintptr_t manager, uintptr_t perk, int limit, bool& found) {
+    const auto list = *reinterpret_cast<uintptr_t**>(manager);
+    const auto count = *reinterpret_cast<int*>(manager + 8);
+    const auto capacity = *reinterpret_cast<int*>(manager + 12);
+    if (count < 0 || count > limit || capacity < count || (count && !list)) return 3;
+    found = false;
+    for (int i = 0; i < count; ++i) {
+        if (list[i] == perk) {
+            found = true;
+            break;
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
-    return error;
+    }
+    return found ? 0 : append_registered_rune(manager, perk, limit, count, capacity, list);
+}
+
+uint32_t ensure_rune_list(uintptr_t p, uint32_t mask, const char* const* paths, int path_count,
+                          unsigned offset, int limit, uint32_t& owned) {
+    const uintptr_t manager = p + 0x19168 + offset;
+    const auto unlock_perk =
+        reinterpret_cast<void (*)(uintptr_t, uintptr_t, char, char, uintptr_t, char)>(image_base + 0xfe2500);
+    const auto level_event = reinterpret_cast<void (*)(uintptr_t, uint64_t)>(image_base + 0x13ef6a0);
+    for (int i = 0; i < path_count; ++i) {
+        if (!(mask & (1u << i))) continue;
+        const auto perk = find_perk(p, paths[i]);
+        if (!perk) return 2;
+        bool found = false;
+        const auto reason = register_rune(manager, perk, limit, found);
+        if (reason) return reason;
+        if (unlock_perk) unlock_perk(p + 0x3b40, perk, 0, 0, 0, 0);
+        if (!found && level_event) level_event(p, 0x457);
+        owned |= 1u << i;
+    }
+    return 0;
+}
+
+uint32_t ensure_normal_runes(void*, uintptr_t p, uint32_t mask) {
+    if (!p) return 1;
+    __try {
+        return ensure_rune_list(p, mask, NORMAL_RUNE_PATHS, 9, 0x50, 64, native_facts.owned_normal);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
+}
+
+uint32_t ensure_support_runes(void*, uintptr_t p, uint32_t mask) {
+    if (!p) return 1;
+    __try {
+        return ensure_rune_list(p, mask, SUPPORT_RUNE_PATHS, 3, 0x68, 16, native_facts.owned_support);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
 }
 
 uint32_t select_normal_rune(void*, uintptr_t p, uint8_t slot_idx, int8_t rune_idx) {
@@ -332,11 +275,29 @@ bool refresh(void*, uintptr_t p) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+bool register_active_support(uintptr_t rm, uintptr_t perk) {
+    const auto assure_size = reinterpret_cast<char (*)(uintptr_t)>(image_base + 0x357040);
+    auto list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
+    auto count = *reinterpret_cast<int*>(rm + 0x70);
+    auto capacity = *reinterpret_cast<int*>(rm + 0x74);
+    if (count < 0 || count > 16 || capacity < count || (count && !list)) return false;
+    bool registered = false;
+    for (int entry = 0; entry < count; ++entry) registered |= list[entry] == perk;
+    if (!registered) {
+        if (count == 16 || (count >= capacity && (!assure_size || !assure_size(rm + 0x68)))) return false;
+        list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
+        capacity = *reinterpret_cast<int*>(rm + 0x74);
+        if (!list || *reinterpret_cast<int*>(rm + 0x70) != count || capacity <= count) return false;
+        list[count] = perk;
+        *reinterpret_cast<int*>(rm + 0x70) = count + 1;
+    }
+    return true;
+}
+
 void bind_run_state(void*, uintptr_t p) {
     if (!p) return;
     __try {
         const uintptr_t rm = p + 0x19168;
-        const auto assure_size = reinterpret_cast<char(*)(uintptr_t)>(image_base + 0x357040);
         const auto active_list = *reinterpret_cast<const uintptr_t**>(p + 0x3ba8);
         const auto active_entries = *reinterpret_cast<const int*>(p + 0x3bb0);
         if (active_entries < 0 || active_entries > 4000 || (active_entries && !active_list)) return;
@@ -353,20 +314,7 @@ void bind_run_state(void*, uintptr_t p) {
                 seen |= static_cast<uint8_t>(1u << s);
                 active_support = perk;
                 ++active_count;
-                auto list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
-                auto count = *reinterpret_cast<int*>(rm + 0x70);
-                auto capacity = *reinterpret_cast<int*>(rm + 0x74);
-                if (count < 0 || count > 16 || capacity < count || (count && !list)) return;
-                bool registered = false;
-                for (int entry = 0; entry < count; ++entry) registered |= list[entry] == perk;
-                if (!registered) {
-                    if (count == 16 || (count >= capacity && (!assure_size || !assure_size(rm + 0x68)))) return;
-                    list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
-                    capacity = *reinterpret_cast<int*>(rm + 0x74);
-                    if (!list || *reinterpret_cast<int*>(rm + 0x70) != count || capacity <= count) return;
-                    list[count] = perk;
-                    *reinterpret_cast<int*>(rm + 0x70) = count + 1;
-                }
+                if (!register_active_support(rm, perk)) return;
                 break;
             }
         }
@@ -405,22 +353,17 @@ void use_fixture(Calls value, const char* id) {
 }
 #endif
 
-void install(const engine::Binding& binding, HANDLE stop) {
-    (void)stop;
+void install(const engine::Binding& binding) {
     image_base = binding.image.base;
     image_size = binding.image.size;
     engine_root = binding.root;
-    // Supported image, exact entry bytes and executable section are required
-    // for every direct mutation target, before exposing any Rune capability.
     engine::LocalMemory memory;
     const auto& sites = builds::steam_20260818().runes;
     for (const auto& site : sites) {
-        std::array<uint8_t, 32> actual{}, expected{};
-        const auto digit = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
-        for (size_t i = 0; i < expected.size(); ++i)
-            expected[i] = static_cast<uint8_t>(digit(site.prefix[i * 2]) * 16 + digit(site.prefix[i * 2 + 1]));
+        std::array<uint8_t, 32> actual{};
+        const auto target=native::target_from_hex(image_base+site.rva,site.prefix);
         if (!binding.image.contains(site.rva, actual.size(), IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0) ||
-            memory.copy(image_base + site.rva, actual.data(), actual.size()).reason || actual != expected) return;
+            memory.copy(target.address, actual.data(), actual.size()).reason || actual != target.bytes) return;
     }
     ready.store(true, std::memory_order_release);
 }

@@ -33,11 +33,37 @@ struct CatalogFuture : SaveFuture {
     bool terminal = false;
     CatalogFuture(Session& s, const CatalogCalls& c) : owner(s), calls(c) {}
     ~CatalogFuture() { if (native) native->vtable->destroy(native, 1); calls.release(&data); }
+    bool require(bool valid,const char* why,std::initializer_list<BFact> facts=std::initializer_list<BFact>{}) {
+            if(!valid) owner.btrace.record(BStage::catalog,BStatus::refused,why,0,facts); return valid;
+    }
+
+    bool read_layout(const NativeCampaignCatalog& source, uintptr_t& object, uintptr_t& entries, int32_t& count, int32_t& capacity) {
+    if (!require(at(memory, data.control, 8, object) && at(memory, object, 0x258, entries) &&
+        at(memory, object, 0x260, count) && at(memory, object, 0x264, capacity),"catalog_native_layout_unreadable") ||
+        !require(count>=0 && count<=12 && capacity>=count && (!count || entries),"catalog_native_bounds",
+            {{"count",count},{"capacity",capacity},{"entries_present",entries!=0}}) ||
+        !require(static_cast<size_t>(count)==source.slots.size(),"catalog_native_remote_count_mismatch",
+            {{"native_count",count},{"remote_count",source.slots.size()}})) return false;
+    return true;
+}
+    bool read_entries(uintptr_t entries, int32_t count, const NativeCampaignCatalog& source, const std::string& stem, std::vector<std::string>& ordered, std::vector<std::string>& full_names) {
+    for (int32_t i = 0; i < count; ++i) {
+        const auto entry = entries + static_cast<size_t>(i) * 0xe0;
+        uint8_t corrupt = 0; std::string name;
+        if (!require(at(memory, entry, 0x58, corrupt) && !corrupt,"catalog_entry_unreadable_or_corrupt",{{"entry",i},{"corrupt",corrupt}}) ||
+            !require(text_at(memory, entry + 0x70, name),"catalog_entry_name_unreadable",{{"entry",i}}) ||
+            !require(steam_name_equal(std::string_view(name).substr(0, stem.size()), stem),"catalog_entry_outside_namespace",{{"entry",i},{"name_length",name.size()}})) return false;
+        const auto candidate = std::string_view(name).substr(stem.size());
+        const auto found = std::find_if(source.slots.begin(), source.slots.end(),
+            [&](const std::string& value) { return steam_name_equal(candidate, value); });
+        if (!require(found!=source.slots.end(),"catalog_entry_absent_from_remote",{{"entry",i}}) ||
+            !require(std::find(ordered.begin(), ordered.end(), *found)==ordered.end(),"catalog_entry_duplicate",{{"entry",i}})) return false;
+        ordered.push_back(*found); full_names.push_back(stem + *found);
+    }
+    return true;
+}
     bool reconcile() {
         NativeCampaignCatalog source; uintptr_t remote = 0;
-        const auto require=[&](bool valid,const char* why,std::initializer_list<BFact> facts=std::initializer_list<BFact>{}) {
-            if(!valid) owner.btrace.record(BStage::catalog,BStatus::refused,why,0,facts); return valid;
-        };
         owner.btrace.record(BStage::catalog,BStatus::entered,"catalog_reconcile_enter");
         if (!require(read_native_catalog(owner, memory, prefix, source, remote),"catalog_remote_ownership_or_entries")) return false;
         std::string current_prefix;
@@ -45,28 +71,11 @@ struct CatalogFuture : SaveFuture {
             !require(steam_name_equal(prefix, current_prefix),"catalog_campaign_changed",
                 {{"expected_campaign",native_campaign_index(prefix)},{"actual_campaign",native_campaign_index(current_prefix)}})) return false;
         uintptr_t object = 0, entries = 0; int32_t count = 0, capacity = 0;
-        if (!require(at(memory, data.control, 8, object) && at(memory, object, 0x258, entries) &&
-            at(memory, object, 0x260, count) && at(memory, object, 0x264, capacity),"catalog_native_layout_unreadable") ||
-            !require(count>=0 && count<=12 && capacity>=count && (!count || entries),"catalog_native_bounds",
-                {{"count",count},{"capacity",capacity},{"entries_present",entries!=0}}) ||
-            !require(static_cast<size_t>(count)==source.slots.size(),"catalog_native_remote_count_mismatch",
-                {{"native_count",count},{"remote_count",source.slots.size()}})) return false;
+        if (!read_layout(source, object, entries, count, capacity)) return false;
         std::vector<std::string> ordered, full_names;
         ordered.reserve(static_cast<size_t>(count)); full_names.reserve(static_cast<size_t>(count));
         const auto stem = owner.native_root() + "/" + prefix;
-        for (int32_t i = 0; i < count; ++i) {
-            const auto entry = entries + static_cast<size_t>(i) * 0xe0;
-            uint8_t corrupt = 0; std::string name;
-            if (!require(at(memory, entry, 0x58, corrupt) && !corrupt,"catalog_entry_unreadable_or_corrupt",{{"entry",i},{"corrupt",corrupt}}) ||
-                !require(text_at(memory, entry + 0x70, name),"catalog_entry_name_unreadable",{{"entry",i}}) ||
-                !require(steam_name_equal(std::string_view(name).substr(0, stem.size()), stem),"catalog_entry_outside_namespace",{{"entry",i},{"name_length",name.size()}})) return false;
-            const auto candidate = std::string_view(name).substr(stem.size());
-            const auto found = std::find_if(source.slots.begin(), source.slots.end(),
-                [&](const std::string& value) { return steam_name_equal(candidate, value); });
-            if (!require(found!=source.slots.end(),"catalog_entry_absent_from_remote",{{"entry",i}}) ||
-                !require(std::find(ordered.begin(), ordered.end(), *found)==ordered.end(),"catalog_entry_duplicate",{{"entry",i}})) return false;
-            ordered.push_back(*found); full_names.push_back(stem + *found);
-        }
+        if (!read_entries(entries, count, source, stem, ordered, full_names)) return false;
         std::string selected = source.selected;
         int32_t index = 0; const bool prospective = ordered.empty() && (selected.empty() || selected == "AUTOSAVE0");
         if (prospective) selected = "AUTOSAVE0"; // native empty-cache format "%s0", index 0
@@ -121,6 +130,19 @@ bool read_campaign_prefix(engine::Memory& memory, uintptr_t image_base, std::str
     const char* current = nullptr;
     return at(memory, image_base, 0x397f4a8, current) && prefix_at(memory, current, out);
 }
+static bool prepare_catalog_future(CatalogFuture* future, Session& owner, engine::Memory& memory, SaveReference* data, const char* prefix, const CatalogCalls& calls) {
+    bool valid = false;
+    uintptr_t object = 0; std::string root;
+    valid = future && owner.native_io() && at(memory, data->control, 8, object) &&
+        text_at(memory, object, root) && (root.empty() || root == owner.native_root()) && prefix_at(memory, prefix, future->prefix);
+    if (valid) {
+        future->prefix = native_campaign_prefix(static_cast<unsigned>(native_campaign_index(future->prefix)));
+        calls.set_name(object, owner.native_root().c_str());
+        valid = text_at(memory, object, root) && root == owner.native_root();
+    }
+    if (valid) { calls.retain(&future->data, data); valid = future->data.control != 0; }
+    return valid;
+}
 SaveFuture** enumerate_provider(Session& owner, engine::Memory& memory, uintptr_t provider, SaveFuture** out,
     uintptr_t identity, SaveReference* data, const char* prefix, const CatalogCalls& calls) {
     if (!owner.routed()) { owner.unrouted_import("provider_catalog", "enumerate", provider, identity); if (owner.state() == SessionState::disabled) return calls.enumerate(provider, out, identity, data, prefix);
@@ -130,15 +152,7 @@ SaveFuture** enumerate_provider(Session& owner, engine::Memory& memory, uintptr_
         {{"allocated",future!=nullptr},{"native_io",owner.native_io()},{"data_reference",data->control!=0}});
     bool valid = false;
     try {
-        uintptr_t object = 0; std::string root;
-        valid = future && owner.native_io() && at(memory, data->control, 8, object) &&
-            text_at(memory, object, root) && (root.empty() || root == owner.native_root()) && prefix_at(memory, prefix, future->prefix);
-        if (valid) {
-            future->prefix = native_campaign_prefix(static_cast<unsigned>(native_campaign_index(future->prefix)));
-            calls.set_name(object, owner.native_root().c_str());
-            valid = text_at(memory, object, root) && root == owner.native_root();
-        }
-        if (valid) { calls.retain(&future->data, data); valid = future->data.control != 0; }
+        valid = prepare_catalog_future(future.get(), owner, memory, data, prefix, calls);
     } catch (const std::bad_alloc&) { valid = false; }
     if (!valid) { owner.btrace.record(BStage::catalog,BStatus::refused,"catalog_factory_source_or_scope",0,
         {{"allocated",future!=nullptr},{"native_io",owner.native_io()},{"retained",future && future->data.control!=0}});

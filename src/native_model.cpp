@@ -611,6 +611,14 @@ void Diagnostics::await_backup(Slot& s, sc_diagnostic_result result, sc_diagnost
     s.awaiting_backup.store(true, std::memory_order_release);
     // only the job may be accessed after publishing this handoff
 }
+static void backup_execution_state(sc_save_backup_snapshot& out, bool matched) {
+    if (out.execution.state == SC_DIAGNOSTIC_CLAIMED) {
+        if (out.state != SC_BACKUP_COPYING && out.state != SC_BACKUP_COPIED) out.state = SC_BACKUP_WAITING_NATIVE;
+    } else if (out.execution.state == SC_DIAGNOSTIC_EXECUTED) {
+        out.state = matched && out.state == SC_BACKUP_COMPLETE ? SC_BACKUP_COMPLETE : SC_BACKUP_FAILED;
+        if (!matched) out.failure = SC_BACKUP_FAILURE_NATIVE;
+    } else if (out.execution.state == SC_DIAGNOSTIC_REJECTED) out.state = SC_BACKUP_REJECTED;
+}
 sc_save_backup_snapshot Diagnostics::backup_result(const sc_save_backup_request& r, bool cancel, uint64_t now) {
     sc_save_backup_snapshot out{}; out.size = sizeof(out); out.abi_version = SC_SAVE_BACKUP_ABI_VERSION;
     out.execution = retrieve(r.execution, cancel, now, nullptr, &r);
@@ -635,12 +643,7 @@ sc_save_backup_snapshot Diagnostics::backup_result(const sc_save_backup_request&
         out.native_exception = s.submission.exception;
         out.flags = backup_submission_flags(s.submission);
         s.backup->inspect(out);
-        if (out.execution.state == SC_DIAGNOSTIC_CLAIMED) {
-            if (out.state != SC_BACKUP_COPYING && out.state != SC_BACKUP_COPIED) out.state = SC_BACKUP_WAITING_NATIVE;
-        } else if (out.execution.state == SC_DIAGNOSTIC_EXECUTED) {
-            out.state = s.submission.matched && out.state == SC_BACKUP_COMPLETE ? SC_BACKUP_COMPLETE : SC_BACKUP_FAILED;
-            if (!s.submission.matched) out.failure = SC_BACKUP_FAILURE_NATIVE;
-        } else if (out.execution.state == SC_DIAGNOSTIC_REJECTED) out.state = SC_BACKUP_REJECTED;
+        backup_execution_state(out, s.submission.matched);
         return out;
     }
     return out;

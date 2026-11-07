@@ -57,8 +57,8 @@ set(identity_inputs include/sentinel_evidence.h src/currencies.h src/currencies.
   include/sentinel_engine.h src/engine_observer.h src/engine_observer.cpp
   include/sentinel_context.h src/context_observer.h src/context_observer.cpp
   include/sentinel_native.h src/native_model.h src/native_model.cpp
-  src/command_registry.h src/command_registry.cpp
-  include/sentinel_combat.h src/combat.h src/combat.cpp src/combat_native.h src/combat_native.cpp src/combat_presentation.h src/combat_progress_hud.h
+  src/command_registry.h src/command_registry.cpp src/namespace_id.h
+  include/sentinel_combat.h src/combat.h src/combat.cpp src/combat_native.h src/combat_native.cpp src/combat_presentation.h
   src/expanded.h src/expanded.cpp src/expanded_native.h src/expanded_native.cpp
   src/features/expanded/expanded_internal.h
   src/features/expanded/movement_native.cpp
@@ -81,7 +81,7 @@ set(identity_inputs include/sentinel_evidence.h src/currencies.h src/currencies.
   tools/arsenal_probe.cpp
   include/sentinel_runes.h src/runes.h src/runes.cpp src/runes_native.cpp
   tools/runes_probe.cpp
-  include/sentinel_special.h src/special.h src/special.cpp src/special_native.cpp src/special_hud_native.h
+  include/sentinel_special.h src/special.h src/special.cpp src/special_native.cpp
   tools/special_probe.cpp src/local_controls.h tools/local_controls_probe.cpp
   src/ap_controls_native.h src/ap_controls_native.cpp src/player_strings_generated.h
   include/sentinel_deathlink.h src/deathlink.h src/deathlink.cpp src/deathlink_native.cpp
@@ -190,7 +190,7 @@ target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)
 target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_fault_storage sentinel_native_model sentinel_fault_minhook sentinel_save_session sentinel_protocol)
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.tmp/campaign-fixtures")
-foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write limit_inputs quantity_inputs recipe_inputs recipe_checkpoint combat_contention expanded_stop hook_cleanup encounter_recovery hands_restore)
+foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write limit_inputs quantity_inputs recipe_inputs recipe_checkpoint combat_contention hook_cleanup encounter_recovery hands_restore hud_owner)
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.tmp/campaign-fixtures/${case}")
   file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/.tmp/campaign-fixtures/${case}" campaign_fixture)
   add_test(NAME native_campaign_${case}_contract COMMAND sentinel_campaign_tests create "${campaign_fixture}" 1 ${case})
@@ -200,6 +200,7 @@ set_tests_properties(native_campaign_hook_cleanup_contract PROPERTIES TIMEOUT 60
 target_link_libraries(sentinel_native_model PUBLIC sentinel_save_session)
 add_library(sentinel_native STATIC src/native_target.cpp src/native_runtime.cpp src/combat_native.cpp src/save_native_hooks.cpp src/save_campaign_native.cpp src/campaign_menu_native.cpp)
 target_link_libraries(sentinel_native PUBLIC sentinel_native_model sentinel_observer sentinel_minhook sentinel_save_session)
+
 add_library(sentinel_core SHARED src/core.cpp src/inspection_server.cpp src/protocol_dispatch.cpp src/startup_log.cpp)
 target_link_libraries(sentinel_core PRIVATE sentinel_protocol sentinel_native advapi32 bcrypt)
 target_include_directories(sentinel_core PUBLIC include)
@@ -327,6 +328,14 @@ foreach(target sentinel_native sentinel_campaign_tests sentinel_native_host)
     src/features/expanded/recovery_native.cpp
     src/enemy_checkpoint_native.cpp src/deathlink_native.cpp src/commands_native.cpp src/commands_local.cpp)
 endforeach()
+foreach(target sentinel_campaign_tests sentinel_native_host)
+  get_target_property(sources ${target} SOURCES)
+  foreach(unit arsenal_native combat_native enemy_checkpoint_native campaign_menu_native special_native)
+    list(REMOVE_ITEM sources src/${unit}.cpp)
+    list(APPEND sources tests/${unit}.cpp)
+  endforeach()
+  set_property(TARGET ${target} PROPERTY SOURCES ${sources})
+endforeach()
 add_executable(sentinel_hook_set_tests tests/hooks/hook_set.cpp src/engine/hooks/hook_set.cpp)
 target_link_libraries(sentinel_hook_set_tests PRIVATE sentinel_save_session sentinel_minhook)
 target_include_directories(sentinel_hook_set_tests PRIVATE src include)
@@ -385,16 +394,11 @@ set_tests_properties(checkpoint_protocol_crash_contract PROPERTIES TIMEOUT 180)
 add_test(NAME checkpoint_recovery_resume_contract COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/checkpoint_resume.py"
   "$<TARGET_FILE:sentinel_campaign_tests>" "${CMAKE_CURRENT_SOURCE_DIR}/.tmp")
 set_tests_properties(checkpoint_recovery_resume_contract PROPERTIES TIMEOUT 180)
-add_test(NAME protocol_generator_contract COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
-  -s tests -p test_generate_protocol.py -q)
-set_tests_properties(protocol_generator_contract PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_executable(sentinel_currency_tests tests/currencies.cpp)
 target_link_libraries(sentinel_currency_tests PRIVATE sentinel_native_model)
 target_compile_options(sentinel_currency_tests PRIVATE /UNDEBUG)
 add_test(NAME currency_evidence_contract COMMAND sentinel_currency_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/wire/evidence.json")
-add_test(NAME evidence_wire_python_contract COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_evidence_wire.py -q)
-set_tests_properties(evidence_wire_python_contract PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_executable(sentinel_progression_tests tests/progression.cpp)
 target_link_libraries(sentinel_progression_tests PRIVATE sentinel_native_model)

@@ -135,6 +135,25 @@ bool completed_independent_actor(uintptr_t actor, const SpawnRecipe& frozen, std
     return true;
 }
 
+static const RecipeProgress* creating_progress(const SpawnRecipe& recipe, uint64_t& ordinal) {
+    const RecipeProgress* progress = nullptr;
+    if (recipe_creation && recipe_creation->creating && recipe_creation->recipe->definition.origin ==
+        std::string_view(recipe.origin.data(), recipe.origin.size())) {
+        const auto found = recipe_state.requests().find(recipe_creation->key);
+        if (found != recipe_state.requests().end()) { progress = &found->second; ordinal = recipe_creation->emission.ordinal; }
+    }
+    return progress;
+}
+static const RecipeProgress* actor_progress(const std::string& role, uint64_t& ordinal) {
+    const RecipeProgress* progress = nullptr;
+        const auto separator = role.rfind('/');
+        const auto found = recipe_state.requests().find(role.substr(0, separator));
+        if (found != recipe_state.requests().end()) {
+            const auto member = found->second.actors.find(role);
+            if (member != found->second.actors.end()) { progress = &found->second; ordinal = member->second.ordinal; }
+        }
+    return progress;
+}
 RemainingWeight remaining_weight(uintptr_t actor) {
     char name[512];
     if (actor && read_recipe_definition(actor, name, true)) return {{0, 1}, true};
@@ -143,25 +162,14 @@ RemainingWeight remaining_weight(uintptr_t actor) {
     if (!current_recipe_actor(actor) && completed_independent_actor(actor, recipe)) return {{0, recipe.physical_units}, true};
     const RecipeProgress* progress = nullptr;
     uint64_t ordinal = 0;
-    if (recipe_creation && recipe_creation->creating && recipe_creation->recipe->definition.origin ==
-        std::string_view(recipe.origin.data(), recipe.origin.size())) {
-        const auto found = recipe_state.requests().find(recipe_creation->key);
-        if (found != recipe_state.requests().end()) { progress = &found->second; ordinal = recipe_creation->emission.ordinal; }
-    }
+    progress = creating_progress(recipe, ordinal);
     const auto role = recipe_actors.find(actor);
     const auto cached = recipe_actor_credits.find(actor);
     if (!progress && cached != recipe_actor_credits.end()) {
         const auto identifier = actor_identifier(actor);
         if (identifier == cached->second.identifier) return {cached->second.credit, true};
     }
-    if (!progress && role != recipe_actors.end()) {
-        const auto separator = role->second.rfind('/');
-        const auto found = recipe_state.requests().find(role->second.substr(0, separator));
-        if (found != recipe_state.requests().end()) {
-            const auto member = found->second.actors.find(role->second);
-            if (member != found->second.actors.end()) { progress = &found->second; ordinal = member->second.ordinal; }
-        }
-    }
+    if (!progress && role != recipe_actors.end()) progress = actor_progress(role->second, ordinal);
     if (progress) {
         const auto& request = progress->request;
         const auto units = request.credit_limit && ordinal + 1 == request.credit_limit ? request.final_credit_units : request.logical_units;
@@ -370,14 +378,7 @@ uint64_t consumer_emitted(uintptr_t command, const std::string& key, const Recip
     return progress.emitted;
 }
 
-bool synchronous_remainders(uintptr_t command, std::vector<SynchronousRemainder>& result) {
-    if (worker_recipes.empty() && !pending_autonomous_emissions()) return true;
-    const auto manager = remaining_manager(command);
-    char owner[512]; std::string label;
-    if (!manager || !read_definition_name(manager, owner) || !native_text(command + 0x58, label, 1024)) return false;
-    auto mask = *reinterpret_cast<const uint64_t*>(command + 0x88);
-    if (mask & (uint64_t{1} << 44)) mask = encounter_ai_mask;
-    std::set<std::string> counted;
+static void worker_remainders(uintptr_t command, const char* owner, uint64_t mask, const std::string& label, std::set<std::string>& counted, std::vector<SynchronousRemainder>& result) {
     for (const auto& [worker, key] : worker_recipes) {
         (void)worker;
         const auto found = recipe_state.requests().find(key);
@@ -392,38 +393,63 @@ bool synchronous_remainders(uintptr_t command, std::vector<SynchronousRemainder>
         const auto emitted = consumer_emitted(command, key, progress);
         if (emitted < request.maximum_emissions) result.push_back({&recipe->second, &progress, emitted});
     }
+}
+static bool pending_producer_remainders(uintptr_t command, const char* owner, uint64_t mask, const std::string& label, std::set<std::string>& counted, std::vector<SynchronousRemainder>& result, const ComponentSummons& pending, bool direct) {
+    for (const auto& request : pending.requests) {
+        const std::optional<bool> matches = direct ? pending_direct_matches(request, owner, mask, label) :
+            pending_summon_matches(pending, request, owner, mask, label);
+        if (!matches) return false;
+        if (!*matches || !counted.insert(request.key).second) continue;
+        const auto& progress = recipe_state.requests().at(request.key);
+        const auto emitted = consumer_emitted(command, request.key, progress);
+        if (emitted < progress.request.maximum_emissions)
+            result.push_back({&native_recipes.at(request.origin), &progress, emitted, request.body_offset});
+    }
+    return true;
+}
+static bool producer_remainders(uintptr_t command, const char* owner, uint64_t mask, const std::string& label, std::set<std::string>& counted, std::vector<SynchronousRemainder>& result) {
     for (const auto* producers : {&component_summons, &direct_points}) for (const auto& [component, pending] : *producers) {
         (void)component;
-        for (const auto& request : pending.requests) {
-            const std::optional<bool> matches = producers == &direct_points ? pending_direct_matches(request, owner, mask, label) :
-                pending_summon_matches(pending, request, owner, mask, label);
-            if (!matches) return false;
-            if (!*matches || !counted.insert(request.key).second) continue;
-            const auto& progress = recipe_state.requests().at(request.key);
-            const auto emitted = consumer_emitted(command, request.key, progress);
-            if (emitted < progress.request.maximum_emissions)
-                result.push_back({&native_recipes.at(request.origin), &progress, emitted, request.body_offset});
-        }
+        if (!pending_producer_remainders(command, owner, mask, label, counted, result, pending, producers == &direct_points)) return false;
     }
+    return true;
+}
+static void checkpoint_summon_remainders(const char* owner, uint64_t mask, const std::string& label, std::set<std::string>& counted, std::vector<SynchronousRemainder>& result) {
+    for (const auto& component : pending_summon_checkpoint->summons) for (const auto& request : component.requests) {
+        const auto& progress = recipe_state.requests().at(request.key);
+        if (progress.closed || progress.emitted >= progress.request.maximum_emissions || !(progress.request.logical_mask & mask) ||
+            !scope_matches(request.memberships, owner, label) || !counted.insert(request.key).second) continue;
+        result.push_back({&native_recipes.at(request.origin), &progress, progress.emitted, request.body_offset});
+    }
+}
+static bool checkpoint_child_remainders(const char* owner, uint64_t mask, const std::string& label, std::vector<SynchronousRemainder>& result) {
+    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
+    for (const auto& [role, child] : pending_summon_checkpoint->children) {
+        const auto key = role.substr(0, role.rfind('/'));
+        const auto& progress = recipe_state.requests().at(key);
+        const auto& actor = progress.actors.at(role);
+        if (!(progress.request.logical_mask & mask) || !scope_matches(actor.memberships, owner, label)) continue;
+        const auto live = actor.native_name.empty() ? 0 : find_entity(world, actor.native_name.c_str());
+        std::vector<RecipeMembership> actual;
+        if (live && !native_memberships(world, live, actual)) return false;
+        if (scope_matches(actual, owner, label)) continue;
+        result.push_back({&native_recipes.at(progress.request.origin), &progress, actor.ordinal, 0, &child});
+    }
+    return true;
+}
+bool synchronous_remainders(uintptr_t command, std::vector<SynchronousRemainder>& result) {
+    if (worker_recipes.empty() && !pending_autonomous_emissions()) return true;
+    const auto manager = remaining_manager(command);
+    char owner[512]; std::string label;
+    if (!manager || !read_definition_name(manager, owner) || !native_text(command + 0x58, label, 1024)) return false;
+    auto mask = *reinterpret_cast<const uint64_t*>(command + 0x88);
+    if (mask & (uint64_t{1} << 44)) mask = encounter_ai_mask;
+    std::set<std::string> counted;
+    worker_remainders(command, owner, mask, label, counted, result);
+    if (!producer_remainders(command, owner, mask, label, counted, result)) return false;
     if (pending_summon_checkpoint) {
-        for (const auto& component : pending_summon_checkpoint->summons) for (const auto& request : component.requests) {
-            const auto& progress = recipe_state.requests().at(request.key);
-            if (progress.closed || progress.emitted >= progress.request.maximum_emissions || !(progress.request.logical_mask & mask) ||
-                !scope_matches(request.memberships, owner, label) || !counted.insert(request.key).second) continue;
-            result.push_back({&native_recipes.at(request.origin), &progress, progress.emitted, request.body_offset});
-        }
-        const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
-        for (const auto& [role, child] : pending_summon_checkpoint->children) {
-            const auto key = role.substr(0, role.rfind('/'));
-            const auto& progress = recipe_state.requests().at(key);
-            const auto& actor = progress.actors.at(role);
-            if (!(progress.request.logical_mask & mask) || !scope_matches(actor.memberships, owner, label)) continue;
-            const auto live = actor.native_name.empty() ? 0 : find_entity(world, actor.native_name.c_str());
-            std::vector<RecipeMembership> actual;
-            if (live && !native_memberships(world, live, actual)) return false;
-            if (scope_matches(actual, owner, label)) continue;
-            result.push_back({&native_recipes.at(progress.request.origin), &progress, actor.ordinal, 0, &child});
-        }
+        checkpoint_summon_remainders(owner, mask, label, counted, result);
+        if (!checkpoint_child_remainders(owner, mask, label, result)) return false;
     }
     return true;
 }
@@ -469,6 +495,35 @@ bool health_remainders(uintptr_t command, std::vector<RecipeHealth>& health) {
     return true;
 }
 
+static bool read_remaining_weights(uintptr_t records, int32_t count, const std::vector<RemainingItem>& weights, std::vector<RemainingItem>& present, std::vector<RecipeCredit>& total, bool& tracked) {
+    for (int32_t i = 0; i < count; ++i) {
+        const auto record = records + static_cast<uintptr_t>(i) * 0x68;
+        const auto previous_id = *reinterpret_cast<const uint32_t*>(record + 12);
+        const auto actor = record_actor(record);
+        const auto identifier = *reinterpret_cast<const uint32_t*>(record + 12);
+        const auto found = std::find_if(weights.begin(), weights.end(), [identifier, previous_id](const auto& item) {
+            return item.known && (item.identifier == identifier || item.identifier == previous_id);
+        });
+        const auto cached = found != weights.end() ? &*found :
+            identifier == 0x1fffffe && weights.size() >= static_cast<size_t>(count) && weights[i].known ? &weights[i] : nullptr;
+        if (!actor && !cached) return false;
+        const auto weight = cached && cached->weight.recipe ? cached->weight :
+            actor ? remaining_weight(actor) : cached->weight;
+        present.push_back({actor ? identifier : cached->identifier, weight, true}); tracked |= weight.recipe;
+        total.push_back(weight.credit);
+    }
+    return true;
+}
+static void read_living_weights(uintptr_t records, int32_t count, const std::vector<RemainingItem>& present, std::vector<RecipeCredit>& living) {
+    for (int32_t i = 0; i < count; ++i) {
+        const auto record = records + static_cast<uintptr_t>(i) * 0x68;
+        const auto actor = record_actor(record);
+        const auto weight = present[i].weight;
+        const auto dead = actor && reinterpret_cast<bool(*)(uintptr_t)>(
+            *reinterpret_cast<const uintptr_t*>(*reinterpret_cast<const uintptr_t*>(actor) + 0x108))(actor);
+        if (actor && (!dead || ignored_actor(actor))) living.push_back(weight.credit);
+    }
+}
 bool remaining_inputs(uintptr_t command, std::vector<RecipeCredit>& total, std::vector<RecipeCredit>& living,
                       std::vector<RemainingItem>& present, bool& tracked, bool& blocked, int32_t& threshold) {
     __try {
@@ -477,22 +532,7 @@ bool remaining_inputs(uintptr_t command, std::vector<RecipeCredit>& total, std::
         threshold = *reinterpret_cast<const int32_t*>(command + 0xc0);
         auto& weights = remaining_weights[command];
         const auto records = *reinterpret_cast<const uintptr_t*>(command + 0xa8);
-        for (int32_t i = 0; i < count; ++i) {
-            const auto record = records + static_cast<uintptr_t>(i) * 0x68;
-            const auto previous_id = *reinterpret_cast<const uint32_t*>(record + 12);
-            const auto actor = record_actor(record);
-            const auto identifier = *reinterpret_cast<const uint32_t*>(record + 12);
-            const auto found = std::find_if(weights.begin(), weights.end(), [identifier, previous_id](const auto& item) {
-                return item.known && (item.identifier == identifier || item.identifier == previous_id);
-            });
-            const auto cached = found != weights.end() ? &*found :
-                identifier == 0x1fffffe && weights.size() >= static_cast<size_t>(count) && weights[i].known ? &weights[i] : nullptr;
-            if (!actor && !cached) return false;
-            const auto weight = cached && cached->weight.recipe ? cached->weight :
-                actor ? remaining_weight(actor) : cached->weight;
-            present.push_back({actor ? identifier : cached->identifier, weight, true}); tracked |= weight.recipe;
-            total.push_back(weight.credit);
-        }
+        if (!read_remaining_weights(records, count, weights, present, total, tracked)) return false;
         weights = present;
         if (!count) remaining_weights.erase(command);
         if (!remaining_remainders(command, total, living, tracked)) return false;
@@ -501,14 +541,7 @@ bool remaining_inputs(uintptr_t command, std::vector<RecipeCredit>& total, std::
         if (!manager) return false;
         blocked = *reinterpret_cast<const uint8_t*>(manager + 0xdaf) || *reinterpret_cast<const uint8_t*>(manager + 0xdb1);
         if (blocked) return true;
-        for (int32_t i = 0; i < count; ++i) {
-            const auto record = records + static_cast<uintptr_t>(i) * 0x68;
-            const auto actor = record_actor(record);
-            const auto weight = present[i].weight;
-            const auto dead = actor && reinterpret_cast<bool(*)(uintptr_t)>(
-                *reinterpret_cast<const uintptr_t*>(*reinterpret_cast<const uintptr_t*>(actor) + 0x108))(actor);
-            if (actor && (!dead || ignored_actor(actor))) living.push_back(weight.credit);
-        }
+        read_living_weights(records, count, present, living);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -520,6 +553,21 @@ bool empty_request_pending(uintptr_t manager, uint64_t mask, uintptr_t label) {
         recipe_state.pending_empty(owner, selected, filter);
 }
 
+static bool heavy_recipe_members(const RecipeProgress& progress, const char* owner) {
+    for (const auto& [identity, member] : progress.actors) {
+        (void)identity;
+        if (member.native_name.empty() || std::none_of(member.memberships.begin(), member.memberships.end(),
+                [&](const auto& value) { return value.owner == owner; })) continue;
+        const auto world = world_global ? *reinterpret_cast<const uintptr_t*>(world_global) : 0;
+        const auto actor = world ? find_entity(world, member.native_name.c_str()) : 0;
+        char body[512];
+        if (!actor || !read_recipe_definition(actor, body)) continue;
+        const auto tracking = spawn_tracking(body);
+        // heavy replacements of ignored fodder still have to die before the arena clears.
+        if (tracking && (tracking->physical & 0xffffc000ULL)) return true;
+    }
+    return false;
+}
 bool remaining_encounter_heavy(uintptr_t command) {
     if (stopped.load(std::memory_order_acquire)) return false;
     const auto mask = *reinterpret_cast<const uint64_t*>(command + 0x88);
@@ -531,18 +579,7 @@ bool remaining_encounter_heavy(uintptr_t command) {
     for (const auto& [key, progress] : recipe_state.requests()) {
         (void)key;
         if (progress.request.logical_mask & mask) continue;
-        for (const auto& [identity, member] : progress.actors) {
-            (void)identity;
-            if (member.native_name.empty() || std::none_of(member.memberships.begin(), member.memberships.end(),
-                    [&](const auto& value) { return value.owner == owner; })) continue;
-            const auto world = world_global ? *reinterpret_cast<const uintptr_t*>(world_global) : 0;
-            const auto actor = world ? find_entity(world, member.native_name.c_str()) : 0;
-            char body[512];
-            if (!actor || !read_recipe_definition(actor, body)) continue;
-            const auto tracking = spawn_tracking(body);
-            // heavy replacements of ignored fodder still have to die before the arena clears.
-            if (tracking && (tracking->physical & 0xffffc000ULL)) return true;
-        }
+        if (heavy_recipe_members(progress, owner)) return true;
     }
     return false;
 }
@@ -552,25 +589,15 @@ bool remaining_encounter_heavy_safe(uintptr_t command) noexcept {
     __except(EXCEPTION_EXECUTE_HANDLER) { return true; }
 }
 
-bool optional_zombie_completion(uintptr_t command) {
-    const auto manager = *reinterpret_cast<const uintptr_t*>(command + 0x40);
-    char owner[512];
-    std::string label;
-    if (!manager || !world_global || !read_definition_name(manager, owner) ||
-        !native_text(command + 0x58, label, 1024) ||
-        *reinterpret_cast<const uint8_t*>(manager + 0xdaf) || *reinterpret_cast<const uint8_t*>(manager + 0xdb1)) return false;
-    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
-    if (!world) return false;
-    const auto selected = *reinterpret_cast<const uint64_t*>(command + 0x88);
-    const auto mask = selected & (uint64_t{1} << 44) ? encounter_ai_mask : selected;
-    const auto optional = [world](const char* name) {
+static bool optional_zombie(uintptr_t world, const char* name) {
         constexpr uint64_t zombies = uint64_t{1} | (uint64_t{1} << 2);
         const auto tracking = spawn_tracking(name);
         const auto recipe = spawn_recipe(name);
         return tracking && recipe && tracking->physical && !(tracking->physical & ~zombies) &&
             find_entity(world, ("ap_v070_optional_zombies_r" + std::string(recipe->origin.data(), recipe->origin.size())).c_str());
-    };
-    bool found = false;
+}
+
+static bool optional_zombie_actors(uintptr_t manager, uintptr_t command, uintptr_t world, uint64_t mask, const std::string& label, bool& found) {
     const auto count = *reinterpret_cast<const int32_t*>(manager + 0xc88);
     const auto records = *reinterpret_cast<const uintptr_t*>(manager + 0xc80);
     if (count < 0 || count > 100000 || (count && !records)) return false;
@@ -583,10 +610,22 @@ bool optional_zombie_completion(uintptr_t command) {
         if (!actor || reinterpret_cast<bool(*)(uintptr_t)>(*reinterpret_cast<const uintptr_t*>(
                 *reinterpret_cast<const uintptr_t*>(actor) + 0x108))(actor)) continue;
         if (!read_recipe_definition(actor, name)) return false;
-        if (!optional(name)) return false;
+        if (!optional_zombie(world, name)) return false;
         found = true;
     }
-    std::vector<std::string> cancel;
+    return true;
+}
+static bool optional_zombie_emissions(uintptr_t world, const RecipeProgress& progress, const NativeRecipe& recipe) {
+    const auto& request = progress.request;
+    const auto remaining = request.maximum_emissions ? request.maximum_emissions - progress.emitted : recipe.bodies.size();
+    for (uint64_t i = 0; i < std::min<uint64_t>(remaining, recipe.bodies.size()); ++i) {
+        char name[512];
+        const auto body = recipe.bodies[(progress.emitted + i) % recipe.bodies.size()];
+        if (!body || !read_definition_name(body, name) || !optional_zombie(world, name)) return false;
+    }
+    return true;
+}
+static bool optional_zombie_requests(uintptr_t world, const char* owner, uint64_t mask, const std::string& label, std::vector<std::string>& cancel, bool& found) {
     for (const auto& [key, progress] : recipe_state.requests()) {
         const auto& request = progress.request;
         if (progress.closed || request.owner != owner || !(request.logical_mask & mask) ||
@@ -594,14 +633,26 @@ bool optional_zombie_completion(uintptr_t command) {
             (request.maximum_emissions && progress.emitted >= request.maximum_emissions)) continue;
         const auto recipe = native_recipes.find(request.origin);
         if (recipe == native_recipes.end() || recipe->second.bodies.empty() || progress.reserved) return false;
-        const auto remaining = request.maximum_emissions ? request.maximum_emissions - progress.emitted : recipe->second.bodies.size();
-        for (uint64_t i = 0; i < std::min<uint64_t>(remaining, recipe->second.bodies.size()); ++i) {
-            char name[512];
-            const auto body = recipe->second.bodies[(progress.emitted + i) % recipe->second.bodies.size()];
-            if (!body || !read_definition_name(body, name) || !optional(name)) return false;
-        }
+        if (!optional_zombie_emissions(world, progress, recipe->second)) return false;
         cancel.push_back(key); found = true;
     }
+    return true;
+}
+bool optional_zombie_completion(uintptr_t command) {
+    const auto manager = *reinterpret_cast<const uintptr_t*>(command + 0x40);
+    char owner[512];
+    std::string label;
+    if (!manager || !world_global || !read_definition_name(manager, owner) ||
+        !native_text(command + 0x58, label, 1024) ||
+        *reinterpret_cast<const uint8_t*>(manager + 0xdaf) || *reinterpret_cast<const uint8_t*>(manager + 0xdb1)) return false;
+    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
+    if (!world) return false;
+    const auto selected = *reinterpret_cast<const uint64_t*>(command + 0x88);
+    const auto mask = selected & (uint64_t{1} << 44) ? encounter_ai_mask : selected;
+    bool found = false;
+    if (!optional_zombie_actors(manager, command, world, mask, label, found)) return false;
+    std::vector<std::string> cancel;
+    if (!optional_zombie_requests(world, owner, mask, label, cancel, found)) return false;
     if (!found) return false;
     for (const auto& key : cancel) recipe_state.cancel(key);
     return true;
@@ -700,6 +751,14 @@ uintptr_t kill_construct_detour(uintptr_t command, int32_t threshold, uintptr_t 
     return result;
 }
 
+static bool kill_record_selected(uintptr_t command, uintptr_t record, uintptr_t actor) {
+    char name[512];
+    const auto tracking = read_recipe_definition(actor, name) ? spawn_tracking(name) : std::nullopt;
+    const auto filter = *reinterpret_cast<const uint64_t*>(command + 0x88);
+    const auto mask = filter & (uint64_t{1} << 44) ? encounter_ai_mask : filter;
+    return tracking && (tracking->source & mask) &&
+        (!*reinterpret_cast<const int32_t*>(command + 0x68) || !compare_text(record + 0x28, command + 0x58));
+}
 void kill_dead_detour(uintptr_t command, uintptr_t record) {
     if (stopped.load(std::memory_order_acquire)) { original_kill_dead(command, record); return; }
     std::unique_lock<std::recursive_mutex> admission(admission_mutex);
@@ -715,12 +774,7 @@ void kill_dead_detour(uintptr_t command, uintptr_t record) {
             if (counted) record_recipe_death(actor);
             bool selected = false;
             if (weight.recipe) {
-                char name[512];
-                const auto tracking = read_recipe_definition(actor, name) ? spawn_tracking(name) : std::nullopt;
-                const auto filter = *reinterpret_cast<const uint64_t*>(command + 0x88);
-                const auto mask = filter & (uint64_t{1} << 44) ? encounter_ai_mask : filter;
-                selected = tracking && (tracking->source & mask) &&
-                    (!*reinterpret_cast<const int32_t*>(command + 0x68) || !compare_text(record + 0x28, command + 0x58));
+                selected = kill_record_selected(command, record, actor);
             }
             original_kill_dead(command, record);
             // recipe deaths use their logical source and survive expired native actor references.
@@ -755,11 +809,7 @@ bool future_matches(uintptr_t worker, uint64_t mask, uintptr_t label) {
         !compare_text(worker + 0x58, label));
 }
 
-bool native_future(uintptr_t manager, uint64_t mask, uintptr_t label) {
-    if (empty_request_pending(manager, mask, label)) return true;
-    const auto count = *reinterpret_cast<const int32_t*>(manager + 0xcc8);
-    const auto commands = *reinterpret_cast<const uintptr_t*>(manager + 0xcc0);
-    if (count < 0 || count > 100000) return true;
+static bool native_workers_future(uintptr_t commands, int32_t count, uint64_t mask, uintptr_t label) {
     for (int32_t i = 0; i < count; ++i) {
         const auto command = *reinterpret_cast<const uintptr_t*>(commands + static_cast<uintptr_t>(i) * 8);
         if (const auto worker = cast_maintain(command); worker && !*reinterpret_cast<const uint8_t*>(worker + 0xcc) &&
@@ -769,34 +819,81 @@ bool native_future(uintptr_t manager, uint64_t mask, uintptr_t label) {
         if (const auto worker = cast_stagger(command); worker && !*reinterpret_cast<const uint8_t*>(worker + 0xb9) &&
             future_matches(worker, mask, label) && *reinterpret_cast<const int32_t*>(worker + 0xa8) > 0) return true;
     }
-    if (!component_summons.empty() || !direct_points.empty() || pending_summon_checkpoint) {
-        char owner[512]; std::string filter;
-        if (!read_definition_name(manager, owner) || (label && !native_text(label, filter, 1024))) return true;
-        if (mask & (uint64_t{1} << 44)) mask = encounter_ai_mask;
-        for (const auto* producers : {&component_summons, &direct_points}) for (const auto& [component, pending] : *producers) {
-            (void)component;
-            for (const auto& request : pending.requests) {
-                const std::optional<bool> matches = producers == &direct_points ? pending_direct_matches(request, owner, mask, filter) :
-                    pending_summon_matches(pending, request, owner, mask, filter);
-                if (!matches || *matches) return true;
-            }
+    return false;
+}
+static bool checkpoint_future(const char* owner, uint64_t mask, const std::string& filter) {
+    if (pending_summon_checkpoint) {
+        for (const auto& component : pending_summon_checkpoint->summons) for (const auto& request : component.requests) {
+            const auto& progress = recipe_state.requests().at(request.key);
+            if (!progress.closed && progress.emitted < progress.request.maximum_emissions && (progress.request.logical_mask & mask) &&
+                scope_matches(request.memberships, owner, filter)) return true;
         }
-        if (pending_summon_checkpoint) {
-            for (const auto& component : pending_summon_checkpoint->summons) for (const auto& request : component.requests) {
-                const auto& progress = recipe_state.requests().at(request.key);
-                if (!progress.closed && progress.emitted < progress.request.maximum_emissions && (progress.request.logical_mask & mask) &&
-                    scope_matches(request.memberships, owner, filter)) return true;
-            }
-            for (const auto& [role, child] : pending_summon_checkpoint->children) {
-                (void)child;
-                const auto& progress = recipe_state.requests().at(role.substr(0, role.rfind('/')));
-                if ((progress.request.logical_mask & mask) && scope_matches(progress.actors.at(role).memberships, owner, filter)) return true;
-            }
+        for (const auto& [role, child] : pending_summon_checkpoint->children) {
+            (void)child;
+            const auto& progress = recipe_state.requests().at(role.substr(0, role.rfind('/')));
+            if ((progress.request.logical_mask & mask) && scope_matches(progress.actors.at(role).memberships, owner, filter)) return true;
         }
     }
     return false;
 }
+static bool producers_future(const char* owner, uint64_t mask, const std::string& filter) {
+    for (const auto* producers : {&component_summons, &direct_points}) for (const auto& [component, pending] : *producers) {
+        (void)component;
+        for (const auto& request : pending.requests) {
+            const std::optional<bool> matches = producers == &direct_points ? pending_direct_matches(request, owner, mask, filter) :
+                pending_summon_matches(pending, request, owner, mask, filter);
+            if (!matches || *matches) return true;
+        }
+    }
+    return false;
+}
+bool native_future(uintptr_t manager, uint64_t mask, uintptr_t label) {
+    if (empty_request_pending(manager, mask, label)) return true;
+    const auto count = *reinterpret_cast<const int32_t*>(manager + 0xcc8);
+    const auto commands = *reinterpret_cast<const uintptr_t*>(manager + 0xcc0);
+    if (count < 0 || count > 100000) return true;
+    if (native_workers_future(commands, count, mask, label)) return true;
+    if (!component_summons.empty() || !direct_points.empty() || pending_summon_checkpoint) {
+        char owner[512]; std::string filter;
+        if (!read_definition_name(manager, owner) || (label && !native_text(label, filter, 1024))) return true;
+        if (mask & (uint64_t{1} << 44)) mask = encounter_ai_mask;
+        if (producers_future(owner, mask, filter)) return true;
+        if (checkpoint_future(owner, mask, filter)) return true;
+    }
+    return false;
+}
 
+static void living_kill_credits(uintptr_t records, int32_t count, uint64_t mask, uintptr_t command, const KillProgress& progress, bool& tracked, std::vector<RecipeCredit>& living) {
+    for (int32_t i = 0; i < count; ++i) {
+        const auto record = records + static_cast<uintptr_t>(i) * 0x68;
+        if (!(*reinterpret_cast<const uint64_t*>(record) & mask) ||
+            (!progress.label.empty() && compare_text(record + 0x28, command + 0x58))) continue;
+        const auto actor = record_actor(record);
+        if (!actor || reinterpret_cast<bool(*)(uintptr_t)>(*reinterpret_cast<const uintptr_t*>(
+            *reinterpret_cast<const uintptr_t*>(actor) + 0x108))(actor)) continue;
+        const auto weight = remaining_weight(actor); tracked |= weight.recipe; living.push_back(weight.credit);
+    }
+}
+static void publish_kill_count(uintptr_t command, KillProgress& progress, const std::vector<RecipeCredit>& deaths, int32_t target) {
+    uint32_t low = 0, high = static_cast<uint32_t>(target);
+    while (low < high) {
+        const auto middle = low + (high - low + 1) / 2;
+        if (credit_at_least(deaths, middle)) low = middle; else high = middle - 1;
+    }
+    progress.seen = low;
+    *reinterpret_cast<int32_t*>(command + 0xa8) = static_cast<int32_t>(low);
+}
+static uint8_t finish_kill_requirement(uintptr_t command, uintptr_t manager, const KillProgress& progress, int32_t count, int32_t target, const std::vector<RecipeCredit>& deaths, const std::vector<RecipeCredit>& living) {
+    if (native_future(manager, progress.mask, command + 0x58)) return 0;
+    if (optional_zombie_completion_safe(command)) return 1;
+    if (!count) return 1;
+    auto potential = deaths; potential.insert(potential.end(), living.begin(), living.end());
+    if (!credit_at_least(potential, static_cast<uint32_t>(target))) {
+        *reinterpret_cast<uint8_t*>(command + 0x90) = 1;
+        return credit_at_most(living, 0);
+    }
+    return 0;
+}
 uint64_t kill_result(uintptr_t command) {
     const auto manager = *reinterpret_cast<const uintptr_t*>(command + 0x40);
     auto& progress = kill_progress[command];
@@ -813,36 +910,15 @@ uint64_t kill_result(uintptr_t command) {
     const auto records = *reinterpret_cast<const uintptr_t*>(manager + 0xc80);
     if (count < 0 || count > 100000) return 0;
     const auto mask = progress.mask & (uint64_t{1} << 44) ? encounter_ai_mask : progress.mask;
-    for (int32_t i = 0; i < count; ++i) {
-        const auto record = records + static_cast<uintptr_t>(i) * 0x68;
-        if (!(*reinterpret_cast<const uint64_t*>(record) & mask) ||
-            (!progress.label.empty() && compare_text(record + 0x28, command + 0x58))) continue;
-        const auto actor = record_actor(record);
-        if (!actor || reinterpret_cast<bool(*)(uintptr_t)>(*reinterpret_cast<const uintptr_t*>(
-            *reinterpret_cast<const uintptr_t*>(actor) + 0x108))(actor)) continue;
-        const auto weight = remaining_weight(actor); tracked |= weight.recipe; living.push_back(weight.credit);
-    }
+    living_kill_credits(records, count, mask, command, progress, tracked, living);
     if (!tracked) {
         std::vector<SynchronousRemainder> pending;
         if (!synchronous_remainders(command, pending)) return 0;
         if (pending.empty()) return original_kill(command);
     }
-    uint32_t low = 0, high = static_cast<uint32_t>(target);
-    while (low < high) {
-        const auto middle = low + (high - low + 1) / 2;
-        if (credit_at_least(deaths, middle)) low = middle; else high = middle - 1;
-    }
-    progress.seen = low;
-    *reinterpret_cast<int32_t*>(command + 0xa8) = static_cast<int32_t>(low);
+    publish_kill_count(command, progress, deaths, target);
     if (credit_at_least(deaths, static_cast<uint32_t>(target))) return 1;
-    if (native_future(manager, progress.mask, command + 0x58)) return 0;
-    if (optional_zombie_completion_safe(command)) return 1;
-    if (!count) return 1;
-    auto potential = deaths; potential.insert(potential.end(), living.begin(), living.end());
-    if (!credit_at_least(potential, static_cast<uint32_t>(target))) {
-        *reinterpret_cast<uint8_t*>(command + 0x90) = 1;
-        return credit_at_most(living, 0);
-    }
+    return finish_kill_requirement(command, manager, progress, count, target, deaths, living);
     return 0;
 }
 
@@ -920,6 +996,42 @@ void health_damage_detour(uintptr_t command, uintptr_t record, float damage) {
     }();
 }
 
+static void retire_health_actors(HealthProgress& progress, uintptr_t data, int32_t count) {
+    std::vector<uint32_t> present;
+    for (int32_t i = 0; i < count; ++i) {
+        const auto record = data + static_cast<uintptr_t>(i) * 0x68;
+        present.push_back(*reinterpret_cast<const uint32_t*>(record + 12));
+    }
+    for (auto actor = progress.actors.begin(); actor != progress.actors.end();) {
+        if (std::find(present.begin(), present.end(), actor->first) != present.end()) { ++actor; continue; }
+        const auto& item = actor->second;
+        uint32_t bits = 0; std::memcpy(&bits, &item.initial, sizeof(bits));
+        ++progress.retired[{static_cast<uint32_t>(item.weight.credit.numerator), item.weight.credit.denominator, bits}];
+        actor = progress.actors.erase(actor);
+    }
+}
+static bool collect_health(const HealthProgress& progress, std::vector<RecipeHealth>& health) {
+    for (const auto& [id, item] : progress.actors) { (void)id; health.push_back({item.weight.credit, item.initial, item.current}); }
+    for (const auto& [key, number] : progress.retired) {
+        const auto [units, denominator, bits] = key;
+        if (!units) continue;
+        if (number > UINT64_MAX / units) return false;
+        float initial = 0; std::memcpy(&initial, &bits, sizeof(bits));
+        health.push_back({{units * number, denominator}, initial, 0});
+    }
+    return true;
+}
+static std::optional<bool> update_health_requirement(uintptr_t command, uintptr_t manager, uint64_t mask, bool pending, HealthProgress& progress, std::vector<RecipeHealth>& health) {
+    const auto count = *reinterpret_cast<const int32_t*>(command + 0xb0);
+    const auto data = *reinterpret_cast<const uintptr_t*>(command + 0xa8);
+    if (count < 0 || count > 100000) return false;
+    retire_health_actors(progress, data, count);
+    if (!manager) return false;
+    if (!pending && (!count || !*reinterpret_cast<const int32_t*>(manager + 0xc88)))
+        return !native_future(manager, mask, command + 0x58);
+    if (!collect_health(progress, health)) return false;
+    return {};
+}
 uint64_t health_result(uintptr_t command) {
     if (!*reinterpret_cast<const int32_t*>(command + 0xb0) && !*reinterpret_cast<const float*>(command + 0xc8))
         health_progress.erase(command);
@@ -941,32 +1053,7 @@ uint64_t health_result(uintptr_t command) {
     }
     auto& progress = health_progress[command];
     progress.tracked |= pending;
-    const auto count = *reinterpret_cast<const int32_t*>(command + 0xb0);
-    const auto data = *reinterpret_cast<const uintptr_t*>(command + 0xa8);
-    if (count < 0 || count > 100000) return 0;
-    std::vector<uint32_t> present;
-    for (int32_t i = 0; i < count; ++i) {
-        const auto record = data + static_cast<uintptr_t>(i) * 0x68;
-        present.push_back(*reinterpret_cast<const uint32_t*>(record + 12));
-    }
-    for (auto actor = progress.actors.begin(); actor != progress.actors.end();) {
-        if (std::find(present.begin(), present.end(), actor->first) != present.end()) { ++actor; continue; }
-        const auto& item = actor->second;
-        uint32_t bits = 0; std::memcpy(&bits, &item.initial, sizeof(bits));
-        ++progress.retired[{static_cast<uint32_t>(item.weight.credit.numerator), item.weight.credit.denominator, bits}];
-        actor = progress.actors.erase(actor);
-    }
-    if (!manager) return 0;
-    if (!pending && (!count || !*reinterpret_cast<const int32_t*>(manager + 0xc88)))
-        return !native_future(manager, mask, command + 0x58);
-    for (const auto& [id, item] : progress.actors) { (void)id; health.push_back({item.weight.credit, item.initial, item.current}); }
-    for (const auto& [key, number] : progress.retired) {
-        const auto [units, denominator, bits] = key;
-        if (!units) continue;
-        if (number > UINT64_MAX / units) return 0;
-        float initial = 0; std::memcpy(&initial, &bits, sizeof(bits));
-        health.push_back({{units * number, denominator}, initial, 0});
-    }
+    if (const auto result = update_health_requirement(command, manager, mask, pending, progress, health)) return *result;
     if (std::none_of(health.begin(), health.end(), [](const auto& item) { return item.credit.numerator != 0; }))
         return !native_future(manager, mask, command + 0x58);
     const auto result = health_at_most(health, *reinterpret_cast<const float*>(command + 0xc0));

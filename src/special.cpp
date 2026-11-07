@@ -1,3 +1,4 @@
+#include "namespace_id.h"
 #include "special.h"
 #include <cstring>
 #include <algorithm>
@@ -132,29 +133,28 @@ HudOwnerSnapshot hud_owner_snapshot(const char (&namespace_id)[65]) {
     return out;
 }
 
-// The acquisition may intrinsically switch the weapon in hands. A changed
-// declaration is only restored when the prior item was freshly validated
-// against the current inventory; otherwise the caller fails closed instead of
-// fabricating or replaying a prior selection.
+// restore only a freshly validated prior item after acquisition changes the held declaration
 AcquisitionRestore acquisition_restore(uintptr_t before_decl, uintptr_t before_item, uintptr_t after_decl) {
     if (!before_decl || after_decl == before_decl) return AcquisitionRestore::none;
     return before_item ? AcquisitionRestore::equip_prior : AcquisitionRestore::fail_closed;
 }
 
-bool valid(const sc_special_request& r) {
-    if (r.namespace_id[64] || r.kind > SC_SPECIAL_REFILL_EXECUTE) return false;
-    for (size_t i = 0; i < 64; ++i) {
-        const auto c = r.namespace_id[i];
-        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
+static bool valid_refill_operation(const sc_special_request& r) {
+    switch (r.kind) {
+    case SC_SPECIAL_REFILL_PUBLISH:
+        return !r.refill_request_id && !r.refill_authorize;
+    case SC_SPECIAL_REFILL_TAKE:
+        return !r.refill_balance && !r.refill_flags && !r.refill_request_id && !r.refill_authorize;
+    case SC_SPECIAL_REFILL_EXECUTE:
+        return !r.refill_balance && !r.refill_flags && r.refill_request_id != 0;
+    default:
+        return false;
     }
-    if (r.own_crucible > 1 || r.own_hammer > 1) return false;
-    if (r.hammer_tier > SC_SPECIAL_HAMMER_TIER_UPGRADED) return false;
-    if (r.selected > SC_SPECIAL_WEAPON_HAMMER) return false;
-    if (r.refill_flags & ~(SC_SPECIAL_REFILL_CONNECTED | SC_SPECIAL_REFILL_AUTHORITATIVE | SC_SPECIAL_REFILL_BALANCE_KNOWN)) return false;
-    if (r.refill_authorize & ~SC_SPECIAL_REFILL_AUTHORIZED) return false;
-    if (r.refill_balance > 1000) return false;
-    if (r.reserved0) return false;
-    const bool no_ownership = !r.own_crucible && !r.own_hammer && !r.hammer_tier && !r.selected;
+}
+
+static bool valid_operation(const sc_special_request& r) {
+    const bool no_grants = !r.own_crucible && !r.own_hammer && !r.hammer_tier;
+    const bool no_ownership = no_grants && !r.selected;
     const bool no_refill = !r.refill_balance && !r.refill_flags && !r.refill_request_id && !r.refill_authorize;
     switch (r.kind) {
     case SC_SPECIAL_OBSERVE:
@@ -163,16 +163,24 @@ bool valid(const sc_special_request& r) {
     case SC_SPECIAL_ENSURE_OWNERSHIP:
         return no_refill;
     case SC_SPECIAL_SELECT:
-        return !r.own_crucible && !r.own_hammer && !r.hammer_tier && no_refill && r.selected != SC_SPECIAL_WEAPON_NONE;
-    case SC_SPECIAL_REFILL_PUBLISH:
-        return no_ownership && !r.refill_request_id && !r.refill_authorize;
-    case SC_SPECIAL_REFILL_TAKE:
-        return no_ownership && !r.refill_balance && !r.refill_flags && !r.refill_request_id && !r.refill_authorize;
-    case SC_SPECIAL_REFILL_EXECUTE:
-        return no_ownership && !r.refill_balance && !r.refill_flags && r.refill_request_id != 0;
+        return no_grants && no_refill && r.selected != SC_SPECIAL_WEAPON_NONE;
     default:
-        return false;
+        return no_ownership && valid_refill_operation(r);
     }
+}
+
+bool valid(const sc_special_request& r) {
+    if (!valid_namespace_id(r.namespace_id) || r.kind > SC_SPECIAL_REFILL_EXECUTE) return false;
+    if (r.own_crucible > 1 || r.own_hammer > 1) return false;
+    if (r.hammer_tier > SC_SPECIAL_HAMMER_TIER_UPGRADED) return false;
+    if (r.selected > SC_SPECIAL_WEAPON_HAMMER) return false;
+    if (r.refill_flags &
+        ~(SC_SPECIAL_REFILL_CONNECTED | SC_SPECIAL_REFILL_AUTHORITATIVE | SC_SPECIAL_REFILL_BALANCE_KNOWN))
+        return false;
+    if (r.refill_authorize & ~SC_SPECIAL_REFILL_AUTHORIZED) return false;
+    if (r.refill_balance > 1000) return false;
+    if (r.reserved0) return false;
+    return valid_operation(r);
 }
 
 bool same(const sc_special_request& a, const sc_special_request& b) {
@@ -217,6 +225,11 @@ bool create_refill_request(uint64_t now_ms) {
     return true;
 }
 
+static bool owns_native(const SnapshotFacts& facts, uint32_t crucible, uint32_t hammer) {
+    return (!crucible || ((facts.known & SC_SPECIAL_KNOWN_CRUCIBLE) && facts.native_crucible)) &&
+           (!hammer || ((facts.known & SC_SPECIAL_KNOWN_HAMMER) && facts.native_hammer));
+}
+
 void bind_run_state_if_needed(uintptr_t player, uint64_t generation) {
     if (!player) return;
     const auto now = GetTickCount64();
@@ -232,14 +245,237 @@ void bind_run_state_if_needed(uintptr_t player, uint64_t generation) {
     if (calls.ensure(calls.context, player, desired.owns_crucible, desired.owns_hammer, desired.hammer_tier)) return;
     SnapshotFacts after{};
     if (!calls.read(calls.context, player, after) ||
-        (desired.owns_crucible && (!(after.known & SC_SPECIAL_KNOWN_CRUCIBLE) || !after.native_crucible)) ||
-        (desired.owns_hammer && (!(after.known & SC_SPECIAL_KNOWN_HAMMER) || !after.native_hammer)) ||
-        (desired.hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED &&
-         !upgraded_effective(after))) return;
+        !owns_native(after, desired.owns_crucible, desired.owns_hammer) ||
+        (desired.hammer_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED && !upgraded_effective(after)))
+        return;
     AcquireSRWLockExclusive(&state_lock);
     last_bound_player = player;
     last_bound_generation = generation;
     ReleaseSRWLockExclusive(&state_lock);
+}
+
+static void preserved_resources(const SnapshotFacts& before, const SnapshotFacts& after,
+                                sc_special_result& out) {
+    if ((before.known & after.known & SC_SPECIAL_KNOWN_SELECTION) &&
+        after.native_selected == before.native_selected)
+        out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
+    if (before.held_weapon_decl && before.held_weapon_decl == after.held_weapon_decl)
+        out.flags |= SC_SPECIAL_FLAG_HELD_WEAPON_PRESERVED;
+    if ((before.known & after.known & SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE) &&
+        after.crucible_charge == before.crucible_charge &&
+        after.crucible_charge_max == before.crucible_charge_max)
+        out.flags |= SC_SPECIAL_FLAG_RESOURCE_PRESERVED;
+}
+
+static bool verify_ownership(const SnapshotFacts& before, const SnapshotFacts& after,
+                             uint32_t desired_crucible, uint32_t desired_hammer, uint32_t desired_tier,
+                             bool read_ok, sc_special_result& out) {
+    out.flags |= SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE;
+    if (out.native_exception == ERROR_NOT_SUPPORTED) {
+        out.outcome = SC_SPECIAL_OUTCOME_UNAVAILABLE;
+        return false;
+    }
+    if (read_ok &&
+        (after.native_crucible != before.native_crucible || after.native_hammer != before.native_hammer ||
+         after.native_hammer_perks != before.native_hammer_perks))
+        out.flags |= SC_SPECIAL_FLAG_MUTATED;
+    if (out.native_exception || !read_ok || !owns_native(after, desired_crucible, desired_hammer) ||
+        (desired_hammer && desired_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED && !upgraded_effective(after))) {
+        out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED;
+        return false;
+    }
+    out.outcome = SC_SPECIAL_OUTCOME_OK;
+    return true;
+}
+
+static void ensure_ownership_locked(const sc_special_request& r, sc_special_result& out, const Calls& c,
+                                    uintptr_t player, const SnapshotFacts& before) {
+    const uint32_t desired_crucible = shared_state.owns_crucible | (r.own_crucible ? 1u : 0u);
+    const uint32_t desired_hammer = shared_state.owns_hammer | (r.own_hammer ? 1u : 0u);
+    const uint32_t desired_tier = std::max(shared_state.hammer_tier, r.hammer_tier);
+    shared_state.owns_crucible = desired_crucible;
+    shared_state.owns_hammer = desired_hammer;
+    shared_state.hammer_tier = desired_tier;
+
+    const bool native_satisfied =
+        owns_native(before, desired_crucible, desired_hammer) &&
+        (!desired_hammer || desired_tier < SC_SPECIAL_HAMMER_TIER_UPGRADED || upgraded_effective(before));
+    if (native_satisfied) {
+        fill_facts(before, shared_state, out);
+        ReleaseSRWLockExclusive(&state_lock);
+        out.flags |= SC_SPECIAL_FLAG_AFTER_VALID | SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE |
+                     SC_SPECIAL_FLAG_RESOURCE_PRESERVED;
+        if (before.known & SC_SPECIAL_KNOWN_SELECTION) out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
+        out.outcome = SC_SPECIAL_OUTCOME_NOOP;
+        return;
+    }
+
+    ReleaseSRWLockExclusive(&state_lock);
+    out.native_exception = c.ensure(c.context, player, desired_crucible, desired_hammer, desired_tier);
+
+    SnapshotFacts after{};
+    const bool read_ok = c.read(c.context, player, after);
+    if (read_ok) {
+        out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
+        AcquireSRWLockExclusive(&state_lock);
+        adopt_native_locked(after);
+        fill_facts(after, shared_state, out);
+        ReleaseSRWLockExclusive(&state_lock);
+        preserved_resources(before, after, out);
+    }
+    if (!verify_ownership(before, after, desired_crucible, desired_hammer, desired_tier, read_ok, out))
+        return;
+
+    AcquireSRWLockExclusive(&state_lock);
+    ++total_operations;
+    out.operations_applied = total_operations;
+    ReleaseSRWLockExclusive(&state_lock);
+    return;
+}
+
+static bool selection_owned_locked(const sc_special_request& r, const SnapshotFacts& before,
+                                   sc_special_result& out) {
+    const bool owned = (r.selected == SC_SPECIAL_WEAPON_CRUCIBLE &&
+                        (before.known & SC_SPECIAL_KNOWN_CRUCIBLE) && before.native_crucible) ||
+                       (r.selected == SC_SPECIAL_WEAPON_HAMMER && (before.known & SC_SPECIAL_KNOWN_HAMMER) &&
+                        before.native_hammer);
+    if (!owned) {
+        ReleaseSRWLockExclusive(&state_lock);
+        out.outcome = SC_SPECIAL_OUTCOME_REJECTED;
+        return false;
+    }
+    return true;
+}
+
+static void select_locked(const sc_special_request& r, sc_special_result& out, const Calls& c,
+                          uintptr_t player, const SnapshotFacts& before) {
+    if (!selection_owned_locked(r, before, out)) return;
+    const bool already = (before.known & SC_SPECIAL_KNOWN_SELECTION) && before.native_selected == r.selected;
+    ReleaseSRWLockExclusive(&state_lock);
+
+    out.native_exception = c.select(c.context, player, r.selected);
+
+    SnapshotFacts after{};
+    const bool read_ok = c.read(c.context, player, after);
+    if (read_ok) {
+        out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
+        AcquireSRWLockExclusive(&state_lock);
+        adopt_native_locked(after);
+        // the read callback reports the applied route and its authority
+        fill_facts(after, shared_state, out);
+        ReleaseSRWLockExclusive(&state_lock);
+    }
+    if (read_ok && (after.known & SC_SPECIAL_KNOWN_SELECTION) && after.native_selected == r.selected &&
+        !already)
+        out.flags |= SC_SPECIAL_FLAG_MUTATED;
+    if (out.native_exception || !read_ok || !(after.known & SC_SPECIAL_KNOWN_SELECTION) ||
+        after.native_selected != r.selected) {
+        out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED;
+        return;
+    }
+    out.outcome = already ? SC_SPECIAL_OUTCOME_NOOP : SC_SPECIAL_OUTCOME_OK;
+
+    if (!already) {
+        AcquireSRWLockExclusive(&state_lock);
+        ++total_operations;
+        out.operations_applied = total_operations;
+        ReleaseSRWLockExclusive(&state_lock);
+    }
+    return;
+}
+
+static void refill_publish_locked(const sc_special_request& r, sc_special_result& out, const Calls& c,
+                                  uintptr_t player, const SnapshotFacts& before) {
+    const bool changed =
+        shared_state.refill_balance != r.refill_balance || shared_state.refill_flags != r.refill_flags;
+    shared_state.refill_balance = r.refill_balance;
+    shared_state.refill_flags = r.refill_flags;
+    const auto balance = shared_state.refill_balance;
+    const auto flags = shared_state.refill_flags;
+    if (changed) ++total_operations;
+    fill_facts(before, shared_state, out);
+    ReleaseSRWLockExclusive(&state_lock);
+
+    if (changed && c.present && c.present(c.context, player, balance, flags, 0))
+        out.flags |= SC_SPECIAL_FLAG_HUD_PRESENTED;
+    out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
+    out.outcome = changed ? SC_SPECIAL_OUTCOME_OK : SC_SPECIAL_OUTCOME_NOOP;
+    return;
+}
+
+static void refill_execute_locked(const sc_special_request& r, sc_special_result& out, const Calls& c,
+                                  uintptr_t player, const SnapshotFacts& before) {
+    const auto now = GetTickCount64();
+    expire_pending_locked(now);
+    const bool matches_pending = shared_state.refill_request_state == SC_SPECIAL_REFILL_PENDING &&
+                                 shared_state.pending_request_id == r.refill_request_id;
+    const bool matches_executed =
+        shared_state.last_executed_id == r.refill_request_id && shared_state.last_executed != 0;
+    if (matches_executed) {
+        // repeated ack/retry never performs the refill twice
+        fill_facts(before, shared_state, out);
+        ReleaseSRWLockExclusive(&state_lock);
+        out.flags |=
+            SC_SPECIAL_FLAG_AFTER_VALID | SC_SPECIAL_FLAG_REFILL_EXECUTED | SC_SPECIAL_FLAG_REFILL_AUTHORIZED;
+        out.outcome = SC_SPECIAL_OUTCOME_NOOP;
+        return;
+    }
+    if (!matches_pending || !(r.refill_authorize & SC_SPECIAL_REFILL_AUTHORIZED)) {
+        if (shared_state.refill_request_state == SC_SPECIAL_REFILL_PENDING &&
+            shared_state.pending_request_id == r.refill_request_id) {
+            shared_state.refill_request_state = SC_SPECIAL_REFILL_REJECTED;
+            shared_state.pending_request_id = 0;
+        }
+        fill_facts(before, shared_state, out);
+        ReleaseSRWLockExclusive(&state_lock);
+        out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
+        out.outcome = SC_SPECIAL_OUTCOME_REJECTED;
+        return;
+    }
+    // retire the authorization before the native call so a concurrent retry cannot refill twice
+    shared_state.refill_request_state = SC_SPECIAL_REFILL_EXECUTED;
+    shared_state.pending_request_id = 0;
+    shared_state.last_executed_id = r.refill_request_id;
+    shared_state.last_executed = 0;
+    ReleaseSRWLockExclusive(&state_lock);
+
+    out.flags |= SC_SPECIAL_FLAG_REFILL_AUTHORIZED;
+    out.native_exception = c.refill(c.context, player);
+    out.flags |= SC_SPECIAL_FLAG_REFILL_UNVERIFIED; // no capacity readback; partial effects are possible
+
+    SnapshotFacts after{};
+    const bool read_ok = c.read(c.context, player, after);
+    if (read_ok) out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
+
+    AcquireSRWLockExclusive(&state_lock);
+    if (out.native_exception) {
+        // a failed native execution must not leave a retryable charge use
+        shared_state.last_executed = 0;
+        shared_state.refill_request_state = SC_SPECIAL_REFILL_REJECTED;
+    } else {
+        shared_state.last_executed = 1;
+        ++shared_state.refill_sequence;
+        shared_state.last_execution_id = r.refill_request_id;
+    }
+    fill_facts(after, shared_state, out);
+    const auto balance = shared_state.refill_balance;
+    const auto flags = shared_state.refill_flags;
+    ReleaseSRWLockExclusive(&state_lock);
+
+    if (out.native_exception || !read_ok) {
+        out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED;
+        return;
+    }
+    out.flags |= SC_SPECIAL_FLAG_REFILL_EXECUTED;
+    if (c.present && c.present(c.context, player, balance, flags, 1))
+        out.flags |= SC_SPECIAL_FLAG_HUD_PRESENTED;
+    out.outcome = SC_SPECIAL_OUTCOME_OK;
+
+    AcquireSRWLockExclusive(&state_lock);
+    ++total_operations;
+    out.operations_applied = total_operations;
+    ReleaseSRWLockExclusive(&state_lock);
+    return;
 }
 
 void execute(const sc_special_request& r, sc_special_result& out, const Calls& c) {
@@ -265,127 +501,15 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
     }
 
     if (r.kind == SC_SPECIAL_ENSURE_OWNERSHIP) {
-        const uint32_t desired_crucible = shared_state.owns_crucible | (r.own_crucible ? 1u : 0u);
-        const uint32_t desired_hammer = shared_state.owns_hammer | (r.own_hammer ? 1u : 0u);
-        const uint32_t desired_tier = std::max(shared_state.hammer_tier, r.hammer_tier);
-        shared_state.owns_crucible = desired_crucible;
-        shared_state.owns_hammer = desired_hammer;
-        shared_state.hammer_tier = desired_tier;
-
-        const bool native_satisfied =
-            (!desired_crucible || ((before.known & SC_SPECIAL_KNOWN_CRUCIBLE) && before.native_crucible)) &&
-            (!desired_hammer || ((before.known & SC_SPECIAL_KNOWN_HAMMER) && before.native_hammer &&
-             (desired_tier < SC_SPECIAL_HAMMER_TIER_UPGRADED || upgraded_effective(before))));
-        if (native_satisfied) {
-            fill_facts(before, shared_state, out);
-            ReleaseSRWLockExclusive(&state_lock);
-            out.flags |= SC_SPECIAL_FLAG_AFTER_VALID | SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE |
-                SC_SPECIAL_FLAG_RESOURCE_PRESERVED;
-            if (before.known & SC_SPECIAL_KNOWN_SELECTION)
-                out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
-            out.outcome = SC_SPECIAL_OUTCOME_NOOP;
-            return;
-        }
-
-        ReleaseSRWLockExclusive(&state_lock);
-        out.native_exception = c.ensure(c.context, player, desired_crucible, desired_hammer, desired_tier);
-
-        SnapshotFacts after{};
-        const bool read_ok = c.read(c.context, player, after);
-        if (read_ok) {
-            out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
-            AcquireSRWLockExclusive(&state_lock);
-            adopt_native_locked(after);
-            fill_facts(after, shared_state, out);
-            ReleaseSRWLockExclusive(&state_lock);
-            if ((before.known & after.known & SC_SPECIAL_KNOWN_SELECTION) &&
-                after.native_selected == before.native_selected) out.flags |= SC_SPECIAL_FLAG_SELECTION_PRESERVED;
-            if (before.held_weapon_decl && before.held_weapon_decl == after.held_weapon_decl)
-                out.flags |= SC_SPECIAL_FLAG_HELD_WEAPON_PRESERVED;
-            if ((before.known & after.known & SC_SPECIAL_KNOWN_CRUCIBLE_RESOURCE) &&
-                after.crucible_charge == before.crucible_charge &&
-                after.crucible_charge_max == before.crucible_charge_max)
-                out.flags |= SC_SPECIAL_FLAG_RESOURCE_PRESERVED;
-        }
-        out.flags |= SC_SPECIAL_FLAG_OWNERSHIP_CUMULATIVE;
-        if (out.native_exception == ERROR_NOT_SUPPORTED) {
-            out.outcome = SC_SPECIAL_OUTCOME_UNAVAILABLE; return;
-        }
-        if (read_ok && (after.native_crucible != before.native_crucible ||
-            after.native_hammer != before.native_hammer || after.native_hammer_perks != before.native_hammer_perks))
-            out.flags |= SC_SPECIAL_FLAG_MUTATED;
-        if (out.native_exception || !read_ok ||
-            (desired_crucible && (!(after.known & SC_SPECIAL_KNOWN_CRUCIBLE) || !after.native_crucible)) ||
-            (desired_hammer && (!(after.known & SC_SPECIAL_KNOWN_HAMMER) || !after.native_hammer)) ||
-            (desired_hammer && desired_tier >= SC_SPECIAL_HAMMER_TIER_UPGRADED &&
-             !upgraded_effective(after))) {
-            out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return;
-        }
-        out.outcome = SC_SPECIAL_OUTCOME_OK;
-
-        AcquireSRWLockExclusive(&state_lock);
-        ++total_operations;
-        out.operations_applied = total_operations;
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
+        return ensure_ownership_locked(r, out, c, player, before);
     }
 
     if (r.kind == SC_SPECIAL_SELECT) {
-        const bool owned = (r.selected == SC_SPECIAL_WEAPON_CRUCIBLE &&
-                            (before.known & SC_SPECIAL_KNOWN_CRUCIBLE) && before.native_crucible) ||
-                           (r.selected == SC_SPECIAL_WEAPON_HAMMER &&
-                            (before.known & SC_SPECIAL_KNOWN_HAMMER) && before.native_hammer);
-        if (!owned) {
-            ReleaseSRWLockExclusive(&state_lock);
-            out.outcome = SC_SPECIAL_OUTCOME_REJECTED;
-            return;
-        }
-        const bool already = (before.known & SC_SPECIAL_KNOWN_SELECTION) && before.native_selected == r.selected;
-        ReleaseSRWLockExclusive(&state_lock);
-
-        out.native_exception = c.select(c.context, player, r.selected);
-
-        SnapshotFacts after{};
-        const bool read_ok = c.read(c.context, player, after);
-        if (read_ok) {
-            out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
-            AcquireSRWLockExclusive(&state_lock);
-            adopt_native_locked(after);
-            // the read callback reports the applied route and its authority
-            fill_facts(after, shared_state, out);
-            ReleaseSRWLockExclusive(&state_lock);
-        }
-        if (read_ok && (after.known & SC_SPECIAL_KNOWN_SELECTION) &&
-            after.native_selected == r.selected && !already) out.flags |= SC_SPECIAL_FLAG_MUTATED;
-        if (out.native_exception || !read_ok || !(after.known & SC_SPECIAL_KNOWN_SELECTION) ||
-            after.native_selected != r.selected) { out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return; }
-        out.outcome = already ? SC_SPECIAL_OUTCOME_NOOP : SC_SPECIAL_OUTCOME_OK;
-
-        if (!already) {
-            AcquireSRWLockExclusive(&state_lock);
-            ++total_operations;
-            out.operations_applied = total_operations;
-            ReleaseSRWLockExclusive(&state_lock);
-        }
-        return;
+        return select_locked(r, out, c, player, before);
     }
 
     if (r.kind == SC_SPECIAL_REFILL_PUBLISH) {
-        const bool changed = shared_state.refill_balance != r.refill_balance ||
-                             shared_state.refill_flags != r.refill_flags;
-        shared_state.refill_balance = r.refill_balance;
-        shared_state.refill_flags = r.refill_flags;
-        const auto balance = shared_state.refill_balance;
-        const auto flags = shared_state.refill_flags;
-        if (changed) ++total_operations;
-        fill_facts(before, shared_state, out);
-        ReleaseSRWLockExclusive(&state_lock);
-
-        if (changed && c.present && c.present(c.context, player, balance, flags, 0))
-            out.flags |= SC_SPECIAL_FLAG_HUD_PRESENTED;
-        out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
-        out.outcome = changed ? SC_SPECIAL_OUTCOME_OK : SC_SPECIAL_OUTCOME_NOOP;
-        return;
+        return refill_publish_locked(r, out, c, player, before);
     }
 
     if (r.kind == SC_SPECIAL_REFILL_STATUS || r.kind == SC_SPECIAL_REFILL_TAKE) {
@@ -399,75 +523,7 @@ void execute(const sc_special_request& r, sc_special_result& out, const Calls& c
     }
 
     if (r.kind == SC_SPECIAL_REFILL_EXECUTE) {
-        const auto now = GetTickCount64();
-        expire_pending_locked(now);
-        const bool matches_pending = shared_state.refill_request_state == SC_SPECIAL_REFILL_PENDING &&
-                                     shared_state.pending_request_id == r.refill_request_id;
-        const bool matches_executed = shared_state.last_executed_id == r.refill_request_id &&
-                                      shared_state.last_executed != 0;
-        if (matches_executed) {
-            // repeated ack/retry never performs the refill twice
-            fill_facts(before, shared_state, out);
-            ReleaseSRWLockExclusive(&state_lock);
-            out.flags |= SC_SPECIAL_FLAG_AFTER_VALID | SC_SPECIAL_FLAG_REFILL_EXECUTED |
-                SC_SPECIAL_FLAG_REFILL_AUTHORIZED;
-            out.outcome = SC_SPECIAL_OUTCOME_NOOP;
-            return;
-        }
-        if (!matches_pending || !(r.refill_authorize & SC_SPECIAL_REFILL_AUTHORIZED)) {
-            if (shared_state.refill_request_state == SC_SPECIAL_REFILL_PENDING &&
-                shared_state.pending_request_id == r.refill_request_id) {
-                shared_state.refill_request_state = SC_SPECIAL_REFILL_REJECTED;
-                shared_state.pending_request_id = 0;
-            }
-            fill_facts(before, shared_state, out);
-            ReleaseSRWLockExclusive(&state_lock);
-            out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
-            out.outcome = SC_SPECIAL_OUTCOME_REJECTED;
-            return;
-        }
-        // One authorization owns exactly one native refill. The pending identity
-        // is retired before the native call so a concurrent retry cannot match.
-        shared_state.refill_request_state = SC_SPECIAL_REFILL_EXECUTED;
-        shared_state.pending_request_id = 0;
-        shared_state.last_executed_id = r.refill_request_id;
-        shared_state.last_executed = 0;
-        ReleaseSRWLockExclusive(&state_lock);
-
-        out.flags |= SC_SPECIAL_FLAG_REFILL_AUTHORIZED;
-        out.native_exception = c.refill(c.context, player);
-        out.flags |= SC_SPECIAL_FLAG_REFILL_UNVERIFIED; // no capacity readback; partial effects are possible
-
-        SnapshotFacts after{};
-        const bool read_ok = c.read(c.context, player, after);
-        if (read_ok) out.flags |= SC_SPECIAL_FLAG_AFTER_VALID;
-
-        AcquireSRWLockExclusive(&state_lock);
-        if (out.native_exception) {
-            // a failed native execution must not leave a retryable charge use
-            shared_state.last_executed = 0;
-            shared_state.refill_request_state = SC_SPECIAL_REFILL_REJECTED;
-        } else {
-            shared_state.last_executed = 1;
-            ++shared_state.refill_sequence;
-            shared_state.last_execution_id = r.refill_request_id;
-        }
-        fill_facts(after, shared_state, out);
-        const auto balance = shared_state.refill_balance;
-        const auto flags = shared_state.refill_flags;
-        ReleaseSRWLockExclusive(&state_lock);
-
-        if (out.native_exception || !read_ok) { out.outcome = SC_SPECIAL_OUTCOME_NATIVE_FAILED; return; }
-        out.flags |= SC_SPECIAL_FLAG_REFILL_EXECUTED;
-        if (c.present && c.present(c.context, player, balance, flags, 1))
-            out.flags |= SC_SPECIAL_FLAG_HUD_PRESENTED;
-        out.outcome = SC_SPECIAL_OUTCOME_OK;
-
-        AcquireSRWLockExclusive(&state_lock);
-        ++total_operations;
-        out.operations_applied = total_operations;
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
+        return refill_execute_locked(r, out, c, player, before);
     }
 
     ReleaseSRWLockExclusive(&state_lock);

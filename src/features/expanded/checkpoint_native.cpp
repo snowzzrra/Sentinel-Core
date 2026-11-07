@@ -25,77 +25,96 @@ void lock_recipe_checkpoint() { admission_mutex.lock(); quantity_mutex.lock(); }
 
 void unlock_recipe_checkpoint() { quantity_mutex.unlock(); admission_mutex.unlock(); }
 
+static bool recipe_capture_failed(const char* reason) {
+    commands::diagnostic_trace("AP_CHECKPOINT stage=recipe_capture result=failed reason=%s", reason); return false;
+}
+static bool persistent_recipe_request(const std::string& key) {
+    return key.rfind("independent/", 0) == 0 || key.rfind("summon/", 0) == 0 || key.rfind("direct/", 0) == 0;
+}
+static bool retire_checkpoint_actors(uintptr_t world) {
+    for (auto actor = recipe_actors.begin(); actor != recipe_actors.end();) {
+        if (!persistent_recipe_request(actor->second)) { ++actor; continue; }
+        const auto next = std::next(actor);
+        if (!current_recipe_actor(actor->first)) { actor = next; continue; }
+        const auto credit = recipe_actor_credits.find(actor->first);
+        if (credit == recipe_actor_credits.end()) return recipe_capture_failed("actor_credit_missing");
+        const bool present = find_entity(world, credit->second.name.c_str()) == actor->first;
+        if (present && !combat::confirmed_dead(world, actor->first)) { ++actor; continue; }
+        if (!recipe_state.actor_changed(actor->second, present ? RecipeActorState::dead : RecipeActorState::removed)) return recipe_capture_failed("actor_retirement_refused");
+        actor = recipe_actors.erase(actor);
+    }
+    return true;
+}
+static void capture_independent_shows(uintptr_t world, RecipeNativeCheckpoint& checkpoint) {
+    auto wanted = independent_shows;
+    for (const auto& [actor, pending] : deferred_shows) {
+        char origin[21];
+        if (independent_origin(actor, origin)) wanted.insert(pending.name);
+    }
+    for (const auto& name : wanted) {
+        const auto actor = find_entity(world, name.c_str());
+        if (!actor || combat::confirmed_dead(world, actor)) continue;
+        auto& pose = checkpoint.shows[name];
+        std::memcpy(pose.data(), reinterpret_cast<const void*>(actor + 0x74), sizeof(pose));
+    }
+    for (const auto& [name, pose] : pending_independent_shows) checkpoint.shows[name] = pose;
+}
+static bool capture_actor_identities(RecipeNativeCheckpoint& checkpoint) {
+    std::set<std::string> identity_requests;
+    checkpoint.identities = restored_actor_identities;
+    for (const auto& [actor, credit] : recipe_actor_credits) {
+        if (recipe_actors.count(actor) || credit.identifier != actor_identifier(actor)) continue;
+        char body[512];
+        if (credit.name.empty() || !read_recipe_definition(actor, body)) return recipe_capture_failed("actor_identity_unreadable");
+        checkpoint.identities[credit.name] = {credit.request, body, credit.ordinal, credit.credit.numerator, credit.credit.denominator};
+    }
+    for (const auto& [name, identity] : checkpoint.identities) { (void)name; identity_requests.insert(identity.request); }
+    for (const auto& [key, credit] : death_action_credits) {
+        if (persistent_recipe_request(key.first) || identity_requests.count(key.first))
+            checkpoint.actions[key] = {credit.units, credit.sent, credit.denominator};
+    }
+    return true;
+}
 bool capture_recipe_checkpoint(std::string& bytes) {
-    const auto failed = [](const char* reason) {
-        commands::diagnostic_trace("AP_CHECKPOINT stage=recipe_capture result=failed reason=%s", reason); return false;
-    };
     uintptr_t root = 0;
-    if (!recipe_checkpoint_root(root)) return failed("root_unreadable");
+    if (!recipe_checkpoint_root(root)) return recipe_capture_failed("root_unreadable");
     if (!root) { bytes = "EAPC1|-\n"; return true; }
-    if (recipe_fault.load(std::memory_order_acquire)) return failed("recipe_fault");
-    if (!load_native_recipes()) return failed("recipe_library_unavailable");
+    if (recipe_fault.load(std::memory_order_acquire)) return recipe_capture_failed("recipe_fault");
+    if (!load_native_recipes()) return recipe_capture_failed("recipe_library_unavailable");
     if (!session_recipe_plan.empty()) {
         const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
-        for (auto actor = recipe_actors.begin(); actor != recipe_actors.end();) {
-            if (actor->second.rfind("independent/", 0) != 0 && actor->second.rfind("summon/", 0) != 0 && actor->second.rfind("direct/", 0) != 0) { ++actor; continue; }
-            const auto next = std::next(actor);
-            if (!current_recipe_actor(actor->first)) { actor = next; continue; }
-            const auto credit = recipe_actor_credits.find(actor->first);
-            if (credit == recipe_actor_credits.end()) return failed("actor_credit_missing");
-            const bool present = find_entity(world, credit->second.name.c_str()) == actor->first;
-            if (present && !combat::confirmed_dead(world, actor->first)) { ++actor; continue; }
-            if (!recipe_state.actor_changed(actor->second, present ? RecipeActorState::dead : RecipeActorState::removed)) return failed("actor_retirement_refused");
-            actor = recipe_actors.erase(actor);
-        }
+        if (!retire_checkpoint_actors(world)) return false;
         RecipeNativeCheckpoint checkpoint;
         checkpoint.plan = recipe_state.plan(); checkpoint.map = recipe_state.map();
-        if (!capture_autonomous_summons(checkpoint)) return failed("summon_capture_refused");
-        if (!recipe_state.capture(checkpoint.state, std::vector<std::string_view>{"independent/", "summon/", "direct/"})) return failed("recipe_state_capture_refused");
-        auto wanted = independent_shows;
-        for (const auto& [actor, pending] : deferred_shows) {
-            char origin[21];
-            if (independent_origin(actor, origin)) wanted.insert(pending.name);
-        }
-        for (const auto& name : wanted) {
-            const auto actor = find_entity(world, name.c_str());
-            if (!actor || combat::confirmed_dead(world, actor)) continue;
-            auto& pose = checkpoint.shows[name];
-            std::memcpy(pose.data(), reinterpret_cast<const void*>(actor + 0x74), sizeof(pose));
-        }
-        for (const auto& [name, pose] : pending_independent_shows) checkpoint.shows[name] = pose;
-        std::set<std::string> identity_requests;
-        checkpoint.identities = restored_actor_identities;
-        for (const auto& [actor, credit] : recipe_actor_credits) {
-            if (recipe_actors.count(actor) || credit.identifier != actor_identifier(actor)) continue;
-            char body[512];
-            if (credit.name.empty() || !read_recipe_definition(actor, body)) return failed("actor_identity_unreadable");
-            checkpoint.identities[credit.name] = {credit.request, body, credit.ordinal, credit.credit.numerator, credit.credit.denominator};
-        }
-        for (const auto& [name, identity] : checkpoint.identities) { (void)name; identity_requests.insert(identity.request); }
-        for (const auto& [key, credit] : death_action_credits) {
-            if (key.first.rfind("independent/", 0) == 0 || key.first.rfind("summon/", 0) == 0 || key.first.rfind("direct/", 0) == 0 || identity_requests.count(key.first))
-                checkpoint.actions[key] = {credit.units, credit.sent, credit.denominator};
-        }
+        if (!capture_autonomous_summons(checkpoint)) return recipe_capture_failed("summon_capture_refused");
+        if (!recipe_state.capture(checkpoint.state, std::vector<std::string_view>{"independent/", "summon/", "direct/"})) return recipe_capture_failed("recipe_state_capture_refused");
+        capture_independent_shows(world, checkpoint);
+        if (!capture_actor_identities(checkpoint)) return false;
         const bool captured = checkpoint.capture(bytes);
-        if (!captured) return failed("checkpoint_encoding_refused");
+        if (!captured) return recipe_capture_failed("checkpoint_encoding_refused");
         return captured;
     }
     // native checkpoints restart the selected script; its commands recreate ordinals and credits.
-    bytes = "EAPC1|" + (session_recipe_plan.empty() ? std::string("-") : session_recipe_plan) + "\n";
+    bytes = "EAPC1|-\n";
     return true;
 }
 
+static bool checkpoint_plan(std::string_view plan) {
+    return plan.size() == 64 && plan.find_first_not_of("0123456789abcdef") == plan.npos;
+}
+static bool restore_independent_checkpoint(std::string_view bytes, std::string_view map) {
+    RecipeNativeCheckpoint checkpoint;
+    if (!checkpoint.restore(bytes, map) || !checkpoint_plan(checkpoint.plan) ||
+        (!session_recipe_plan.empty() && session_recipe_plan != checkpoint.plan)) return false;
+    checkpoint_recipe_plan = checkpoint.plan;
+    restored_independent = std::move(checkpoint); checkpoint_recipe_missing = false; return true;
+}
 bool restore_recipe_checkpoint(std::string_view bytes, std::string_view map) {
     std::lock_guard<std::recursive_mutex> admission(admission_mutex);
     std::lock_guard<std::recursive_mutex> lock(quantity_mutex);
     if (map.empty()) return false;
     if (bytes.substr(0, 4) == "EAPN") {
-        RecipeNativeCheckpoint checkpoint;
-        if (!checkpoint.restore(bytes, map) || checkpoint.plan.size() != 64 ||
-            checkpoint.plan.find_first_not_of("0123456789abcdef") != checkpoint.plan.npos ||
-            (!session_recipe_plan.empty() && session_recipe_plan != checkpoint.plan)) return false;
-        checkpoint_recipe_plan = checkpoint.plan;
-        restored_independent = std::move(checkpoint); checkpoint_recipe_missing = false; return true;
+        return restore_independent_checkpoint(bytes, map);
     }
     if (bytes.empty()) {
         if (!session_recipe_plan.empty()) return false;
@@ -104,8 +123,7 @@ bool restore_recipe_checkpoint(std::string_view bytes, std::string_view map) {
     }
     if (bytes.size() < 8 || bytes.substr(0, 6) != "EAPC1|" || bytes.back() != '\n') return false;
     const auto plan = bytes.substr(6, bytes.size() - 7);
-    if (plan != "-" && (plan.size() != 64 || !std::all_of(plan.begin(), plan.end(), [](char ch) {
-        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'); }))) return false;
+    if (plan != "-" && !checkpoint_plan(plan)) return false;
     if (plan != "-" && !session_recipe_plan.empty() && session_recipe_plan != plan) return false;
     checkpoint_recipe_plan = plan == "-" ? "" : std::string(plan);
     restored_independent.reset();
@@ -113,6 +131,22 @@ bool restore_recipe_checkpoint(std::string_view bytes, std::string_view map) {
     return true;
 }
 
+static bool manager_memberships(uintptr_t manager, uintptr_t actor, const char* owner, std::vector<RecipeMembership>& result) {
+    for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
+        const auto records = *reinterpret_cast<const uintptr_t*>(manager + offset);
+        const auto size = *reinterpret_cast<const int32_t*>(manager + offset + 8);
+        if (size < 0 || size > 1000000) return false;
+        for (int32_t j = 0; j < size; ++j) {
+            const auto record = records + static_cast<uintptr_t>(j) * 0x68;
+            if (record_actor(record) != actor) continue;
+            std::string label;
+            if (!native_text(record + 0x28, label, 1024)) return false;
+            RecipeMembership value{owner, std::move(label)};
+            if (std::find(result.begin(), result.end(), value) == result.end()) result.push_back(std::move(value));
+        }
+    }
+    return true;
+}
 bool native_memberships(uintptr_t world, uintptr_t actor, std::vector<RecipeMembership>& result) {
     const auto data = *reinterpret_cast<const uintptr_t*>(world + 0x126658);
     const auto count = *reinterpret_cast<const int32_t*>(world + 0x126660);
@@ -121,19 +155,7 @@ bool native_memberships(uintptr_t world, uintptr_t actor, std::vector<RecipeMemb
         const auto manager = *reinterpret_cast<const uintptr_t*>(data + static_cast<uintptr_t>(i) * 0x20 + 8);
         char owner[512];
         if (!manager || !read_definition_name(manager, owner)) return false;
-        for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
-            const auto records = *reinterpret_cast<const uintptr_t*>(manager + offset);
-            const auto size = *reinterpret_cast<const int32_t*>(manager + offset + 8);
-            if (size < 0 || size > 1000000) return false;
-            for (int32_t j = 0; j < size; ++j) {
-                const auto record = records + static_cast<uintptr_t>(j) * 0x68;
-                if (record_actor(record) != actor) continue;
-                std::string label;
-                if (!native_text(record + 0x28, label, 1024)) return false;
-                RecipeMembership value{owner, std::move(label)};
-                if (std::find(result.begin(), result.end(), value) == result.end()) result.push_back(std::move(value));
-            }
-        }
+        if (!manager_memberships(manager, actor, owner, result)) return false;
     }
     return true;
 }
@@ -174,9 +196,47 @@ bool append_recipe_membership(std::map<std::string, std::vector<RecipeMembership
     return true;
 }
 
+struct MembershipRegistration { uintptr_t manager; const NativeRecipe* recipe; std::array<uint64_t, 13> record; std::string label; };
+static bool register_empty_membership(uintptr_t manager, const NativeRecipe& recipe, const std::string& label) {
+        char owner[512];
+        const auto& entry = recipe.definition;
+        const auto key = empty_independent_key(entry.origin);
+        if (!read_definition_name(manager, owner) ||
+            !recipe_state.request(key, {entry.source, entry.origin, "", entry.logical_mask, 1, 0, 0}) ||
+            !recipe_state.join_empty(key, owner, label)) return false;
+    return true;
+}
+static bool collect_membership_registration(uintptr_t manager, uintptr_t record, std::vector<MembershipRegistration>& registrations, bool& observed) {
+    const auto actor = record_actor(record);
+    char origin[21], name[512];
+    if (!actor || !independent_origin(actor, origin) || !read_instance_name(actor, name)) return true;
+    const auto recipe = native_recipes.find(origin);
+    if (recipe == native_recipes.end() || recipe->second.definition.source != name) return true;
+    observed=true;
+    MembershipRegistration pending{manager, &recipe->second, {}, {}};
+    if (!native_text(record + 0x28, pending.label, 1024)) return false;
+    if (recipe->second.bodies.empty()) {
+        if (!register_empty_membership(manager, recipe->second, pending.label)) return false;
+        return true;
+    }
+    std::memcpy(pending.record.data(), reinterpret_cast<const void*>(record), sizeof(pending.record));
+    registrations.push_back(std::move(pending));
+    return true;
+}
+static bool collect_manager_registrations(uintptr_t manager, std::vector<MembershipRegistration>& registrations, bool& observed) {
+    for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
+        const auto data = *reinterpret_cast<const uintptr_t*>(manager + offset);
+        const auto length = *reinterpret_cast<const int32_t*>(manager + offset + 8);
+        if (length < 0 || length > 1000000) return false;
+        for (int32_t index = 0; index < length; ++index) {
+            const auto record = data + static_cast<uintptr_t>(index) * 0x68;
+            if (!collect_membership_registration(manager, record, registrations, observed)) return false;
+        }
+    }
+    return true;
+}
 bool synchronize_independent_memberships(uintptr_t world) {
-    struct Registration { uintptr_t manager; const NativeRecipe* recipe; std::array<uint64_t, 13> record; std::string label; };
-    std::vector<Registration> registrations;
+    std::vector<MembershipRegistration> registrations;
     bool observed=false;
     const auto managers = *reinterpret_cast<const uintptr_t*>(world + 0x126658);
     const auto count = *reinterpret_cast<const int32_t*>(world + 0x126660);
@@ -184,33 +244,7 @@ bool synchronize_independent_memberships(uintptr_t world) {
     for (int32_t i = 0; i < count; ++i) {
         const auto manager = *reinterpret_cast<const uintptr_t*>(managers + static_cast<uintptr_t>(i) * 0x20 + 8);
         if (!manager) continue;
-        for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
-            const auto data = *reinterpret_cast<const uintptr_t*>(manager + offset);
-            const auto length = *reinterpret_cast<const int32_t*>(manager + offset + 8);
-            if (length < 0 || length > 1000000) return false;
-            for (int32_t index = 0; index < length; ++index) {
-                const auto record = data + static_cast<uintptr_t>(index) * 0x68;
-                const auto actor = record_actor(record);
-                char origin[21], name[512];
-                if (!actor || !independent_origin(actor, origin) || !read_instance_name(actor, name)) continue;
-                const auto recipe = native_recipes.find(origin);
-                if (recipe == native_recipes.end() || recipe->second.definition.source != name) continue;
-                observed=true;
-                Registration pending{manager, &recipe->second, {}, {}};
-                if (!native_text(record + 0x28, pending.label, 1024)) return false;
-                if (recipe->second.bodies.empty()) {
-                    char owner[512];
-                    const auto& entry = recipe->second.definition;
-                    const auto key = empty_independent_key(entry.origin);
-                    if (!read_definition_name(manager, owner) ||
-                        !recipe_state.request(key, {entry.source, entry.origin, "", entry.logical_mask, 1, 0, 0}) ||
-                        !recipe_state.join_empty(key, owner, pending.label)) return false;
-                    continue;
-                }
-                std::memcpy(pending.record.data(), reinterpret_cast<const void*>(record), sizeof(pending.record));
-                registrations.push_back(std::move(pending));
-            }
-        }
+        if (!collect_manager_registrations(manager, registrations, observed)) return false;
     }
     bool complete = observed || !independent_memberships_pending;
     for (const auto& pending : registrations)
@@ -237,34 +271,55 @@ void reconcile_recipe_memberships(const std::string& actor, const std::vector<Re
             recipe_state.detach_actor(actor, member.owner, member.label);
 }
 
+static bool read_active_recipe_actors(uintptr_t world, std::map<uintptr_t, bool>& actors, uint64_t* living) {
+    const auto collection = *reinterpret_cast<const uintptr_t*>(world + 0x62088);
+    const auto data = *reinterpret_cast<const uintptr_t*>(collection);
+    const auto count = *reinterpret_cast<const int32_t*>(collection + 8);
+    if (count < 0 || count > 1000000) return false;
+    for (int32_t i = 0; i < count; ++i) {
+        const auto actor = resolve_actor(data + static_cast<uintptr_t>(i) * 24);
+        if (actor) current_recipe_actor(actor);
+        const bool tracked=actor && (!component_summons.empty() || recipe_actors.find(actor) != recipe_actors.end() ||
+            recipe_actor_credits.find(actor) != recipe_actor_credits.end());
+        if (actor && (tracked || living)) {
+            const auto dead=combat::confirmed_dead(world, actor);
+            if (living && !dead) ++*living;
+            if (tracked) actors[actor]=dead;
+        }
+    }
+    return true;
+}
+static bool read_manager_recipe_memberships(uintptr_t manager, const char* owner, std::map<std::string, std::vector<RecipeMembership>>& memberships) {
+    for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
+        const auto records = *reinterpret_cast<const uintptr_t*>(manager + offset);
+        const auto length = *reinterpret_cast<const int32_t*>(manager + offset + 8);
+        if (length < 0 || length > 1000000) return false;
+        for (int32_t index = 0; index < length; ++index) {
+            const auto record = records + static_cast<uintptr_t>(index) * 0x68;
+            const auto actor = record_actor(record);
+            const auto role = recipe_actors.find(actor);
+            if (role != recipe_actors.end() && !append_recipe_membership(memberships, role->second, owner, record + 0x28)) return false;
+        }
+    }
+    return true;
+}
+static void read_hidden_recipe_actors(uintptr_t world, std::map<uintptr_t, bool>& actors) {
+    // hidden actors keep their native identity outside the active AI list.
+    for (const auto& [actor, credit] : recipe_actor_credits) {
+        if (actors.find(actor) != actors.end() || credit.name.empty()) continue;
+        const auto present = find_entity(world, credit.name.c_str());
+        if (present != actor) continue;
+        const auto identifier = actor_identifier(present);
+        if (identifier == credit.identifier) actors[actor] = combat::confirmed_dead(world, actor);
+    }
+}
 bool read_recipe_actors(uintptr_t world, std::map<uintptr_t, bool>& actors,
                         std::map<std::string, std::vector<RecipeMembership>>& memberships,
                         std::set<uintptr_t>& workers, std::set<uintptr_t>& owners, uint64_t* living) {
     __try {
         if (living) *living=0;
-        const auto collection = *reinterpret_cast<const uintptr_t*>(world + 0x62088);
-        const auto data = *reinterpret_cast<const uintptr_t*>(collection);
-        const auto count = *reinterpret_cast<const int32_t*>(collection + 8);
-        if (count < 0 || count > 1000000) return false;
-        for (int32_t i = 0; i < count; ++i) {
-            const auto actor = resolve_actor(data + static_cast<uintptr_t>(i) * 24);
-            if (actor) current_recipe_actor(actor);
-            const bool tracked=actor && (!component_summons.empty() || recipe_actors.find(actor) != recipe_actors.end() ||
-                recipe_actor_credits.find(actor) != recipe_actor_credits.end());
-            if (actor && (tracked || living)) {
-                const auto dead=combat::confirmed_dead(world, actor);
-                if (living && !dead) ++*living;
-                if (tracked) actors[actor]=dead;
-            }
-        }
-        // hidden actors keep their native identity outside the active AI list.
-        for (const auto& [actor, credit] : recipe_actor_credits) {
-            if (actors.find(actor) != actors.end() || credit.name.empty()) continue;
-            const auto present = find_entity(world, credit.name.c_str());
-            if (present != actor) continue;
-            const auto identifier = actor_identifier(present);
-            if (identifier == credit.identifier) actors[actor] = combat::confirmed_dead(world, actor);
-        }
+        if (!read_active_recipe_actors(world, actors, living)) return false;
+        read_hidden_recipe_actors(world, actors);
         const auto managers = *reinterpret_cast<const uintptr_t*>(world + 0x126658);
         const auto manager_count = *reinterpret_cast<const int32_t*>(world + 0x126660);
         if (manager_count < 0 || manager_count > 100000) return false;
@@ -278,17 +333,7 @@ bool read_recipe_actors(uintptr_t world, std::map<uintptr_t, bool>& actors,
             if (command_count < 0 || command_count > 100000) return false;
             for (int32_t index = 0; index < command_count; ++index)
                 workers.insert(*reinterpret_cast<const uintptr_t*>(commands + static_cast<uintptr_t>(index) * 8));
-            for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
-                const auto records = *reinterpret_cast<const uintptr_t*>(manager + offset);
-                const auto length = *reinterpret_cast<const int32_t*>(manager + offset + 8);
-                if (length < 0 || length > 1000000) return false;
-                for (int32_t index = 0; index < length; ++index) {
-                    const auto record = records + static_cast<uintptr_t>(index) * 0x68;
-                    const auto actor = record_actor(record);
-                    const auto role = recipe_actors.find(actor);
-                    if (role != recipe_actors.end() && !append_recipe_membership(memberships, role->second, owner, record + 0x28)) return false;
-                }
-            }
+            if (!read_manager_recipe_memberships(manager, owner, memberships)) return false;
         }
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }

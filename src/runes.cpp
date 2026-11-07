@@ -1,3 +1,4 @@
+#include "namespace_id.h"
 #include "runes.h"
 #include <cstring>
 #include <algorithm>
@@ -49,32 +50,16 @@ void record_observed_locked(const SnapshotFacts& facts) {
 
 uint8_t compute_derived_crystal_pairs(uint8_t health, uint8_t armor, uint8_t ammo) {
     uint8_t mask = 0;
-    // family 0 (quickdraw belch): health >= 1 && armor >= 1
     if (health >= 1 && armor >= 1) mask |= SC_CRYSTAL_PAIR_QUICKDRAW_BELCH;
-    // family 1 (loot magnet): armor >= 2 && ammo >= 3
     if (armor >= 2 && ammo >= 3) mask |= SC_CRYSTAL_PAIR_LOOT_MAGNET;
-    // family 2 (napalm belch): health >= 2 && ammo >= 1
     if (health >= 2 && ammo >= 1) mask |= SC_CRYSTAL_PAIR_NAPALM_BELCH;
-    // family 3 (health for blood): health >= 4 && armor >= 3
     if (health >= 4 && armor >= 3) mask |= SC_CRYSTAL_PAIR_HEALTH_FOR_BLOOD;
-    // family 4 (belch armor boost): health >= 3 && ammo >= 2
     if (health >= 3 && ammo >= 2) mask |= SC_CRYSTAL_PAIR_BELCH_ARMOR_BOOST;
-    // family 5 (armor for blood): armor >= 4 && ammo >= 4
     if (armor >= 4 && ammo >= 4) mask |= SC_CRYSTAL_PAIR_ARMOR_FOR_BLOOD;
     return mask;
 }
 
-bool valid(const sc_runes_request& r) {
-    if (r.namespace_id[64] || r.kind > SC_RUNES_SELECT_SUPPORT) return false;
-    for (size_t i = 0; i < 64; ++i) {
-        const auto c = r.namespace_id[i];
-        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
-    }
-    if (r.normal_runes & ~SC_RUNES_ALL_NORMAL) return false;
-    if (r.support_runes & ~SC_RUNES_ALL_SUPPORT) return false;
-    if (r.kind == SC_RUNES_OBSERVE) {
-        return !r.normal_runes && !r.support_runes && r.select_slot == 0 && r.select_rune == 0;
-    }
+static bool valid_selection(const sc_runes_request& r) {
     if (r.kind == SC_RUNES_SELECT_NORMAL) {
         if (r.select_slot >= 3) return false;
         if (r.select_rune < -1 || r.select_rune >= 9) return false;
@@ -83,6 +68,16 @@ bool valid(const sc_runes_request& r) {
         if (r.select_rune < -1 || r.select_rune >= 3) return false;
     }
     return true;
+}
+
+bool valid(const sc_runes_request& r) {
+    if (!valid_namespace_id(r.namespace_id) || r.kind > SC_RUNES_SELECT_SUPPORT) return false;
+    if (r.normal_runes & ~SC_RUNES_ALL_NORMAL) return false;
+    if (r.support_runes & ~SC_RUNES_ALL_SUPPORT) return false;
+    if (r.kind == SC_RUNES_OBSERVE) {
+        return !r.normal_runes && !r.support_runes && r.select_slot == 0 && r.select_rune == 0;
+    }
+    return valid_selection(r);
 }
 
 bool same(const sc_runes_request& a, const sc_runes_request& b) {
@@ -138,6 +133,204 @@ void bind_run_state_if_needed(uintptr_t player, uint64_t) {
     // native save owns selections. never replay stale cached choices or pair(0)
 }
 
+static void ensure_normal_locked(const sc_runes_request& r, sc_runes_result& out, const Calls& c,
+                                 uintptr_t player, const SnapshotFacts& before) {
+    shared_state.owned_normal |= (r.normal_runes & SC_RUNES_ALL_NORMAL);
+    const uint32_t needed = shared_state.owned_normal;
+    const uint32_t delta = needed & ~before.owned_normal;
+
+    if (!delta) {
+        out.owned_normal_after = before.owned_normal;
+        out.owned_support_after = before.owned_support;
+        for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = before.selected_slots[i];
+        out.selected_support_after = before.selected_support;
+        out.unlocked_slots_after = before.unlocked_slots;
+        out.derived_pairs_after = before.derived_pairs;
+        out.operations_applied = total_operations;
+        ReleaseSRWLockExclusive(&state_lock);
+        out.flags |= SC_RUNES_FLAG_AFTER_VALID | SC_RUNES_FLAG_SELECTION_PRESERVED;
+        out.outcome = SC_RUNES_OUTCOME_OK;
+        return;
+    }
+
+    ReleaseSRWLockExclusive(&state_lock);
+    out.native_exception = c.ensure_normal_runes(c.context, player, delta);
+
+    SnapshotFacts after{};
+    const bool read_ok = c.read(c.context, player, after);
+    if (read_ok) {
+        out.flags |= SC_RUNES_FLAG_AFTER_VALID;
+        out.owned_normal_after = after.owned_normal;
+        out.owned_support_after = after.owned_support;
+        for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = after.selected_slots[i];
+        out.selected_support_after = after.selected_support;
+        out.unlocked_slots_after = after.unlocked_slots;
+        out.derived_pairs_after = after.derived_pairs;
+        if (after.selected_slots[0] == before.selected_slots[0] &&
+            after.selected_slots[1] == before.selected_slots[1] &&
+            after.selected_slots[2] == before.selected_slots[2]) {
+            out.flags |= SC_RUNES_FLAG_SELECTION_PRESERVED;
+        }
+    }
+    if (out.native_exception || !read_ok || (after.owned_normal & needed) != needed) {
+        out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED;
+        return;
+    }
+    if (c.refresh && !c.refresh(c.context, player)) {
+        out.outcome = SC_RUNES_OUTCOME_REFRESH_FAILED;
+        return;
+    }
+    out.flags |= SC_RUNES_FLAG_MUTATED;
+    out.outcome = SC_RUNES_OUTCOME_OK;
+
+    AcquireSRWLockExclusive(&state_lock);
+    ++total_operations;
+    out.operations_applied = total_operations;
+    ReleaseSRWLockExclusive(&state_lock);
+    return;
+}
+
+static void ensure_support_locked(const sc_runes_request& r, sc_runes_result& out, const Calls& c,
+                                  uintptr_t player, const SnapshotFacts& before) {
+    shared_state.owned_support |= (r.support_runes & SC_RUNES_ALL_SUPPORT);
+    const uint32_t needed = shared_state.owned_support;
+    const uint32_t delta = needed & ~before.owned_support;
+
+    if (!delta) {
+        out.owned_normal_after = before.owned_normal;
+        out.owned_support_after = before.owned_support;
+        for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = before.selected_slots[i];
+        out.selected_support_after = before.selected_support;
+        out.unlocked_slots_after = before.unlocked_slots;
+        out.derived_pairs_after = before.derived_pairs;
+        out.operations_applied = total_operations;
+        ReleaseSRWLockExclusive(&state_lock);
+        out.flags |= SC_RUNES_FLAG_AFTER_VALID | SC_RUNES_FLAG_SELECTION_PRESERVED;
+        out.outcome = SC_RUNES_OUTCOME_OK;
+        return;
+    }
+
+    ReleaseSRWLockExclusive(&state_lock);
+    out.native_exception = c.ensure_support_runes(c.context, player, delta);
+
+    SnapshotFacts after{};
+    const bool read_ok = c.read(c.context, player, after);
+    if (read_ok) {
+        out.flags |= SC_RUNES_FLAG_AFTER_VALID;
+        out.owned_normal_after = after.owned_normal;
+        out.owned_support_after = after.owned_support;
+        for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = after.selected_slots[i];
+        out.selected_support_after = after.selected_support;
+        out.unlocked_slots_after = after.unlocked_slots;
+        out.derived_pairs_after = after.derived_pairs;
+        if (after.selected_support == before.selected_support) {
+            out.flags |= SC_RUNES_FLAG_SELECTION_PRESERVED;
+        }
+    }
+    if (out.native_exception || !read_ok || (after.owned_support & needed) != needed) {
+        out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED;
+        return;
+    }
+    if (c.refresh && !c.refresh(c.context, player)) {
+        out.outcome = SC_RUNES_OUTCOME_REFRESH_FAILED;
+        return;
+    }
+    out.flags |= SC_RUNES_FLAG_MUTATED;
+    out.outcome = SC_RUNES_OUTCOME_OK;
+
+    AcquireSRWLockExclusive(&state_lock);
+    ++total_operations;
+    out.operations_applied = total_operations;
+    ReleaseSRWLockExclusive(&state_lock);
+    return;
+}
+
+static void select_normal_locked(const sc_runes_request& r, sc_runes_result& out, const Calls& c,
+                                 uintptr_t player) {
+    const auto slot = r.select_slot;
+    const auto rune = r.select_rune;
+    if (slot >= 3) {
+        ReleaseSRWLockExclusive(&state_lock);
+        out.outcome = SC_RUNES_OUTCOME_REJECTED;
+        return;
+    }
+
+    ReleaseSRWLockExclusive(&state_lock);
+    out.native_exception = c.select_normal_rune(c.context, player, slot, rune);
+
+    SnapshotFacts after{};
+    const bool read_ok = c.read(c.context, player, after);
+    if (read_ok) {
+        out.flags |= SC_RUNES_FLAG_AFTER_VALID;
+        out.owned_normal_after = after.owned_normal;
+        out.owned_support_after = after.owned_support;
+        for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = after.selected_slots[i];
+        out.selected_support_after = after.selected_support;
+        out.unlocked_slots_after = after.unlocked_slots;
+        out.derived_pairs_after = after.derived_pairs;
+    }
+    if (out.native_exception || !read_ok || after.selected_slots[slot] != rune) {
+        out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED;
+        return;
+    }
+    if (c.refresh && !c.refresh(c.context, player)) {
+        out.outcome = SC_RUNES_OUTCOME_REFRESH_FAILED;
+        return;
+    }
+    out.flags |= SC_RUNES_FLAG_MUTATED;
+    out.outcome = SC_RUNES_OUTCOME_OK;
+
+    AcquireSRWLockExclusive(&state_lock);
+    if (rune >= 0 && rune < 9)
+        shared_state.selected_slots[slot] = rune;
+    else
+        shared_state.selected_slots[slot] = -1;
+    ++total_operations;
+    out.operations_applied = total_operations;
+    ReleaseSRWLockExclusive(&state_lock);
+    return;
+}
+
+static void select_support_locked(const sc_runes_request& r, sc_runes_result& out, const Calls& c,
+                                  uintptr_t player) {
+    const auto rune = r.select_rune;
+
+    ReleaseSRWLockExclusive(&state_lock);
+    out.native_exception = c.select_support_rune(c.context, player, rune);
+
+    SnapshotFacts after{};
+    const bool read_ok = c.read(c.context, player, after);
+    if (read_ok) {
+        out.flags |= SC_RUNES_FLAG_AFTER_VALID;
+        out.owned_normal_after = after.owned_normal;
+        out.owned_support_after = after.owned_support;
+        for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = after.selected_slots[i];
+        out.selected_support_after = after.selected_support;
+        out.unlocked_slots_after = after.unlocked_slots;
+        out.derived_pairs_after = after.derived_pairs;
+    }
+    if (out.native_exception || !read_ok || after.selected_support != rune) {
+        out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED;
+        return;
+    }
+    if (c.refresh && !c.refresh(c.context, player)) {
+        out.outcome = SC_RUNES_OUTCOME_REFRESH_FAILED;
+        return;
+    }
+    out.flags |= SC_RUNES_FLAG_MUTATED;
+    out.outcome = SC_RUNES_OUTCOME_OK;
+
+    AcquireSRWLockExclusive(&state_lock);
+    if (rune >= 0 && rune < 3)
+        shared_state.selected_support = rune;
+    else
+        shared_state.selected_support = -1;
+    ++total_operations;
+    out.operations_applied = total_operations;
+    ReleaseSRWLockExclusive(&state_lock);
+    return;
+}
+
 void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
     const auto player = c.player(c.context);
     if (!player) { out.outcome = SC_RUNES_OUTCOME_NO_PLAYER; return; }
@@ -173,186 +366,19 @@ void execute(const sc_runes_request& r, sc_runes_result& out, const Calls& c) {
     }
 
     if (r.kind == SC_RUNES_ENSURE_NORMAL) {
-        shared_state.owned_normal |= (r.normal_runes & SC_RUNES_ALL_NORMAL);
-        const uint32_t needed = shared_state.owned_normal;
-        const uint32_t delta = needed & ~before.owned_normal;
-
-        if (!delta) {
-            // already registered; keep the slots as they are
-            out.owned_normal_after = before.owned_normal;
-            out.owned_support_after = before.owned_support;
-            for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = before.selected_slots[i];
-            out.selected_support_after = before.selected_support;
-            out.unlocked_slots_after = before.unlocked_slots;
-            out.derived_pairs_after = before.derived_pairs;
-            out.operations_applied = total_operations;
-            ReleaseSRWLockExclusive(&state_lock);
-            out.flags |= SC_RUNES_FLAG_AFTER_VALID | SC_RUNES_FLAG_SELECTION_PRESERVED;
-            out.outcome = SC_RUNES_OUTCOME_OK;
-            return;
-        }
-
-        ReleaseSRWLockExclusive(&state_lock);
-        out.native_exception = c.ensure_normal_runes(c.context, player, delta);
-
-        SnapshotFacts after{};
-        const bool read_ok = c.read(c.context, player, after);
-        if (read_ok) {
-            out.flags |= SC_RUNES_FLAG_AFTER_VALID;
-            out.owned_normal_after = after.owned_normal;
-            out.owned_support_after = after.owned_support;
-            for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = after.selected_slots[i];
-            out.selected_support_after = after.selected_support;
-            out.unlocked_slots_after = after.unlocked_slots;
-            out.derived_pairs_after = after.derived_pairs;
-            if (after.selected_slots[0] == before.selected_slots[0] &&
-                after.selected_slots[1] == before.selected_slots[1] &&
-                after.selected_slots[2] == before.selected_slots[2]) {
-                out.flags |= SC_RUNES_FLAG_SELECTION_PRESERVED;
-            }
-        }
-        if (out.native_exception || !read_ok || (after.owned_normal & needed) != needed) {
-            out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED; return;
-        }
-        if (c.refresh && !c.refresh(c.context, player)) {
-            out.outcome = SC_RUNES_OUTCOME_REFRESH_FAILED; return;
-        }
-        out.flags |= SC_RUNES_FLAG_MUTATED;
-        out.outcome = SC_RUNES_OUTCOME_OK;
-
-        AcquireSRWLockExclusive(&state_lock);
-        ++total_operations;
-        out.operations_applied = total_operations;
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
+        return ensure_normal_locked(r, out, c, player, before);
     }
 
     if (r.kind == SC_RUNES_ENSURE_SUPPORT) {
-        shared_state.owned_support |= (r.support_runes & SC_RUNES_ALL_SUPPORT);
-        const uint32_t needed = shared_state.owned_support;
-        const uint32_t delta = needed & ~before.owned_support;
-
-        if (!delta) {
-            // already registered; don't select it
-            out.owned_normal_after = before.owned_normal;
-            out.owned_support_after = before.owned_support;
-            for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = before.selected_slots[i];
-            out.selected_support_after = before.selected_support;
-            out.unlocked_slots_after = before.unlocked_slots;
-            out.derived_pairs_after = before.derived_pairs;
-            out.operations_applied = total_operations;
-            ReleaseSRWLockExclusive(&state_lock);
-            out.flags |= SC_RUNES_FLAG_AFTER_VALID | SC_RUNES_FLAG_SELECTION_PRESERVED;
-            out.outcome = SC_RUNES_OUTCOME_OK;
-            return;
-        }
-
-        ReleaseSRWLockExclusive(&state_lock);
-        out.native_exception = c.ensure_support_runes(c.context, player, delta);
-
-        SnapshotFacts after{};
-        const bool read_ok = c.read(c.context, player, after);
-        if (read_ok) {
-            out.flags |= SC_RUNES_FLAG_AFTER_VALID;
-            out.owned_normal_after = after.owned_normal;
-            out.owned_support_after = after.owned_support;
-            for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = after.selected_slots[i];
-            out.selected_support_after = after.selected_support;
-            out.unlocked_slots_after = after.unlocked_slots;
-            out.derived_pairs_after = after.derived_pairs;
-            if (after.selected_support == before.selected_support) {
-                out.flags |= SC_RUNES_FLAG_SELECTION_PRESERVED;
-            }
-        }
-        if (out.native_exception || !read_ok || (after.owned_support & needed) != needed) {
-            out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED; return;
-        }
-        if (c.refresh && !c.refresh(c.context, player)) {
-            out.outcome = SC_RUNES_OUTCOME_REFRESH_FAILED; return;
-        }
-        out.flags |= SC_RUNES_FLAG_MUTATED;
-        out.outcome = SC_RUNES_OUTCOME_OK;
-
-        AcquireSRWLockExclusive(&state_lock);
-        ++total_operations;
-        out.operations_applied = total_operations;
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
+        return ensure_support_locked(r, out, c, player, before);
     }
 
     if (r.kind == SC_RUNES_SELECT_NORMAL) {
-        const auto slot = r.select_slot;
-        const auto rune = r.select_rune;
-        if (slot >= 3) {
-            ReleaseSRWLockExclusive(&state_lock);
-            out.outcome = SC_RUNES_OUTCOME_REJECTED; return;
-        }
-
-        ReleaseSRWLockExclusive(&state_lock);
-        out.native_exception = c.select_normal_rune(c.context, player, slot, rune);
-
-        SnapshotFacts after{};
-        const bool read_ok = c.read(c.context, player, after);
-        if (read_ok) {
-            out.flags |= SC_RUNES_FLAG_AFTER_VALID;
-            out.owned_normal_after = after.owned_normal;
-            out.owned_support_after = after.owned_support;
-            for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = after.selected_slots[i];
-            out.selected_support_after = after.selected_support;
-            out.unlocked_slots_after = after.unlocked_slots;
-            out.derived_pairs_after = after.derived_pairs;
-        }
-        if (out.native_exception || !read_ok || after.selected_slots[slot] != rune) {
-            out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED; return;
-        }
-        if (c.refresh && !c.refresh(c.context, player)) {
-            out.outcome = SC_RUNES_OUTCOME_REFRESH_FAILED; return;
-        }
-        out.flags |= SC_RUNES_FLAG_MUTATED;
-        out.outcome = SC_RUNES_OUTCOME_OK;
-
-        AcquireSRWLockExclusive(&state_lock);
-        if (rune >= 0 && rune < 9) shared_state.selected_slots[slot] = rune;
-        else shared_state.selected_slots[slot] = -1;
-        ++total_operations;
-        out.operations_applied = total_operations;
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
+        return select_normal_locked(r, out, c, player);
     }
 
     if (r.kind == SC_RUNES_SELECT_SUPPORT) {
-        const auto rune = r.select_rune;
-
-        ReleaseSRWLockExclusive(&state_lock);
-        out.native_exception = c.select_support_rune(c.context, player, rune);
-
-        SnapshotFacts after{};
-        const bool read_ok = c.read(c.context, player, after);
-        if (read_ok) {
-            out.flags |= SC_RUNES_FLAG_AFTER_VALID;
-            out.owned_normal_after = after.owned_normal;
-            out.owned_support_after = after.owned_support;
-            for (int i = 0; i < 3; ++i) out.selected_slots_after[i] = after.selected_slots[i];
-            out.selected_support_after = after.selected_support;
-            out.unlocked_slots_after = after.unlocked_slots;
-            out.derived_pairs_after = after.derived_pairs;
-        }
-        if (out.native_exception || !read_ok || after.selected_support != rune) {
-            out.outcome = SC_RUNES_OUTCOME_NATIVE_FAILED; return;
-        }
-        if (c.refresh && !c.refresh(c.context, player)) {
-            out.outcome = SC_RUNES_OUTCOME_REFRESH_FAILED; return;
-        }
-        out.flags |= SC_RUNES_FLAG_MUTATED;
-        out.outcome = SC_RUNES_OUTCOME_OK;
-
-        AcquireSRWLockExclusive(&state_lock);
-        if (rune >= 0 && rune < 3) shared_state.selected_support = rune;
-        else shared_state.selected_support = -1;
-        ++total_operations;
-        out.operations_applied = total_operations;
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
+        return select_support_locked(r, out, c, player);
     }
 
     ReleaseSRWLockExclusive(&state_lock);

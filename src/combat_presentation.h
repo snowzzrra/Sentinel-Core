@@ -4,12 +4,19 @@
 #include <mutex>
 
 namespace sentinel::combat {
+inline bool valid_milestone(const sc_combat_presentation_request& request) {
+    if (request.milestone ? (!request.first_milestone || request.first_milestone > request.milestone ||
+                             !request.milestone_step ||
+                             (request.milestone - request.first_milestone) % request.milestone_step)
+                          : (request.first_milestone || request.milestone_step))
+        return false;
+    return true;
+}
+
 inline bool valid_presentation(const sc_combat_presentation_request& request) {
     if (request.namespace_id[64] || request.visible > 1 || request.milestone > request.total ||
         (request.target && request.target <= request.total) || (request.visible && !request.target)) return false;
-    if (request.milestone ? (!request.first_milestone || request.first_milestone > request.milestone ||
-        !request.milestone_step || (request.milestone - request.first_milestone) % request.milestone_step) :
-        (request.first_milestone || request.milestone_step)) return false;
+    if (!valid_milestone(request)) return false;
     for (unsigned i = 0; i < 64; ++i) {
         const auto c = request.namespace_id[i];
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;

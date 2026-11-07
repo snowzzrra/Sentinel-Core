@@ -718,22 +718,11 @@ void configure_prelaunch() {
     if (!result.ok()) session().reject(SessionFault::descriptor);
 }
 bool owner_retained() { return owner_pinned.load(std::memory_order_acquire); }
-bool validate_native_helpers(Installation& record, engine::Memory& memory, const engine::Image& image, uintptr_t& initializer) {
-    auto event = record.begin(SC_INSTALL_REFERENCE_COPY, 3, SC_INSTALL_UNKNOWN, 0x367510);
-    const bool reference_ok = reference_copy_entry(memory, image, event);
-    record.finish(event, reference_ok ? SC_NATIVE_NONE : event.reason);
-    if (!reference_ok) { return false; }
-    constexpr std::array<uint8_t, 5> expected_factory_call{0xe8, 0x3c, 0x13, 0xe2, 0x00};
-    event = record.begin(SC_INSTALL_FACTORY_CALL, 3, SC_INSTALL_UNKNOWN, 0x67473f);
-    const bool factory_scope = image.contains(event.rva, 5, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE);
-    const bool factory_ok = factory_scope &&
-        checked_bytes(memory, image.base + event.rva, expected_factory_call.data(), expected_factory_call.size(), event);
-    record.finish(event, factory_ok ? SC_NATIVE_NONE : (factory_scope ? SC_NATIVE_TARGET_BYTES : SC_NATIVE_TARGET_BOUNDARY));
-    if (!factory_ok) { return false; }
+static bool validate_profile_factory_calls(Installation& record, engine::Memory& memory, const engine::Image& image) {
     constexpr std::array<uint8_t, 22> checkpoint_call{
         0x49,0x8b,0x02,0x4c,0x8d,0x4c,0x24,0x38,0x4d,0x8b,0xc7,
         0x48,0x8d,0x54,0x24,0x58,0x49,0x8b,0xca,0xff,0x50,0x18};
-    event = record.begin(SC_INSTALL_FACTORY_CALL, 3, SC_INSTALL_UNKNOWN, 0x14897ad);
+    auto event = record.begin(SC_INSTALL_FACTORY_CALL, 3, SC_INSTALL_UNKNOWN, 0x14897ad);
     const bool checkpoint_ok = image.contains(event.rva, checkpoint_call.size(),
         IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE) &&
         checked_bytes(memory, image.base + event.rva, checkpoint_call.data(), checkpoint_call.size(), event);
@@ -746,6 +735,21 @@ bool validate_native_helpers(Installation& record, engine::Memory& memory, const
         checked_bytes(memory,image.base+event.rva,presence_call.data(),presence_call.size(),event);
     record.finish(event,presence_ok?SC_NATIVE_NONE:SC_NATIVE_TARGET_BYTES);
     if (!presence_ok) return false;
+    return true;
+}
+bool validate_native_helpers(Installation& record, engine::Memory& memory, const engine::Image& image, uintptr_t& initializer) {
+    auto event = record.begin(SC_INSTALL_REFERENCE_COPY, 3, SC_INSTALL_UNKNOWN, 0x367510);
+    const bool reference_ok = reference_copy_entry(memory, image, event);
+    record.finish(event, reference_ok ? SC_NATIVE_NONE : event.reason);
+    if (!reference_ok) { return false; }
+    constexpr std::array<uint8_t, 5> expected_factory_call{0xe8, 0x3c, 0x13, 0xe2, 0x00};
+    event = record.begin(SC_INSTALL_FACTORY_CALL, 3, SC_INSTALL_UNKNOWN, 0x67473f);
+    const bool factory_scope = image.contains(event.rva, 5, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE);
+    const bool factory_ok = factory_scope &&
+        checked_bytes(memory, image.base + event.rva, expected_factory_call.data(), expected_factory_call.size(), event);
+    record.finish(event, factory_ok ? SC_NATIVE_NONE : (factory_scope ? SC_NATIVE_TARGET_BYTES : SC_NATIVE_TARGET_BOUNDARY));
+    if (!factory_ok) { return false; }
+    if (!validate_profile_factory_calls(record, memory, image)) return false;
     InitializeSteamContext context_init = nullptr;
     event = record.begin(SC_INSTALL_STEAM_IMPORT, 3, SC_INSTALL_UNKNOWN, 0x2a1cc60);
     const auto import_read = memory.copy(image.base + event.rva, &context_init, sizeof(context_init));
@@ -755,6 +759,53 @@ bool validate_native_helpers(Installation& record, engine::Memory& memory, const
         return false;
     }
     initializer = reinterpret_cast<uintptr_t>(context_init);
+    return true;
+}
+static StartupGate::Arm observe_startup_arm(engine::Memory& memory, const engine::Binding& binding, const native::Target& root_target) {
+    StartupGate::Arm arm{};
+    arm.at_ms = GetTickCount64();
+    uintptr_t manager=0,dispatch_root=0,dispatch_vtable=0,dispatch_init=0;
+    const auto manager_read=memory.copy(binding.root+0x9b38,&manager,sizeof(manager));
+    arm.manager_read_reason=manager_read.reason; arm.manager_present=!manager_read.reason && manager!=0;
+    const auto root_read=memory.copy(binding.image.base+0x38913a0,&dispatch_root,sizeof(dispatch_root));
+    arm.root_read_reason=root_read.reason; arm.root_equals_binding=!root_read.reason && dispatch_root==binding.root;
+    arm.vtable_read_reason=arm.init_read_reason=root_read.reason?SC_REASON_PARENT_UNAVAILABLE:SC_REASON_PARENT_NULL;
+    if (!root_read.reason && dispatch_root) {
+        const auto vtable_read=memory.copy(dispatch_root,&dispatch_vtable,sizeof(dispatch_vtable));
+        arm.vtable_read_reason=vtable_read.reason;
+        arm.init_read_reason=vtable_read.reason?SC_REASON_PARENT_UNAVAILABLE:SC_REASON_PARENT_NULL;
+        if (!vtable_read.reason && dispatch_vtable) {
+            const auto init_read=memory.copy(dispatch_vtable+0x18,&dispatch_init,sizeof(dispatch_init));
+            arm.init_read_reason=init_read.reason; arm.init_equals_target=!init_read.reason && dispatch_init==root_target.address;
+        }
+    }
+    return arm;
+}
+static bool save_install_cancelled(HANDLE stop, StartupGate::Completion& gate_completion) {
+        if (!stop || WaitForSingleObject(stop,0)==WAIT_TIMEOUT) return false;
+        gate_completion.cancel(); return true;
+}
+static bool publish_save_policy(const engine::Binding& binding, const hooks::HookSpec (&specs)[std::size(save_originals)], HANDLE stop, StartupGate::Completion& gate_completion) {
+    auto& record = session().installation;
+    configure_save_calls();
+    auto event = record.begin(SC_INSTALL_POLICY);
+    session().install(binding.root, binding.image.base + 0x4323fc, steam_20260818_routes);
+    const bool published = session().inspect().prepared_routes == steam_20260818_routes;
+    record.finish(event, published ? SC_NATIVE_NONE : SC_NATIVE_CANCELLED);
+    if (!published || !save_hooks.install(specs, stop) || !install_campaign_hooks(binding, stop) || save_install_cancelled(stop, gate_completion)) {
+        session().reject(SessionFault::installation);
+        return false;
+    }
+    return true;
+}
+static bool validate_remaining_save_targets(Installation& record, engine::LocalMemory& memory, const engine::Binding& binding, HANDLE stop, StartupGate::Completion& gate_completion) {
+    auto& targets = save_targets;
+    for (unsigned i = 1; i < targets.size(); ++i) {
+        targets[i] = native::save_target(binding.image.base, i);
+        if (native::validate_recorded(record, memory, binding.image, targets[i], stop, GetTickCount64() + 3000, 2, i)) {
+            save_install_cancelled(stop, gate_completion); session().reject(SessionFault::installation); return false;
+        }
+    }
     return true;
 }
 void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
@@ -777,48 +828,23 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     }
     hooks::Transaction attempt;
     StartupGate::Completion gate_completion(startup_gate,&session().btrace);
-    const auto cancelled=[&] {
-        if (!stop || WaitForSingleObject(stop,0)==WAIT_TIMEOUT) return false;
-        gate_completion.cancel(); return true;
-    };
     startup_image=binding.image.base; startup_expected_root=binding.root;
     startup_expected_caller=binding.image.base+0x4323fc;
     targets[0]=native::save_target(binding.image.base,0);
     if (native::validate_recorded(record,memory,binding.image,targets[0],stop,GetTickCount64()+3000,2,0)) {
-        cancelled(); session().reject(SessionFault::installation); return;
+        save_install_cancelled(stop, gate_completion); session().reject(SessionFault::installation); return;
     }
-    StartupGate::Arm arm{};
-    arm.at_ms = GetTickCount64();
-    uintptr_t manager=0,dispatch_root=0,dispatch_vtable=0,dispatch_init=0;
-    const auto manager_read=memory.copy(binding.root+0x9b38,&manager,sizeof(manager));
-    arm.manager_read_reason=manager_read.reason; arm.manager_present=!manager_read.reason && manager!=0;
-    const auto root_read=memory.copy(binding.image.base+0x38913a0,&dispatch_root,sizeof(dispatch_root));
-    arm.root_read_reason=root_read.reason; arm.root_equals_binding=!root_read.reason && dispatch_root==binding.root;
-    arm.vtable_read_reason=arm.init_read_reason=root_read.reason?SC_REASON_PARENT_UNAVAILABLE:SC_REASON_PARENT_NULL;
-    if (!root_read.reason && dispatch_root) {
-        const auto vtable_read=memory.copy(dispatch_root,&dispatch_vtable,sizeof(dispatch_vtable));
-        arm.vtable_read_reason=vtable_read.reason;
-        arm.init_read_reason=vtable_read.reason?SC_REASON_PARENT_UNAVAILABLE:SC_REASON_PARENT_NULL;
-        if (!vtable_read.reason && dispatch_vtable) {
-            const auto init_read=memory.copy(dispatch_vtable+0x18,&dispatch_init,sizeof(dispatch_init));
-            arm.init_read_reason=init_read.reason; arm.init_equals_target=!init_read.reason && dispatch_init==targets[0].address;
-        }
-    }
+    const auto arm = observe_startup_arm(memory, binding, targets[0]);
     startup_gate.observe_arm(arm);
     // Presence is evidence only: neither a null manager nor a matching dispatch
     // can retrospectively qualify a native startup that already passed.
     startup_gate.record(session().btrace,BStatus::pending,arm.manager_present?
         "startup_gate_manager_already_published":"startup_gate_arming",StartupGate::State::pending);
     const hooks::HookSpec root_spec[]{hooks::bind(targets[0].address, root_detour_entry, original_root)};
-    if (cancelled() || !root_hooks.install(root_spec, stop)) {
+    if (save_install_cancelled(stop, gate_completion) || !root_hooks.install(root_spec, stop)) {
         session().reject(SessionFault::installation); return;
     }
-    for (unsigned i = 1; i < targets.size(); ++i) {
-        targets[i] = native::save_target(binding.image.base, i);
-        if (native::validate_recorded(record, memory, binding.image, targets[i], stop, GetTickCount64() + 3000, 2, i)) {
-            cancelled(); session().reject(SessionFault::installation); return;
-        }
-    }
+    if (!validate_remaining_save_targets(record, memory, binding, stop, gate_completion)) return;
     save_initializer = 0;
 #ifdef SC_NATIVE_TESTING
     if (testing::real_hook_targets())
@@ -866,15 +892,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
         specs[i] = {targets[index].address, detours[i], &save_originals[i], index,
                     static_cast<uint32_t>(targets[index].address - binding.image.base)};
     }
-    configure_save_calls();
-    event = record.begin(SC_INSTALL_POLICY);
-    session().install(binding.root, binding.image.base + 0x4323fc, steam_20260818_routes);
-    const bool published = session().inspect().prepared_routes == steam_20260818_routes;
-    record.finish(event, published ? SC_NATIVE_NONE : SC_NATIVE_CANCELLED);
-    if (!published || !save_hooks.install(specs, stop) || !install_campaign_hooks(binding, stop) || cancelled()) {
-        session().reject(SessionFault::installation);
-        return;
-    }
+    if (!publish_save_policy(binding, specs, stop, gate_completion)) return;
     startup_gate_deferred = true;
     attempt.commit();
     gate_completion.disarm();

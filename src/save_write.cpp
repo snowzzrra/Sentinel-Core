@@ -46,25 +46,31 @@ struct AccessFuture : SaveFuture {
     }
 };
 SaveFuture* destroy_access(SaveFuture* future, uint32_t) { delete static_cast<AccessFuture*>(future); return future; }
-SaveResult* poll_access(SaveFuture* base, SaveResult* out, void* task) {
-    auto& future = *static_cast<AccessFuture*>(base);
-    if (future.terminal) { *out = {1, 0, 0, 0}; return out; }
-    SaveResult result = future.native_result;
-    // Poll the existing native operation, including after inspection shutdown or
-    // a later route fault. Dropping it here would invent completion of its jobs.
+static bool write_result_succeeded(const SaveResult& result) {
+    return !result.state && !result.outcome && result.value == 1;
+}
+static void poll_native_access(AccessFuture& future, SaveResult& result, void* task) {
     if (!future.native_done) {
         WritePollScope scope(future.owner.native_writes, future.operation);
         future.native->vtable->poll(future.native, &result, task);
         future.owner.native_writes.provider_result(future.operation, result);
         future.native_done = result.state != -1;
         future.native_result = result;
-        const bool success = !result.state && !result.outcome && result.value == 1;
+        const bool success = write_result_succeeded(result);
         future.owner.btrace.record(BStage::provider, result.state == -1 ? BStatus::pending : success ? BStatus::succeeded : BStatus::refused,
             "provider_native_result", future.operation, {{"state", result.state}, {"outcome", result.state == 0 ? result.outcome : 0},
             {"value", result.state == 0 ? result.value : 0}, {"access", future.access}});
     }
+}
+SaveResult* poll_access(SaveFuture* base, SaveResult* out, void* task) {
+    auto& future = *static_cast<AccessFuture*>(base);
+    if (future.terminal) { *out = {1, 0, 0, 0}; return out; }
+    SaveResult result = future.native_result;
+    // Poll the existing native operation, including after inspection shutdown or
+    // a later route fault. Dropping it here would invent completion of its jobs.
+    poll_native_access(future, result, task);
     if (result.state == -1) { *out = result; return out; }
-    if (!result.state && !result.outcome && result.value == 1 && future.readback) {
+    if (write_result_succeeded(result) && future.readback) {
         future.readback->vtable->poll(future.readback, &result, task);
         if (result.state == -1) {
             engine::LocalMemory memory; future.owner.campaign_run.write_observed(future.operation, false, false, memory);
@@ -73,8 +79,8 @@ SaveResult* poll_access(SaveFuture* base, SaveResult* out, void* task) {
     }
     future.terminal = true;
     if (future.access == Access::write) { engine::LocalMemory memory;
-      future.owner.campaign_run.write_observed(future.operation, true, !result.state && !result.outcome && result.value == 1, memory); }
-    if (result.state != 0 || result.outcome != 0 || result.value != 1) {
+      future.owner.campaign_run.write_observed(future.operation, true, write_result_succeeded(result), memory); }
+    if (!write_result_succeeded(result)) {
         future.owner.fail(future.failure); result = {0, 1, 1, 0};
     } else if (future.selection.sequence) {
         engine::LocalMemory memory;
@@ -100,13 +106,48 @@ bool read_name(engine::Memory& memory, uintptr_t data, std::string& name, int32_
         !trace.check(!buffer[count] && !std::memchr(buffer.data(), 0, count), "directory_termination_invalid", {{"length", count}})) return false;
     name.assign(buffer.data(), count); return true;
 }
-bool relative_files(engine::Memory& memory, uintptr_t data, const WriteCalls& calls, bool root_auxiliary, BIoTrace trace) {
-    uintptr_t files = 0; int32_t count = 0, capacity = 0;
+static bool relative_file_character(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+}
+static bool relative_file_path(const std::string& name, int32_t i, BIoTrace& trace) {
+    size_t begin = 0;
+    for (size_t n = 0; n <= name.size(); ++n) {
+        if (n == name.size() || name[n] == '/') {
+            const auto component = std::string_view(name).substr(begin, n - begin);
+            if (!trace.check(!component.empty() && component != "." && component != "..", "relative_file_component_invalid",
+                {{"file_index", i}, {"component_offset", begin}, {"component_length", component.size()}})) return false;
+            begin = n + 1;
+        } else {
+            const unsigned char c = static_cast<unsigned char>(name[n]);
+            if (!trace.check(relative_file_character(c), "relative_file_character_invalid",
+                {{"file_index", i}, {"character_offset", n}, {"character", c}})) return false;
+        }
+    }
+    return true;
+}
+static bool auxiliary_file_mask(engine::Memory& memory, uintptr_t data, BIoTrace& trace) {
+        std::string prefix, suffix;
+        if (!read_name(memory, data + 0x70, prefix, 7, true, trace) ||
+            !read_name(memory, data + 0xa8, suffix, 7, true, trace)) return false;
+        if (!trace.check(prefix.empty() || suffix.empty() ||
+            (!steam_name_equal(std::string_view(prefix).substr(0, 9), "sentinel-") &&
+             !steam_name_equal(std::string_view("sentinel-").substr(0, prefix.size()), prefix)), "auxiliary_mask_targets_root_records",
+             {{"prefix_length", prefix.size()}, {"suffix_length", suffix.size()}})) return false;
+    return true;
+}
+static bool read_provider_vector(engine::Memory& memory, uintptr_t data, uintptr_t& files, int32_t& count, BIoTrace& trace) {
+    int32_t capacity = 0;
     if (!trace.read(memory, data, 0x1c0, files, "provider_files_unreadable") ||
         !trace.read(memory, data, 0x1c8, count, "provider_count_unreadable") ||
         !trace.read(memory, data, 0x1cc, capacity, "provider_capacity_unreadable") ||
         !trace.check(count >= 0 && count <= 1024 && capacity >= count && (!count || files), "provider_vector_invalid",
             {{"count", count}, {"capacity", capacity}, {"null_files", !files}})) return false;
+    return true;
+}
+bool relative_files(engine::Memory& memory, uintptr_t data, const WriteCalls& calls, bool root_auxiliary, BIoTrace trace) {
+    uintptr_t files = 0; int32_t count = 0;
+    if (!read_provider_vector(memory, data, files, count, trace)) return false;
     for (int32_t i = 0; i < count; ++i) {
         uintptr_t file = 0, vtable = 0; std::string name;
         if (!trace.read(memory, files, static_cast<uintptr_t>(i) * 8, file, "provider_stream_unreadable") ||
@@ -115,30 +156,9 @@ bool relative_files(engine::Memory& memory, uintptr_t data, const WriteCalls& ca
             !read_name(memory, file + 8, name, 191, false, trace)) return false;
         if (!trace.check(!root_auxiliary || !steam_name_equal(std::string_view(name).substr(0, 9), "sentinel-"),
             "auxiliary_targets_root_record", {{"file_index", i}})) return false;
-        size_t begin = 0;
-        for (size_t n = 0; n <= name.size(); ++n) {
-            if (n == name.size() || name[n] == '/') {
-                const auto component = std::string_view(name).substr(begin, n - begin);
-                if (!trace.check(!component.empty() && component != "." && component != "..", "relative_file_component_invalid",
-                    {{"file_index", i}, {"component_offset", begin}, {"component_length", component.size()}})) return false;
-                begin = n + 1;
-            } else {
-                const unsigned char c = static_cast<unsigned char>(name[n]);
-                if (!trace.check((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.', "relative_file_character_invalid",
-                    {{"file_index", i}, {"character_offset", n}, {"character", c}})) return false;
-            }
-        }
+        if (!relative_file_path(name, i, trace)) return false;
     }
-    if (root_auxiliary) {
-        std::string prefix, suffix;
-        if (!read_name(memory, data + 0x70, prefix, 7, true, trace) ||
-            !read_name(memory, data + 0xa8, suffix, 7, true, trace)) return false;
-        if (!trace.check(prefix.empty() || suffix.empty() ||
-            (!steam_name_equal(std::string_view(prefix).substr(0, 9), "sentinel-") &&
-             !steam_name_equal(std::string_view("sentinel-").substr(0, prefix.size()), prefix)), "auxiliary_mask_targets_root_records",
-             {{"prefix_length", prefix.size()}, {"suffix_length", suffix.size()}})) return false;
-    }
+    if (root_auxiliary && !auxiliary_file_mask(memory, data, trace)) return false;
     return true;
 }
 bool campaign_slot(std::string_view name) {
@@ -151,6 +171,27 @@ bool campaign_slot(std::string_view name) {
     }
     return false;
 }
+static bool scope_provider_name(Session& owner, engine::Memory& memory, uintptr_t data, const WriteCalls& calls, std::string& name, BIoTrace& trace) {
+    const std::string prefix = owner.native_root() + "/";
+    const bool scoped = name.compare(0, prefix.size(), prefix) == 0;
+    const auto slot = scoped ? std::string_view(name).substr(prefix.size()) : std::string_view(name);
+    if (!trace.check(campaign_slot(slot), "provider_campaign_slot_invalid", {{"scoped", scoped}, {"name_length", name.size()}, {"slot_length", slot.size()}})) return false;
+    if (!scoped) {
+        const auto target = prefix + name;
+        if (!trace.check(target.size() < 64, "provider_scoped_name_too_long", {{"length", target.size()}, {"limit", 63}})) return false;
+        calls.set_name(data, target.c_str());
+        if (!read_name(memory, data, name, 63, false, trace) ||
+            !trace.check(name == target, "provider_set_name_mismatch", {{"actual_length", name.size()}, {"expected_length", target.size()}})) return false;
+    }
+    return true;
+}
+static bool prepare_profile_access(Session& owner, engine::Memory& memory, uintptr_t data, const WriteCalls& calls, Access access, ProfileWrite& selection, BIoTrace& trace) {
+    if (access == Access::read) return true;
+    if (!trace.check(access == Access::write, "profile_mutation_kind_forbidden", {{"access", access}}) ||
+        !trace.check(calls.profile(owner, memory, data), "profile_payload_validation_failed") ||
+        !trace.check(owner.take_profile_write(data, selection), "profile_write_capture_missing")) return false;
+    return true;
+}
 bool prepare_name(Session& owner, engine::Memory& memory, SaveReference* reference,
                   const WriteCalls& calls, Access access, bool& profile, ProfileWrite& selection,
                   uintptr_t& data, std::string& name) {
@@ -159,11 +200,7 @@ bool prepare_name(Session& owner, engine::Memory& memory, SaveReference* referen
         !read_name(memory, data, name, 63, access == Access::erase_auxiliary, trace)) return false;
     if (name == "PROFILE") {
         profile = true;
-        if (access == Access::read) return true;
-        if (!trace.check(access == Access::write, "profile_mutation_kind_forbidden", {{"access", access}}) ||
-            !trace.check(calls.profile(owner, memory, data), "profile_payload_validation_failed") ||
-            !trace.check(owner.take_profile_write(data, selection), "profile_write_capture_missing")) return false;
-        return true;
+        return prepare_profile_access(owner, memory, data, calls, access, selection, trace);
     }
     if (!trace.check(owner.native_io(), "provider_native_io_not_admitted", {{"session_state", owner.state()}, {"session_fault", owner.fault()}})) return false;
     const bool root_auxiliary = access == Access::erase_auxiliary && (name.empty() || name == owner.native_root());
@@ -176,17 +213,7 @@ bool prepare_name(Session& owner, engine::Memory& memory, SaveReference* referen
         }
         return true;
     }
-    const std::string prefix = owner.native_root() + "/";
-    const bool scoped = name.compare(0, prefix.size(), prefix) == 0;
-    const auto slot = scoped ? std::string_view(name).substr(prefix.size()) : std::string_view(name);
-    if (!trace.check(campaign_slot(slot), "provider_campaign_slot_invalid", {{"scoped", scoped}, {"name_length", name.size()}, {"slot_length", slot.size()}})) return false;
-    if (!scoped) {
-        const auto target = prefix + name;
-        if (!trace.check(target.size() < 64, "provider_scoped_name_too_long", {{"length", target.size()}, {"limit", 63}})) return false;
-        calls.set_name(data, target.c_str());
-        if (!read_name(memory, data, name, 63, false, trace) ||
-            !trace.check(name == target, "provider_set_name_mismatch", {{"actual_length", name.size()}, {"expected_length", target.size()}})) return false;
-    }
+    return scope_provider_name(owner, memory, data, calls, name, trace);
     return true;
 }
 UnroutedSource unrouted_source(engine::Memory& memory, SaveReference* reference) {
@@ -231,6 +258,39 @@ SaveFuture** access_unrouted(Session& owner, engine::Memory& memory, uintptr_t p
     *out = refused_save_future();
     return out;
 }
+static void prepare_write_operation(Session& owner, std::unique_ptr<AccessFuture>& future, Access access, uintptr_t data, const std::string& name, bool profile, bool native_checkpoint, const WriteCalls& calls) {
+    if (future && access == Access::write) {
+        future->operation = owner.native_writes.open_provider(data, name);
+        if (!future->operation) future.reset();
+        else if (!profile && !capture_submission(owner.native_writes, future->operation, name)) {
+            owner.btrace.record(BStage::provider, BStatus::refused, "provider_submission_not_correlated", future->operation); future.reset();
+        }
+        uintptr_t remote=0;
+        const auto user=calls.readback && owner.native_provider(remote) ? read_owner(calls.readback->owner,remote) : 0;
+        if (future && !owner.campaign_run.write_started(future->operation, name,
+            native_checkpoint || capture_native_checkpoint(owner.native_writes),
+            user)) {
+            owner.btrace.record(BStage::provider, BStatus::blocked, "campaign_write_start_refused", future->operation); future.reset();
+        }
+    }
+}
+static SaveFuture** create_access_future(Session& owner, std::unique_ptr<AccessFuture>& future, Access access, bool profile, uintptr_t data, const std::string& name, const ProfileWrite& selection, uintptr_t provider, SaveFuture** out, uintptr_t identity, SaveReference* reference, const WriteCalls& calls, SessionFault failure) {
+    if (access == Access::write && calls.readback) {
+        future->readback = create_write_readback(owner, future->operation, provider, identity, name, *calls.readback);
+        if (!future->readback) {
+            owner.fail(failure); calls.release(reference); *out = refused_save_future(); return out;
+        }
+    }
+    future->selection = selection;
+    calls.create(provider, &future->native, identity, reference); // consumes its reference, even on failure
+    if (future->native) {
+        owner.btrace.record(BStage::provider, BStatus::pending, "provider_native_future_created", future->operation,
+            {{"access", access}, {"profile", profile}, {"selection_sequence", selection.sequence}}, data);
+        future->vtable = &access_vtable; *out = future.release(); return out;
+    }
+    owner.btrace.record(BStage::provider, BStatus::refused, "provider_native_factory_null", future->operation, {{"access", access}});
+    owner.fail(failure); *out = refused_save_future(); return out;
+}
 SaveFuture** access_scoped(Session& owner, engine::Memory& memory, uintptr_t provider, SaveFuture** out,
                            uintptr_t identity, SaveReference* reference, const WriteCalls& calls, Access access,
                            bool native_checkpoint = false) {
@@ -259,36 +319,9 @@ SaveFuture** access_scoped(Session& owner, engine::Memory& memory, uintptr_t pro
         auto future = std::unique_ptr<AccessFuture>(new (std::nothrow) AccessFuture(owner, failure));
         if (!future) owner.btrace.record(BStage::provider, BStatus::refused, "provider_wrapper_allocation_failed");
         if (future) future->access = access;
-        if (future && access == Access::write) {
-            future->operation = owner.native_writes.open_provider(data, name);
-            if (!future->operation) future.reset();
-            else if (!profile && !capture_submission(owner.native_writes, future->operation, name)) {
-                owner.btrace.record(BStage::provider, BStatus::refused, "provider_submission_not_correlated", future->operation); future.reset();
-            }
-            uintptr_t remote=0;
-            const auto user=calls.readback && owner.native_provider(remote) ? read_owner(calls.readback->owner,remote) : 0;
-            if (future && !owner.campaign_run.write_started(future->operation, name,
-                native_checkpoint || capture_native_checkpoint(owner.native_writes),
-                user)) {
-                owner.btrace.record(BStage::provider, BStatus::blocked, "campaign_write_start_refused", future->operation); future.reset();
-            }
-        }
+        prepare_write_operation(owner, future, access, data, name, profile, native_checkpoint, calls);
         if (future) {
-            if (access == Access::write && calls.readback) {
-                future->readback = create_write_readback(owner, future->operation, provider, identity, name, *calls.readback);
-                if (!future->readback) {
-                    owner.fail(failure); calls.release(reference); *out = refused_save_future(); return out;
-                }
-            }
-            future->selection = selection;
-            calls.create(provider, &future->native, identity, reference); // consumes its reference, even on failure
-            if (future->native) {
-                owner.btrace.record(BStage::provider, BStatus::pending, "provider_native_future_created", future->operation,
-                    {{"access", access}, {"profile", profile}, {"selection_sequence", selection.sequence}}, data);
-                future->vtable = &access_vtable; *out = future.release(); return out;
-            }
-            owner.btrace.record(BStage::provider, BStatus::refused, "provider_native_factory_null", future->operation, {{"access", access}});
-            owner.fail(failure); *out = refused_save_future(); return out;
+            return create_access_future(owner, future, access, profile, data, name, selection, provider, out, identity, reference, calls, failure);
         }
     }
     owner.fail(failure);
@@ -300,6 +333,26 @@ SaveFuture** access_scoped(Session& owner, engine::Memory& memory, uintptr_t pro
 }
 }
 SaveFuture* refused_save_future() { return &refusal; }
+static bool prepare_preflight(Session& owner, engine::Memory& memory, uintptr_t context, uintptr_t image, BIoTrace& trace) {
+    uintptr_t remote = 0; std::string name; std::array<uint64_t, 3> files{};
+    bool scoped = false;
+    if (trace.check(context && context <= UINTPTR_MAX - 0x58, "preflight_context_invalid") &&
+        trace.read(memory, context, 0, remote, "preflight_remote_unreadable") &&
+        trace.read(memory, context, 0x40, files, "preflight_vector_unreadable") &&
+        trace.check(files[0] && files[1] && files[1] <= files[2] && files[1] <= UINTPTR_MAX / 0x180,
+            "preflight_vector_invalid", {{"count", files[1]}, {"capacity", files[2]}, {"null_files", !files[0]}}) &&
+        trace.check(owner.collecting(remote, owner.native_root()), "preflight_remote_not_owned") &&
+        read_name(memory, context + 8, name, 63, false, trace)) {
+        const std::string prefix = owner.native_root() + "/";
+        scoped = trace.check(name == "PROFILE" || (name.compare(0, prefix.size(), prefix) == 0 &&
+            campaign_slot(std::string_view(name).substr(prefix.size()))), "preflight_directory_not_scoped", {{"name_length", name.size()}});
+        if (scoped) {
+            const auto sequence = owner.native_writes.begin(remote, files[0], files[1], name);
+            scoped = sequence && prepare_sdk_payloads(owner.native_writes, memory, sequence, files[0], files[1], name, image, &owner.btrace);
+        }
+    }
+    return scoped;
+}
 WritePreflightResult* preflight_scoped(Session& owner, engine::Memory& memory, uintptr_t context,
         WritePreflightResult* out, WritePreflight original, uintptr_t image) {
     static_assert(sizeof(WritePreflightResult) == 32);
@@ -309,22 +362,7 @@ WritePreflightResult* preflight_scoped(Session& owner, engine::Memory& memory, u
     owner.btrace.record(BStage::sdk_prepare, BStatus::entered, "preflight_entered", 0, {}, context);
     bool scoped = false;
     try {
-        uintptr_t remote = 0; std::string name; std::array<uint64_t, 3> files{};
-        if (trace.check(context && context <= UINTPTR_MAX - 0x58, "preflight_context_invalid") &&
-            trace.read(memory, context, 0, remote, "preflight_remote_unreadable") &&
-            trace.read(memory, context, 0x40, files, "preflight_vector_unreadable") &&
-            trace.check(files[0] && files[1] && files[1] <= files[2] && files[1] <= UINTPTR_MAX / 0x180,
-                "preflight_vector_invalid", {{"count", files[1]}, {"capacity", files[2]}, {"null_files", !files[0]}}) &&
-            trace.check(owner.collecting(remote, owner.native_root()), "preflight_remote_not_owned") &&
-            read_name(memory, context + 8, name, 63, false, trace)) {
-            const std::string prefix = owner.native_root() + "/";
-            scoped = trace.check(name == "PROFILE" || (name.compare(0, prefix.size(), prefix) == 0 &&
-                campaign_slot(std::string_view(name).substr(prefix.size()))), "preflight_directory_not_scoped", {{"name_length", name.size()}});
-            if (scoped) {
-                const auto sequence = owner.native_writes.begin(remote, files[0], files[1], name);
-                scoped = sequence && prepare_sdk_payloads(owner.native_writes, memory, sequence, files[0], files[1], name, image, &owner.btrace);
-            }
-        }
+        scoped = prepare_preflight(owner, memory, context, image, trace);
     } catch (const std::bad_alloc&) { owner.btrace.record(BStage::sdk_prepare, BStatus::refused, "preflight_allocation_failed", 0, {}, context); }
     if (scoped) {
         auto* result = original(context, out);

@@ -15,17 +15,23 @@ bool identifier(std::string_view value) {
     return !value.empty() && value.size() <= 191 &&
         value.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.") == value.npos;
 }
+bool valid_credit(const RecipeRequest& value) {
+    return ((!value.credit_limit && !value.final_credit_units) ||
+         (value.physical_units && value.credit_limit && value.credit_limit <= INT32_MAX &&
+          value.final_credit_units && value.final_credit_units <= value.logical_units));
+}
+bool valid_quantities(const RecipeRequest& value) {
+    return value.logical_units && value.logical_units <= INT32_MAX && value.physical_units <= INT32_MAX &&
+        value.maximum_emissions <= INT32_MAX && (value.physical_units || !value.maximum_emissions);
+}
 bool valid(const RecipeRequest& value) {
     return identifier(value.owner) && identifier(value.origin) && value.label.size() <= 1024 && value.label.find('\0') == value.label.npos &&
         value.logical_mask && value.logical_mask < (uint64_t{1} << 44) &&
         !(value.logical_mask & (value.logical_mask - 1)) &&
-        value.logical_units && value.logical_units <= INT32_MAX && value.physical_units <= INT32_MAX &&
-        value.maximum_emissions <= INT32_MAX && (value.physical_units || !value.maximum_emissions) &&
+        valid_quantities(value) &&
         (value.parent_actor.empty() || identifier(value.parent_actor)) &&
         (value.parent_request.empty() || identifier(value.parent_request)) &&
-        ((!value.credit_limit && !value.final_credit_units) ||
-         (value.physical_units && value.credit_limit && value.credit_limit <= INT32_MAX &&
-          value.final_credit_units && value.final_credit_units <= value.logical_units));
+        valid_credit(value);
 }
 bool valid_parent(std::string_view actor, const std::map<std::string, RecipeProgress>& requests) {
     const auto separator = actor.rfind('/');
@@ -437,33 +443,7 @@ std::optional<std::vector<RecipeCredit>> RecipeState::watched_deaths(std::string
     if (found == watches_.end()) return {};
     return deaths(found->second.owner, found->second.mask, found->second.label, found->second.baseline);
 }
-bool RecipeNativeCheckpoint::capture(std::string& out) const {
-    out.clear();
-    RecipeState checked;
-    if (!identifier(plan) || !identifier(map) || !checked.restore(state, plan, map) ||
-        shows.size() > max_actors || actions.size() > max_requests || summons.size() > max_requests ||
-        children.size() > max_actors || identities.size() > max_actors) return false;
-    std::string bytes("EAPN\2", 5);
-    text(bytes, plan); text(bytes, map); text(bytes, state); integer(bytes, shows.size(), 4);
-    for (const auto& [name, pose] : shows) {
-        if (name.empty() || name.size() > 511 || name.find('\0') != name.npos) return false;
-        text(bytes, name);
-        for (const auto value : pose) {
-            if (!std::isfinite(value)) return false;
-            uint32_t bits; std::memcpy(&bits, &value, sizeof(bits)); integer(bytes, bits, 4);
-        }
-        if (bytes.size() > max_bytes) return false;
-    }
-    integer(bytes, actions.size(), 4);
-    for (const auto& [identity, credit] : actions) {
-        if (!identifier(identity.first) || identity.second.empty() || identity.second.size() > 511 ||
-            identity.second.find('\0') != identity.second.npos || !credit.denominator || credit.sent > credit.units / credit.denominator)
-            return false;
-        text(bytes, identity.first); text(bytes, identity.second);
-        integer(bytes, credit.units, 8); integer(bytes, credit.sent, 8); integer(bytes, credit.denominator, 4);
-        if (bytes.size() > max_bytes) return false;
-    }
-    integer(bytes, next_request, 8); integer(bytes, summons.size(), 4);
+static bool capture_summons(std::string& bytes, const std::vector<RecipeNativeCheckpoint::Component>& summons) {
     for (const auto& component : summons) {
         text(bytes, component.parent); text(bytes, component.definition);
         text(bytes, component.template_name); integer(bytes, component.mask, 8); integer(bytes, component.phase, 1);
@@ -483,6 +463,48 @@ bool RecipeNativeCheckpoint::capture(std::string& out) const {
         }
         if (bytes.size() > max_bytes) return false;
     }
+    return true;
+}
+static bool capture_shows(std::string& bytes, const std::map<std::string, std::array<float, 12>>& shows) {
+    for (const auto& [name, pose] : shows) {
+        if (name.empty() || name.size() > 511 || name.find('\0') != name.npos) return false;
+        text(bytes, name);
+        for (const auto value : pose) {
+            if (!std::isfinite(value)) return false;
+            uint32_t bits; std::memcpy(&bits, &value, sizeof(bits)); integer(bytes, bits, 4);
+        }
+        if (bytes.size() > max_bytes) return false;
+    }
+    return true;
+}
+static bool capture_actions(std::string& bytes, const std::map<std::pair<std::string, std::string>, RecipeNativeCheckpoint::Action>& actions) {
+    for (const auto& [identity, credit] : actions) {
+        if (!identifier(identity.first) || identity.second.empty() || identity.second.size() > 511 ||
+            identity.second.find('\0') != identity.second.npos || !credit.denominator || credit.sent > credit.units / credit.denominator)
+            return false;
+        text(bytes, identity.first); text(bytes, identity.second);
+        integer(bytes, credit.units, 8); integer(bytes, credit.sent, 8); integer(bytes, credit.denominator, 4);
+        if (bytes.size() > max_bytes) return false;
+    }
+    return true;
+}
+static bool valid_native_checkpoint(const RecipeNativeCheckpoint& value, RecipeState& checked) {
+    if (!identifier(value.plan) || !identifier(value.map) || !checked.restore(value.state, value.plan, value.map) ||
+        value.shows.size() > max_actors || value.actions.size() > max_requests || value.summons.size() > max_requests ||
+        value.children.size() > max_actors || value.identities.size() > max_actors) return false;
+    return true;
+}
+bool RecipeNativeCheckpoint::capture(std::string& out) const {
+    out.clear();
+    RecipeState checked;
+    if (!valid_native_checkpoint(*this, checked)) return false;
+    std::string bytes("EAPN\2", 5);
+    text(bytes, plan); text(bytes, map); text(bytes, state); integer(bytes, shows.size(), 4);
+    if (!capture_shows(bytes, shows)) return false;
+    integer(bytes, actions.size(), 4);
+    if (!capture_actions(bytes, actions)) return false;
+    integer(bytes, next_request, 8); integer(bytes, summons.size(), 4);
+    if (!capture_summons(bytes, summons)) return false;
     integer(bytes, children.size(), 4);
     for (const auto& [role, child] : children) {
         text(bytes, role); text(bytes, child.parent); text(bytes, child.body);
@@ -498,15 +520,7 @@ bool RecipeNativeCheckpoint::capture(std::string& out) const {
     if (bytes.size() > max_bytes || !roundtrip.restore(bytes, map)) return false;
     out = std::move(bytes); return true;
 }
-bool RecipeNativeCheckpoint::restore(std::string_view bytes, std::string_view expected_map) {
-    if (bytes.size() > max_bytes || bytes.substr(0, 4) != "EAPN" || bytes.size() < 5 || (bytes[4] != 1 && bytes[4] != 2)) return false;
-    const bool autonomous = bytes[4] == 2;
-    Reader in{bytes.substr(5)}; RecipeNativeCheckpoint restored;
-    RecipeState checked;
-    uint64_t count = 0;
-    if (!in.text(restored.plan, 191) || !in.text(restored.map, 191) || restored.map != expected_map ||
-        !in.text(restored.state, max_bytes) || !checked.restore(restored.state, restored.plan, restored.map) ||
-        !in.integer(count, 4) || count > max_actors) return false;
+static bool restore_shows(Reader& in, uint64_t count, RecipeNativeCheckpoint& restored) {
     for (uint64_t index = 0; index < count; ++index) {
         std::string name; std::array<float, 12> pose;
         if (!in.text(name, 511) || name.empty() || name.find('\0') != name.npos) return false;
@@ -518,7 +532,10 @@ bool RecipeNativeCheckpoint::restore(std::string_view bytes, std::string_view ex
         }
         if (!restored.shows.emplace(name, pose).second) return false;
     }
-    if (!in.integer(count, 4) || count > max_requests) return false;
+    return true;
+}
+static bool restore_actions(Reader& in, uint64_t count, RecipeNativeCheckpoint& restored) {
+    using Action = RecipeNativeCheckpoint::Action;
     for (uint64_t index = 0; index < count; ++index) {
         std::pair<std::string, std::string> identity; Action credit; uint64_t denominator = 0;
         if (!in.text(identity.first, 191) || !identifier(identity.first) || !in.text(identity.second, 511) || identity.second.empty() ||
@@ -527,88 +544,162 @@ bool RecipeNativeCheckpoint::restore(std::string_view bytes, std::string_view ex
         credit.denominator = static_cast<uint32_t>(denominator);
         if (!restored.actions.emplace(identity, credit).second) return false;
     }
-    if (autonomous) {
-        uint64_t size = 0, flag = 0;
-        std::set<std::string> parents, requests;
-        const auto name = [&in](std::string& value) { return in.text(value, 511) && !value.empty() && value.find('\0') == value.npos; };
-        const auto autonomous_key = [](const std::string& key) { return key.rfind("summon/", 0) == 0 || key.rfind("direct/", 0) == 0; };
-        if (!in.integer(restored.next_request, 8) || !in.integer(count, 4) || count > max_requests) return false;
-        for (uint64_t i = 0; i < count; ++i) {
-            Component component;
-            if (!name(component.parent) || !parents.insert(component.parent).second || !name(component.definition) ||
-                !in.text(component.template_name, 511) || component.template_name.find('\0') != component.template_name.npos ||
-                !in.integer(component.mask, 8) || !in.integer(flag, 1) || flag > 3) return false;
-            component.phase = static_cast<uint8_t>(flag);
-            std::array<float, 1> playback{};
-            if (!floats(in, playback) || playback[0] < 0 || !in.integer(flag, 1) || flag > 1) return false;
-            component.playback = playback[0]; component.paused = flag != 0;
-            if (!in.integer(flag, 1) || flag > 1) return false;
-            component.template_mode = flag != 0;
-            if (!in.integer(component.epoch, 8) || !in.integer(flag, 1) || flag > 1 || !in.integer(size, 4) || size > max_requests) return false;
-            component.completed = flag != 0;
-            for (uint64_t j = 0; j < size; ++j) {
-                Summon request; uint64_t sources = 0;
-                if (!in.text(request.key, 191) || !autonomous_key(request.key) || !requests.insert(request.key).second ||
-                    !in.text(request.origin, 20) || !in.integer(request.body_offset, 8) || !in.integer(flag, 1) || flag > 1 ||
-                    !in.integer(sources, 4) || !sources || sources > max_requests) return false;
-                const auto progress = checked.requests().find(request.key);
-                if (progress == checked.requests().end() || progress->second.request.origin != request.origin) return false;
-                request.completed = flag != 0;
-                for (uint64_t k = 0; k < sources; ++k) {
-                    Source source;
-                    if (!summon_source(in, source) || source.origin != request.origin || source.label != progress->second.request.label) return false;
-                    request.sources.push_back(std::move(source));
-                }
-                uint64_t members = 0;
-                if (!in.integer(members, 4) || members > max_requests) return false;
-                for (uint64_t k = 0; k < members; ++k) {
-                    RecipeMembership member;
-                    if (!name(member.owner) || !in.text(member.label, 1024) || member.label.find('\0') != member.label.npos ||
-                        std::find(request.memberships.begin(), request.memberships.end(), member) != request.memberships.end()) return false;
-                    request.memberships.push_back(std::move(member));
-                }
-                component.requests.push_back(std::move(request));
-            }
-            if (!in.integer(size, 4) || size > max_requests) return false;
-            for (uint64_t j = 0; j < size; ++j) {
-                std::string target; uint64_t dependencies = 0;
-                if (!name(target) || component.notifications.count(target) || !in.integer(dependencies, 4) || dependencies > max_requests) return false;
-                auto& values = component.notifications[target];
-                for (uint64_t k = 0; k < dependencies; ++k) {
-                    std::string key;
-                    if (!in.text(key, 191) || !autonomous_key(key) || !checked.requests().count(key) || !values.insert(key).second) return false;
-                }
-            }
-            restored.summons.push_back(std::move(component));
-        }
-        if (!in.integer(count, 4) || count > max_actors) return false;
-        for (uint64_t i = 0; i < count; ++i) {
-            std::string role; Child child;
-            if (!in.text(role, 191) || !in.text(child.parent, 511) || child.parent.find('\0') != child.parent.npos ||
-                (!child.parent.empty() && !parents.count(child.parent)) || !name(child.body) || !floats(in, child.pose) || !floats(in, child.health) ||
-                std::any_of(child.health.begin(), child.health.end(), [](float value) { return value < 0; })) return false;
-            const auto progress = checked.requests().find(role.substr(0, role.rfind('/')));
-            if (progress == checked.requests().end() || !autonomous_key(role) || !progress->second.actors.count(role) ||
-                !restored.children.emplace(role, std::move(child)).second) return false;
-        }
-        for (const auto& [key, progress] : checked.requests()) {
-            if (!autonomous_key(key)) continue;
-            if (!progress.closed && !requests.count(key)) return false;
-            for (const auto& [role, actor] : progress.actors) {
-                (void)actor;
-                if (!restored.children.count(role)) return false;
-            }
-        }
-        if (!in.integer(count, 4) || count > max_actors) return false;
-        for (uint64_t i = 0; i < count; ++i) {
-            std::string native_name; Identity identity; uint64_t denominator = 0;
-            if (!name(native_name) || !in.text(identity.request, 191) || !identifier(identity.request) || !name(identity.body) ||
-                !in.integer(identity.ordinal, 8) || identity.ordinal > INT32_MAX || !in.integer(identity.units, 8) || !identity.units || identity.units > INT32_MAX ||
-                !in.integer(denominator, 4) || !denominator || denominator > INT32_MAX) return false;
-            identity.denominator = static_cast<uint32_t>(denominator);
-            if (!restored.identities.emplace(native_name, std::move(identity)).second) return false;
+    return true;
+}
+static bool native_name(Reader& in, std::string& value) {
+    return in.text(value, 511) && !value.empty() && value.find('\0') == value.npos;
+}
+static bool autonomous_key(const std::string& key) { return key.rfind("summon/", 0) == 0 || key.rfind("direct/", 0) == 0; }
+static bool restore_summon_sources(Reader& in, uint64_t sources, RecipeNativeCheckpoint::Summon& request, const RecipeProgress& progress) {
+    using Source = RecipeNativeCheckpoint::Source;
+    for (uint64_t k = 0; k < sources; ++k) {
+        Source source;
+        if (!summon_source(in, source) || source.origin != request.origin || source.label != progress.request.label) return false;
+        request.sources.push_back(std::move(source));
+    }
+    return true;
+}
+static bool restore_summon_members(Reader& in, uint64_t members, RecipeNativeCheckpoint::Summon& request) {
+    for (uint64_t k = 0; k < members; ++k) {
+        RecipeMembership member;
+        if (!native_name(in, member.owner) || !in.text(member.label, 1024) || member.label.find('\0') != member.label.npos ||
+            std::find(request.memberships.begin(), request.memberships.end(), member) != request.memberships.end()) return false;
+        request.memberships.push_back(std::move(member));
+    }
+    return true;
+}
+static bool bounded_integer(Reader& in, uint64_t& value, unsigned width, uint64_t maximum) {
+    return in.integer(value, width) && value <= maximum;
+}
+static bool summon_key(Reader& in, std::string& key, std::set<std::string>& requests) {
+    return in.text(key, 191) && autonomous_key(key) && requests.insert(key).second;
+}
+static bool restore_component_requests(Reader& in, uint64_t size, RecipeNativeCheckpoint::Component& component, std::set<std::string>& requests, const RecipeState& checked) {
+    using Summon = RecipeNativeCheckpoint::Summon;
+    using Source = RecipeNativeCheckpoint::Source;
+    uint64_t flag = 0;
+    for (uint64_t j = 0; j < size; ++j) {
+        Summon request; uint64_t sources = 0;
+        if (!summon_key(in, request.key, requests) ||
+            !in.text(request.origin, 20) || !in.integer(request.body_offset, 8) || !bounded_integer(in, flag, 1, 1) ||
+            !in.integer(sources, 4) || !sources || sources > max_requests) return false;
+        const auto progress = checked.requests().find(request.key);
+        if (progress == checked.requests().end() || progress->second.request.origin != request.origin) return false;
+        request.completed = flag != 0;
+        if (!restore_summon_sources(in, sources, request, progress->second)) return false;
+        uint64_t members = 0;
+        if (!bounded_integer(in, members, 4, max_requests)) return false;
+        if (!restore_summon_members(in, members, request)) return false;
+        component.requests.push_back(std::move(request));
+    }
+    return true;
+}
+static bool restore_notifications(Reader& in, uint64_t size, RecipeNativeCheckpoint::Component& component, const RecipeState& checked) {
+    for (uint64_t j = 0; j < size; ++j) {
+        std::string target; uint64_t dependencies = 0;
+        if (!native_name(in, target) || component.notifications.count(target) || !in.integer(dependencies, 4) || dependencies > max_requests) return false;
+        auto& values = component.notifications[target];
+        for (uint64_t k = 0; k < dependencies; ++k) {
+            std::string key;
+            if (!in.text(key, 191) || !autonomous_key(key) || !checked.requests().count(key) || !values.insert(key).second) return false;
         }
     }
+    return true;
+}
+static bool restore_component_header(Reader& in, RecipeNativeCheckpoint::Component& component, std::set<std::string>& parents, uint64_t& size) {
+    uint64_t flag = 0;
+    if (!native_name(in, component.parent) || !parents.insert(component.parent).second || !native_name(in, component.definition) ||
+        !in.text(component.template_name, 511) || component.template_name.find('\0') != component.template_name.npos ||
+        !in.integer(component.mask, 8) || !bounded_integer(in, flag, 1, 3)) return false;
+    component.phase = static_cast<uint8_t>(flag);
+    std::array<float, 1> playback{};
+    if (!floats(in, playback) || playback[0] < 0 || !bounded_integer(in, flag, 1, 1)) return false;
+    component.playback = playback[0]; component.paused = flag != 0;
+    if (!bounded_integer(in, flag, 1, 1)) return false;
+    component.template_mode = flag != 0;
+    if (!in.integer(component.epoch, 8) || !bounded_integer(in, flag, 1, 1) || !bounded_integer(in, size, 4, max_requests)) return false;
+    component.completed = flag != 0;
+    return true;
+}
+static bool restore_components(Reader& in, uint64_t count, RecipeNativeCheckpoint& restored, std::set<std::string>& parents, std::set<std::string>& requests, const RecipeState& checked) {
+    using Component = RecipeNativeCheckpoint::Component;
+    uint64_t size = 0;
+    for (uint64_t i = 0; i < count; ++i) {
+        Component component;
+        if (!restore_component_header(in, component, parents, size)) return false;
+        if (!restore_component_requests(in, size, component, requests, checked)) return false;
+        if (!in.integer(size, 4) || size > max_requests) return false;
+        if (!restore_notifications(in, size, component, checked)) return false;
+        restored.summons.push_back(std::move(component));
+    }
+    return true;
+}
+static bool restore_children(Reader& in, uint64_t count, RecipeNativeCheckpoint& restored, const std::set<std::string>& parents, const RecipeState& checked) {
+    using Child = RecipeNativeCheckpoint::Child;
+    for (uint64_t i = 0; i < count; ++i) {
+        std::string role; Child child;
+        if (!in.text(role, 191) || !in.text(child.parent, 511) || child.parent.find('\0') != child.parent.npos ||
+            (!child.parent.empty() && !parents.count(child.parent)) || !native_name(in, child.body) || !floats(in, child.pose) || !floats(in, child.health) ||
+            std::any_of(child.health.begin(), child.health.end(), [](float value) { return value < 0; })) return false;
+        const auto progress = checked.requests().find(role.substr(0, role.rfind('/')));
+        if (progress == checked.requests().end() || !autonomous_key(role) || !progress->second.actors.count(role) ||
+            !restored.children.emplace(role, std::move(child)).second) return false;
+    }
+    return true;
+}
+static bool complete_summon_children(const RecipeNativeCheckpoint& restored, const std::set<std::string>& requests, const RecipeState& checked) {
+    for (const auto& [key, progress] : checked.requests()) {
+        if (!autonomous_key(key)) continue;
+        if (!progress.closed && !requests.count(key)) return false;
+        for (const auto& [role, actor] : progress.actors) {
+            (void)actor;
+            if (!restored.children.count(role)) return false;
+        }
+    }
+    return true;
+}
+static bool restore_identities(Reader& in, uint64_t count, RecipeNativeCheckpoint& restored) {
+    using Identity = RecipeNativeCheckpoint::Identity;
+    for (uint64_t i = 0; i < count; ++i) {
+        std::string actor_name; Identity identity; uint64_t denominator = 0;
+        if (!native_name(in, actor_name) || !in.text(identity.request, 191) || !identifier(identity.request) || !native_name(in, identity.body) ||
+            !in.integer(identity.ordinal, 8) || identity.ordinal > INT32_MAX || !in.integer(identity.units, 8) || !identity.units || identity.units > INT32_MAX ||
+            !in.integer(denominator, 4) || !denominator || denominator > INT32_MAX) return false;
+        identity.denominator = static_cast<uint32_t>(denominator);
+        if (!restored.identities.emplace(actor_name, std::move(identity)).second) return false;
+    }
+    return true;
+}
+static bool restore_autonomous(Reader& in, RecipeNativeCheckpoint& restored, const RecipeState& checked) {
+    uint64_t count = 0;
+    {
+        std::set<std::string> parents, requests;
+        if (!in.integer(restored.next_request, 8) || !bounded_integer(in, count, 4, max_requests)) return false;
+        if (!restore_components(in, count, restored, parents, requests, checked)) return false;
+        if (!bounded_integer(in, count, 4, max_actors)) return false;
+        if (!restore_children(in, count, restored, parents, checked)) return false;
+        if (!complete_summon_children(restored, requests, checked)) return false;
+        if (!bounded_integer(in, count, 4, max_actors)) return false;
+        if (!restore_identities(in, count, restored)) return false;
+    }
+    return true;
+}
+static bool restore_native_header(Reader& in, RecipeNativeCheckpoint& restored, RecipeState& checked, std::string_view expected_map) {
+    return in.text(restored.plan, 191) && in.text(restored.map, 191) && restored.map == expected_map &&
+        in.text(restored.state, max_bytes) && checked.restore(restored.state, restored.plan, restored.map);
+}
+bool RecipeNativeCheckpoint::restore(std::string_view bytes, std::string_view expected_map) {
+    if (bytes.size() > max_bytes || bytes.substr(0, 4) != "EAPN" || bytes.size() < 5 || (bytes[4] != 1 && bytes[4] != 2)) return false;
+    const bool autonomous = bytes[4] == 2;
+    Reader in{bytes.substr(5)}; RecipeNativeCheckpoint restored;
+    RecipeState checked;
+    uint64_t count = 0;
+    if (!restore_native_header(in, restored, checked, expected_map) ||
+        !bounded_integer(in, count, 4, max_actors)) return false;
+    if (!restore_shows(in, count, restored)) return false;
+    if (!bounded_integer(in, count, 4, max_requests)) return false;
+    if (!restore_actions(in, count, restored)) return false;
+    if (autonomous && !restore_autonomous(in, restored, checked)) return false;
     if (!in.bytes.empty()) return false;
     *this = std::move(restored); return true;
 }
@@ -635,6 +726,15 @@ bool RecipeState::capture(std::string& out, const std::vector<std::string_view>&
     selected.watches_.clear();
     return selected.capture(out);
 }
+static bool capture_actors(std::string& bytes, const RecipeProgress& value, size_t& total_members) {
+    for (const auto& [actor, state] : value.actors) {
+        (void)actor; integer(bytes, state.ordinal, 8); text(bytes, state.native_name); integer(bytes, state.memberships.size(), 4);
+        total_members += state.memberships.size();
+        if (total_members > max_actors) return false;
+        for (const auto& member : state.memberships) { text(bytes, member.owner); text(bytes, member.label); }
+    }
+    return true;
+}
 bool RecipeState::capture(std::string& out) const {
     out.clear();
     if (plan_.empty() || requests_.size() > max_requests || credits_.size() > max_requests) return false;
@@ -651,12 +751,7 @@ bool RecipeState::capture(std::string& out) const {
         text(bytes, value.request.parent_request);
         integer(bytes, value.emitted, 8); integer(bytes, value.dead, 8); integer(bytes, value.removed, 8);
         integer(bytes, value.closed, 1); integer(bytes, value.empty_completed, 1); integer(bytes, value.actors.size(), 4);
-        for (const auto& [actor, state] : value.actors) {
-            (void)actor; integer(bytes, state.ordinal, 8); text(bytes, state.native_name); integer(bytes, state.memberships.size(), 4);
-            total_members += state.memberships.size();
-            if (total_members > max_actors) return false;
-            for (const auto& member : state.memberships) { text(bytes, member.owner); text(bytes, member.label); }
-        }
+        if (!capture_actors(bytes, value, total_members)) return false;
         if (bytes.size() > max_bytes) return false;
     }
     integer(bytes, credits_.size(), 4);
@@ -671,117 +766,165 @@ bool RecipeState::capture(std::string& out) const {
     if (bytes.size() > max_bytes) return false;
     out = std::move(bytes); return true;
 }
-bool RecipeState::restore(std::string_view bytes, std::string_view expected_plan, std::string_view expected_map) {
-    if (bytes.size() > max_bytes || bytes.substr(0, 5) != std::string_view("EAPR\7", 5)) return false;
-    Reader in{bytes.substr(5)}; RecipeState restored;
-    uint64_t count = 0, total_actors = 0, total_members = 0;
-    if (!in.text(restored.plan_, 191) || !in.text(restored.map_, 191) || restored.plan_ != expected_plan ||
-        restored.map_ != expected_map || !identifier(restored.plan_) || !identifier(restored.map_) ||
-        !in.integer(count, 4) || count > max_requests) return false;
-    for (uint64_t i = 0; i < count; ++i) {
-        std::string key; RecipeProgress value;
-        uint64_t units = 0, physical = 0, credit_limit = 0, final_credit = 0, closed = 0, empty_completed = 0, actors = 0;
-        if (!in.text(key, 191) || !identifier(key) || !in.text(value.request.owner, 191) || !in.text(value.request.origin, 191) ||
-            !in.text(value.request.label, 1024) || !in.integer(value.request.logical_mask, 8) ||
-            !in.integer(units, 4) || !in.integer(physical, 4) || !in.integer(value.request.maximum_emissions, 8) ||
-            !in.integer(credit_limit, 4) || !in.integer(final_credit, 4) ||
-            !in.text(value.request.parent_actor, 191) ||
-            !in.text(value.request.parent_request, 191) ||
-            !in.integer(value.emitted, 8) || !in.integer(value.dead, 8) || !in.integer(value.removed, 8) ||
-            !in.integer(closed, 1) || closed > 1 || !in.integer(empty_completed, 1) || empty_completed > 1 ||
-            (empty_completed && (physical || !closed)) || (!physical && value.emitted) || !in.integer(actors, 4) ||
-            value.dead > value.emitted || value.removed > value.emitted - value.dead ||
-            actors != value.emitted - value.dead - value.removed || total_actors + actors > max_actors) return false;
-        value.request.logical_units = static_cast<uint32_t>(units);
-        value.request.physical_units = static_cast<uint32_t>(physical); value.closed = closed != 0;
-        value.request.credit_limit = static_cast<uint32_t>(credit_limit);
-        value.request.final_credit_units = static_cast<uint32_t>(final_credit);
-        value.empty_completed = empty_completed != 0;
-        if (!valid(value.request) || value.emitted > UINT64_MAX / value.request.logical_units) return false;
-        std::set<uint64_t> ordinals;
-        for (uint64_t n = 0; n < actors; ++n) {
-            uint64_t ordinal = 0, members = 0;
-            RecipeActor actor;
-            if (!in.integer(ordinal, 8) || ordinal >= value.emitted || !ordinals.insert(ordinal).second ||
-                !in.text(actor.native_name, 511) || actor.native_name.find('\0') != actor.native_name.npos ||
-                !in.integer(members, 4) || total_members + members > max_actors) return false;
-            actor.ordinal = ordinal;
-            std::set<std::pair<std::string, std::string>> memberships;
-            for (uint64_t j = 0; j < members; ++j) {
-                RecipeMembership member;
-                if (!in.text(member.owner, 191) || !in.text(member.label, 1024) || !valid_member(member) ||
-                    !memberships.emplace(member.owner, member.label).second) return false;
-                actor.memberships.push_back(std::move(member));
-            }
-            total_members += members;
-            value.actors.emplace(key + "/" + std::to_string(ordinal), std::move(actor));
-        }
-        total_actors += actors;
-        if (!restored.requests_.emplace(key, std::move(value)).second) return false;
+static bool restore_request(Reader& in, std::string& key, RecipeRequest& request, uint64_t& units, uint64_t& physical, uint64_t& credit_limit, uint64_t& final_credit) {
+    return in.text(key, 191) && identifier(key) && in.text(request.owner, 191) && in.text(request.origin, 191) &&
+        in.text(request.label, 1024) && in.integer(request.logical_mask, 8) &&
+        in.integer(units, 4) && in.integer(physical, 4) && in.integer(request.maximum_emissions, 8) &&
+        in.integer(credit_limit, 4) && in.integer(final_credit, 4) &&
+        in.text(request.parent_actor, 191) && in.text(request.parent_request, 191);
+}
+static bool valid_progress_counts(const RecipeProgress& value, uint64_t physical, uint64_t closed, uint64_t empty_completed, uint64_t actors, uint64_t total_actors) {
+    return !((empty_completed && (physical || !closed)) || (!physical && value.emitted) ||
+        value.dead > value.emitted || value.removed > value.emitted - value.dead ||
+        actors != value.emitted - value.dead - value.removed || total_actors + actors > max_actors);
+}
+static bool restore_progress_header(Reader& in, std::string& key, RecipeProgress& value, uint64_t& actors, uint64_t total_actors) {
+    uint64_t units = 0, physical = 0, credit_limit = 0, final_credit = 0, closed = 0, empty_completed = 0;
+    if (!restore_request(in, key, value.request, units, physical, credit_limit, final_credit) ||
+        !in.integer(value.emitted, 8) || !in.integer(value.dead, 8) || !in.integer(value.removed, 8) ||
+        !in.integer(closed, 1) || closed > 1 || !in.integer(empty_completed, 1) || empty_completed > 1 ||
+        !in.integer(actors, 4) || !valid_progress_counts(value, physical, closed, empty_completed, actors, total_actors)) return false;
+    value.request.logical_units = static_cast<uint32_t>(units);
+    value.request.physical_units = static_cast<uint32_t>(physical); value.closed = closed != 0;
+    value.request.credit_limit = static_cast<uint32_t>(credit_limit);
+    value.request.final_credit_units = static_cast<uint32_t>(final_credit);
+    value.empty_completed = empty_completed != 0;
+    if (!valid(value.request) || value.emitted > UINT64_MAX / value.request.logical_units) return false;
+    return true;
+}
+static bool restore_actor_members(Reader& in, uint64_t members, RecipeActor& actor) {
+    std::set<std::pair<std::string, std::string>> memberships;
+    for (uint64_t j = 0; j < members; ++j) {
+        RecipeMembership member;
+        if (!in.text(member.owner, 191) || !in.text(member.label, 1024) || !valid_member(member) ||
+            !memberships.emplace(member.owner, member.label).second) return false;
+        actor.memberships.push_back(std::move(member));
     }
-    for (const auto& [key, progress] : restored.requests_) {
+    return true;
+}
+static bool restore_progress_actors(Reader& in, const std::string& key, RecipeProgress& value, uint64_t actors, uint64_t& total_members) {
+    std::set<uint64_t> ordinals;
+    for (uint64_t n = 0; n < actors; ++n) {
+        uint64_t ordinal = 0, members = 0;
+        RecipeActor actor;
+        if (!in.integer(ordinal, 8) || ordinal >= value.emitted || !ordinals.insert(ordinal).second ||
+            !in.text(actor.native_name, 511) || actor.native_name.find('\0') != actor.native_name.npos ||
+            !in.integer(members, 4) || total_members + members > max_actors) return false;
+        actor.ordinal = ordinal;
+        if (!restore_actor_members(in, members, actor)) return false;
+        total_members += members;
+        value.actors.emplace(key + "/" + std::to_string(ordinal), std::move(actor));
+    }
+    return true;
+}
+static bool restore_requests(Reader& in, uint64_t count, std::map<std::string, RecipeProgress>& requests) {
+    uint64_t total_actors = 0, total_members = 0;
+    for (uint64_t i = 0; i < count; ++i) {
+        std::string key; RecipeProgress value; uint64_t actors = 0;
+        if (!restore_progress_header(in, key, value, actors, total_actors)) return false;
+        if (!restore_progress_actors(in, key, value, actors, total_members)) return false;
+        total_actors += actors;
+        if (!requests.emplace(key, std::move(value)).second) return false;
+    }
+    return true;
+}
+static bool valid_parents(const std::map<std::string, RecipeProgress>& requests) {
+    for (const auto& [key, progress] : requests) {
         (void)key;
-        if (!progress.request.parent_actor.empty() && !valid_parent(progress.request.parent_actor, restored.requests_)) return false;
-        if (!progress.request.parent_request.empty() && (!restored.requests_.count(progress.request.parent_request) ||
+        if (!progress.request.parent_actor.empty() && !valid_parent(progress.request.parent_actor, requests)) return false;
+        if (!progress.request.parent_request.empty() && (!requests.count(progress.request.parent_request) ||
             (!progress.request.parent_actor.empty() && progress.request.parent_actor.substr(0, progress.request.parent_actor.rfind('/')) !=
                 progress.request.parent_request))) return false;
     }
+    return true;
+}
+static bool valid_ancestry(const std::map<std::string, RecipeProgress>& requests) {
+    if (!valid_parents(requests)) return false;
     std::map<std::string, uint8_t> ancestry;
-    for (const auto& [key, progress] : restored.requests_) {
+    for (const auto& [key, progress] : requests) {
         (void)progress;
         std::string cursor = key;
         std::vector<std::string> path;
         while (!cursor.empty() && !ancestry[cursor]) {
             ancestry[cursor] = 1; path.push_back(cursor);
-            const auto& request = restored.requests_.at(cursor).request;
+            const auto& request = requests.at(cursor).request;
             cursor = !request.parent_request.empty() ? request.parent_request :
                 request.parent_actor.empty() ? "" : request.parent_actor.substr(0, request.parent_actor.rfind('/'));
         }
         if (!cursor.empty() && ancestry[cursor] == 1) return false;
         for (const auto& visited : path) ancestry[visited] = 2;
     }
-    if (!in.integer(count, 4) || count > max_requests) return false;
+    return true;
+}
+static bool valid_credit_units(const RecipeRequest& request, uint32_t units) {
+    return units == request.logical_units || (request.credit_limit && units == request.final_credit_units) ||
+        (!request.physical_units && !units);
+}
+static bool valid_credit_record(const RecipeProgress& progress, const RecipeCreditScope& scope, uint64_t dead) {
+    if (        (!dead && (progress.request.physical_units || progress.empty_completed || scope.units)) ||
+        dead > progress.dead + progress.empty_completed ||
+        !valid_credit_units(progress.request, scope.units) ||
+        (scope.units != progress.request.logical_units && scope.units && dead > 1) ||
+        (scope.units && scope.units != progress.request.logical_units &&
+         (progress.emitted < progress.request.credit_limit ||
+          progress.actors.count(scope.request + "/" + std::to_string(progress.request.credit_limit - 1))))) return false;
+    return true;
+}
+static bool restore_credits(Reader& in, uint64_t count, const std::map<std::string, RecipeProgress>& requests, RecipeBaseline& credits) {
     std::map<std::tuple<std::string, std::string, std::string>, uint64_t> credited;
     for (uint64_t i = 0; i < count; ++i) {
         RecipeCreditScope scope; uint64_t dead = 0;
         if (!in.credit_scope(scope) || !in.integer(dead, 8)) return false;
-        const auto request = restored.requests_.find(scope.request);
-        if (request == restored.requests_.end() ||
-            (!dead && (request->second.request.physical_units || request->second.empty_completed || scope.units)) ||
-            dead > request->second.dead + request->second.empty_completed ||
-            (scope.units != request->second.request.logical_units &&
-             (!request->second.request.credit_limit || scope.units != request->second.request.final_credit_units) &&
-              !(!request->second.request.physical_units && !scope.units)) ||
-            (scope.units != request->second.request.logical_units && scope.units && dead > 1) ||
-            (scope.units && scope.units != request->second.request.logical_units &&
-             (request->second.emitted < request->second.request.credit_limit ||
-              request->second.actors.count(scope.request + "/" + std::to_string(request->second.request.credit_limit - 1)))) ||
-            !restored.credits_.emplace(scope, dead).second) return false;
+        const auto request = requests.find(scope.request);
+        if (request == requests.end() || !valid_credit_record(request->second, scope, dead) || !credits.emplace(scope, dead).second) return false;
         auto& total = credited[{scope.request, scope.owner, scope.label}]; total += dead;
         if (total > request->second.dead + request->second.empty_completed) return false;
     }
-    for (const auto& [key, value] : restored.requests_)
-        if (value.empty_completed && !restored.credits_.count({key, value.request.owner, value.request.label})) return false;
-    if (!in.integer(count, 4) || count > max_requests) return false;
+    for (const auto& [key, value] : requests)
+        if (value.empty_completed && !credits.count({key, value.request.owner, value.request.label})) return false;
+    return true;
+}
+static bool restore_baselines(Reader& in, uint64_t baselines, RecipeWatch& watch, const RecipeBaseline& credits, const std::map<std::string, RecipeProgress>& requests) {
+    for (uint64_t n = 0; n < baselines; ++n) {
+        RecipeCreditScope scope; uint64_t dead = 0;
+        if (!in.credit_scope(scope) || !in.integer(dead, 8)) return false;
+        const auto found = credits.find(scope);
+        if (found == credits.end() || !dead || dead > found->second ||
+            !selects(requests.at(scope.request).request, watch.mask) ||
+            !selects(scope.owner, scope.label, watch.owner, watch.label) ||
+            !watch.baseline.emplace(std::move(scope), dead).second) return false;
+    }
+    return true;
+}
+static bool restore_watches(Reader& in, uint64_t count, RecipeState& restored, std::map<std::string, RecipeWatch>& watches, const RecipeBaseline& credits) {
     uint64_t total_baselines = 0;
     for (uint64_t i = 0; i < count; ++i) {
         std::string key; RecipeWatch watch; uint64_t baselines = 0;
         if (!in.text(key, 191) || !in.integer(watch.mask, 8) || !watch.mask || watch.mask >= (uint64_t{1} << 44) ||
             !in.text(watch.owner, 191) || !in.text(watch.label, 1024) || !in.integer(baselines, 4) ||
-            baselines > restored.credits_.size() || total_baselines + baselines > max_actors ||
-            restored.watches_.find(key) != restored.watches_.end() || !restored.watch(key, watch.owner, watch.mask, watch.label)) return false;
+            baselines > credits.size() || total_baselines + baselines > max_actors ||
+            watches.find(key) != watches.end() || !restored.watch(key, watch.owner, watch.mask, watch.label)) return false;
         watch.baseline.clear();
-        for (uint64_t n = 0; n < baselines; ++n) {
-            RecipeCreditScope scope; uint64_t dead = 0;
-            if (!in.credit_scope(scope) || !in.integer(dead, 8)) return false;
-            const auto found = restored.credits_.find(scope);
-            if (found == restored.credits_.end() || !dead || dead > found->second ||
-                !selects(restored.requests_.at(scope.request).request, watch.mask) ||
-                !selects(scope.owner, scope.label, watch.owner, watch.label) ||
-                !watch.baseline.emplace(std::move(scope), dead).second) return false;
-        }
-        restored.watches_.at(key) = std::move(watch); total_baselines += baselines;
+        if (!restore_baselines(in, baselines, watch, credits, restored.requests())) return false;
+        watches.at(key) = std::move(watch); total_baselines += baselines;
     }
+    return true;
+}
+static bool restore_state_identity(Reader& in, std::string& plan, std::string& map, std::string_view expected_plan, std::string_view expected_map) {
+    return in.text(plan, 191) && in.text(map, 191) && plan == expected_plan && map == expected_map && identifier(plan) && identifier(map);
+}
+bool RecipeState::restore(std::string_view bytes, std::string_view expected_plan, std::string_view expected_map) {
+    if (bytes.size() > max_bytes || bytes.substr(0, 5) != std::string_view("EAPR\7", 5)) return false;
+    Reader in{bytes.substr(5)}; RecipeState restored;
+    uint64_t count = 0;
+    if (!restore_state_identity(in, restored.plan_, restored.map_, expected_plan, expected_map) ||
+        !bounded_integer(in, count, 4, max_requests)) return false;
+    if (!restore_requests(in, count, restored.requests_)) return false;
+    if (!valid_ancestry(restored.requests_)) return false;
+    if (!bounded_integer(in, count, 4, max_requests)) return false;
+    if (!restore_credits(in, count, restored.requests_, restored.credits_)) return false;
+    if (!bounded_integer(in, count, 4, max_requests)) return false;
+    if (!restore_watches(in, count, restored, restored.watches_, restored.credits_)) return false;
     if (!in.bytes.empty()) return false;
     *this = std::move(restored); return true;
 }

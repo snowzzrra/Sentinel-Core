@@ -262,74 +262,74 @@ bool combat_payload_bytes(const generated::NativeRequest& value, generated::Byte
 using Encode = bool (*)(uint16_t, uint16_t, const generated::NativeRequest&, generated::Bytes&);
 struct Encoder { uint16_t type; Encode encode; };
 const Encoder encoders[] = {
-    {1, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<inspect_payload>(inspect_inspect_payload{}, bytes);
+    {1, +[](uint16_t, uint16_t, const generated::NativeRequest&, generated::Bytes& bytes) {
+        return pack<inspect_payload>(inspect_inspect_payload{}, bytes);
     }},
-    {2, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<engine_payload>(engine_engine_payload{}, bytes);
+    {2, +[](uint16_t, uint16_t, const generated::NativeRequest&, generated::Bytes& bytes) {
+        return pack<engine_payload>(engine_engine_payload{}, bytes);
     }},
-    {3, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<context_payload>(context_context_payload{}, bytes);
+    {3, +[](uint16_t, uint16_t, const generated::NativeRequest&, generated::Bytes& bytes) {
+        return pack<context_payload>(context_context_payload{}, bytes);
     }},
-    {4, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<native_payload>(native_native_payload{std::get<NativeRead>(value).cursor}, bytes);
+    {4, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return pack<native_payload>(native_native_payload{std::get<NativeRead>(value).cursor}, bytes);
     }},
-    {5, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<diagnostic_payload>(diagnostic_diagnostic_payload{}, bytes);
+    {5, +[](uint16_t, uint16_t, const generated::NativeRequest&, generated::Bytes& bytes) {
+        return pack<diagnostic_payload>(diagnostic_diagnostic_payload{}, bytes);
     }},
-    {8, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<diagnostic_detail_payload>(diagnostic_detail_diagnostic_detail_payload{}, bytes);
+    {8, +[](uint16_t, uint16_t, const generated::NativeRequest&, generated::Bytes& bytes) {
+        return pack<diagnostic_detail_payload>(diagnostic_detail_diagnostic_detail_payload{}, bytes);
     }},
-    {11, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<save_payload>(save_save_payload{}, bytes);
+    {11, +[](uint16_t, uint16_t, const generated::NativeRequest&, generated::Bytes& bytes) {
+        return pack<save_payload>(save_save_payload{}, bytes);
     }},
-    {12, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<save_admission_payload>(save_admission_save_admission_payload{}, bytes);
+    {12, +[](uint16_t, uint16_t, const generated::NativeRequest&, generated::Bytes& bytes) {
+        return pack<save_admission_payload>(save_admission_save_admission_payload{}, bytes);
     }},
-    {13, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<save_write_payload>(save_write_save_write_payload{std::get<NativeRead>(value).cursor}, bytes);
+    {13, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return pack<save_write_payload>(save_write_save_write_payload{std::get<NativeRead>(value).cursor}, bytes);
     }},
-    {14, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<save_backup_payload>(save_backup_save_backup_payload{std::get<::sc_save_backup_request>(value).campaign, std::get<::sc_save_backup_request>(value).slot, std::get<::sc_save_backup_request>(value).work_deadline_ms}, bytes);
+    {14, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return pack<save_backup_payload>(save_backup_save_backup_payload{std::get<::sc_save_backup_request>(value).campaign, std::get<::sc_save_backup_request>(value).slot, std::get<::sc_save_backup_request>(value).work_deadline_ms}, bytes);
     }},
-    {17, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<save_installation_payload>(save_installation_save_installation_payload{}, bytes);
+    {17, +[](uint16_t, uint16_t, const generated::NativeRequest&, generated::Bytes& bytes) {
+        return pack<save_installation_payload>(save_installation_save_installation_payload{}, bytes);
     }},
-    {18, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return weapon_points(std::get<::sc_weapon_points_request>(value), bytes);
+    {18, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return weapon_points(std::get<::sc_weapon_points_request>(value), bytes);
     }},
     {22, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return campaign(type, revision, std::get<NativeCampaign>(value), bytes);
+        return campaign(type, revision, std::get<NativeCampaign>(value), bytes);
     }},
     {23, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return campaign(type, revision, std::get<NativeCampaign>(value), bytes);
+        return campaign(type, revision, std::get<NativeCampaign>(value), bytes);
     }},
     {24, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return campaign(type, revision, std::get<NativeCampaign>(value), bytes);
+        return campaign(type, revision, std::get<NativeCampaign>(value), bytes);
     }},
-    {25, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return inventory(std::get<::sc_inventory_request>(value), bytes);
+    {25, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return inventory(std::get<::sc_inventory_request>(value), bytes);
     }},
-    {29, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return arsenal(std::get<::sc_arsenal_request>(value), bytes);
+    {29, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return arsenal(std::get<::sc_arsenal_request>(value), bytes);
     }},
-    {33, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return runes(std::get<::sc_runes_request>(value), bytes);
+    {33, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return runes(std::get<::sc_runes_request>(value), bytes);
     }},
-    {37, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return special(std::get<::sc_special_request>(value), bytes);
+    {37, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return special(std::get<::sc_special_request>(value), bytes);
     }},
-    {41, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return deathlink(std::get<::sc_deathlink_request>(value), bytes);
+    {41, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return deathlink(std::get<::sc_deathlink_request>(value), bytes);
     }},
-    {45, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; return automap(std::get<::sc_automap_request>(value), revision, bytes);
+    {45, +[](uint16_t, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return automap(std::get<::sc_automap_request>(value), revision, bytes);
     }},
-    {46, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return command(std::get<::sc_command_request>(value), bytes);
+    {46, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return command(std::get<::sc_command_request>(value), bytes);
     }},
-    {51, +[](uint16_t type, uint16_t revision, const generated::NativeRequest& value, generated::Bytes& bytes) {
-        (void)type; (void)revision; (void)value; return pack<combat_presentation_payload>(combat_presentation_combat_presentation_payload{to_wire(std::get<::sc_combat_presentation_request>(value))}, bytes);
+    {51, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) {
+        return pack<combat_presentation_payload>(combat_presentation_combat_presentation_payload{to_wire(std::get<::sc_combat_presentation_request>(value))}, bytes);
     }},
     {50, +[](uint16_t, uint16_t, const generated::NativeRequest& value, generated::Bytes& bytes) { return combat_payload_bytes(value, bytes); }},
 };

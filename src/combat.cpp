@@ -110,15 +110,24 @@ void Model::release(const Capture& saved) noexcept {
     }
     claim = {};
 }
+static bool matching_capture(const Capture& saved, const Context& context, uint64_t generation,
+                             uint64_t stamp, uint32_t thread) noexcept {
+    return saved.context.generation == generation && saved.context.stamp == stamp && stamp == context.stamp &&
+           saved.callback_thread && thread == saved.callback_thread && saved.context.world == context.world &&
+           saved.context.player == context.player &&
+           !std::memcmp(saved.context.namespace_id, context.namespace_id, 65);
+}
+
+static bool counted_death(const Capture& saved, const DeathRecord& record) noexcept {
+    return record.victim_spawn_id == saved.victim_spawn_id && record.victim_type == 1 &&
+           record.game_mode == 1 && record.attack_type != 2;
+}
+
 Publication Model::publish(const Capture& saved, const DeathRecord& record, uint64_t now,
                            uint64_t stamp, uint32_t thread) noexcept {
-    if (!ready(now) || saved.context.generation != generation_ ||
-        saved.context.stamp != stamp || stamp != context_.stamp || !saved.callback_thread || thread != saved.callback_thread ||
-        saved.context.world != context_.world || saved.context.player != context_.player ||
-        std::memcmp(saved.context.namespace_id, context_.namespace_id, 65) ||
-        record.victim_spawn_id != saved.victim_spawn_id || record.victim_type != 1 ||
-        record.game_mode != 1 ||
-        record.attack_type == 2) return Publication::ignored;
+    if (!ready(now) || !matching_capture(saved, context_, generation_, stamp, thread) ||
+        !counted_death(saved, record))
+        return Publication::ignored;
     if (!saved.registration_serial) return Publication::missing_registration;
     if (saved.claim_index >= claims_.size()) return Publication::missing_registration;
     auto& claim = claims_[saved.claim_index];

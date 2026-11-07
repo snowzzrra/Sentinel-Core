@@ -21,6 +21,13 @@ struct PrerequisiteFuture : SaveFuture {
     }
 };
 SaveFuture* destroy(SaveFuture* value, uint32_t) { delete static_cast<PrerequisiteFuture*>(value); return value; }
+static bool native_profile_complete(const SaveResult& result) {
+    return result.state == 0 && result.outcome == 0 && result.value == 1;
+}
+static ProfileStatus profile_transport_status(bool allowed, const SaveResult& result) {
+    if (!allowed) return ProfileStatus::refused;
+    return result.state == -1 ? ProfileStatus::pending : ProfileStatus::succeeded;
+}
 SaveResult* poll(SaveFuture* value, SaveResult* out, void* executor) {
     auto& future = *static_cast<PrerequisiteFuture*>(value);
     if (future.terminal) { *out = {1, 0, 0, 0}; return out; }
@@ -42,10 +49,9 @@ SaveResult* poll(SaveFuture* value, SaveResult* out, void* executor) {
         // native future owns its waiter and cancellation; construction time is
         // not an execution budget. Only one child uses the native executor.
         future.profile->vtable->poll(future.profile, &result, executor);
-        allowed = result.state == -1 || (result.state == 0 && result.outcome == 0 && result.value == 1);
+        allowed = result.state == -1 || (native_profile_complete(result));
         failure = "native_profile_transport_result";
-        future.owner.profile_step(ProfileStage::transport, !allowed ? ProfileStatus::refused :
-            result.state == -1 ? ProfileStatus::pending : ProfileStatus::succeeded, failure,
+        future.owner.profile_step(ProfileStage::transport, profile_transport_status(allowed, result), failure,
             true, result.state, result.outcome, result.value);
         if (result.state == -1) { *out = result; return out; }
         future.profile_done = allowed;
@@ -55,7 +61,7 @@ SaveResult* poll(SaveFuture* value, SaveResult* out, void* executor) {
         future.owner.profile_step(ProfileStage::catalog_poll, ProfileStatus::succeeded, "after_profile_transport");
         future.enumeration->vtable->poll(future.enumeration, &result, executor);
         if (result.state == -1) { *out = result; return out; }
-        allowed = result.state == 0 && result.outcome == 0 && result.value == 1;
+        allowed = native_profile_complete(result);
         failure = "catalog_prerequisite_result";
         future.enumeration->vtable->destroy(future.enumeration, 1); future.enumeration = nullptr;
         future.calls.catalog.release(&future.catalog_data);
@@ -65,8 +71,6 @@ SaveResult* poll(SaveFuture* value, SaveResult* out, void* executor) {
         future.owner.profile_step(ProfileStage::request, ProfileStatus::refused, failure);
         future.owner.fail_profile(); result = {0, 1, 1, 0};
     }
-    // This result completes only provider reading. The unchanged native parent
-    // still owns deserialization, cache import, notification and its finalizer.
     *out = result; return out;
 }
 const SaveFutureVtable vtable{destroy, poll};

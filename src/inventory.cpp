@@ -1,3 +1,4 @@
+#include "namespace_id.h"
 #include "inventory.h"
 #include <cstring>
 #include <algorithm>
@@ -88,25 +89,29 @@ bool armored_counter(const SnapshotFacts& facts) {
         ((facts.weapons & SC_INV_WEAPON_SHOTGUN) && (perks & 1ull));
 }
 
-bool valid(const sc_inventory_request& r) {
-    if (r.namespace_id[64] || r.kind > SC_INV_SET_CAPACITY) return false;
-    for (size_t i = 0; i < 64; ++i) {
-        const auto c = r.namespace_id[i];
-        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
+static bool valid_observation(const sc_inventory_request& r) {
+    if (r.kind == SC_INV_OBSERVE) {
+        return !r.weapons && !r.equipment && !r.special_weapons && !r.persistent_upgrades && !r.health_tier &&
+               !r.armor_tier && !r.ammo_tier;
     }
-    if (r.weapons & ~SC_INV_ALL_WEAPONS) return false;
-    if (r.equipment & ~SC_INV_ALL_EQUIPMENT) return false;
-    if (r.special_weapons || r.persistent_upgrades || r.reserved) return false;
+    return true;
+}
+
+static bool valid_capacity_request(const sc_inventory_request& r) {
     if (r.kind == SC_INV_ENSURE && (r.health_tier || r.armor_tier || r.ammo_tier)) return false;
     if (r.kind == SC_INV_SET_CAPACITY && (r.weapons || r.equipment)) return false;
     if (r.health_tier > SC_INVENTORY_MAX_CAPACITY_TIER) return false;
     if (r.armor_tier > SC_INVENTORY_MAX_CAPACITY_TIER) return false;
     if (r.ammo_tier > SC_INVENTORY_MAX_CAPACITY_TIER) return false;
-    if (r.kind == SC_INV_OBSERVE) {
-        return !r.weapons && !r.equipment && !r.special_weapons && !r.persistent_upgrades &&
-               !r.health_tier && !r.armor_tier && !r.ammo_tier;
-    }
-    return true;
+    return valid_observation(r);
+}
+
+bool valid(const sc_inventory_request& r) {
+    if (!valid_namespace_id(r.namespace_id) || r.kind > SC_INV_SET_CAPACITY) return false;
+    if (r.weapons & ~SC_INV_ALL_WEAPONS) return false;
+    if (r.equipment & ~SC_INV_ALL_EQUIPMENT) return false;
+    if (r.special_weapons || r.persistent_upgrades || r.reserved) return false;
+    return valid_capacity_request(r);
 }
 
 bool same(const sc_inventory_request& a, const sc_inventory_request& b) {
@@ -142,23 +147,186 @@ void reset_session(const char* namespace_id) {
     ReleaseSRWLockExclusive(&state_lock);
 }
 
+static bool valid_mask(uint32_t value, uint32_t allowed) {
+    return value == SC_INVENTORY_UNKNOWN_MASK || !(value & ~allowed);
+}
+static bool valid_item(uint8_t value) { return value <= 1 || value == SC_INVENTORY_UNKNOWN_ITEM; }
+static bool valid_tier(uint8_t value) {
+    return value == SC_INVENTORY_UNKNOWN_TIER || value <= SC_INVENTORY_MAX_CAPACITY_TIER;
+}
+
 bool valid_facts(const SnapshotFacts& f) {
-    const auto mask = [](uint32_t value, uint32_t allowed) {
-        return value == SC_INVENTORY_UNKNOWN_MASK || !(value & ~allowed);
-    };
-    const auto tier = [](uint8_t value) {
-        return value == SC_INVENTORY_UNKNOWN_TIER || value <= SC_INVENTORY_MAX_CAPACITY_TIER;
-    };
-    return mask(f.weapons, SC_INV_ALL_WEAPONS) && mask(f.equipment, SC_INV_ALL_EQUIPMENT) &&
-        !f.special_weapons && mask(f.persistent_upgrades, SC_INV_BLOOD_PUNCH_MASK) && !f.reserved &&
-        tier(f.health_tier) && tier(f.armor_tier) && tier(f.ammo_tier) &&
-        (f.ice_bomb <= 1 || f.ice_bomb == SC_INVENTORY_UNKNOWN_ITEM) &&
-        (f.dash <= 1 || f.dash == SC_INVENTORY_UNKNOWN_ITEM) &&
-        (f.slayer_key <= 1 || f.slayer_key == SC_INVENTORY_UNKNOWN_ITEM) &&
-        (f.frag_grenade <= 1 || f.frag_grenade == SC_INVENTORY_UNKNOWN_ITEM) &&
-        (f.flame_belch <= 1 || f.flame_belch == SC_INVENTORY_UNKNOWN_ITEM) &&
-        (f.blood_punch <= 1 || f.blood_punch == SC_INVENTORY_UNKNOWN_ITEM) &&
-        !(f.perks_owned & ~f.perks_known);
+    return valid_mask(f.weapons, SC_INV_ALL_WEAPONS) && valid_mask(f.equipment, SC_INV_ALL_EQUIPMENT) &&
+           !f.special_weapons && valid_mask(f.persistent_upgrades, SC_INV_BLOOD_PUNCH_MASK) && !f.reserved &&
+           valid_tier(f.health_tier) && valid_tier(f.armor_tier) && valid_tier(f.ammo_tier) &&
+           valid_item(f.ice_bomb) && valid_item(f.dash) && valid_item(f.slayer_key) &&
+           valid_item(f.frag_grenade) && valid_item(f.flame_belch) && valid_item(f.blood_punch) &&
+           !(f.perks_owned & ~f.perks_known);
+}
+
+static bool verified_items(const SnapshotFacts& needed, const SnapshotFacts& after, bool read_ok,
+                           uint32_t native_exception) {
+    if (native_exception || !read_ok ||
+        (needed.weapons && (after.weapons == SC_INVENTORY_UNKNOWN_MASK ||
+                            (after.weapons & needed.weapons) != needed.weapons)) ||
+        (needed.equipment && (after.equipment == SC_INVENTORY_UNKNOWN_MASK ||
+                              (after.equipment & needed.equipment) != needed.equipment))) {
+        return false;
+    }
+    return true;
+}
+
+static void ensure_locked(const sc_inventory_request& r, sc_inventory_result& out, const Calls& calls,
+                          uintptr_t player, const SnapshotFacts& before) {
+    update_items_locked(r.weapons, r.equipment, r.special_weapons, r.persistent_upgrades);
+    const auto needed = shared_state;
+    if ((needed.weapons && before.weapons == SC_INVENTORY_UNKNOWN_MASK) ||
+        (needed.equipment && before.equipment == SC_INVENTORY_UNKNOWN_MASK)) {
+        ReleaseSRWLockExclusive(&state_lock);
+        out.outcome = SC_INV_READ_FAILED;
+        return;
+    }
+    const uint32_t delta_w = needed.weapons & ~before.weapons;
+    const uint32_t delta_e = needed.equipment & ~before.equipment;
+    const uint32_t delta_s = needed.special_weapons & ~before.special_weapons;
+    const uint32_t delta_u = needed.persistent_upgrades & ~before.persistent_upgrades;
+
+    if (!delta_w && !delta_e && !delta_s && !delta_u) {
+        out.weapons_after = before.weapons;
+        out.equipment_after = before.equipment;
+        out.ice_bomb_after = before.ice_bomb;
+        out.dash_after = before.dash;
+        out.slayer_key_after = before.slayer_key;
+        out.frag_grenade_after = before.frag_grenade;
+        out.special_after = before.special_weapons;
+        out.upgrades_after = before.persistent_upgrades;
+        out.health_tier_after = before.health_tier;
+        out.armor_tier_after = before.armor_tier;
+        out.ammo_tier_after = before.ammo_tier;
+        out.operations_applied = total_operations;
+        ReleaseSRWLockExclusive(&state_lock);
+        out.flags |= SC_INV_AFTER_VALID;
+        out.outcome = SC_INV_OBSERVED;
+        return;
+    }
+
+    ReleaseSRWLockExclusive(&state_lock);
+    out.flags |= SC_INV_NATIVE_ENTERED;
+    out.native_exception = calls.ensure_items(calls.context, player, delta_w, delta_e, delta_s, delta_u);
+
+    SnapshotFacts after{};
+    const bool read_ok = calls.read(calls.context, player, after) && valid_facts(after);
+    if (read_ok) {
+        out.flags |= SC_INV_AFTER_VALID;
+        out.weapons_after = after.weapons;
+        out.equipment_after = after.equipment;
+        out.ice_bomb_after = after.ice_bomb;
+        out.dash_after = after.dash;
+        out.slayer_key_after = after.slayer_key;
+        out.frag_grenade_after = after.frag_grenade;
+        out.special_after = after.special_weapons;
+        out.upgrades_after = after.persistent_upgrades;
+        out.health_tier_after = after.health_tier;
+        out.armor_tier_after = after.armor_tier;
+        out.ammo_tier_after = after.ammo_tier;
+    }
+    if (!verified_items(needed, after, read_ok, out.native_exception)) {
+        out.outcome = SC_INV_NATIVE_FAILED;
+        return;
+    }
+    if (!calls.refresh(calls.context, player)) {
+        out.outcome = SC_INV_REFRESH_FAILED;
+        return;
+    }
+    out.flags |= SC_INV_REFRESHED;
+    out.outcome = SC_INV_MUTATED;
+
+    AcquireSRWLockExclusive(&state_lock);
+    ++total_operations;
+    out.operations_applied = total_operations;
+    ReleaseSRWLockExclusive(&state_lock);
+    return;
+}
+
+static bool verified_capacity(const SnapshotFacts& needed, const SnapshotFacts& after, bool read_ok,
+                              uint32_t native_exception) {
+    if (native_exception || !read_ok || after.health_tier == SC_INVENTORY_UNKNOWN_TIER ||
+        after.health_tier < needed.health_tier || after.armor_tier == SC_INVENTORY_UNKNOWN_TIER ||
+        after.armor_tier < needed.armor_tier || after.ammo_tier == SC_INVENTORY_UNKNOWN_TIER ||
+        after.ammo_tier < needed.ammo_tier) {
+        return false;
+    }
+    return true;
+}
+
+static void set_capacity_locked(const sc_inventory_request& r, sc_inventory_result& out, const Calls& calls,
+                                uintptr_t player, const SnapshotFacts& before) {
+    update_capacity_locked(r.health_tier, r.armor_tier, r.ammo_tier);
+    const auto needed = shared_state;
+
+    if (before.health_tier == SC_INVENTORY_UNKNOWN_TIER || before.armor_tier == SC_INVENTORY_UNKNOWN_TIER ||
+        before.ammo_tier == SC_INVENTORY_UNKNOWN_TIER) {
+        ReleaseSRWLockExclusive(&state_lock);
+        out.outcome = SC_INV_READ_FAILED;
+        return;
+    }
+    if (before.health_tier >= needed.health_tier && before.armor_tier >= needed.armor_tier &&
+        before.ammo_tier >= needed.ammo_tier) {
+        out.weapons_after = before.weapons;
+        out.equipment_after = before.equipment;
+        out.ice_bomb_after = before.ice_bomb;
+        out.dash_after = before.dash;
+        out.slayer_key_after = before.slayer_key;
+        out.frag_grenade_after = before.frag_grenade;
+        out.special_after = before.special_weapons;
+        out.upgrades_after = before.persistent_upgrades;
+        out.health_tier_after = before.health_tier;
+        out.armor_tier_after = before.armor_tier;
+        out.ammo_tier_after = before.ammo_tier;
+        out.operations_applied = total_operations;
+        ReleaseSRWLockExclusive(&state_lock);
+        out.flags |= SC_INV_AFTER_VALID;
+        out.outcome = SC_INV_OBSERVED;
+        return;
+    }
+
+    ReleaseSRWLockExclusive(&state_lock);
+    out.flags |= SC_INV_NATIVE_ENTERED;
+    out.native_exception =
+        calls.set_capacity(calls.context, player, needed.health_tier, needed.armor_tier, needed.ammo_tier);
+
+    SnapshotFacts after{};
+    const bool read_ok = calls.read(calls.context, player, after) && valid_facts(after);
+    if (read_ok) {
+        out.flags |= SC_INV_AFTER_VALID;
+        out.weapons_after = after.weapons;
+        out.equipment_after = after.equipment;
+        out.ice_bomb_after = after.ice_bomb;
+        out.dash_after = after.dash;
+        out.slayer_key_after = after.slayer_key;
+        out.frag_grenade_after = after.frag_grenade;
+        out.special_after = after.special_weapons;
+        out.upgrades_after = after.persistent_upgrades;
+        out.health_tier_after = after.health_tier;
+        out.armor_tier_after = after.armor_tier;
+        out.ammo_tier_after = after.ammo_tier;
+    }
+    if (!verified_capacity(needed, after, read_ok, out.native_exception)) {
+        out.outcome = SC_INV_NATIVE_FAILED;
+        return;
+    }
+    if (!calls.refresh(calls.context, player)) {
+        out.outcome = SC_INV_REFRESH_FAILED;
+        return;
+    }
+    out.flags |= SC_INV_REFRESHED;
+    out.outcome = SC_INV_MUTATED;
+
+    AcquireSRWLockExclusive(&state_lock);
+    ++total_operations;
+    out.operations_applied = total_operations;
+    ReleaseSRWLockExclusive(&state_lock);
+    return;
 }
 
 void execute(const sc_inventory_request& r, sc_inventory_result& out, const Calls& calls) {
@@ -213,147 +381,11 @@ void execute(const sc_inventory_request& r, sc_inventory_result& out, const Call
     }
 
     if (r.kind == SC_INV_ENSURE) {
-        update_items_locked(r.weapons, r.equipment, r.special_weapons, r.persistent_upgrades);
-        const auto needed = shared_state;
-        if ((needed.weapons && before.weapons == SC_INVENTORY_UNKNOWN_MASK) ||
-            (needed.equipment && before.equipment == SC_INVENTORY_UNKNOWN_MASK)) {
-            ReleaseSRWLockExclusive(&state_lock);
-            out.outcome = SC_INV_READ_FAILED; return;
-        }
-        const uint32_t delta_w = needed.weapons & ~before.weapons;
-        const uint32_t delta_e = needed.equipment & ~before.equipment;
-        const uint32_t delta_s = needed.special_weapons & ~before.special_weapons;
-        const uint32_t delta_u = needed.persistent_upgrades & ~before.persistent_upgrades;
-
-        if (!delta_w && !delta_e && !delta_s && !delta_u) {
-            // already owned; finish without changing anything
-            out.weapons_after = before.weapons;
-            out.equipment_after = before.equipment;
-            out.ice_bomb_after = before.ice_bomb;
-            out.dash_after = before.dash;
-            out.slayer_key_after = before.slayer_key;
-            out.frag_grenade_after = before.frag_grenade;
-            out.special_after = before.special_weapons;
-            out.upgrades_after = before.persistent_upgrades;
-            out.health_tier_after = before.health_tier;
-            out.armor_tier_after = before.armor_tier;
-            out.ammo_tier_after = before.ammo_tier;
-            out.operations_applied = total_operations;
-            ReleaseSRWLockExclusive(&state_lock);
-            out.flags |= SC_INV_AFTER_VALID;
-            out.outcome = SC_INV_OBSERVED;
-            return;
-        }
-
-        ReleaseSRWLockExclusive(&state_lock);
-        out.flags |= SC_INV_NATIVE_ENTERED;
-        out.native_exception = calls.ensure_items(calls.context, player, delta_w, delta_e, delta_s, delta_u);
-
-        SnapshotFacts after{};
-        const bool read_ok = calls.read(calls.context, player, after) && valid_facts(after);
-        if (read_ok) {
-            out.flags |= SC_INV_AFTER_VALID;
-            out.weapons_after = after.weapons;
-            out.equipment_after = after.equipment;
-            out.ice_bomb_after = after.ice_bomb;
-            out.dash_after = after.dash;
-            out.slayer_key_after = after.slayer_key;
-            out.frag_grenade_after = after.frag_grenade;
-            out.special_after = after.special_weapons;
-            out.upgrades_after = after.persistent_upgrades;
-            out.health_tier_after = after.health_tier;
-            out.armor_tier_after = after.armor_tier;
-            out.ammo_tier_after = after.ammo_tier;
-        }
-        if (out.native_exception || !read_ok ||
-            (needed.weapons && (after.weapons == SC_INVENTORY_UNKNOWN_MASK ||
-             (after.weapons & needed.weapons) != needed.weapons)) ||
-            (needed.equipment && (after.equipment == SC_INVENTORY_UNKNOWN_MASK ||
-             (after.equipment & needed.equipment) != needed.equipment))) {
-            out.outcome = SC_INV_NATIVE_FAILED; return;
-        }
-        if (!calls.refresh(calls.context, player)) {
-            out.outcome = SC_INV_REFRESH_FAILED; return;
-        }
-        out.flags |= SC_INV_REFRESHED;
-        out.outcome = SC_INV_MUTATED;
-
-        AcquireSRWLockExclusive(&state_lock);
-        ++total_operations;
-        out.operations_applied = total_operations;
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
+        return ensure_locked(r, out, calls, player, before);
     }
 
     if (r.kind == SC_INV_SET_CAPACITY) {
-        update_capacity_locked(r.health_tier, r.armor_tier, r.ammo_tier);
-        const auto needed = shared_state;
-
-        if (before.health_tier == SC_INVENTORY_UNKNOWN_TIER ||
-            before.armor_tier == SC_INVENTORY_UNKNOWN_TIER ||
-            before.ammo_tier == SC_INVENTORY_UNKNOWN_TIER) {
-            ReleaseSRWLockExclusive(&state_lock);
-            out.outcome = SC_INV_READ_FAILED; return;
-        }
-        if (before.health_tier >= needed.health_tier &&
-            before.armor_tier >= needed.armor_tier &&
-            before.ammo_tier >= needed.ammo_tier) {
-            // capacity is already high enough; finish without changing it
-            out.weapons_after = before.weapons;
-            out.equipment_after = before.equipment;
-            out.ice_bomb_after = before.ice_bomb;
-            out.dash_after = before.dash;
-            out.slayer_key_after = before.slayer_key;
-            out.frag_grenade_after = before.frag_grenade;
-            out.special_after = before.special_weapons;
-            out.upgrades_after = before.persistent_upgrades;
-            out.health_tier_after = before.health_tier;
-            out.armor_tier_after = before.armor_tier;
-            out.ammo_tier_after = before.ammo_tier;
-            out.operations_applied = total_operations;
-            ReleaseSRWLockExclusive(&state_lock);
-            out.flags |= SC_INV_AFTER_VALID;
-            out.outcome = SC_INV_OBSERVED;
-            return;
-        }
-
-        ReleaseSRWLockExclusive(&state_lock);
-        out.flags |= SC_INV_NATIVE_ENTERED;
-        out.native_exception = calls.set_capacity(calls.context, player, needed.health_tier, needed.armor_tier, needed.ammo_tier);
-
-        SnapshotFacts after{};
-        const bool read_ok = calls.read(calls.context, player, after) && valid_facts(after);
-        if (read_ok) {
-            out.flags |= SC_INV_AFTER_VALID;
-            out.weapons_after = after.weapons;
-            out.equipment_after = after.equipment;
-            out.ice_bomb_after = after.ice_bomb;
-            out.dash_after = after.dash;
-            out.slayer_key_after = after.slayer_key;
-            out.frag_grenade_after = after.frag_grenade;
-            out.special_after = after.special_weapons;
-            out.upgrades_after = after.persistent_upgrades;
-            out.health_tier_after = after.health_tier;
-            out.armor_tier_after = after.armor_tier;
-            out.ammo_tier_after = after.ammo_tier;
-        }
-        if (out.native_exception || !read_ok ||
-            after.health_tier == SC_INVENTORY_UNKNOWN_TIER || after.health_tier < needed.health_tier ||
-            after.armor_tier == SC_INVENTORY_UNKNOWN_TIER || after.armor_tier < needed.armor_tier ||
-            after.ammo_tier == SC_INVENTORY_UNKNOWN_TIER || after.ammo_tier < needed.ammo_tier) {
-            out.outcome = SC_INV_NATIVE_FAILED; return;
-        }
-        if (!calls.refresh(calls.context, player)) {
-            out.outcome = SC_INV_REFRESH_FAILED; return;
-        }
-        out.flags |= SC_INV_REFRESHED;
-        out.outcome = SC_INV_MUTATED;
-
-        AcquireSRWLockExclusive(&state_lock);
-        ++total_operations;
-        out.operations_applied = total_operations;
-        ReleaseSRWLockExclusive(&state_lock);
-        return;
+        return set_capacity_locked(r, out, calls, player, before);
     }
 
     ReleaseSRWLockExclusive(&state_lock);

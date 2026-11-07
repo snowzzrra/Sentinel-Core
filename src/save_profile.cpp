@@ -71,49 +71,65 @@ private:
         out = {reinterpret_cast<const char*>(bytes_.data() + cursor_), length}; cursor_ += length;
         return true;
     }
+    bool selection_number(size_t width, uint64_t raw, std::string_view field) {
+        if (width < 8 && (raw & (uint64_t(1) << (width * 8 - 1)))) raw |= UINT64_MAX << (width * 8);
+        const auto value = static_cast<int64_t>(raw);
+        if (field == "magicNumber") {
+            if (value != profile_magic) return false;
+            fields_->magic_present = true;
+        } else {
+            if (value < 0 || value >= 12) return false;
+            fields_->index = static_cast<int32_t>(value); fields_->index_present = true;
+        }
+    return true;
+}
+    bool number_node(uint8_t tag, bool selection, std::string_view field) {
+    const size_t width = tag == 9 ? 8 : size_t(1) << ((tag - 1) % 4);
+    uint64_t raw = 0;
+    if (!integer(width, raw)) return false;
+    if (selection && !selection_number(width, raw, field)) return false;
+    return true;
+}
+    bool text_node(bool selection) {
+    std::string_view value;
+    if (!string(value)) return false;
+    if (selection) {
+        if (value.size() >= 64 || value.find('\0') != std::string_view::npos) return false;
+        fields_->name.assign(value); fields_->name_present = true;
+    }
+    return true;
+}
+    bool collection_node(uint8_t tag, unsigned depth) {
+    uint32_t children = 0;
+    if (!count(children)) return false;
+    std::unordered_set<std::string_view> keys;
+    for (uint32_t i = 0; i < children; ++i) {
+        std::string_view key;
+        if (tag == 14 && (!string(key) || key.find('\0') != std::string_view::npos || !keys.insert(key).second)) return false;
+        if (!node(depth + 1, depth == 0 ? key : std::string_view{})) return false;
+    }
+    return true;
+}
+    bool selection_tag(std::string_view field, uint8_t tag) {
+        if (field == "lastSaveGameName") return tag == 10;
+        if (field == "lastUsedGameSlot" || field == "magicNumber") return tag >= 1 && tag <= 4;
+        return true;
+    }
+    bool selection_field(std::string_view field) {
+        return field == "lastSaveGameName" || field == "lastUsedGameSlot" || field == "magicNumber";
+    }
     bool node(unsigned depth, std::string_view field) {
         if (depth > 64 || ++nodes_ > maximum_profile || cursor_ == bytes_.size()) return false;
         const uint8_t tag = bytes_[cursor_++];
-        const bool selection = field == "lastSaveGameName" || field == "lastUsedGameSlot" || field == "magicNumber";
+        const bool selection = selection_field(field);
         if (!depth && tag != 14) return false;
-        if (selection && ((field == "lastSaveGameName" && tag != 10) ||
-            (field != "lastSaveGameName" && (tag < 1 || tag > 4)))) return false;
-        if (tag >= 1 && tag <= 9) {
-            const size_t width = tag == 9 ? 8 : size_t(1) << ((tag - 1) % 4);
-            uint64_t raw = 0;
-            if (!integer(width, raw)) return false;
-            if (selection) {
-                if (width < 8 && (raw & (uint64_t(1) << (width * 8 - 1)))) raw |= UINT64_MAX << (width * 8);
-                const auto value = static_cast<int64_t>(raw);
-                if (field == "magicNumber") {
-                    if (value != profile_magic) return false;
-                    fields_->magic_present = true;
-                } else {
-                    if (value < 0 || value >= 12) return false;
-                    fields_->index = static_cast<int32_t>(value); fields_->index_present = true;
-                }
-            }
-            return true;
-        }
+        if (!selection_tag(field, tag)) return false;
+        if (tag >= 1 && tag <= 9) return number_node(tag, selection, field);
         if (tag == 10) {
-            std::string_view value;
-            if (!string(value)) return false;
-            if (selection) {
-                if (value.size() >= 64 || value.find('\0') != std::string_view::npos) return false;
-                fields_->name.assign(value); fields_->name_present = true;
-            }
-            return true;
+            return text_node(selection);
         }
         if (tag == 13 || tag == 14) {
-            uint32_t children = 0;
-            if (!count(children)) return false;
-            std::unordered_set<std::string_view> keys;
-            for (uint32_t i = 0; i < children; ++i) {
-                std::string_view key;
-                if (tag == 14 && (!string(key) || key.find('\0') != std::string_view::npos || !keys.insert(key).second)) return false;
-                if (!node(depth + 1, depth == 0 ? key : std::string_view{})) return false;
-            }
-            return true;
+            return collection_node(tag, depth);
         }
         return tag == 0 || tag == 11 || tag == 12;
     }
@@ -121,6 +137,46 @@ private:
     Fields* fields_ = nullptr;
     size_t cursor_ = 12, nodes_ = 0;
 };
+struct ProfileFiles { uintptr_t entries; int32_t count, capacity; };
+static bool profile_file_layout(engine::Memory& memory, uintptr_t data, const ProfileCalls& calls, ProfileFiles& files,
+                                uintptr_t& file, uintptr_t& buffer, uint64_t& length, uint64_t& capacity) {
+    uintptr_t vtable = 0, name_address = 0;
+    return named(memory, data, "PROFILE") && at(memory, data, 0x1c0, files) &&
+        files.count == 1 && files.capacity >= 1 && at(memory, files.entries, 0, file) &&
+        at(memory, file, 0, vtable) && vtable == calls.image_base + 0x2a575a8 &&
+        engine::add(file, 8, sizeof(NativeString), name_address) && named(memory, name_address, "profile.bin") &&
+        at(memory, file, 0x150, length) && at(memory, file, 0x158, capacity) && at(memory, file, 0x168, buffer);
+}
+static const char* copy_profile_bytes(engine::Memory& memory, uintptr_t buffer, std::vector<uint8_t>& bytes, ProfileRead& acquisition) {
+    for (size_t offset = 0; offset < bytes.size();) {
+        const size_t size = std::min(engine::Memory::maximum_copy, bytes.size() - offset);
+        acquisition.offset = offset; acquisition.size = size;
+        const auto result = memory.copy(buffer + offset, bytes.data() + offset, size);
+        acquisition.reason = result.reason; acquisition.error = result.error;
+        if (result.reason == SC_REASON_OUT_OF_RANGE) return "profile_copy_policy_rejected";
+        if (result.reason == SC_REASON_PARTIAL_READ) return "profile_buffer_partial_read";
+        if (result.reason) return "profile_buffer_inaccessible";
+        offset += size;
+    }
+    return nullptr;
+}
+static const char* stable_profile_source(engine::Memory& memory, uintptr_t data, const ProfileFiles& files, uintptr_t file, uintptr_t buffer, uint64_t length, uint64_t capacity, ProfileRead& acquisition) {
+    ProfileFiles after{}; uintptr_t next_file = 0, next_buffer = 0; uint64_t next_length = 0, next_capacity = 0;
+    const auto stable_field = [&](uintptr_t base, size_t offset, auto& value) {
+        uintptr_t address = 0;
+        const auto result = engine::add(base, offset, sizeof(value), address) ? memory.copy(address, &value, sizeof(value)) :
+            engine::ReadResult{SC_REASON_OUT_OF_RANGE, 0};
+        acquisition.reason = result.reason; acquisition.error = result.error;
+        return result.reason == SC_REASON_NONE;
+    };
+    if (!stable_field(data, 0x1c0, after) || !stable_field(files.entries, 0, next_file) ||
+        !stable_field(file, 0x150, next_length) || !stable_field(file, 0x158, next_capacity) || !stable_field(file, 0x168, next_buffer))
+        return "profile_source_metadata_unreadable";
+    if (std::tie(after.entries, after.count, after.capacity, next_file, next_length, next_capacity, next_buffer) !=
+        std::tie(files.entries, files.count, files.capacity, file, length, capacity, buffer))
+        return "profile_source_changed";
+    return nullptr;
+}
 bool payload(engine::Memory& memory, uintptr_t data, const ProfileCalls& calls, Fields& fields, Session& trace, bool output = false) {
     ProfileRead acquisition{};
     const auto record = [&](ProfileStage stage, bool valid, const char* predicate) {
@@ -128,14 +184,10 @@ bool payload(engine::Memory& memory, uintptr_t data, const ProfileCalls& calls, 
             valid ? ProfileStatus::succeeded : ProfileStatus::refused, predicate, false, 0, 0, 0, acquisition);
         return valid;
     };
-    struct Files { uintptr_t entries; int32_t count, capacity; } files{};
-    uintptr_t file = 0, vtable = 0, buffer = 0, name_address = 0;
+    ProfileFiles files{};
+    uintptr_t file = 0, buffer = 0;
     uint64_t length = 0, capacity = 0;
-    if (!named(memory, data, "PROFILE") || !at(memory, data, 0x1c0, files) ||
-        files.count != 1 || files.capacity < 1 || !at(memory, files.entries, 0, file) ||
-        !at(memory, file, 0, vtable) || vtable != calls.image_base + 0x2a575a8 ||
-        !engine::add(file, 8, sizeof(NativeString), name_address) || !named(memory, name_address, "profile.bin") ||
-        !at(memory, file, 0x150, length) || !at(memory, file, 0x158, capacity) || !at(memory, file, 0x168, buffer))
+    if (!profile_file_layout(memory, data, calls, files, file, buffer, length, capacity))
         return record(ProfileStage::framing, false, "profile_file_layout_or_size");
     acquisition.requested = length;
     if (length < 14 || length > maximum_profile || length > capacity)
@@ -151,32 +203,10 @@ bool payload(engine::Memory& memory, uintptr_t data, const ProfileCalls& calls, 
     // reference (or the provider caller's reference) still alive. No native call
     // can resize/release this file during acquisition; refcounts alone are not a
     // concurrency lock. Check the owned file descriptor again before parsing.
-    for (size_t offset = 0; offset < bytes.size();) {
-        const size_t size = std::min(engine::Memory::maximum_copy, bytes.size() - offset);
-        acquisition.offset = offset; acquisition.size = size;
-        const auto result = memory.copy(buffer + offset, bytes.data() + offset, size);
-        acquisition.reason = result.reason; acquisition.error = result.error;
-        if (result.reason) {
-            const char* predicate = result.reason == SC_REASON_OUT_OF_RANGE ? "profile_copy_policy_rejected" :
-                result.reason == SC_REASON_PARTIAL_READ ? "profile_buffer_partial_read" : "profile_buffer_inaccessible";
-            return record(ProfileStage::framing, false, predicate); // partial vector is discarded, never parsed
-        }
-        offset += size; // whole span was checked; offset <= limited length
-    }
-    Files after{}; uintptr_t next_file = 0, next_buffer = 0; uint64_t next_length = 0, next_capacity = 0;
-    const auto stable_field = [&](uintptr_t base, size_t offset, auto& value) {
-        uintptr_t address = 0;
-        const auto result = engine::add(base, offset, sizeof(value), address) ? memory.copy(address, &value, sizeof(value)) :
-            engine::ReadResult{SC_REASON_OUT_OF_RANGE, 0};
-        acquisition.reason = result.reason; acquisition.error = result.error;
-        return result.reason == SC_REASON_NONE;
-    };
-    if (!stable_field(data, 0x1c0, after) || !stable_field(files.entries, 0, next_file) ||
-        !stable_field(file, 0x150, next_length) || !stable_field(file, 0x158, next_capacity) || !stable_field(file, 0x168, next_buffer))
-        return record(ProfileStage::framing, false, "profile_source_metadata_unreadable");
-    if (after.entries != files.entries || after.count != files.count || after.capacity != files.capacity ||
-        next_file != file || next_length != length || next_capacity != capacity || next_buffer != buffer)
-        return record(ProfileStage::framing, false, "profile_source_changed");
+    if (const auto predicate = copy_profile_bytes(memory, buffer, bytes, acquisition))
+        return record(ProfileStage::framing, false, predicate);
+    if (const auto predicate = stable_profile_source(memory, data, files, file, buffer, length, capacity, acquisition))
+        return record(ProfileStage::framing, false, predicate);
     constexpr uint8_t header[]{0xa9, 0x0d, 0x8d, 0xaa, 0, 0, 0, 2};
     if (!record(ProfileStage::framing, !std::memcmp(bytes.data(), header, sizeof(header)), "supported_binary_v2_header")) return false;
     const uint32_t checksum = uint32_t(bytes[8]) << 24 | uint32_t(bytes[9]) << 16 | uint32_t(bytes[10]) << 8 | bytes[11];
@@ -186,7 +216,7 @@ bool payload(engine::Memory& memory, uintptr_t data, const ProfileCalls& calls, 
 }
 bool callbacks(engine::Memory& memory, ProfileOwner& owner, const ProfileCalls& calls, Session& session, BStage stage) {
     const auto profile = owner.profile, shell = owner.shell;
-    uintptr_t context = 0, major = 0, minor = 0, version = 0, serialize = 0, vtable = 0;
+    uintptr_t context = 0;
     uintptr_t backlink = 0, manager = 0;
     BIoTrace diagnostic{&session.btrace,stage,0,profile};
     const auto read=[&](uintptr_t base,size_t offset,auto& value) {
@@ -196,15 +226,22 @@ bool callbacks(engine::Memory& memory, ProfileOwner& owner, const ProfileCalls& 
         if(!valid) session.btrace.record(stage,BStatus::refused,why,0,{{"field_offset",offset}},profile);
         return valid;
     };
-    return check(read(profile, 0x18, context) && context == shell,"profile_context_link",0x18) &&
+    if (!(check(read(profile, 0x18, context) && context == shell,"profile_context_link",0x18) &&
         check(read(shell, 8, backlink) && backlink == profile,"profile_shell_backlink",8) &&
         check(read(shell, 16, manager) && manager == owner.manager && manager,"profile_manager_link",16) &&
-        check(read(profile, 8, owner.user) && owner.user != UINT32_MAX,"profile_native_user_validity",8) &&
-        check(read(shell, 0, vtable) && vtable == calls.image_base + 0x2dbbbe8,"profile_shell_vtable",0) &&
-        check(read(profile, 0x20, major) && major == calls.image_base + 0x1416b50,"profile_major_callback",0x20) &&
-        check(read(profile, 0x28, minor) && minor == calls.image_base + 0x1416f10,"profile_minor_callback",0x28) &&
-        check(read(profile, 0x30, version) && version == calls.image_base + 0x1416ee0,"profile_version_callback",0x30) &&
-        check(read(profile, 0x48, serialize) && serialize == calls.image_base + 0x141bdd0,"profile_serializer_callback",0x48);
+        check(read(profile, 8, owner.user) && owner.user != UINT32_MAX,"profile_native_user_validity",8) )) return false;
+    struct Callback { uintptr_t base; size_t offset; uintptr_t expected; const char* predicate; };
+    const Callback expected[]{
+        {shell, 0, calls.image_base + 0x2dbbbe8, "profile_shell_vtable"},
+        {profile, 0x20, calls.image_base + 0x1416b50, "profile_major_callback"},
+        {profile, 0x28, calls.image_base + 0x1416f10, "profile_minor_callback"},
+        {profile, 0x30, calls.image_base + 0x1416ee0, "profile_version_callback"},
+        {profile, 0x48, calls.image_base + 0x141bdd0, "profile_serializer_callback"}};
+    for (const auto& callback : expected) {
+        uintptr_t actual = 0;
+        if (!check(read(callback.base, callback.offset, actual) && actual == callback.expected, callback.predicate, callback.offset)) return false;
+    }
+    return true;
 }
 struct ReadContext : ProfileOwner {
     ProfileChoice choice{};
@@ -222,6 +259,10 @@ struct Reading {
     explicit Reading(ReadContext& context) { active_read = &context; }
     ~Reading() { active_read = nullptr; }
 };
+static bool profile_member_present(const ProfileValue* member, uintptr_t absent) {
+    return member && reinterpret_cast<uintptr_t>(member) != absent;
+}
+static bool profile_magic_value(const ProfileValue& value) { return value.type == 1 && value.payload == profile_magic; }
 bool values(Session& owner, BStage stage, engine::Memory& memory, const ProfileHolder& view, const ProfileCalls& calls,
         ProfileValue*& name, ProfileValue*& index, std::string& text, int32_t& number, const char*& predicate,
         int cursor_state = 1) {
@@ -245,14 +286,14 @@ bool values(Session& owner, BStage stage, engine::Memory& memory, const ProfileH
     name = calls.lookup(view.root, "lastSaveGameName"); index = calls.lookup(view.root, "lastUsedGameSlot");
     const auto magic = calls.lookup(view.root, "magicNumber");
     const auto absent = calls.image_base + 0x4275fb0;
-    name_present=name && reinterpret_cast<uintptr_t>(name)!=absent;
-    index_present=index && reinterpret_cast<uintptr_t>(index)!=absent;
-    magic_present=magic && reinterpret_cast<uintptr_t>(magic)!=absent;
+    name_present=profile_member_present(name, absent);
+    index_present=profile_member_present(index, absent);
+    magic_present=profile_member_present(magic, absent);
     if (!require(name_present && index_present && magic_present, "serialized_selection_member_missing") ||
         !require(read(reinterpret_cast<uintptr_t>(name), nv) && nv.type == 4, "serialized_name_type_or_read") ||
         !require(read(reinterpret_cast<uintptr_t>(index), iv) && iv.type == 1, "serialized_slot_type_or_read") ||
         !require(iv.payload < 12, "serialized_slot_out_of_range") ||
-        !require(read(reinterpret_cast<uintptr_t>(magic), mv) && mv.type == 1 && mv.payload == profile_magic,
+        !require(read(reinterpret_cast<uintptr_t>(magic), mv) && profile_magic_value(mv),
             "serialized_magic_type_or_value") ||
         !require(native_text(memory, static_cast<uintptr_t>(nv.payload), text), "serialized_name_unreadable_or_too_long")) return false;
     number = static_cast<int32_t>(iv.payload);
@@ -279,30 +320,37 @@ void selection(ProfileValue* name, ProfileValue* index, const char* text, int32_
     calls.destroy(&next_name); calls.destroy(&next_index);
 }
 }
+static bool read_profile_shell(engine::Memory& memory, SaveReference* reference, ReadContext& context) {
+    return at(memory, reference->control, 8, context.shell) && at(memory, context.shell, 8, context.profile) &&
+        at(memory, context.shell, 16, context.manager);
+}
+static bool prepare_profile_read(Session& owner, engine::Memory& memory, SaveReference* reference, SaveReference* data, const ProfileCalls& calls, ReadContext& context, const char*& predicate) {
+    uintptr_t payload_object = 0;
+    Fields fields;
+    // A completed provider read can reach this callback after another route
+    // faulted. Refuse before native import, even with a valid cached baseline.
+    const auto require = [&](bool ok, const char* why) { if (!ok) predicate = why; return ok; };
+    return require(owner.native_io(), "session_already_faulted") && require(!active_read, "reentrant_profile_reader") &&
+        require(owner.profile_choice(context.choice), "ap_catalog_choice_unavailable") &&
+        require(read_profile_shell(memory, reference, context), "profile_shell_layout") &&
+        require(callbacks(memory, context, calls, owner, BStage::profile_read), "profile_callback_identity") &&
+        require(at(memory, data->control, 8, payload_object), "profile_data_reference") &&
+        require(payload(memory, payload_object, calls, fields, owner), "profile_payload_rejected") &&
+        require(owner.capture_profile_baseline(context, std::move(fields.name), fields.index),
+            "vanilla_selection_baseline_mismatch");
+}
 uint64_t read_profile(Session& owner, engine::Memory& memory, SaveReference* reference, SaveReference* data, const ProfileCalls& calls) {
     if (!owner.routed()) {
         owner.unrouted_import("profile_reader", "import");
         if (owner.state() == SessionState::disabled) return calls.read(reference, data);
         calls.release(reference); calls.release(data); return 0x10;
     }
-    ReadContext context{}; uintptr_t payload_object = 0;
+    ReadContext context{};
     bool valid = false;
     const char* predicate = "allocation_failed";
     owner.profile_step(ProfileStage::reader, ProfileStatus::entered, "native_reader_boundary");
     try {
-        Fields fields;
-        // A completed provider read can reach this callback after another route
-        // faulted. Refuse before native import, even with a valid cached baseline.
-        const auto require = [&](bool ok, const char* why) { if (!ok) predicate = why; return ok; };
-        valid = require(owner.native_io(), "session_already_faulted") && require(!active_read, "reentrant_profile_reader") &&
-            require(owner.profile_choice(context.choice), "ap_catalog_choice_unavailable") &&
-            require(at(memory, reference->control, 8, context.shell) && at(memory, context.shell, 8, context.profile) &&
-                at(memory, context.shell, 16, context.manager), "profile_shell_layout") &&
-            require(callbacks(memory, context, calls, owner, BStage::profile_read), "profile_callback_identity") &&
-            require(at(memory, data->control, 8, payload_object), "profile_data_reference") &&
-            require(payload(memory, payload_object, calls, fields, owner), "profile_payload_rejected") &&
-            require(owner.capture_profile_baseline(context, std::move(fields.name), fields.index),
-                "vanilla_selection_baseline_mismatch");
+        valid = prepare_profile_read(owner, memory, reference, data, calls, context, predicate);
     } catch (const std::bad_alloc&) {}
     if (!valid) {
         owner.profile_step(ProfileStage::reader, ProfileStatus::refused, predicate);
@@ -324,6 +372,70 @@ uint64_t read_profile(Session& owner, engine::Memory& memory, SaveReference* ref
     }
     return 0;
 }
+static uint32_t refuse_profile_serializer(Session& owner, ProfileStage stage, const char* predicate) {
+    owner.profile_step(stage, ProfileStatus::refused, predicate);
+    owner.fail_profile(); return 3u;
+}
+static uint32_t serialize_profile_overlay(Session& owner, engine::Memory& memory, const ProfileOwner& identity, ProfileHolder* holder, const ProfileHolder& view, const ProfileCalls& calls, const char* baseline, int32_t baseline_index) {
+    const auto profile = identity.profile, manager = identity.manager, shell = identity.shell;
+    const auto stage = ProfileStage::overlay; const auto bstage = BStage::profile_read;
+    ProfileValue* name = nullptr; ProfileValue* index = nullptr;
+    std::string current; int32_t current_index = -1; const char* predicate = "serialized_selection_invalid";
+    auto context = active_read;
+    if (!context || context->applied || context->profile != profile || context->manager != manager ||
+        context->shell != shell ||
+        !values(owner, bstage, memory, view, calls, name, index, current, current_index, predicate) ||
+        current != baseline || current_index != baseline_index) return refuse_profile_serializer(owner, stage, "structured_selection_or_read_context_mismatch");
+    selection(name, index, context->choice.name.data(), context->choice.index, calls);
+    context->applied = true;
+    const auto result = calls.serialize(manager, profile, holder);
+    owner.profile_step(ProfileStage::overlay, result ? ProfileStatus::refused : ProfileStatus::succeeded,
+        result ? "native_serializer_result" : "ap_selection_only_applied", true, 0, result);
+    return result;
+}
+static bool capture_serialized_choice(Session& owner, engine::Memory& memory, const ProfileCalls& calls, uintptr_t profile, uintptr_t manager, const std::string& current, int32_t current_index, int32_t baseline_index) {
+    if (active_write) {
+        std::string campaign;
+        owner.btrace.record(BStage::profile_capture,BStatus::entered,"serializer_capture_context",active_write->write.sequence,
+            {{"profile_matches",active_write->profile==profile},{"manager_matches",active_write->manager==manager},
+             {"index",current_index},{"baseline_index",baseline_index}},profile);
+        if (active_write->write.sequence) { refuse_profile_serializer(owner, ProfileStage::output_validation, "profile_write_serializer_repeated"); return false; }
+        if (active_write->profile != profile || active_write->manager != manager) { refuse_profile_serializer(owner, ProfileStage::output_validation, "profile_write_context_owner_mismatch"); return false; }
+        if (!read_campaign_prefix(memory, calls.image_base, campaign)) { refuse_profile_serializer(owner, ProfileStage::output_validation, "profile_write_campaign_prefix_unreadable"); return false; }
+        if (!owner.capture_profile_write(current, current_index,
+            static_cast<unsigned>(native_campaign_index(campaign)), active_write->write)) { refuse_profile_serializer(owner, ProfileStage::output_validation, "profile_write_choice_or_campaign_mismatch"); return false; }
+    }
+    return true;
+}
+static uint32_t serialize_profile_output(Session& owner, engine::Memory& memory, const ProfileOwner& identity, ProfileHolder* holder, const ProfileHolder& view, const ProfileCalls& calls, const char* baseline, int32_t baseline_index) {
+    const auto profile = identity.profile, manager = identity.manager;
+    const auto stage = ProfileStage::output_validation; const auto bstage = BStage::profile_output;
+    ProfileValue* name = nullptr; ProfileValue* index = nullptr;
+    std::string current; int32_t current_index = -1; const char* predicate = "serialized_selection_invalid";
+    const auto result = calls.serialize(manager, profile, holder);
+    if (result) {
+        owner.profile_step(stage, ProfileStatus::refused, "native_output_serializer_result", true, 0, result);
+        owner.fail_profile(); return result;
+    }
+    // 1414978e0 passes its stack-local Json root to 14055a0c0 after
+    // serialization. Holder+8 is a mutable traversal cursor, not ownership
+    // of that document. Native 140e5d570 pushes idMasterLevelManager and
+    // completionInfo but pops only once, leaving the cursor in the former
+    // even for an empty list. Validate/restore the encoded entry document;
+    // neither restore the native traversal cursor nor import its subtree.
+    ProfileHolder returned{};
+    const int cursor_state=at(memory,reinterpret_cast<uintptr_t>(holder),0,returned)?
+        (returned.root==view.root?1:0):-1;
+    if (!values(owner, bstage, memory, view, calls, name, index, current, current_index, predicate, cursor_state))
+        return refuse_profile_serializer(owner, stage, predicate);
+    if (!owner.observe_profile_choice(current, current_index)) return refuse_profile_serializer(owner, stage, "serialized_selection_not_in_owned_catalog");
+    if (!capture_serialized_choice(owner, memory, calls, profile, manager, current, current_index, baseline_index)) return 3u;
+    selection(name, index, baseline, baseline_index, calls);
+    owner.btrace.record(BStage::profile_output,BStatus::succeeded,"native_output_selection_restored",0,
+        {{"serialized_index",current_index},{"baseline_index",baseline_index},{"write_context",active_write!=nullptr},
+         {"cursor_state",cursor_state}},profile);
+    return result;
+}
 uint32_t serialize_profile(Session& owner, engine::Memory& memory, uintptr_t manager, uintptr_t profile,
         ProfileHolder* holder, const ProfileCalls& calls) {
     if (!owner.routed()) {
@@ -334,14 +446,10 @@ uint32_t serialize_profile(Session& owner, engine::Memory& memory, uintptr_t man
         return 3;
     }
     auto stage = ProfileStage::overlay;
-    const auto refuse = [&](const char* predicate) {
-        owner.profile_step(stage, ProfileStatus::refused, predicate);
-        owner.fail_profile(); return 3u;
-    };
     try {
         ProfileHolder view{};
         if (!at(memory, reinterpret_cast<uintptr_t>(holder), 0, view) || view.direction > 1) {
-            return refuse("serializer_holder_or_direction");
+            return refuse_profile_serializer(owner, stage, "serializer_holder_or_direction");
         }
         if (view.direction == 1) stage = ProfileStage::output_validation;
         const char* baseline = nullptr; int32_t baseline_index = -1;
@@ -349,59 +457,13 @@ uint32_t serialize_profile(Session& owner, engine::Memory& memory, uintptr_t man
         const auto bstage=view.direction==1 ? BStage::profile_output : BStage::profile_read;
         owner.btrace.record(bstage,BStatus::entered,"native_serializer_enter",0,
             {{"direction",view.direction},{"write_context",active_write!=nullptr},{"read_context",active_read!=nullptr}},profile);
-        if (!at(memory, profile, 0x18, identity.shell) || !callbacks(memory, identity, calls, owner, bstage)) return refuse("serializer_callback_identity");
-        if (!owner.profile_baseline(identity, baseline, baseline_index)) return refuse("serializer_baseline_unavailable");
-        const auto shell = identity.shell;
-        ProfileValue* name = nullptr; ProfileValue* index = nullptr;
-        std::string current; int32_t current_index = -1;
-        const char* predicate = "serialized_selection_invalid";
+        if (!at(memory, profile, 0x18, identity.shell) || !callbacks(memory, identity, calls, owner, bstage)) return refuse_profile_serializer(owner, stage, "serializer_callback_identity");
+        if (!owner.profile_baseline(identity, baseline, baseline_index)) return refuse_profile_serializer(owner, stage, "serializer_baseline_unavailable");
         if (view.direction == 0) {
-            auto context = active_read;
-            if (!context || context->applied || context->profile != profile || context->manager != manager ||
-                context->shell != shell ||
-                !values(owner, bstage, memory, view, calls, name, index, current, current_index, predicate) ||
-                current != baseline || current_index != baseline_index) return refuse("structured_selection_or_read_context_mismatch");
-            selection(name, index, context->choice.name.data(), context->choice.index, calls);
-            context->applied = true;
-            const auto result = calls.serialize(manager, profile, holder);
-            owner.profile_step(ProfileStage::overlay, result ? ProfileStatus::refused : ProfileStatus::succeeded,
-                result ? "native_serializer_result" : "ap_selection_only_applied", true, 0, result);
-            return result;
+            return serialize_profile_overlay(owner, memory, identity, holder, view, calls, baseline, baseline_index);
         }
-        const auto result = calls.serialize(manager, profile, holder);
-        if (result) {
-            owner.profile_step(stage, ProfileStatus::refused, "native_output_serializer_result", true, 0, result);
-            owner.fail_profile(); return result;
-        }
-        // 1414978e0 passes its stack-local Json root to 14055a0c0 after
-        // serialization. Holder+8 is a mutable traversal cursor, not ownership
-        // of that document. Native 140e5d570 pushes idMasterLevelManager and
-        // completionInfo but pops only once, leaving the cursor in the former
-        // even for an empty list. Validate/restore the encoded entry document;
-        // neither restore the native traversal cursor nor import its subtree.
-        ProfileHolder returned{};
-        const int cursor_state=at(memory,reinterpret_cast<uintptr_t>(holder),0,returned)?
-            (returned.root==view.root?1:0):-1;
-        if (!values(owner, bstage, memory, view, calls, name, index, current, current_index, predicate, cursor_state))
-            return refuse(predicate);
-        if (!owner.observe_profile_choice(current, current_index)) return refuse("serialized_selection_not_in_owned_catalog");
-        if (active_write) {
-            std::string campaign;
-            owner.btrace.record(BStage::profile_capture,BStatus::entered,"serializer_capture_context",active_write->write.sequence,
-                {{"profile_matches",active_write->profile==profile},{"manager_matches",active_write->manager==manager},
-                 {"index",current_index},{"baseline_index",baseline_index}},profile);
-            if (active_write->write.sequence) return refuse("profile_write_serializer_repeated");
-            if (active_write->profile != profile || active_write->manager != manager) return refuse("profile_write_context_owner_mismatch");
-            if (!read_campaign_prefix(memory, calls.image_base, campaign)) return refuse("profile_write_campaign_prefix_unreadable");
-            if (!owner.capture_profile_write(current, current_index,
-                static_cast<unsigned>(native_campaign_index(campaign)), active_write->write)) return refuse("profile_write_choice_or_campaign_mismatch");
-        }
-        selection(name, index, baseline, baseline_index, calls);
-        owner.btrace.record(BStage::profile_output,BStatus::succeeded,"native_output_selection_restored",0,
-            {{"serialized_index",current_index},{"baseline_index",baseline_index},{"write_context",active_write!=nullptr},
-             {"cursor_state",cursor_state}},profile);
-        return result;
-    } catch (const std::bad_alloc&) { return refuse("serializer_allocation_failed"); }
+        return serialize_profile_output(owner, memory, identity, holder, view, calls, baseline, baseline_index);
+    } catch (const std::bad_alloc&) { return refuse_profile_serializer(owner, stage, "serializer_allocation_failed"); }
 }
 bool profile_payload_valid(Session& owner, engine::Memory& memory, uintptr_t data, const ProfileCalls& calls) {
     const char* predicate = "profile_output_baseline_unavailable";
@@ -416,6 +478,12 @@ bool profile_payload_valid(Session& owner, engine::Memory& memory, uintptr_t dat
     owner.profile_step(ProfileStage::output_validation, ProfileStatus::refused, predicate);
     owner.fail_profile(); return false;
 }
+static bool retain_profile_write_context(engine::Memory& memory, SaveReference* profile, SaveReference* data, RetainProfileReference retain, WriteContext& context, SaveReference& held, uintptr_t& object) {
+    uintptr_t source = 0;
+    return !active_write && at(memory, profile->control, 8, source) &&
+        at(memory, source, 8, context.profile) && at(memory, source, 16, context.manager) &&
+        at(memory, data->control, 8, object) && object && retain(&held, data) && held.control;
+}
 void prepare_profile_write(Session& owner, engine::Memory& memory, SaveReference* profile, SaveReference* data,
         uintptr_t native_user, const char* suffix, PrepareProfile original, RetainProfileReference retain, const ProfileCalls& calls) {
     if (!owner.routed()) {
@@ -424,7 +492,7 @@ void prepare_profile_write(Session& owner, engine::Memory& memory, SaveReference
     }
     if (!owner.native_io()) owner.profile_step(ProfileStage::write_after_refusal, ProfileStatus::refused,
         "native_profile_encode_attempt_after_fault");
-    WriteContext context; SaveReference held{}; uintptr_t object = 0, source = 0;
+    WriteContext context; SaveReference held{}; uintptr_t object = 0;
     owner.btrace.record(BStage::profile_prepare,BStatus::entered,"native_profile_prepare_enter",0,
         {{"reentrant",active_write!=nullptr},{"native_io",owner.native_io()},{"profile_reference",profile->control!=0},
          {"data_reference",data->control!=0},{"native_user_present",native_user!=0},{"suffix_present",suffix!=nullptr}});
@@ -435,9 +503,7 @@ void prepare_profile_write(Session& owner, engine::Memory& memory, SaveReference
     // 141496330 passes a native user context as argument 3, NOT the shell.
     // 1414978e0 obtains the shell exclusively from profile->control+8; arg3 is
     // unused by its encoder. Keep it opaque and forward it unchanged.
-    const bool valid = !active_write && at(memory, profile->control, 8, source) &&
-        at(memory, source, 8, context.profile) && at(memory, source, 16, context.manager) &&
-        at(memory, data->control, 8, object) && object && retain(&held, data) && held.control;
+    const bool valid = retain_profile_write_context(memory, profile, data, retain, context, held, object);
     if (!valid) {
         owner.profile_step(ProfileStage::output_validation, ProfileStatus::refused, "profile_write_reference_context");
         owner.fail_profile();

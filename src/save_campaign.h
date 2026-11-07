@@ -80,6 +80,15 @@ public:
     CampaignSnapshot snapshot() const;
     bool backup_continuity(const SdkWriteObservation&, storage::TransportMetadata&) const;
 private:
+    bool allow_campaign_write();
+    bool menu_save_available(bool catalog, bool persisted, bool fortress) const;
+    bool hydrate_catalog_access(uintptr_t data, const std::string& directory, bool write, bool erase);
+    bool verify_source_file(engine::Memory&, uintptr_t files, int32_t index, int32_t count, uintptr_t data, uintptr_t image,
+                            bool& backup_group, std::vector<std::string>& seen, bool& checkpoint_changed);
+    bool read_source_stream(engine::Memory&, uintptr_t files, int32_t index, uintptr_t image, uintptr_t& file, std::string& name);
+    bool digest_source_stream(engine::Memory&, uintptr_t file, int32_t index, uintptr_t data, const SdkFileWrite&,
+                              bool backup_group, bool& checkpoint_changed);
+    bool menu_checkpoint_ready(const CampaignTransition&);
     bool admit_generation(uint64_t generation,bool mission_launch,bool continuing);
     bool admit_resume_map(const std::string& map,bool continuing,uint32_t stage_id,uint32_t native_subtype);
     bool read_restart();

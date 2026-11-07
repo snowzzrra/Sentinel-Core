@@ -37,16 +37,22 @@ public:
     sc_mission_access_result access(uint32_t id, const sc_evidence_scope&);
     void hint_intent(const char* namespace_id,uint32_t location_id);
 private:
-    std::mutex mutex_;
-    std::map<uint32_t, sc_mission_access_result> access_;
-    uint32_t pending_access_ = 0;
-    Projection staged_{},committed_{};
-    std::array<bool,SC_CAMPAIGN_MENU_MAX_ROWS> received_{};
-    uint64_t rendered_=0;
-    uint32_t selected_=0,loaded_=0;
-    std::string namespace_id_;
-    std::set<uint32_t> hint_intents_;
-    std::map<uint32_t,std::pair<uint64_t,sc_campaign_reward>> encounter_edges_;
+  void record_encounter_edge(uint32_t stage_id, const sc_campaign_reward&);
+  void record_encounter_edges();
+  void update_request(uint16_t operation, const sc_campaign_request&, const sc_campaign_summary&,
+                      const sc_campaign_rewards*, sc_campaign_result&);
+  void stage_request(uint16_t operation, const sc_campaign_request&, const sc_campaign_summary&,
+                     const sc_campaign_rewards*, sc_campaign_result&);
+  std::mutex mutex_;
+  std::map<uint32_t, sc_mission_access_result> access_;
+  uint32_t pending_access_ = 0;
+  Projection staged_{}, committed_{};
+  std::array<bool, SC_CAMPAIGN_MENU_MAX_ROWS> received_{};
+  uint64_t rendered_ = 0;
+  uint32_t selected_ = 0, loaded_ = 0;
+  std::string namespace_id_;
+  std::set<uint32_t> hint_intents_;
+  std::map<uint32_t, std::pair<uint64_t, sc_campaign_reward>> encounter_edges_;
 };
 Menu& menu();
 }

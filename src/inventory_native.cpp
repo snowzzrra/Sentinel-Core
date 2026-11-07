@@ -23,6 +23,26 @@ uintptr_t player(void*) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
+uint8_t read_capacity_perks(uintptr_t perks, uintptr_t perk_type, const char* family, uintptr_t host,
+                            unsigned index) {
+    uint32_t available = 0, active = 0;
+    for (unsigned stage = 0; stage < 4; ++stage) {
+        char path[80]{};
+        std::snprintf(path, sizeof(path), "perk/player/argent/%s_capacity_%u", family, stage);
+        const auto decl = reinterpret_cast<uintptr_t (*)(uintptr_t, const char*, int)>(
+            image_base + 0x17aa5d0)(perk_type, path, 1);
+        if (!decl) return SC_INVENTORY_UNKNOWN_TIER;
+        const auto name = *reinterpret_cast<const char**>(decl + 8);
+        if (!name || std::strcmp(name, path)) return SC_INVENTORY_UNKNOWN_TIER;
+        if (reinterpret_cast<uint8_t (*)(uintptr_t, uintptr_t)>(image_base + 0xfe3830)(perks, decl))
+            available |= 1u << stage;
+        if (reinterpret_cast<uint8_t (*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0)(perks, decl))
+            active |= 1u << stage;
+    }
+    // givePlayerPerk updates the perk component and suit host without acquiring a Crystal UI node.
+    return capacity_stage(available, active, *reinterpret_cast<const int*>(host + 0x318 + 4 * index));
+}
+
 uint8_t read_capacity(uintptr_t p, uintptr_t inv, uintptr_t type, uintptr_t perk_type,
                       const char* family, unsigned index) {
     __try {
@@ -41,22 +61,7 @@ uint8_t read_capacity(uintptr_t p, uintptr_t inv, uintptr_t type, uintptr_t perk
         const auto host = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
             image_base + 0x1690660)(inv, host_decl);
         if (!host) return SC_INVENTORY_UNKNOWN_TIER;
-        uint32_t available = 0, active = 0;
-        for (unsigned stage = 0; stage < 4; ++stage) {
-            char path[80]{};
-            std::snprintf(path, sizeof(path), "perk/player/argent/%s_capacity_%u", family, stage);
-            const auto decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
-                image_base + 0x17aa5d0)(perk_type, path, 1);
-            if (!decl) return SC_INVENTORY_UNKNOWN_TIER;
-            const auto name = *reinterpret_cast<const char**>(decl + 8);
-            if (!name || std::strcmp(name, path)) return SC_INVENTORY_UNKNOWN_TIER;
-            if (reinterpret_cast<uint8_t(*)(uintptr_t, uintptr_t)>(image_base + 0xfe3830)(perks, decl))
-                available |= 1u << stage;
-            if (reinterpret_cast<uint8_t(*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0)(perks, decl))
-                active |= 1u << stage;
-        }
-        // givePlayerPerk updates the perk component and suit host without acquiring a Crystal UI node.
-        return capacity_stage(available, active, *reinterpret_cast<const int*>(host + 0x318 + 4 * index));
+        return read_capacity_perks(perks, perk_type, family, host, index);
     } __except(EXCEPTION_EXECUTE_HANDLER) { return SC_INVENTORY_UNKNOWN_TIER; }
 }
 
@@ -83,6 +88,122 @@ void observe_perk(SnapshotFacts& facts, uint32_t item, uint8_t owned) {
     if (owned) facts.perks_owned |= bit;
 }
 
+bool read_weapons(uintptr_t inv, uintptr_t type, SnapshotFacts& facts) {
+    const char* const paths[] = {"weapon/player/shotgun",         "weapon/player/double_barrel",
+                                 "weapon/player/heavy_cannon",    "weapon/player/chaingun",
+                                 "weapon/player/plasma_rifle",    "weapon/player/gauss_rifle",
+                                 "weapon/player/rocket_launcher", "weapon/player/bfg",
+                                 "weapon/player/chainsaw",        "weapon/player/unmaykr"};
+    uint32_t weapons = 0;
+    for (unsigned i = 0; i < _countof(paths); ++i) {
+        const auto decl = reinterpret_cast<uintptr_t (*)(uintptr_t, const char*, int)>(
+            image_base + 0x17aa5d0)(type, paths[i], 1);
+        if (!decl) return false;
+        const auto path = *reinterpret_cast<const char**>(decl + 8);
+        if (!path || std::strncmp(path, paths[i], std::strlen(paths[i]) + 1)) return false;
+        if (reinterpret_cast<uintptr_t (*)(uintptr_t, uintptr_t)>(image_base + 0x1690660)(inv, decl))
+            weapons |= 1u << i;
+    }
+    facts.weapons = weapons;
+    return true;
+}
+
+void read_dash(uintptr_t inv, uintptr_t type, SnapshotFacts& facts) {
+    const char* dash = "ability_dash";
+    const auto dash_decl =
+        reinterpret_cast<uintptr_t (*)(uintptr_t, const char*, int)>(image_base + 0x17aa5d0)(type, dash, 1);
+    const auto dash_type = reinterpret_cast<uintptr_t (*)()>(image_base + 0x1631d90)();
+    if (dash_decl && dash_type) {
+        const auto path = *reinterpret_cast<const char**>(dash_decl + 8);
+        const auto get_type = *reinterpret_cast<uintptr_t*>(*reinterpret_cast<uintptr_t*>(dash_decl) + 0xb0);
+        if (path && !std::strcmp(path, dash) && get_type &&
+            reinterpret_cast<uintptr_t (*)(uintptr_t)>(get_type)(dash_decl) == dash_type) {
+            const auto item =
+                reinterpret_cast<uintptr_t (*)(uintptr_t, uintptr_t)>(image_base + 0x1690660)(inv, dash_decl);
+            // idAbility_Dash inventory count is independent of charges, cooldown and CanUse.
+            const auto quantity = item ? *reinterpret_cast<int*>(item + 0x40) : 0;
+            if (quantity >= 0) facts.dash = quantity > 0 ? 1 : 0;
+        }
+    }
+}
+
+void read_slayer_key(uintptr_t inv, uintptr_t type, SnapshotFacts& facts) {
+    const char* key = "map_objects/keycard/slayer_key";
+    const auto key_decl =
+        reinterpret_cast<uintptr_t (*)(uintptr_t, const char*, int)>(image_base + 0x17aa5d0)(type, key, 1);
+    if (key_decl) {
+        const auto path = *reinterpret_cast<const char**>(key_decl + 8);
+        if (path && !std::strcmp(path, key)) {
+            const auto item =
+                reinterpret_cast<uintptr_t (*)(uintptr_t, uintptr_t)>(image_base + 0x1690660)(inv, key_decl);
+            const auto quantity = item ? *reinterpret_cast<int*>(item + 0x40) : 0;
+            if (quantity >= 0) {
+                facts.slayer_key = quantity > 0 ? 1 : 0;
+                facts.slayer_key_quantity = quantity;
+            }
+        }
+    }
+}
+
+void read_flame_belch(uintptr_t inv, uintptr_t type, SnapshotFacts& facts) {
+    const char* flame = "weapon/player/equipment_flame_belch";
+    const auto flame_decl =
+        reinterpret_cast<uintptr_t (*)(uintptr_t, const char*, int)>(image_base + 0x17aa5d0)(type, flame, 1);
+    if (flame_decl) {
+        const auto path = *reinterpret_cast<const char**>(flame_decl + 8);
+        if (path && !std::strcmp(path, flame))
+            facts.flame_belch =
+                reinterpret_cast<uintptr_t (*)(uintptr_t, uintptr_t)>(image_base + 0x1690660)(inv, flame_decl)
+                    ? 1
+                    : 0;
+    }
+}
+
+void read_grenades(uintptr_t inv, uintptr_t type, SnapshotFacts& facts) {
+    const char* throwables[] = {"throwable/player/frag_grenade", "throwable/player/ice_bomb"};
+    uint8_t* observations[] = {&facts.frag_grenade, &facts.ice_bomb};
+    for (unsigned i = 0; i < _countof(throwables); ++i) {
+        const auto decl = reinterpret_cast<uintptr_t (*)(uintptr_t, const char*, int)>(
+            image_base + 0x17aa5d0)(type, throwables[i], 1);
+        if (!decl) continue;
+        const auto path = *reinterpret_cast<const char**>(decl + 8);
+        if (path && !std::strcmp(path, throwables[i]))
+            *observations[i] =
+                reinterpret_cast<uintptr_t (*)(uintptr_t, uintptr_t)>(image_base + 0x1690660)(inv, decl) ? 1
+                                                                                                         : 0;
+    }
+}
+
+void read_blood_punch(uintptr_t p, uintptr_t perk_type, SnapshotFacts& facts) {
+    const char* const blood_punch[] = {
+        "perk/player/blood_punch/base", "perk/player/blood_punch/area_of_effect",
+        "perk/player/blood_punch/ai_charge_rate", "perk/player/blood_punch/max_charges"};
+    uint32_t perks = 0;
+    for (unsigned i = 0; i < _countof(blood_punch); ++i) {
+        const auto decl = reinterpret_cast<uintptr_t (*)(uintptr_t, const char*, int)>(
+            image_base + 0x17aa5d0)(perk_type, blood_punch[i], 1);
+        if (!decl) return;
+        const auto path = *reinterpret_cast<const char**>(decl + 8);
+        if (!path || std::strncmp(path, blood_punch[i], std::strlen(blood_punch[i]) + 1)) return;
+        if (reinterpret_cast<uint8_t (*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0)(p + 0x3b40, decl))
+            perks |= 1u << (SC_INV_BLOOD_PUNCH_SHIFT + i);
+    }
+    facts.persistent_upgrades = perks;
+    facts.blood_punch = (perks & (1u << SC_INV_BLOOD_PUNCH_SHIFT)) ? 1 : 0;
+}
+
+void read_rune_perks(uintptr_t p, SnapshotFacts& facts) {
+    runes::SnapshotFacts rune_facts{};
+    if (runes::available() && runes::calls.read && runes::calls.read(runes::calls.context, p, rune_facts)) {
+        const uint32_t normal[] = {7770085, 7770086, 7770087, 7770089, 7770090,
+                                   7770091, 7770093, 7770094, 7770095};
+        for (unsigned i = 0; i < _countof(normal); ++i)
+            observe_perk(facts, normal[i], (rune_facts.owned_normal >> i) & 1);
+        for (unsigned i = 0; i < 3; ++i)
+            observe_perk(facts, 7770145 + i, (rune_facts.owned_support >> i) & 1);
+    }
+}
+
 bool read(void*, uintptr_t p, SnapshotFacts& facts) {
     __try {
         facts = {};
@@ -95,74 +216,11 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
             (count && !*reinterpret_cast<uintptr_t*>(inv))) return false;
         const auto type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1617cd0)();
         if (!type) return false;
-        const char* const paths[] = {
-            "weapon/player/shotgun", "weapon/player/double_barrel", "weapon/player/heavy_cannon",
-            "weapon/player/chaingun", "weapon/player/plasma_rifle", "weapon/player/gauss_rifle",
-            "weapon/player/rocket_launcher", "weapon/player/bfg", "weapon/player/chainsaw",
-            "weapon/player/unmaykr"};
-        uint32_t weapons = 0;
-        for (unsigned i = 0; i < _countof(paths); ++i) {
-            const auto decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
-                image_base + 0x17aa5d0)(type, paths[i], 1);
-            if (!decl) return true;
-            const auto path = *reinterpret_cast<const char**>(decl + 8);
-            if (!path || std::strncmp(path, paths[i], std::strlen(paths[i]) + 1)) return true;
-            if (reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(image_base + 0x1690660)(inv, decl))
-                weapons |= 1u << i;
-        }
-        facts.weapons = weapons;
-        const char* flame = "weapon/player/equipment_flame_belch";
-        const auto flame_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
-            image_base + 0x17aa5d0)(type, flame, 1);
-        if (flame_decl) {
-            const auto path = *reinterpret_cast<const char**>(flame_decl + 8);
-            if (path && !std::strcmp(path, flame))
-                facts.flame_belch = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
-                    image_base + 0x1690660)(inv, flame_decl) ? 1 : 0;
-        }
-        const char* dash = "ability_dash";
-        const auto dash_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
-            image_base + 0x17aa5d0)(type, dash, 1);
-        const auto dash_type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631d90)();
-        if (dash_decl && dash_type) {
-            const auto path = *reinterpret_cast<const char**>(dash_decl + 8);
-            const auto get_type = *reinterpret_cast<uintptr_t*>(
-                *reinterpret_cast<uintptr_t*>(dash_decl) + 0xb0);
-            if (path && !std::strcmp(path, dash) && get_type &&
-                reinterpret_cast<uintptr_t(*)(uintptr_t)>(get_type)(dash_decl) == dash_type) {
-                const auto item = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
-                    image_base + 0x1690660)(inv, dash_decl);
-                // idAbility_Dash inventory count is independent of charges, cooldown and CanUse.
-                const auto quantity = item ? *reinterpret_cast<int*>(item + 0x40) : 0;
-                if (quantity >= 0) facts.dash = quantity > 0 ? 1 : 0;
-            }
-        }
-        const char* throwables[] = {"throwable/player/frag_grenade", "throwable/player/ice_bomb"};
-        uint8_t* observations[] = {&facts.frag_grenade, &facts.ice_bomb};
-        for (unsigned i = 0; i < _countof(throwables); ++i) {
-            const auto decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
-                image_base + 0x17aa5d0)(type, throwables[i], 1);
-            if (!decl) continue;
-            const auto path = *reinterpret_cast<const char**>(decl + 8);
-            if (path && !std::strcmp(path, throwables[i]))
-                *observations[i] = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
-                    image_base + 0x1690660)(inv, decl) ? 1 : 0;
-        }
-        const char* key = "map_objects/keycard/slayer_key";
-        const auto key_decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
-            image_base + 0x17aa5d0)(type, key, 1);
-        if (key_decl) {
-            const auto path = *reinterpret_cast<const char**>(key_decl + 8);
-            if (path && !std::strcmp(path, key)) {
-                const auto item = reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(
-                    image_base + 0x1690660)(inv, key_decl);
-                const auto quantity = item ? *reinterpret_cast<int*>(item + 0x40) : 0;
-                if (quantity >= 0) {
-                    facts.slayer_key = quantity > 0 ? 1 : 0;
-                    facts.slayer_key_quantity = quantity;
-                }
-            }
-        }
+        if (!read_weapons(inv, type, facts)) return true;
+        read_flame_belch(inv, type, facts);
+        read_dash(inv, type, facts);
+        read_grenades(inv, type, facts);
+        read_slayer_key(inv, type, facts);
         const auto perk_type = reinterpret_cast<uintptr_t(*)()>(image_base + 0x1631f90)();
         if (!perk_type) return true;
         facts.pickup_radius = read_perk(p, perk_type, "perk/player/suit/fundamentals/increase_pickup_radius");
@@ -205,32 +263,11 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         };
         for (const auto& perk : permanent)
             observe_perk(facts, perk.item, read_perk(p, perk_type, perk.path));
-        runes::SnapshotFacts rune_facts{};
-        if (runes::available() && runes::calls.read && runes::calls.read(runes::calls.context, p, rune_facts)) {
-            const uint32_t normal[] = {7770085, 7770086, 7770087, 7770089, 7770090, 7770091, 7770093, 7770094, 7770095};
-            for (unsigned i = 0; i < _countof(normal); ++i)
-                observe_perk(facts, normal[i], (rune_facts.owned_normal >> i) & 1);
-            for (unsigned i = 0; i < 3; ++i)
-                observe_perk(facts, 7770145 + i, (rune_facts.owned_support >> i) & 1);
-        }
+        read_rune_perks(p, facts);
         facts.health_tier = read_capacity(p, inv, type, perk_type, "health", 0);
         facts.armor_tier = read_capacity(p, inv, type, perk_type, "armor", 1);
         facts.ammo_tier = read_capacity(p, inv, type, perk_type, "ammo", 2);
-        const char* const blood_punch[] = {
-            "perk/player/blood_punch/base", "perk/player/blood_punch/area_of_effect",
-            "perk/player/blood_punch/ai_charge_rate", "perk/player/blood_punch/max_charges"};
-        uint32_t perks = 0;
-        for (unsigned i = 0; i < _countof(blood_punch); ++i) {
-            const auto decl = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(
-                image_base + 0x17aa5d0)(perk_type, blood_punch[i], 1);
-            if (!decl) return true;
-            const auto path = *reinterpret_cast<const char**>(decl + 8);
-            if (!path || std::strncmp(path, blood_punch[i], std::strlen(blood_punch[i]) + 1)) return true;
-            if (reinterpret_cast<uint8_t(*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0)(p + 0x3b40, decl))
-                perks |= 1u << (SC_INV_BLOOD_PUNCH_SHIFT + i);
-        }
-        facts.persistent_upgrades = perks;
-        facts.blood_punch = (perks & (1u << SC_INV_BLOOD_PUNCH_SHIFT)) ? 1 : 0;
+        read_blood_punch(p, perk_type, facts);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -336,8 +373,7 @@ void use_fixture(Calls value, const char* id) {
 }
 #endif
 
-void install(const engine::Binding& binding, HANDLE stop) {
-    (void)stop;
+void install(const engine::Binding& binding) {
     image_base = binding.image.base;
     image_size = binding.image.size;
     engine_root = binding.root;
@@ -345,12 +381,10 @@ void install(const engine::Binding& binding, HANDLE stop) {
     engine::LocalMemory memory;
     const auto& sites = builds::steam_20260818().inventory;
     for (const auto& site : sites) {
-        std::array<uint8_t, 32> expected{}, actual{};
-        const auto digit = [](char c) { return static_cast<uint8_t>(c <= '9' ? c - '0' : c - 'a' + 10); };
-        for (size_t i = 0; i < expected.size(); ++i)
-            expected[i] = static_cast<uint8_t>(digit(site.prefix[2 * i]) * 16 + digit(site.prefix[2 * i + 1]));
-        if (!binding.image.contains(site.rva, expected.size(), IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0) ||
-            memory.copy(image_base + site.rva, actual.data(), actual.size()).reason || actual != expected) return;
+        std::array<uint8_t, 32> actual{};
+        const auto target=native::target_from_hex(image_base+site.rva,site.prefix);
+        if (!binding.image.contains(site.rva, target.bytes.size(), IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, 0) ||
+            memory.copy(target.address, actual.data(), actual.size()).reason || actual != target.bytes) return;
     }
     ready.store(true, std::memory_order_release);
 }

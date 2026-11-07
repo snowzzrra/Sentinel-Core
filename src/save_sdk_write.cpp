@@ -168,6 +168,52 @@ bool NativeWrites::inspect_operation(uint64_t id, NativeWriteOperation& out) con
     for (const auto& value : operations_) if (value.id == id) { out = value; return true; }
     return false;
 }
+static bool sdk_succeeded(const SdkWriteResult& value) {
+    return !value.state && !value.outcome && value.detail == 1;
+}
+static bool sdk_callback_proven(const SdkFileWrite& file) {
+    return file.handle && file.completed && file.callback && !file.failed && file.sdk_result == 1;
+}
+static uint32_t provider_snapshot_flags(const NativeWriteOperation& source) {
+    uint32_t flags = 0;
+    const std::pair<bool, uint32_t> values[]{
+        {source.provider_alive, SC_SAVE_WRITE_PROVIDER_ALIVE}, {source.provider_terminal, SC_SAVE_WRITE_PROVIDER_TERMINAL},
+        {source.source_valid, SC_SAVE_WRITE_SOURCE_VALID}, {source.vector_released, SC_SAVE_WRITE_VECTOR_RELEASED},
+        {source.readback_required, SC_SAVE_WRITE_READBACK_REQUIRED}, {source.readback_data != 0, SC_SAVE_WRITE_READBACK_ACTIVE},
+        {source.readback_hashes, SC_SAVE_WRITE_READBACK_HASHES}, {source.readback_terminal, SC_SAVE_WRITE_READBACK_TERMINAL},
+        {source.readback_failed, SC_SAVE_WRITE_READBACK_ERROR}};
+    for (const auto& [present, flag] : values) if (present) flags |= flag;
+    return flags;
+}
+static void sdk_snapshot_flags(const SdkWriteObservation& write, sc_save_write_snapshot& out) {
+    out.submitted = write.submitted;
+    bool prepared = !write.payloads.empty(), captured = prepared && write.submitted == write.payloads.size();
+    bool callbacks = captured;
+    for (const auto& file : write.payloads) {
+        prepared &= file.prepared; captured &= file.captured;
+        callbacks &= sdk_callback_proven(file);
+        out.completed += file.completed ? 1u : 0u;
+    }
+    if (prepared) out.flags |= SC_SAVE_WRITE_PAYLOADS_PREPARED;
+    if (captured) out.flags |= SC_SAVE_WRITE_PAYLOADS_CAPTURED;
+    if (callbacks) out.flags |= SC_SAVE_WRITE_CALLBACKS_SUCCEEDED;
+    if (write.terminal && sdk_succeeded(write.result))
+        out.flags |= SC_SAVE_WRITE_SDK_SUCCEEDED;
+    if (write.unproven) out.flags |= SC_SAVE_WRITE_UNPROVEN;
+}
+static void write_snapshot_state(const NativeWriteOperation& source, sc_save_write_snapshot& out) {
+    if (!source.provider_terminal) out.state = source.provider_alive ? SC_SAVE_WRITE_PENDING : SC_SAVE_WRITE_INDETERMINATE;
+    else if (source.provider_state || source.provider_outcome || source.provider_value != 1) out.state = SC_SAVE_WRITE_NATIVE_FAILED;
+    else {
+        constexpr auto proof = SC_SAVE_WRITE_PAYLOADS_PREPARED | SC_SAVE_WRITE_PAYLOADS_CAPTURED |
+            SC_SAVE_WRITE_CALLBACKS_SUCCEEDED | SC_SAVE_WRITE_SDK_SUCCEEDED;
+        out.state = (out.flags & proof) == proof && !(out.flags & (SC_SAVE_WRITE_UNPROVEN | SC_SAVE_WRITE_TRACKING_LOST)) ?
+            SC_SAVE_WRITE_SDK_CONFIRMED : SC_SAVE_WRITE_NATIVE_SUCCEEDED;
+        if (out.state == SC_SAVE_WRITE_SDK_CONFIRMED && source.readback_required)
+            out.state = source.readback_failed ? SC_SAVE_WRITE_READBACK_FAILED : source.readback_terminal ?
+                SC_SAVE_WRITE_READBACK_CONFIRMED : SC_SAVE_WRITE_READBACK_PENDING;
+    }
+}
 sc_save_write_snapshot NativeWrites::snapshot(uint64_t id) const {
     static_assert(sizeof(sc_save_write_snapshot) == 160 && offsetof(sc_save_write_snapshot, directory) == 80);
     std::lock_guard<std::mutex> guard(mutex_);
@@ -182,43 +228,12 @@ sc_save_write_snapshot NativeWrites::snapshot(uint64_t id) const {
     out.preparation_jobs = source->preparation_jobs; out.preflight_jobs = source->preflight_jobs;
     out.native_state = source->provider_state; out.native_outcome = source->provider_outcome; out.native_value = source->provider_value;
     std::memcpy(out.directory, source->directory.c_str(), source->directory.size() + 1);
-    if (source->provider_alive) out.flags |= SC_SAVE_WRITE_PROVIDER_ALIVE;
-    if (source->provider_terminal) out.flags |= SC_SAVE_WRITE_PROVIDER_TERMINAL;
-    if (source->source_valid) out.flags |= SC_SAVE_WRITE_SOURCE_VALID;
-    if (source->vector_released) out.flags |= SC_SAVE_WRITE_VECTOR_RELEASED;
-    if (source->readback_required) out.flags |= SC_SAVE_WRITE_READBACK_REQUIRED;
-    if (source->readback_data) out.flags |= SC_SAVE_WRITE_READBACK_ACTIVE;
-    if (source->readback_hashes) out.flags |= SC_SAVE_WRITE_READBACK_HASHES;
-    if (source->readback_terminal) out.flags |= SC_SAVE_WRITE_READBACK_TERMINAL;
-    if (source->readback_failed) out.flags |= SC_SAVE_WRITE_READBACK_ERROR;
+    out.flags |= provider_snapshot_flags(*source);
     for (const auto& write : writes_) if (write.operation == source->id) {
-        out.submitted = write.submitted;
-        bool prepared = !write.payloads.empty(), captured = prepared && write.submitted == write.payloads.size();
-        bool callbacks = captured;
-        for (const auto& file : write.payloads) {
-            prepared &= file.prepared; captured &= file.captured;
-            callbacks &= file.handle && file.completed && file.callback && !file.failed && file.sdk_result == 1;
-            out.completed += file.completed ? 1u : 0u;
-        }
-        if (prepared) out.flags |= SC_SAVE_WRITE_PAYLOADS_PREPARED;
-        if (captured) out.flags |= SC_SAVE_WRITE_PAYLOADS_CAPTURED;
-        if (callbacks) out.flags |= SC_SAVE_WRITE_CALLBACKS_SUCCEEDED;
-        if (write.terminal && !write.result.state && !write.result.outcome && write.result.detail == 1)
-            out.flags |= SC_SAVE_WRITE_SDK_SUCCEEDED;
-        if (write.unproven) out.flags |= SC_SAVE_WRITE_UNPROVEN;
+        sdk_snapshot_flags(write, out);
         break;
     }
-    if (!source->provider_terminal) out.state = source->provider_alive ? SC_SAVE_WRITE_PENDING : SC_SAVE_WRITE_INDETERMINATE;
-    else if (source->provider_state || source->provider_outcome || source->provider_value != 1) out.state = SC_SAVE_WRITE_NATIVE_FAILED;
-    else {
-        constexpr auto proof = SC_SAVE_WRITE_PAYLOADS_PREPARED | SC_SAVE_WRITE_PAYLOADS_CAPTURED |
-            SC_SAVE_WRITE_CALLBACKS_SUCCEEDED | SC_SAVE_WRITE_SDK_SUCCEEDED;
-        out.state = (out.flags & proof) == proof && !(out.flags & (SC_SAVE_WRITE_UNPROVEN | SC_SAVE_WRITE_TRACKING_LOST)) ?
-            SC_SAVE_WRITE_SDK_CONFIRMED : SC_SAVE_WRITE_NATIVE_SUCCEEDED;
-        if (out.state == SC_SAVE_WRITE_SDK_CONFIRMED && source->readback_required)
-            out.state = source->readback_failed ? SC_SAVE_WRITE_READBACK_FAILED : source->readback_terminal ?
-                SC_SAVE_WRITE_READBACK_CONFIRMED : SC_SAVE_WRITE_READBACK_PENDING;
-    }
+    write_snapshot_state(*source, out);
     return out;
 }
 bool NativeWrites::source_matches(uint64_t id, uintptr_t data) const {
@@ -258,37 +273,46 @@ uint64_t NativeWrites::readback_operation(uintptr_t data) const {
     if (data) for (const auto& value : operations_) if (value.readback_data == data) return value.id;
     return 0;
 }
+static bool readback_sdk_proven(const SdkWriteObservation& write, BIoTrace& trace) {
+    if (!trace.check(!write.unproven, "readback_sdk_evidence_unproven") ||
+        !trace.check(write.terminal, "readback_sdk_not_terminal") ||
+        !trace.check(sdk_succeeded(write.result), "readback_sdk_not_successful",
+            {{"state", write.result.state}, {"outcome", write.result.outcome}, {"detail", write.result.detail}, {"value", write.result.value}}) ||
+        !trace.check(!write.payloads.empty() && write.submitted == write.payloads.size(), "readback_submission_count_mismatch",
+            {{"submitted", write.submitted}, {"expected", write.payloads.size()}})) return false;
+    for (size_t index = 0; index < write.payloads.size(); ++index) {
+        const auto& file = write.payloads[index];
+        if (!trace.check(file.prepared && file.captured && sdk_callback_proven(file),
+            "readback_file_sdk_proof_missing", {{"file_index", index}, {"prepared", file.prepared}, {"captured", file.captured},
+            {"handle", file.handle}, {"completed", file.completed}, {"callback", file.callback}, {"failed", file.failed}, {"sdk_result", file.sdk_result}})) return false;
+    }
+    return true;
+}
+static bool complete_readback_manifest(const SdkWriteObservation& write, const NativeWriteOperation& value, SdkWriteObservation& out, BIoTrace& trace) {
+    out = write;
+    for (const auto& previous : value.readback_baseline) {
+        if (std::none_of(out.payloads.begin(),out.payloads.end(),[&](const auto& changed) {
+            return steam_name_equal(changed.name.data(),previous.name.data());
+        })) out.payloads.push_back(previous);
+    }
+    return trace.check(out.payloads.size()<=value.readback_capacity,"complete_readback_exceeds_capacity",
+        {{"count",out.payloads.size()},{"capacity",value.readback_capacity}});
+}
 bool NativeWrites::readback_manifest(uint64_t id, SdkWriteObservation& out) const {
     std::lock_guard<std::mutex> guard(mutex_);
     BIoTrace trace{diagnostics_, BStage::readback_prepare, id};
-    for (const auto& value : operations_) if (value.id == id) {
+    for (const auto& value : operations_) {
+        if (value.id != id) continue;
         if (!trace.check(!lost_, "readback_tracking_lost") ||
             !trace.check(value.readback_data != 0, "readback_data_detached") ||
             !trace.check(!value.readback_failed, "readback_already_failed") ||
             !trace.check(value.provider_terminal, "readback_provider_not_terminal") ||
             !trace.check(!value.provider_state && !value.provider_outcome && value.provider_value == 1, "readback_provider_not_successful",
                 {{"state", value.provider_state}, {"outcome", value.provider_outcome}, {"value", value.provider_value}})) return false;
-        for (const auto& write : writes_) if (write.operation == id) {
-            if (!trace.check(!write.unproven, "readback_sdk_evidence_unproven") ||
-                !trace.check(write.terminal, "readback_sdk_not_terminal") ||
-                !trace.check(!write.result.state && !write.result.outcome && write.result.detail == 1, "readback_sdk_not_successful",
-                    {{"state", write.result.state}, {"outcome", write.result.outcome}, {"detail", write.result.detail}, {"value", write.result.value}}) ||
-                !trace.check(!write.payloads.empty() && write.submitted == write.payloads.size(), "readback_submission_count_mismatch",
-                    {{"submitted", write.submitted}, {"expected", write.payloads.size()}})) return false;
-            for (size_t index = 0; index < write.payloads.size(); ++index) {
-                const auto& file = write.payloads[index];
-                if (!trace.check(file.prepared && file.captured && file.handle && file.completed && file.callback && !file.failed && file.sdk_result == 1,
-                    "readback_file_sdk_proof_missing", {{"file_index", index}, {"prepared", file.prepared}, {"captured", file.captured},
-                    {"handle", file.handle}, {"completed", file.completed}, {"callback", file.callback}, {"failed", file.failed}, {"sdk_result", file.sdk_result}})) return false;
-            }
-            out = write;
-            for (const auto& previous : value.readback_baseline) {
-                if (std::none_of(out.payloads.begin(),out.payloads.end(),[&](const auto& changed) {
-                    return steam_name_equal(changed.name.data(),previous.name.data());
-                })) out.payloads.push_back(previous);
-            }
-            return trace.check(out.payloads.size()<=value.readback_capacity,"complete_readback_exceeds_capacity",
-                {{"count",out.payloads.size()},{"capacity",value.readback_capacity}});
+        for (const auto& write : writes_) {
+            if (write.operation != id) continue;
+            if (!readback_sdk_proven(write, trace)) return false;
+            return complete_readback_manifest(write, value, out, trace);
         }
         return trace.check(false, "readback_sdk_observation_missing");
     }
@@ -379,19 +403,28 @@ void NativeWrites::complete(SdkWriteObservation& write, SdkFileWrite& file) {
         }
     }
 }
+static bool sdk_source_matches(const NativeWriteOperation& source, uint64_t count, const std::string& directory, BIoTrace& trace) {
+    if (!trace.check(source.source_valid, "sdk_begin_source_invalidated") ||
+        !trace.check(source.file_count == count, "sdk_begin_count_mismatch", {{"expected", source.file_count}, {"actual", count}}) ||
+        !trace.check(steam_name_equal(source.directory, directory), "sdk_begin_directory_mismatch")) return false;
+    return true;
+}
+static bool sdk_begin_extent(uintptr_t remote, uintptr_t files, uint64_t count) {
+    return remote && files && count && count <= 1024;
+}
 uint64_t NativeWrites::begin(uintptr_t remote, uintptr_t files, uint64_t count, const std::string& directory) {
     std::lock_guard<std::mutex> guard(mutex_);
     BIoTrace trace{diagnostics_, BStage::sdk_prepare, 0, files};
     if (!trace.check(!lost_, "sdk_begin_tracking_lost") ||
-        !trace.check(remote && files && count && count <= 1024, "sdk_begin_extent_invalid", {{"count", count}, {"null_remote", !remote}, {"null_files", !files}}) ||
+        !trace.check(sdk_begin_extent(remote, files, count), "sdk_begin_extent_invalid", {{"count", count}, {"null_remote", !remote}, {"null_files", !files}}) ||
         !trace.check(next_ != UINT64_MAX, "sdk_sequence_exhausted")) return 0;
-    NativeWriteOperation* source = nullptr;
-    for (auto& value : operations_) if (value.files == files && !value.vector_released && !value.vector_retiring) { source = &value; break; }
+    const auto found = std::find_if(operations_.begin(), operations_.end(), [files](const auto& value) {
+        return value.files == files && !value.vector_released && !value.vector_retiring;
+    });
+    auto* source = found == operations_.end() ? nullptr : &*found;
     if (!trace.check(source != nullptr, "sdk_begin_vector_owner_missing")) return 0;
     trace.operation = source->id;
-    if (!trace.check(source->source_valid, "sdk_begin_source_invalidated") ||
-        !trace.check(source->file_count == count, "sdk_begin_count_mismatch", {{"expected", source->file_count}, {"actual", count}}) ||
-        !trace.check(steam_name_equal(source->directory, directory), "sdk_begin_directory_mismatch")) return 0;
+    if (!sdk_source_matches(*source, count, directory, trace)) return 0;
     for (const auto& write : writes_) if (!trace.check(write.released || write.retiring || write.files != files,
         "sdk_begin_vector_already_observed", {{"sdk_sequence", write.sequence}})) return 0;
     if (!trace.check(writes_.size() < 64, "sdk_observation_capacity_exhausted", {{"observations", writes_.size()}, {"limit", 64}})) return 0;
@@ -431,6 +464,16 @@ uint32_t NativeWrites::capture(uint64_t sequence, const SdkFileWrite& file) {
     if (diagnostics_) diagnostics_->record(BStage::sdk_submit, BStatus::refused, "sdk_submission_outside_manifest", 0, {{"sdk_sequence", sequence}});
     lost_ = true; return UINT32_MAX;
 }
+static bool readback_payload_extent(const NativeWriteOperation* value, const std::vector<SdkFileWrite>& files, BIoTrace& trace) {
+    // native load treats a zero size as missing. refuse before deletion if its required readback can't represent an empty transport file
+    if (value && value->readback_required) {
+        if (!trace.check(files.size() <= value->readback_capacity, "payload_count_exceeds_readback_capacity",
+            {{"count", files.size()}, {"capacity", value->readback_capacity}})) return false;
+        for (size_t i = 0; i < files.size(); ++i)
+            if (!trace.check(files[i].size != 0, "payload_empty_readback_file", {{"file_index", i}})) return false;
+    }
+    return true;
+}
 bool NativeWrites::prepared(uint64_t sequence, std::vector<SdkFileWrite> files) {
     std::lock_guard<std::mutex> guard(mutex_);
     BIoTrace trace{diagnostics_, BStage::sdk_prepare};
@@ -442,16 +485,41 @@ bool NativeWrites::prepared(uint64_t sequence, std::vector<SdkFileWrite> files) 
             !trace.check(write.payloads.size() == files.size(), "payload_manifest_count_mismatch",
                 {{"expected", write.payloads.size()}, {"actual", files.size()}})) return false;
         const auto* value = operation(write.operation);
-        // native load treats a zero size as missing. refuse before deletion if its required readback can't represent an empty transport file
-        if (value && value->readback_required) {
-            if (!trace.check(files.size() <= value->readback_capacity, "payload_count_exceeds_readback_capacity",
-                {{"count", files.size()}, {"capacity", value->readback_capacity}})) return false;
-            for (size_t i = 0; i < files.size(); ++i)
-                if (!trace.check(files[i].size != 0, "payload_empty_readback_file", {{"file_index", i}})) return false;
-        }
+        if (!readback_payload_extent(value, files, trace)) return false;
         write.payloads = std::move(files); return true;
     }
     return trace.check(false, "payload_manifest_sequence_missing", {{"sdk_sequence", sequence}, {"count", files.size()}});
+}
+static bool sdk_payload_name(engine::Memory& memory, uintptr_t entry, uint64_t i, std::array<char, 260>& relative, BIoTrace& trace) {
+    NativeString name{};
+    return trace.read(memory, entry, 8, name, "payload_name_header_unreadable") &&
+    trace.check(name.data && name.length >= 1 && name.length < 260, "payload_name_extent_invalid",
+        {{"file_index", i}, {"length", name.length}, {"null_bytes", !name.data}}) &&
+    trace.copy(memory, reinterpret_cast<uintptr_t>(name.data), relative.data(), static_cast<size_t>(name.length) + 1, "payload_name_bytes_unreadable") &&
+    trace.check(!relative[static_cast<size_t>(name.length)] && !std::memchr(relative.data(), 0, static_cast<size_t>(name.length)),
+        "payload_name_termination_invalid", {{"file_index", i}, {"length", name.length}});
+}
+static bool sdk_payload_buffer(engine::Memory& memory, uintptr_t entry, uint64_t i, uint64_t& size, SdkFileWrite& file, BIoTrace& trace) {
+    uint64_t capacity = 0; uint8_t owned = 0;
+    return trace.read(memory, entry, 0x150, size, "payload_size_unreadable") &&
+    trace.check(size <= 100u * 1024u * 1024u, "payload_size_limit", {{"file_index", i}, {"size", size}}) &&
+    trace.read(memory, entry, 0x158, capacity, "payload_capacity_unreadable") &&
+    trace.check(size <= capacity, "payload_capacity_short", {{"file_index", i}, {"size", size}, {"capacity", capacity}}) &&
+    trace.read(memory, entry, 0x168, file.buffer, "payload_buffer_unreadable") &&
+    trace.read(memory, entry, 0x178, owned, "payload_ownership_unreadable") &&
+    trace.check(!size || owned, "payload_not_owned", {{"file_index", i}, {"size", size}, {"owned", owned}});
+}
+static bool name_sdk_payload(const std::string& directory, const std::array<char, 260>& relative, uint64_t size, uint64_t i, const std::vector<SdkFileWrite>& captured, SdkFileWrite& file, BIoTrace& trace) {
+    const auto full = directory + "/" + relative.data();
+    if (!trace.check(full.size() < file.name.size(), "payload_full_name_too_long", {{"file_index", i}, {"length", full.size()}})) return false;
+    for (size_t previous = 0; previous < captured.size(); ++previous)
+        if (!trace.check(!steam_name_equal(captured[previous].name.data(), full), "payload_duplicate_name",
+            {{"file_index", i}, {"previous_index", previous}})) return false;
+    std::memcpy(file.name.data(), full.c_str(), full.size() + 1); file.size = static_cast<uint32_t>(size);
+    return true;
+}
+static bool sdk_payload_extent(uintptr_t files, uint64_t count) {
+    return files && count && count <= 1024 && files <= UINTPTR_MAX - count * 0x180;
 }
 bool prepare_sdk_payloads(NativeWrites& writes, engine::Memory& memory, uint64_t sequence,
         uintptr_t files, uint64_t count, const std::string& directory, uintptr_t image,
@@ -459,13 +527,13 @@ bool prepare_sdk_payloads(NativeWrites& writes, engine::Memory& memory, uint64_t
     if (!operation) operation = writes.operation_id(sequence);
     BIoTrace trace{diagnostics, BStage::sdk_prepare, operation, files};
     const auto deadline = GetTickCount64() + 1000;
-    if (!trace.check(files && count && count <= 1024 && files <= UINTPTR_MAX - count * 0x180,
+    if (!trace.check(sdk_payload_extent(files, count),
         "payload_vector_extent_invalid", {{"count", count}, {"null_files", !files}, {"sdk_sequence", sequence}})) return false;
     std::vector<SdkFileWrite> captured; captured.reserve(static_cast<size_t>(count));
     for (uint64_t i = 0; i < count; ++i) {
         const auto entry = files + i * 0x180;
-        uintptr_t table = 0; uint64_t size = 0, capacity = 0; uint8_t owned = 0;
-        NativeString name{}; std::array<char, 260> relative{}; SdkFileWrite file{};
+        uintptr_t table = 0; uint64_t size = 0;
+        std::array<char, 260> relative{}; SdkFileWrite file{};
         if (!trace.check(GetTickCount64() < deadline, "payload_prepare_deadline", {{"file_index", i}, {"count", count}}) ||
             !trace.read(memory, entry, 0, table, "payload_vtable_unreadable") ||
             // 141bdcbc0 prepares inline idFile_Memory objects through 141ac89e0.
@@ -473,25 +541,9 @@ bool prepare_sdk_payloads(NativeWrites& writes, engine::Memory& memory, uint64_t
             !trace.check(table == image + 0x2a57348, "payload_vtable_mismatch",
                 {{"file_index", i}, {"vtable_rva", table - image}, {"expected_vtable_rva", 0x2a57348},
                  {"file_type", table == image + 0x2a575a8 ? 2 : 0}, {"expected_file_type", 1}}) ||
-            !trace.read(memory, entry, 8, name, "payload_name_header_unreadable") ||
-            !trace.check(name.data && name.length >= 1 && name.length < 260, "payload_name_extent_invalid",
-                {{"file_index", i}, {"length", name.length}, {"null_bytes", !name.data}}) ||
-            !trace.copy(memory, reinterpret_cast<uintptr_t>(name.data), relative.data(), static_cast<size_t>(name.length) + 1, "payload_name_bytes_unreadable") ||
-            !trace.check(!relative[static_cast<size_t>(name.length)] && !std::memchr(relative.data(), 0, static_cast<size_t>(name.length)),
-                "payload_name_termination_invalid", {{"file_index", i}, {"length", name.length}}) ||
-            !trace.read(memory, entry, 0x150, size, "payload_size_unreadable") ||
-            !trace.check(size <= 100u * 1024u * 1024u, "payload_size_limit", {{"file_index", i}, {"size", size}}) ||
-            !trace.read(memory, entry, 0x158, capacity, "payload_capacity_unreadable") ||
-            !trace.check(size <= capacity, "payload_capacity_short", {{"file_index", i}, {"size", size}, {"capacity", capacity}}) ||
-            !trace.read(memory, entry, 0x168, file.buffer, "payload_buffer_unreadable") ||
-            !trace.read(memory, entry, 0x178, owned, "payload_ownership_unreadable") ||
-            !trace.check(!size || owned, "payload_not_owned", {{"file_index", i}, {"size", size}, {"owned", owned}})) return false;
-        const auto full = directory + "/" + relative.data();
-        if (!trace.check(full.size() < file.name.size(), "payload_full_name_too_long", {{"file_index", i}, {"length", full.size()}})) return false;
-        for (size_t previous = 0; previous < captured.size(); ++previous)
-            if (!trace.check(!steam_name_equal(captured[previous].name.data(), full), "payload_duplicate_name",
-                {{"file_index", i}, {"previous_index", previous}})) return false;
-        std::memcpy(file.name.data(), full.c_str(), full.size() + 1); file.size = static_cast<uint32_t>(size);
+            !sdk_payload_name(memory, entry, i, relative, trace) ||
+            !sdk_payload_buffer(memory, entry, i, size, file, trace)) return false;
+        if (!name_sdk_payload(directory, relative, size, i, captured, file, trace)) return false;
         if (!digest_payload(memory, file.buffer, file.size, file.sha256, deadline, diagnostics, BStage::sdk_prepare, operation, i)) return false;
         file.prepared = true; captured.push_back(file);
     }
@@ -537,8 +589,7 @@ void NativeWrites::utilities(uint64_t sequence, uintptr_t utilities) {
         write.utilities = utilities; write.utilities_captured = true; return;
     }
 }
-void NativeWrites::result(uint64_t sequence, const SdkWriteResult& value) {
-    if (value.state == -1) return;
+static SdkWriteResult decode_sdk_result(const SdkWriteResult& value) {
     SdkWriteResult observed{}; observed.state = value.state;
     if (value.state == 0) {
         observed.outcome = value.outcome;
@@ -549,6 +600,11 @@ void NativeWrites::result(uint64_t sequence, const SdkWriteResult& value) {
             else if (value.detail == 1) observed.value = value.value;
         }
     }
+    return observed;
+}
+void NativeWrites::result(uint64_t sequence, const SdkWriteResult& value) {
+    if (value.state == -1) return;
+    const auto observed = decode_sdk_result(value);
     std::lock_guard<std::mutex> guard(mutex_);
     for (auto& write : writes_) if (write.sequence == sequence) {
         write.terminal = true; write.result = observed;
@@ -585,6 +641,15 @@ bool NativeWrites::inspect(uint64_t sequence, SdkWriteObservation& out) const {
     for (const auto& write : writes_) if (write.sequence == sequence) { out = write; return true; }
     return false;
 }
+static void next_released_handle(const std::deque<SdkWriteObservation>& writes, uintptr_t utilities, uint64_t after, uint64_t& sequence, uint64_t& handle, uint32_t& index) {
+    for (const auto& write : writes) if (write.released && write.utilities == utilities && utilities)
+        for (uint32_t i = 0; i < write.submitted; ++i) {
+        const auto& file = write.payloads[i];
+        if (file.handle > after && !file.completed && (!handle || file.handle < handle)) {
+            sequence = write.sequence; handle = file.handle; index = i;
+        }
+    }
+}
 void NativeWrites::poll_released(uintptr_t utilities, bool (*completed)(uintptr_t, uint64_t, bool*)) {
     // capture one handle at a time; no steam call runs under the trace mutex
     uint64_t after = 0;
@@ -592,13 +657,7 @@ void NativeWrites::poll_released(uintptr_t utilities, bool (*completed)(uintptr_
         uint64_t sequence = 0, handle = 0; uint32_t index = 0;
         {
             std::lock_guard<std::mutex> guard(mutex_);
-            for (const auto& write : writes_) if (write.released && write.utilities == utilities && utilities)
-                for (uint32_t i = 0; i < write.submitted; ++i) {
-                const auto& file = write.payloads[i];
-                if (file.handle > after && !file.completed && (!handle || file.handle < handle)) {
-                    sequence = write.sequence; handle = file.handle; index = i;
-                }
-            }
+            next_released_handle(writes_, utilities, after, sequence, handle, index);
         }
         if (!handle) break;
         after = handle; bool failed = false;

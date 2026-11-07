@@ -154,6 +154,46 @@ const char* recovery_empty_request(const recovery::Context& context, recovery::M
     return reason;
 }
 
+static bool scan_recovery_actors(uintptr_t world, uintptr_t address, recovery::Manager& manager) {
+    std::set<uintptr_t> seen;
+    for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
+        const auto records = *reinterpret_cast<const uintptr_t*>(address + offset);
+        const auto size = *reinterpret_cast<const int32_t*>(address + offset + 8);
+        if (size < 0 || size > 1000000) return false;
+        for (int32_t j = 0; j < size; ++j) {
+            const auto actor = record_actor(records + static_cast<uintptr_t>(j) * 0x68);
+            if (!actor || !seen.insert(actor).second || combat::confirmed_dead(world, actor)) continue;
+            char actor_name[512];
+            if (!read_instance_name(actor, actor_name)) return false;
+            manager.actors.push_back({actor, actor_identifier(actor), recovery::protected_actor(actor_name, recovery_type(actor))});
+        }
+    }
+    return true;
+}
+static void trace_recovery_rejection(const recovery::Context& context, const recovery::Manager& manager, uintptr_t address) {
+    const auto rejection = recovery::rejection(context.map, manager);
+    if (rejection && (recovery_rejections.count(address) || recovery_rejections.size() < 4096) &&
+        recovery_rejections[address] != rejection) {
+        recovery_rejections[address] = rejection;
+        commands::diagnostic_trace("AP_ENCOUNTER_RECOVERY rejected=%.192s manager=%llx reason=%s active=%u enabled=%u cursor=%d live_ai=%zu wait=%.192s",
+            manager.name.c_str(), address, rejection, *reinterpret_cast<const uint8_t*>(address + 0xdb2),
+            *reinterpret_cast<const uint8_t*>(address + 0xba0), *reinterpret_cast<const int32_t*>(address + 0xda0),
+            manager.actors.size(), manager.wait.c_str());
+    } else if (!rejection) recovery_rejections.erase(address);
+}
+static bool scan_recovery_workers(uintptr_t address, recovery::Manager& manager, uintptr_t& workers, int32_t& length) {
+    workers = *reinterpret_cast<const uintptr_t*>(address + 0xcc0);
+    length = *reinterpret_cast<const int32_t*>(address + 0xcc8);
+    if (length < 0 || length > 100000) return false;
+    for (int32_t j = 0; j < length; ++j) {
+        const auto worker = *reinterpret_cast<const uintptr_t*>(workers + static_cast<uintptr_t>(j) * 8);
+        scan_recovery_wait(worker, manager);
+    }
+    return true;
+}
+static bool recovery_needs_empty_request(const recovery::Manager& manager) {
+    return manager.actors.empty() && manager.active && !manager.complete && !manager.noncombat_wait && !manager.event_blocked;
+}
 bool scan_recovery_impl(uintptr_t world, recovery::Context& context) {
     const auto managers = *reinterpret_cast<const uintptr_t*>(world + 0x126658);
     const auto count = *reinterpret_cast<const int32_t*>(world + 0x126660);
@@ -170,39 +210,14 @@ bool scan_recovery_impl(uintptr_t world, recovery::Context& context) {
         manager.complete = *reinterpret_cast<const uint8_t*>(address + 0xdb3) != 0;
         manager.active = *reinterpret_cast<const uint8_t*>(address + 0xdb2) &&
             *reinterpret_cast<const uint8_t*>(address + 0xba0) && *reinterpret_cast<const int32_t*>(address + 0xda0) >= 0;
-        const auto workers = *reinterpret_cast<const uintptr_t*>(address + 0xcc0);
-        const auto length = *reinterpret_cast<const int32_t*>(address + 0xcc8);
-        if (length < 0 || length > 100000) return false;
-        for (int32_t j = 0; j < length; ++j) {
-            const auto worker = *reinterpret_cast<const uintptr_t*>(workers + static_cast<uintptr_t>(j) * 8);
-            scan_recovery_wait(worker, manager);
-        }
-        std::set<uintptr_t> seen;
-        for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
-            const auto records = *reinterpret_cast<const uintptr_t*>(address + offset);
-            const auto size = *reinterpret_cast<const int32_t*>(address + offset + 8);
-            if (size < 0 || size > 1000000) return false;
-            for (int32_t j = 0; j < size; ++j) {
-                const auto actor = record_actor(records + static_cast<uintptr_t>(j) * 0x68);
-                if (!actor || !seen.insert(actor).second || combat::confirmed_dead(world, actor)) continue;
-                char actor_name[512];
-                if (!read_instance_name(actor, actor_name)) return false;
-                manager.actors.push_back({actor, actor_identifier(actor), recovery::protected_actor(actor_name, recovery_type(actor))});
-            }
-        }
-        if (manager.actors.empty() && manager.active && !manager.complete && !manager.noncombat_wait && !manager.event_blocked) {
+        uintptr_t workers = 0; int32_t length = 0;
+        if (!scan_recovery_workers(address, manager, workers, length)) return false;
+        if (!scan_recovery_actors(world, address, manager)) return false;
+        if (recovery_needs_empty_request(manager)) {
             const auto reason = recovery_empty_request(context, manager, workers, length);
             if (reason) manager.exclusion = reason;
         }
-        const auto rejection = recovery::rejection(context.map, manager);
-        if (rejection && (recovery_rejections.count(address) || recovery_rejections.size() < 4096) &&
-            recovery_rejections[address] != rejection) {
-            recovery_rejections[address] = rejection;
-            commands::diagnostic_trace("AP_ENCOUNTER_RECOVERY rejected=%.192s manager=%llx reason=%s active=%u enabled=%u cursor=%d live_ai=%zu wait=%.192s",
-                manager.name.c_str(), address, rejection, *reinterpret_cast<const uint8_t*>(address + 0xdb2),
-                *reinterpret_cast<const uint8_t*>(address + 0xba0), *reinterpret_cast<const int32_t*>(address + 0xda0),
-                manager.actors.size(), manager.wait.c_str());
-        } else if (!rejection) recovery_rejections.erase(address);
+        trace_recovery_rejection(context, manager, address);
         context.managers.push_back(std::move(manager));
     }
     return true;
@@ -213,7 +228,7 @@ bool scan_recovery(uintptr_t world, recovery::Context& context) noexcept {
     __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-void stop_recovery_producers(recovery::Attempt& attempt, const recovery::Manager& target) {
+static void stop_recovery_workers(recovery::Attempt& attempt, const recovery::Manager& target) {
     const auto count = *reinterpret_cast<const int32_t*>(target.address + 0xcc8);
     const auto workers = *reinterpret_cast<const uintptr_t*>(target.address + 0xcc0);
     if (count < 0 || count > 100000) throw std::runtime_error("worker list unreadable");
@@ -229,14 +244,8 @@ void stop_recovery_producers(recovery::Attempt& attempt, const recovery::Manager
         if (found != worker_recipes.end()) { recipe_state.cancel(found->second); worker_recipes.erase(found); }
         worker_diagnostics.erase(command);
     }
-    alignas(8) uint8_t output[32]{};
-    recovery_stop_maintaining(target.address, reinterpret_cast<uintptr_t>(output), uint64_t{1} << 44, "");
-    if (native::observation_stamp() != attempt.stamp) { attempt.outcome = recovery::changed; return; }
-    for (auto pending = pending_recipes.begin(); pending != pending_recipes.end();) {
-        if (pending->first.first != target.address) { ++pending; continue; }
-        recipe_state.cancel(pending->second); ++attempt.producers_stopped;
-        pending = pending_recipes.erase(pending);
-    }
+}
+static std::set<std::string> close_recovery_requests(recovery::Attempt& attempt, const recovery::Manager& target) {
     std::set<std::string> closed;
     for (const auto& [key, progress] : recipe_state.requests()) {
         if (target.actors.empty() && progress.request.owner != target.name) continue;
@@ -250,14 +259,22 @@ void stop_recovery_producers(recovery::Attempt& attempt, const recovery::Manager
         if (!progress.closed) { recipe_state.cancel(key); ++attempt.producers_stopped; }
         closed.insert(key);
     }
+    return closed;
+}
+static void close_producer_requests(ComponentSummons& pending, const std::set<std::string>& closed) {
+    for (auto& request : pending.requests) if (closed.count(request.key)) request.completed = true;
+    if (!pending.requests.empty() && std::all_of(pending.requests.begin(), pending.requests.end(),
+            [](const auto& request) { return request.completed; })) pending.completed = true;
+}
+static void close_recovery_summons(const std::set<std::string>& closed) {
     for (auto* producers : {&component_summons, &direct_points}) for (auto& [component, pending] : *producers) {
         (void)component;
-        for (auto& request : pending.requests) if (closed.count(request.key)) request.completed = true;
-        if (!pending.requests.empty() && std::all_of(pending.requests.begin(), pending.requests.end(),
-                [](const auto& request) { return request.completed; })) pending.completed = true;
+        close_producer_requests(pending, closed);
     }
     if (pending_summon_checkpoint) for (auto& component : pending_summon_checkpoint->summons)
         for (auto& request : component.requests) if (closed.count(request.key)) request.completed = true;
+}
+static void cancel_recovery_shows(const std::set<std::string>& closed) {
     for (auto pending = pending_independent_shows.begin(); pending != pending_independent_shows.end();) {
         const bool cancelled = std::any_of(closed.begin(), closed.end(), [&](const auto& key) {
             const auto& request = recipe_state.requests().at(key).request;
@@ -270,6 +287,21 @@ void stop_recovery_producers(recovery::Attempt& attempt, const recovery::Manager
         if (cancelled) { independent_shows.insert(pending->first); pending = pending_independent_shows.erase(pending); }
         else ++pending;
     }
+}
+
+void stop_recovery_producers(recovery::Attempt& attempt, const recovery::Manager& target) {
+    stop_recovery_workers(attempt, target);
+    alignas(8) uint8_t output[32]{};
+    recovery_stop_maintaining(target.address, reinterpret_cast<uintptr_t>(output), uint64_t{1} << 44, "");
+    if (native::observation_stamp() != attempt.stamp) { attempt.outcome = recovery::changed; return; }
+    for (auto pending = pending_recipes.begin(); pending != pending_recipes.end();) {
+        if (pending->first.first != target.address) { ++pending; continue; }
+        recipe_state.cancel(pending->second); ++attempt.producers_stopped;
+        pending = pending_recipes.erase(pending);
+    }
+    const auto closed = close_recovery_requests(attempt, target);
+    close_recovery_summons(closed);
+    cancel_recovery_shows(closed);
 }
 
 bool kill_recovery_actor(recovery::Attempt& attempt, const recovery::Context& context, const recovery::Actor& actor) {
@@ -314,8 +346,18 @@ bool unblock_recovery_waits(recovery::Attempt& attempt, const recovery::Manager&
     return true;
 }
 
-bool drain_recovery_impl(recovery::Attempt& attempt, const recovery::Context& context) {
+static bool kill_recovery_targets(recovery::Attempt& attempt, const recovery::Context& context, const std::vector<const recovery::Manager*>& targets) {
     std::set<uintptr_t> killed;
+    for (const auto* target : targets) {
+        if (target->complete) continue;
+        for (const auto& actor : target->actors) {
+            if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
+            if (killed.insert(actor.address).second && !kill_recovery_actor(attempt, context, actor)) return false;
+        }
+    }
+    return true;
+}
+bool drain_recovery_impl(recovery::Attempt& attempt, const recovery::Context& context) {
     std::vector<const recovery::Manager*> targets;
     // close every target before deaths can trigger a checkpoint.
     for (const auto& target : attempt.targets) {
@@ -329,13 +371,7 @@ bool drain_recovery_impl(recovery::Attempt& attempt, const recovery::Context& co
         stop_recovery_producers(attempt, *found);
         targets.push_back(&*found);
     }
-    for (const auto* target : targets) {
-        if (target->complete) continue;
-        for (const auto& actor : target->actors) {
-            if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
-            if (killed.insert(actor.address).second && !kill_recovery_actor(attempt, context, actor)) return false;
-        }
-    }
+    return kill_recovery_targets(attempt, context, targets);
     return true;
 }
 

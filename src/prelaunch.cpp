@@ -35,6 +35,65 @@ storage::Result lease_key(std::string_view control, std::wstring& key) {
     for (auto byte : hash) { key += L"0123456789abcdef"[byte>>4]; key += L"0123456789abcdef"[byte&15]; }
     return {};
 }
+static bool read_control_field(std::istream& input, std::string& value, const char* prefix) {
+    const std::string_view expected(prefix);
+    return static_cast<bool>(std::getline(input, value)) && value.substr(0, expected.size()) == expected;
+}
+
+static bool valid_run_identity(const std::string& run, const std::string& reference, const std::string& owner,
+                               const std::string& created, uint64_t& pid, uint64_t& creation) {
+    return hex(run, 32) && hex(reference, 64) && number(owner, pid) && pid && pid <= MAXDWORD &&
+           number(created, creation);
+}
+
+static storage::Result parse_run_control(const std::string& text, storage::Descriptor& descriptor,
+                                         uint64_t& pid, uint64_t& creation) {
+    std::istringstream input(text);
+    std::string version, run, reference, owner, created;
+    if (!std::getline(input, version) || version != "sentinel-run-v1" ||
+        !read_control_field(input, run, "run=") || !read_control_field(input, reference, "protection=") ||
+        !read_control_field(input, owner, "owner=") || !read_control_field(input, created, "created="))
+        return refused(ERROR_INVALID_DATA);
+    run.erase(0, 4);
+    reference.erase(0, 11);
+    owner.erase(0, 6);
+    created.erase(0, 8);
+    if (!valid_run_identity(run, reference, owner, created, pid, creation))
+        return refused(ERROR_INVALID_DATA);
+    const auto position = input.tellg();
+    if (position < 0) return refused(ERROR_INVALID_DATA);
+    const auto result =
+        storage::parse_descriptor(std::string_view(text).substr(static_cast<size_t>(position)), descriptor);
+    if (!result.ok()) return result;
+    return {};
+}
+
+static storage::Result verify_run_owner(uint64_t pid, uint64_t creation) {
+    Handle process{
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, static_cast<DWORD>(pid))};
+    if (!process.value) return refused(GetLastError());
+    FILETIME actual{}, exit{}, kernel{}, user{};
+    if (!GetProcessTimes(process.value, &actual, &exit, &kernel, &user)) return refused(GetLastError());
+    const uint64_t actual_creation =
+        (static_cast<uint64_t>(actual.dwHighDateTime) << 32) | actual.dwLowDateTime;
+    if (actual_creation != creation || WaitForSingleObject(process.value, 0) != WAIT_TIMEOUT)
+        return refused(ERROR_INVALID_OWNER);
+    Handle lease{OpenSemaphoreW(SYNCHRONIZE, FALSE, observed_key.c_str())};
+    if (!lease.value) return refused(GetLastError());
+    if (WaitForSingleObject(lease.value, 0) != WAIT_OBJECT_0) return refused(ERROR_BUSY);
+    return {};
+}
+
+static storage::Result read_environment_descriptor(DWORD needed, DWORD env_error,
+                                                   storage::Descriptor& descriptor) {
+    if (!needed || needed > 32761) return refused(env_error ? env_error : ERROR_INVALID_DATA);
+    std::wstring path(needed, L'\0');
+    const DWORD written = GetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", path.data(), needed);
+    if (!written || written >= needed) return refused(GetLastError());
+    path.resize(written);
+    return storage::read_descriptor_file(path.c_str(), descriptor);
+}
+
 storage::Result resolve(const wchar_t* local_file, storage::Descriptor& descriptor, bool& requested) {
     requested = false;
     SetLastError(ERROR_SUCCESS);
@@ -54,40 +113,14 @@ storage::Result resolve(const wchar_t* local_file, storage::Descriptor& descript
     }
     if (local && env) return refused(ERROR_DUP_NAME);
     if (env) {
-        if (!needed || needed > 32761) return refused(env_error ? env_error : ERROR_INVALID_DATA);
-        std::wstring path(needed, L'\0');
-        const DWORD written = GetEnvironmentVariableW(L"SENTINEL_AP_TEST_SESSION", path.data(), needed);
-        if (!written || written >= needed) return refused(GetLastError());
-        path.resize(written);
-        return storage::read_descriptor_file(path.c_str(), descriptor);
+        return read_environment_descriptor(needed, env_error, descriptor);
     }
     auto result = local_read;
     if (!result.ok()) return result;
-    std::istringstream input(text);
-    std::string version, run, reference, owner, created;
-    if (!std::getline(input,version) || version != "sentinel-run-v1" ||
-        !std::getline(input,run) || run.substr(0,4) != "run=" ||
-        !std::getline(input,reference) || reference.substr(0,11) != "protection=" ||
-        !std::getline(input,owner) || owner.substr(0,6) != "owner=" ||
-        !std::getline(input,created) || created.substr(0,8) != "created=") return refused(ERROR_INVALID_DATA);
-    run.erase(0,4); reference.erase(0,11); owner.erase(0,6); created.erase(0,8);
     uint64_t pid = 0, creation = 0;
-    if (!hex(run,32) || !hex(reference,64) || !number(owner,pid) || !pid || pid > MAXDWORD || !number(created,creation))
-        return refused(ERROR_INVALID_DATA);
-    const auto position = input.tellg();
-    if (position < 0) return refused(ERROR_INVALID_DATA);
-    result = storage::parse_descriptor(std::string_view(text).substr(static_cast<size_t>(position)), descriptor);
+    result = parse_run_control(text, descriptor, pid, creation);
     if (!result.ok()) return result;
-    Handle process{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,FALSE,static_cast<DWORD>(pid))};
-    if (!process.value) return refused(GetLastError());
-    FILETIME actual{}, exit{}, kernel{}, user{};
-    if (!GetProcessTimes(process.value,&actual,&exit,&kernel,&user)) return refused(GetLastError());
-    const uint64_t actual_creation = (static_cast<uint64_t>(actual.dwHighDateTime)<<32) | actual.dwLowDateTime;
-    if (actual_creation != creation || WaitForSingleObject(process.value,0) != WAIT_TIMEOUT) return refused(ERROR_INVALID_OWNER);
-    Handle lease{OpenSemaphoreW(SYNCHRONIZE,FALSE,observed_key.c_str())};
-    if (!lease.value) return refused(GetLastError());
-    if (WaitForSingleObject(lease.value,0) != WAIT_OBJECT_0) return refused(ERROR_BUSY);
-    return {};
+    return verify_run_owner(pid, creation);
 }
 storage::Result resolve(storage::Descriptor& descriptor, bool& requested) {
     std::wstring path(32761,L'\0');

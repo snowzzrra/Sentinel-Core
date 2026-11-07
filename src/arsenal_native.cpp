@@ -70,7 +70,6 @@ UpgradeActivate original_upgrade_activate = nullptr;
 using ArsenalUi = uintptr_t(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 ArsenalUi original_arsenal_ui = nullptr;
 
-
 #ifdef SC_NATIVE_TESTING
 char fixture_namespace[65]{};
 #endif
@@ -93,30 +92,22 @@ UpdateAimFn original_update_aim = nullptr;
 bool is_ready_hook(uintptr_t self, int32_t fire_mode) {
     if (active() && fire_mode == 1) {
         const uint32_t mods = native::gameplay_admitted() ? shared_mods() : 0;
-        if (!(mods & SC_ARSENAL_ATTACHMENT_MEAT_HOOK)) {
-            return false;
-        }
+        if (!(mods & SC_ARSENAL_ATTACHMENT_MEAT_HOOK)) { return false; }
     }
     return original_is_ready ? original_is_ready(self, fire_mode) : false;
 }
-
 bool fire_hook(uintptr_t self, uintptr_t fire_mode_def, uintptr_t p3, int32_t* p4, uintptr_t p5) {
     if (active() && fire_mode_def) {
         int32_t mode = 0;
         engine::LocalMemory memory;
-        if (memory.copy(fire_mode_def + 0x28c, &mode, sizeof(mode)).reason) {
-            ready.store(false, std::memory_order_release); return false;
-        }
+        if (memory.copy(fire_mode_def + 0x28c, &mode, sizeof(mode)).reason) { ready.store(false, std::memory_order_release); return false; }
         if (mode == 1) {
             const uint32_t mods = native::gameplay_admitted() ? shared_mods() : 0;
-            if (!(mods & SC_ARSENAL_ATTACHMENT_MEAT_HOOK)) {
-                return false;
-            }
+            if (!(mods & SC_ARSENAL_ATTACHMENT_MEAT_HOOK)) { return false; }
         }
     }
     return original_fire ? original_fire(self, fire_mode_def, p3, p4, p5) : false;
 }
-
 void update_aim_hook(uintptr_t self) {
     if (active()) {
         const uint32_t mods = native::gameplay_admitted() ? shared_mods() : 0;
@@ -129,24 +120,30 @@ void update_aim_hook(uintptr_t self) {
             return;
         }
     }
-    if (original_update_aim) {
-        original_update_aim(self);
-    }
+    if (original_update_aim) { original_update_aim(self); }
 }
-
-native::Target make_target(uintptr_t base, uint32_t offset, const char* hex) {
-    native::Target out{}; out.address = base + offset;
-    const auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
-    for (size_t n = 0; n < out.bytes.size(); ++n)
-        out.bytes[n] = static_cast<uint8_t>(digit(hex[n * 2]) * 16 + digit(hex[n * 2 + 1]));
-    return out;
-}
-
 uintptr_t player(void*) {
     __try {
         const auto map = *reinterpret_cast<uintptr_t*>(engine_root + 0x50);
         return map ? reinterpret_cast<uintptr_t(*)(uintptr_t, uint32_t)>(image_base + 0x69af70)(map, 0) : 0;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+bool read_mastery_component(uintptr_t item, uintptr_t& component) {
+    const auto item_vtable = *reinterpret_cast<uintptr_t*>(item);
+    component = reinterpret_cast<uintptr_t (*)(uintptr_t)>(*reinterpret_cast<uintptr_t*>(item_vtable + 0x1c8))(item);
+    if (!component || !*reinterpret_cast<uintptr_t*>(component + 0x28)) return false;
+    const auto component_vtable = *reinterpret_cast<uintptr_t*>(component);
+    if (*reinterpret_cast<uintptr_t*>(component_vtable + 0x20) != image_base + 0x164fc20 ||
+        *reinterpret_cast<uintptr_t*>(component_vtable + 0x38) != image_base + 0x1650d80)
+        return false;
+    return true;
+}
+bool read_mastery_upgrade(uintptr_t perk, uintptr_t& item_decl, uintptr_t& upgrade) {
+    item_decl = *reinterpret_cast<uintptr_t*>(perk + 0x108);
+    const auto upgrades = *reinterpret_cast<uintptr_t*>(perk + 0x118);
+    if (!item_decl || !upgrades || *reinterpret_cast<int32_t*>(perk + 0x120) != 1) return false;
+    upgrade = *reinterpret_cast<uintptr_t*>(upgrades);
+    return true;
 }
 
 TargetStatus mastery_target(uintptr_t p, unsigned index, uintptr_t& component, uintptr_t& upgrade, bool& selected) {
@@ -155,42 +152,27 @@ TargetStatus mastery_target(uintptr_t p, unsigned index, uintptr_t& component, u
         const auto find = reinterpret_cast<uintptr_t(*)(uintptr_t, const char*, int)>(image_base + 0x17aa5d0);
         const auto perk = find(type, mastery_families[index].mastery, 1);
         const auto base = find(type, mastery_families[index].base, 1);
-        if (!perk || !base ||
-            std::strcmp(*reinterpret_cast<const char* const*>(perk + 8), mastery_families[index].mastery) ||
+        if (!perk || !base || std::strcmp(*reinterpret_cast<const char* const*>(perk + 8), mastery_families[index].mastery) ||
             std::strcmp(*reinterpret_cast<const char* const*>(base + 8), mastery_families[index].base))
             return TargetStatus::unresolved;
-        const auto item_decl = *reinterpret_cast<uintptr_t*>(perk + 0x108);
-        const auto upgrades = *reinterpret_cast<uintptr_t*>(perk + 0x118);
-        if (!item_decl || !upgrades || *reinterpret_cast<int32_t*>(perk + 0x120) != 1)
-            return TargetStatus::unresolved;
-        upgrade = *reinterpret_cast<uintptr_t*>(upgrades);
+        uintptr_t item_decl = 0;
+        if (!read_mastery_upgrade(perk, item_decl, upgrade)) return TargetStatus::unresolved;
         const auto inv = reinterpret_cast<uintptr_t(*)(uintptr_t)>(image_base + 0x763080)(p);
         const auto item = inv ? reinterpret_cast<uintptr_t(*)(uintptr_t, uintptr_t)>(image_base + 0x1690660)(inv, item_decl) : 0;
         if (!inv || !upgrade) return TargetStatus::unresolved;
         if (!item) return TargetStatus::host_missing;
         const auto base_owned = reinterpret_cast<bool(*)(uintptr_t, uintptr_t)>(image_base + 0xfe3830)(p + 0x3b40, base);
-        if (!base_owned && !(index == 8 && (shared_mods() & SC_ARSENAL_ATTACHMENT_MEAT_HOOK)))
-            return TargetStatus::mod_missing;
-        const auto item_vtable = *reinterpret_cast<uintptr_t*>(item);
-        component = reinterpret_cast<uintptr_t(*)(uintptr_t)>(*reinterpret_cast<uintptr_t*>(item_vtable + 0x1c8))(item);
-        if (!component || !*reinterpret_cast<uintptr_t*>(component + 0x28)) return TargetStatus::unresolved;
-        const auto component_vtable = *reinterpret_cast<uintptr_t*>(component);
-        if (*reinterpret_cast<uintptr_t*>(component_vtable + 0x20) != image_base + 0x164fc20 ||
-            *reinterpret_cast<uintptr_t*>(component_vtable + 0x38) != image_base + 0x1650d80)
-            return TargetStatus::unresolved;
+        if (!base_owned && !(index == 8 && (shared_mods() & SC_ARSENAL_ATTACHMENT_MEAT_HOOK))) return TargetStatus::mod_missing;
+        if (!read_mastery_component(item, component)) return TargetStatus::unresolved;
         selected = index == 8 || reinterpret_cast<bool(*)(uintptr_t, uintptr_t)>(image_base + 0xfe37f0)(p + 0x3b40, base);
         return TargetStatus::ready;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return TargetStatus::unresolved; }
 }
-
 void target_status(unsigned index, TargetStatus status) {
     const auto bit = static_cast<uint16_t>(1u << index);
-    mastery_state.host_missing = (mastery_state.host_missing & ~bit) |
-        (status == TargetStatus::host_missing ? bit : 0);
-    mastery_state.mod_missing = (mastery_state.mod_missing & ~bit) |
-        (status == TargetStatus::mod_missing ? bit : 0);
+    mastery_state.host_missing = (mastery_state.host_missing & ~bit) | (status == TargetStatus::host_missing ? bit : 0);
+    mastery_state.mod_missing = (mastery_state.mod_missing & ~bit) | (status == TargetStatus::mod_missing ? bit : 0);
 }
-
 bool apply_mastery(uintptr_t component, uintptr_t upgrade) {
     if (applying_mastery) return false;
     applying_mastery = true;
@@ -202,7 +184,6 @@ bool apply_mastery(uintptr_t component, uintptr_t upgrade) {
     applying_mastery = false;
     return applied;
 }
-
 void mastery_result(unsigned index, uintptr_t component, bool target_found, bool applied) {
     const auto bit = static_cast<uint16_t>(1u << index);
     mastery_state.applied = (mastery_state.applied & ~bit) | (applied ? bit : 0);
@@ -210,15 +191,12 @@ void mastery_result(unsigned index, uintptr_t component, bool target_found, bool
     mastery_state.apply_failed = (mastery_state.apply_failed & ~bit) | (target_found && !applied ? bit : 0);
     mastery_state.components[index] = applied ? component : 0;
 }
-
 bool mastery_context() {
-    if (!mastery_ready.load(std::memory_order_acquire) || applying_mastery ||
-        !active() || !native::gameplay_admitted() || !mastery_state.desired ||
+    if (!mastery_ready.load(std::memory_order_acquire) || applying_mastery || !active() || !native::gameplay_admitted() || !mastery_state.desired ||
         std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65)) return false;
     const auto p = player(nullptr);
     return p && p == mastery_state.player;
 }
-
 bool clear_masteries(uintptr_t component) {
     if (!mastery_context()) return false;
     bool cleared = true;
@@ -236,7 +214,6 @@ bool clear_masteries(uintptr_t component) {
     applying_mastery = false;
     return cleared;
 }
-
 void reapply_masteries(uintptr_t component) {
     if (!mastery_context()) return;
     const auto p = mastery_state.player;
@@ -255,22 +232,17 @@ void reapply_masteries(uintptr_t component) {
             if (selected && applied) mastery_state.projected |= bit;
         }
     }
-    for (unsigned i = 0; i < 13; ++i)
-        if (mastery_state.components[i] == component && !(mastery_state.apply_failed & (1u << i)))
+    for (unsigned i = 0; i < 13; ++i) if (mastery_state.components[i] == component && !(mastery_state.apply_failed & (1u << i)))
             mastery_state.needs_rebuild &= ~(1u << i);
 }
-
 void upgrade_replay_hook(uintptr_t component) {
-    for (unsigned i = 0; i < 13; ++i)
-        if (mastery_state.components[i] == component) mastery_state.needs_rebuild |= 1u << i;
+    for (unsigned i = 0; i < 13; ++i) if (mastery_state.components[i] == component) mastery_state.needs_rebuild |= 1u << i;
     const auto cleared = activation_depth || clear_masteries(component);
     if (original_upgrade_replay) original_upgrade_replay(component);
     if (!activation_depth && cleared) reapply_masteries(component);
 }
-
 void upgrade_activate_hook(uintptr_t component, uintptr_t upgrade, uint8_t a, uint8_t b) {
-    for (unsigned i = 0; i < 13; ++i)
-        if (mastery_state.components[i] == component) mastery_state.needs_rebuild |= 1u << i;
+    for (unsigned i = 0; i < 13; ++i) if (mastery_state.components[i] == component) mastery_state.needs_rebuild |= 1u << i;
     const auto projected = mastery_state.projected;
     const auto cleared = activation_depth || clear_masteries(component);
     ++activation_depth;
@@ -281,22 +253,58 @@ void upgrade_activate_hook(uintptr_t component, uintptr_t upgrade, uint8_t a, ui
         reapply_masteries(component);
     }
 }
-
 void project_mastery_ui(uintptr_t result, uintptr_t family) {
     const auto base = *reinterpret_cast<const uintptr_t*>(family);
     const auto mastery = *reinterpret_cast<const uintptr_t*>(family + 0x28);
     if (!base || !mastery) return;
     for (unsigned i = 0; i < 13; ++i) {
         const auto bit = static_cast<uint16_t>(1u << i);
-        if ((mastery_state.desired & mastery_state.applied & bit) &&
-            !std::strcmp(*reinterpret_cast<const char* const*>(base + 8), mastery_families[i].base) &&
+        if ((mastery_state.desired & mastery_state.applied & bit) && !std::strcmp(*reinterpret_cast<const char* const*>(base + 8), mastery_families[i].base) &&
             !std::strcmp(*reinterpret_cast<const char* const*>(mastery + 8), mastery_families[i].mastery)) {
             *reinterpret_cast<uint8_t*>(result + 0x1c) = 1;
             return;
         }
     }
 }
-
+bool heat_blast_identity(uintptr_t family, uintptr_t mastery, bool& delay_first) {
+    const auto count = *reinterpret_cast<const int32_t*>(family + 0x18);
+    const auto upgrades = *reinterpret_cast<const uintptr_t*>(family + 0x10);
+    const auto first = count == 2 && upgrades ? *reinterpret_cast<const char* const*>(*reinterpret_cast<const uintptr_t*>(upgrades) + 8) : nullptr;
+    const auto second = first ? *reinterpret_cast<const char* const*>(*reinterpret_cast<const uintptr_t*>(upgrades + 8) + 8) : nullptr;
+    delay_first = first && second && !std::strcmp(first, "perk/player/weapons/plasma_rifle/secondary_aoe_no_primary_delay") &&
+                  !std::strcmp(second, "perk/player/weapons/plasma_rifle/secondary_aoe_faster_charge");
+    const bool charge_first = first && second && !std::strcmp(first, "perk/player/weapons/plasma_rifle/secondary_aoe_faster_charge") &&
+        !std::strcmp(second, "perk/player/weapons/plasma_rifle/secondary_aoe_no_primary_delay");
+    return (delay_first || charge_first) && mastery && !std::strcmp(*reinterpret_cast<const char* const*>(mastery + 8), mastery_families[4].mastery);
+}
+void trace_heat_blast_ui(uintptr_t result, uintptr_t family, uintptr_t p) {
+    const auto base = *reinterpret_cast<uintptr_t*>(family);
+    const auto mastery = *reinterpret_cast<const uintptr_t*>(family + 0x28);
+    if (!base || std::strcmp(*reinterpret_cast<const char* const*>(base + 8), mastery_families[4].base)) return;
+    bool delay_first = false;
+    const bool identity = heat_blast_identity(family, mastery, delay_first);
+    const bool namespace_match = mastery_state.namespace_id[0] && !std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65);
+    const bool player_match = mastery_state.player == p;
+    if (!identity || !namespace_match || !player_match || !mastery_state.generation) {
+        heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::blocked, "heat_blast_ui_unqualified", 0,
+                                   {{"family_identity", identity},
+                                    {"namespace_match", namespace_match},
+                                    {"player_match", player_match},
+                                    {"generation", mastery_state.generation}}, p);
+        return;
+    }
+    heat_blast_ui_trace.record( save::BStage::native_start, save::BStatus::succeeded, "heat_blast_ui_facts", 0,
+        {{"generation", mastery_state.generation},
+         {"player", p},
+         {"base_available", *reinterpret_cast<const uint8_t*>(result + 0x10)},
+         {"base_active", *reinterpret_cast<const uint8_t*>(result + 0x11)},
+         {"normal_delay", *reinterpret_cast<const uint16_t*>(result + (delay_first ? 0x12 : 0x14))},
+         {"normal_charge", *reinterpret_cast<const uint16_t*>(result + (delay_first ? 0x14 : 0x12))},
+         {"mastery_available", *reinterpret_cast<const uint8_t*>(result + 0x1c)},
+         {"challenge_decl_present", *reinterpret_cast<const uintptr_t*>(family + 0x30) != 0},
+         {"challenge_field", *reinterpret_cast<const uint32_t*>(result + 0x18)},
+         {"ap_mastery_requested", (mastery_state.desired & (1u << 4)) != 0}}, p);
+}
 uintptr_t arsenal_ui_hook(uintptr_t out, uintptr_t weapon, uintptr_t family, uintptr_t p) {
     const auto result = original_arsenal_ui(out, weapon, family, p);
     if (!active() || !native::gameplay_admitted() || !result || !family || !p) return result;
@@ -304,49 +312,9 @@ uintptr_t arsenal_ui_hook(uintptr_t out, uintptr_t weapon, uintptr_t family, uin
         if (mastery_state.player == p && mastery_state.generation && mastery_state.namespace_id[0] &&
             !std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65))
             project_mastery_ui(result, family);
-        const auto base = *reinterpret_cast<uintptr_t*>(family);
-        const auto mastery = *reinterpret_cast<const uintptr_t*>(family + 0x28);
-        if (!base || std::strcmp(*reinterpret_cast<const char* const*>(base + 8),
-                                  mastery_families[4].base)) return result;
-        const auto count = *reinterpret_cast<const int32_t*>(family + 0x18);
-        const auto upgrades = *reinterpret_cast<const uintptr_t*>(family + 0x10);
-        const auto first = count == 2 && upgrades ?
-            *reinterpret_cast<const char* const*>(*reinterpret_cast<const uintptr_t*>(upgrades) + 8) : nullptr;
-        const auto second = first ?
-            *reinterpret_cast<const char* const*>(*reinterpret_cast<const uintptr_t*>(upgrades + 8) + 8) : nullptr;
-        const bool delay_first = first && second &&
-            !std::strcmp(first, "perk/player/weapons/plasma_rifle/secondary_aoe_no_primary_delay") &&
-            !std::strcmp(second, "perk/player/weapons/plasma_rifle/secondary_aoe_faster_charge");
-        const bool charge_first = first && second &&
-            !std::strcmp(first, "perk/player/weapons/plasma_rifle/secondary_aoe_faster_charge") &&
-            !std::strcmp(second, "perk/player/weapons/plasma_rifle/secondary_aoe_no_primary_delay");
-        const bool identity = (delay_first || charge_first) && mastery &&
-            !std::strcmp(*reinterpret_cast<const char* const*>(mastery + 8),
-                         mastery_families[4].mastery);
-        const bool namespace_match = mastery_state.namespace_id[0] &&
-            !std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65);
-        const bool player_match = mastery_state.player == p;
-        if (!identity || !namespace_match || !player_match || !mastery_state.generation) {
-            heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::blocked,
-                "heat_blast_ui_unqualified", 0,
-                {{"family_identity", identity}, {"namespace_match", namespace_match},
-                 {"player_match", player_match}, {"generation", mastery_state.generation}}, p);
-            return result;
-        }
-        heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::succeeded,
-            "heat_blast_ui_facts", 0,
-            {{"generation", mastery_state.generation}, {"player", p},
-             {"base_available", *reinterpret_cast<const uint8_t*>(result + 0x10)},
-             {"base_active", *reinterpret_cast<const uint8_t*>(result + 0x11)},
-             {"normal_delay", *reinterpret_cast<const uint16_t*>(result + (delay_first ? 0x12 : 0x14))},
-             {"normal_charge", *reinterpret_cast<const uint16_t*>(result + (delay_first ? 0x14 : 0x12))},
-             {"mastery_available", *reinterpret_cast<const uint8_t*>(result + 0x1c)},
-             {"challenge_decl_present", *reinterpret_cast<const uintptr_t*>(family + 0x30) != 0},
-             {"challenge_field", *reinterpret_cast<const uint32_t*>(result + 0x18)},
-             {"ap_mastery_requested", (mastery_state.desired & (1u << 4)) != 0}}, p);
+        trace_heat_blast_ui(result, family, p);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::blocked,
-            "heat_blast_ui_read_fault", 0, {}, p);
+        heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::blocked, "heat_blast_ui_read_fault", 0, {}, p);
     }
     return result;
 }
@@ -359,7 +327,6 @@ bool is_ready_hook_entry(uintptr_t self, int32_t fire_mode) {
         return is_ready_hook(self, fire_mode);
     } __finally { hook_set.leave(lease); }
 }
-
 bool fire_hook_entry(uintptr_t self, uintptr_t fire_mode_def, uintptr_t p3, int32_t* p4, uintptr_t p5) {
     const auto lease = hook_set.enter(1);
     __try {
@@ -367,7 +334,6 @@ bool fire_hook_entry(uintptr_t self, uintptr_t fire_mode_def, uintptr_t p3, int3
         return fire_hook(self, fire_mode_def, p3, p4, p5);
     } __finally { hook_set.leave(lease); }
 }
-
 void update_aim_hook_entry(uintptr_t self) {
     const auto lease = hook_set.enter(2);
     __try {
@@ -375,7 +341,6 @@ void update_aim_hook_entry(uintptr_t self) {
         return update_aim_hook(self);
     } __finally { hook_set.leave(lease); }
 }
-
 uintptr_t arsenal_ui_hook_entry(uintptr_t out, uintptr_t weapon, uintptr_t family, uintptr_t p) {
     const auto lease = ui_hooks.enter(0);
     __try {
@@ -383,7 +348,6 @@ uintptr_t arsenal_ui_hook_entry(uintptr_t out, uintptr_t weapon, uintptr_t famil
         return arsenal_ui_hook(out, weapon, family, p);
     } __finally { ui_hooks.leave(lease); }
 }
-
 void upgrade_replay_hook_entry(uintptr_t component) {
     const auto lease = mastery_hooks.enter(0);
     __try {
@@ -391,7 +355,6 @@ void upgrade_replay_hook_entry(uintptr_t component) {
         return upgrade_replay_hook(component);
     } __finally { mastery_hooks.leave(lease); }
 }
-
 void upgrade_activate_hook_entry(uintptr_t component, uintptr_t upgrade, uint8_t a, uint8_t b) {
     const auto lease = mastery_hooks.enter(1);
     __try {
@@ -420,19 +383,15 @@ Update original_mod = nullptr, original_mastery = nullptr;
 bool (*original_bypass)(uintptr_t) = nullptr;
 std::atomic<bool> installed{false};
 
-bool admitted() {
-    return installed.load(std::memory_order_acquire) && active() && native::gameplay_admitted();
-}
+bool admitted() { return installed.load(std::memory_order_acquire) && active() && native::gameplay_admitted(); }
 
 int mastery_index(uintptr_t perk) {
     if (!perk) return -1;
     const auto name = *reinterpret_cast<const char* const*>(perk + 8);
     if (!name) return -1;
-    for (int i = 0; i < 13; ++i)
-        if (!std::strcmp(name, mastery_families[i].mastery)) return i;
+    for (int i = 0; i < 13; ++i) if (!std::strcmp(name, mastery_families[i].mastery)) return i;
     return -1;
 }
-
 uintptr_t child(uintptr_t parent, const char* name, bool text = false) {
     if (!parent) return 0;
     Value value{};
@@ -441,24 +400,18 @@ uintptr_t child(uintptr_t parent, const char* name, bool text = false) {
     if (value.type == 2 || value.type == 8) swf.release(&value);
     return result;
 }
-
 uintptr_t root(uintptr_t widget) {
     const auto vtable = *reinterpret_cast<const uintptr_t*>(widget);
-    return reinterpret_cast<uintptr_t(*)(uintptr_t)>(
-        *reinterpret_cast<const uintptr_t*>(vtable + 0xe0))(widget);
+    return reinterpret_cast<uintptr_t(*)(uintptr_t)>( *reinterpret_cast<const uintptr_t*>(vtable + 0xe0))(widget);
 }
-
-void show(uintptr_t clip, bool visible) {
-    if (clip) swf.visible(clip, visible, true);
-}
+void show(uintptr_t clip, bool visible) { if (clip) swf.visible(clip, visible, true); }
 
 void correct_mod(uintptr_t widget) {
     const auto family = *reinterpret_cast<const uintptr_t*>(widget + 0x2b8);
     if (!family) return;
     const auto index = mastery_index(*reinterpret_cast<const uintptr_t*>(family + 0x28));
     const auto base = *reinterpret_cast<const uintptr_t*>(family);
-    if (index < 0 || !base || std::strcmp(*reinterpret_cast<const char* const*>(base + 8),
-                                        mastery_families[index].base)) return;
+    if (index < 0 || !base || std::strcmp(*reinterpret_cast<const char* const*>(base + 8), mastery_families[index].base)) return;
     if (!*reinterpret_cast<const uint8_t*>(widget + 0x2cc)) return;
     const auto pips = child(root(widget), "pips");
     unsigned corrected = 0;
@@ -473,10 +426,7 @@ void correct_mod(uintptr_t widget) {
         "heat_blast_pips_rendered", 0, {{"generation", native::inspect().scope.lifecycle_generation},
         {"player", player(nullptr)}, {"corrected_zero_slots", corrected}}, widget);
 }
-
-bool canonical_mastery(uintptr_t widget) {
-    return mastery_index(*reinterpret_cast<const uintptr_t*>(widget + 0x2b0)) >= 0;
-}
+bool canonical_mastery(uintptr_t widget) { return mastery_index(*reinterpret_cast<const uintptr_t*>(widget + 0x2b0)) >= 0; }
 
 thread_local uintptr_t clicked_mod_screen=0;
 using ArsenalAction=void(*)(uintptr_t,uintptr_t,uintptr_t);
@@ -489,8 +439,7 @@ const char* clicked_mastery(uintptr_t screen,uintptr_t widget) {
     if (!family) return nullptr;
     const auto index=mastery_index(*reinterpret_cast<const uintptr_t*>(family+0x28));
     const auto base=*reinterpret_cast<const uintptr_t*>(family);
-    if (index<0 || !base || std::strcmp(*reinterpret_cast<const char* const*>(base+8),
-                                      mastery_families[index].base)) return nullptr;
+    if (index<0 || !base || std::strcmp(*reinterpret_cast<const char* const*>(base+8), mastery_families[index].base)) return nullptr;
     return mastery_families[index].mastery;
 }
 void mod_details(uintptr_t screen,uintptr_t widget) {
@@ -511,11 +460,22 @@ void mod_details(uintptr_t screen,uintptr_t widget) {
 void arsenal_action(uintptr_t screen,uintptr_t widget,uintptr_t action) {
     const auto previous_screen=clicked_mod_screen;
     __try {
-        if (!previous_screen && admitted() && *reinterpret_cast<const int32_t*>(action+8)==4) {
-            clicked_mod_screen=screen;
-        }
+        if (!previous_screen && admitted() && *reinterpret_cast<const int32_t*>(action+8)==4) { clicked_mod_screen=screen; }
         original_arsenal_action(screen,widget,action);
     } __finally { clicked_mod_screen=previous_screen; }
+}
+void describe_mastery(uintptr_t widget, uintptr_t decl, uintptr_t description, int32_t goal, char (&buffer)[0x4010]) {
+    const auto text = swf.localize(decl + 0x94);
+    const auto counter = *reinterpret_cast<const uintptr_t*>(decl + 0x110);
+    const auto amount = counter ? *reinterpret_cast<const int32_t*>(counter + 0x220) : 0;
+    const auto base = amount >= 2 ? swf.format(buffer, text, amount, goal) : swf.format(buffer, text, goal);
+    const auto index = mastery_index(*reinterpret_cast<const uintptr_t*>(widget + 0x2b0));
+    const auto reward = campaign_menu::mastery_reward(mastery_families[index].mastery);
+    if (reward.location_id) {
+        const auto instruction = player_strings::menu_mastery_reward(base, "\n", reward.text);
+        swf.set_text(description, instruction.c_str());
+        campaign_menu::reward_scroll(description);
+    } else swf.set_text(description, base);
 }
 void correct_mastery(uintptr_t widget) {
     if (!canonical_mastery(widget)) return;
@@ -538,17 +498,7 @@ void correct_mastery(uintptr_t widget) {
 
     // use the same localized description and authored arguments as 0xf94ac0
     char buffer[0x4010]{};
-    const auto text = swf.localize(decl + 0x94);
-    const auto counter = *reinterpret_cast<const uintptr_t*>(decl + 0x110);
-    const auto amount = counter ? *reinterpret_cast<const int32_t*>(counter + 0x220) : 0;
-    const auto base=amount >= 2 ? swf.format(buffer, text, amount, goal) : swf.format(buffer, text, goal);
-    const auto index=mastery_index(*reinterpret_cast<const uintptr_t*>(widget+0x2b0));
-    const auto reward=campaign_menu::mastery_reward(mastery_families[index].mastery);
-    if (reward.location_id) {
-        const auto instruction=player_strings::menu_mastery_reward(base,"\n",reward.text);
-        swf.set_text(description,instruction.c_str());
-        if (reward.location_id) campaign_menu::reward_scroll(description);
-    } else swf.set_text(description,base);
+    describe_mastery(widget, decl, description, goal, buffer);
     swf.set_text(count, swf.format(buffer, "%d/%d", progress, goal));
     swf.frame(bar, 1 + static_cast<int>(100.0f * std::min(progress, goal) / goal));
     const auto icon = child(challenge, "icon");
@@ -561,27 +511,20 @@ void correct_mastery(uintptr_t widget) {
             "heat_blast_challenge_rendered", 0, {{"generation", native::inspect().scope.lifecycle_generation},
             {"player", player(nullptr)}, {"progress", progress}, {"goal", goal}}, widget);
 }
-
 void mod_hook(uintptr_t widget) {
     original_mod(widget);
     if (!admitted()) return;
     __try { correct_mod(widget); }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
-        installation_trace.record(save::BStage::profile_output, save::BStatus::blocked,
-                                  "arsenal_mod_presentation_fault");
-    }
+    __except(EXCEPTION_EXECUTE_HANDLER) { installation_trace.record(save::BStage::profile_output, save::BStatus::blocked, "arsenal_mod_presentation_fault"); }
 }
-
 void mastery_hook(uintptr_t widget) {
     original_mastery(widget);
     if (!admitted()) return;
     __try { correct_mastery(widget); }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        installation_trace.record(save::BStage::profile_output, save::BStatus::blocked,
-                                  "arsenal_challenge_presentation_fault");
+        installation_trace.record(save::BStage::profile_output, save::BStatus::blocked, "arsenal_challenge_presentation_fault");
     }
 }
-
 bool bypass_hook(uintptr_t widget) {
     if (admitted()) {
         __try { if (canonical_mastery(widget)) return false; }
@@ -589,7 +532,6 @@ bool bypass_hook(uintptr_t widget) {
     }
     return original_bypass(widget);
 }
-
 void mod_hook_entry(uintptr_t widget) {
     const auto lease = menu_hooks.enter(0);
     __try {
@@ -597,7 +539,6 @@ void mod_hook_entry(uintptr_t widget) {
         return mod_hook(widget);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void mastery_hook_entry(uintptr_t widget) {
     const auto lease = menu_hooks.enter(1);
     __try {
@@ -605,7 +546,6 @@ void mastery_hook_entry(uintptr_t widget) {
         return mastery_hook(widget);
     } __finally { menu_hooks.leave(lease); }
 }
-
 bool bypass_hook_entry(uintptr_t widget) {
     const auto lease = menu_hooks.enter(2);
     __try {
@@ -613,7 +553,6 @@ bool bypass_hook_entry(uintptr_t widget) {
         return bypass_hook(widget);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void arsenal_action_entry(uintptr_t screen,uintptr_t widget,uintptr_t action) {
     const auto lease = menu_hooks.enter(3);
     __try {
@@ -621,7 +560,6 @@ void arsenal_action_entry(uintptr_t screen,uintptr_t widget,uintptr_t action) {
         return arsenal_action(screen, widget, action);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void mod_details_entry(uintptr_t screen,uintptr_t widget) {
     const auto lease = menu_hooks.enter(4);
     __try {
@@ -629,7 +567,6 @@ void mod_details_entry(uintptr_t screen,uintptr_t widget) {
         return mod_details(screen, widget);
     } __finally { menu_hooks.leave(lease); }
 }
-
 void install(const engine::Binding& binding, HANDLE stop) {
     engine::LocalMemory memory;
     const auto deadline = GetTickCount64() + 10000;
@@ -652,7 +589,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
         {builds::steam_20260818().arsenal[14], nullptr, reinterpret_cast<void**>(&swf.material)},
     };
     for (const auto& site : sites) {
-        const auto target = make_target(image_base, site.rva, site.prefix);
+        const auto target = native::target_from_hex(image_base + site.rva, site.prefix);
         const auto reason = site.leaf ? native::validate_leaf_target(memory, binding.image, target, site.leaf, stop, deadline) :
                                         native::validate_target(memory, binding.image, target, stop, deadline);
         if (reason) {
@@ -671,8 +608,7 @@ void install(const engine::Binding& binding, HANDLE stop) {
         return;
     }
     installed.store(true, std::memory_order_release);
-    installation_trace.record(save::BStage::profile_prepare, save::BStatus::succeeded,
-                              "arsenal_menu_installed", 0, {{"hooks", 5}});
+    installation_trace.record(save::BStage::profile_prepare, save::BStatus::succeeded, "arsenal_menu_installed", 0, {{"hooks", 5}});
 }
 } // namespace menu
 
@@ -698,12 +634,9 @@ bool refresh(void*, uintptr_t p) {
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-
 void bind_run_state(void*, uintptr_t) {}
 
-Calls calls{nullptr, player, read, ensure_mods, select_mod,
-            purchase_upgrade, project_mastery, update_challenge,
-            refresh, bind_run_state};
+Calls calls{nullptr, player, read, ensure_mods, select_mod, purchase_upgrade, project_mastery, update_challenge, refresh, bind_run_state};
 
 } // namespace
 
@@ -733,15 +666,10 @@ uint16_t find_selected_masteries(uintptr_t p) {
 void rebuild_mastery_components(uint16_t selected_mask) {
     for (unsigned i = 0; i < 13; ++i) {
         const auto component = mastery_state.components[i];
-        if (!component || std::find(mastery_state.components, mastery_state.components + i, component) !=
-                              mastery_state.components + i)
-            continue;
+        if (!component || std::find(mastery_state.components, mastery_state.components + i, component) != mastery_state.components + i) continue;
         uint16_t component_mask = 0;
-        for (unsigned j = 0; j < 13; ++j)
-            if (mastery_state.components[j] == component) component_mask |= static_cast<uint16_t>(1u << j);
-        if ((mastery_state.projected & component_mask) == (selected_mask & component_mask) &&
-            !(mastery_state.needs_rebuild & component_mask))
-            continue;
+        for (unsigned j = 0; j < 13; ++j) if (mastery_state.components[j] == component) component_mask |= static_cast<uint16_t>(1u << j);
+        if ((mastery_state.projected & component_mask) == (selected_mask & component_mask) && !(mastery_state.needs_rebuild & component_mask)) continue;
         // clear AP modifiers, then restore vanilla priorities before the selected mastery
         if (!clear_masteries(component)) {
             mastery_state.applied &= ~(selected_mask & component_mask);
@@ -753,8 +681,7 @@ void rebuild_mastery_components(uint16_t selected_mask) {
     }
 }
 void tick_masteries_body(uint64_t generation, uintptr_t p) {
-    if (!mastery_ready.load(std::memory_order_acquire) || !p ||
-        !native::gameplay_admitted() || !active() ||
+    if (!mastery_ready.load(std::memory_order_acquire) || !p || !native::gameplay_admitted() || !active() ||
         std::memcmp(mastery_state.namespace_id, save::session().namespace_id().c_str(), 65)) return;
     if (mastery_state.generation != generation || mastery_state.player != p) {
         mastery_state.generation = generation;
@@ -776,14 +703,12 @@ void tick_masteries_body(uint64_t generation, uintptr_t p) {
     const auto selected_mask = find_selected_masteries(p);
     rebuild_mastery_components(selected_mask);
 }
-
 void tick_masteries(uint64_t generation, uintptr_t p) {
     if (!mastery_ready.load(std::memory_order_acquire)) return;
     const auto lease = mastery_hooks.enter(0);
     __try { if (lease.committed) tick_masteries_body(generation, p); }
     __finally { mastery_hooks.leave(lease); }
 }
-
 bool available() { return ready.load(std::memory_order_acquire); }
 
 bool admitted(const char* id) {
@@ -794,6 +719,49 @@ bool admitted(const char* id) {
         save::session().accepts_requests() && !std::memcmp(id, save::session().namespace_id().c_str(), 65);
 }
 
+static bool mastery_request_ready(const sc_arsenal_request& request, sc_arsenal_result& out) {
+    if (!mastery_ready.load(std::memory_order_acquire) || !inventory::available() || !request.masteries ||
+        request.mods || request.upgrades || request.select_weapon || request.select_mod ||
+        request.challenge_index || request.challenge_progress || request.challenge_completed) {
+        out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE;
+        return false;
+    }
+    return true;
+}
+
+static void request_mastery(const sc_arsenal_request& request, sc_arsenal_result& out) {
+    if (!mastery_request_ready(request, out)) return;
+    if (std::memcmp(mastery_state.namespace_id, request.namespace_id, 65)) {
+        mastery_state = {};
+        std::memcpy(mastery_state.namespace_id, request.namespace_id, 65);
+    }
+    out.masteries_ap_before = mastery_state.desired;
+    mastery_state.desired |= static_cast<uint16_t>(request.masteries);
+    mastery_state.next_check_ms = 0;
+    tick_masteries(request.execution.expected.lifecycle_generation, player(nullptr));
+    out.masteries_ap_after = mastery_state.desired;
+    out.flags |= SC_ARSENAL_FLAG_BEFORE_VALID | SC_ARSENAL_FLAG_AFTER_VALID | SC_ARSENAL_FLAG_SELECTION_PRESERVED | SC_ARSENAL_FLAG_EFFECTIVE_UNOBSERVED;
+    if (out.masteries_ap_before != out.masteries_ap_after) out.flags |= SC_ARSENAL_FLAG_MUTATED;
+    if ((mastery_state.applied & request.masteries) != request.masteries) {
+        out.flags |= SC_ARSENAL_FLAG_DEFERRED;
+        out.outcome = SC_ARSENAL_OUTCOME_DEFERRED;
+    } else {
+        out.outcome = out.masteries_ap_before == out.masteries_ap_after ? SC_ARSENAL_OUTCOME_NOOP : SC_ARSENAL_OUTCOME_OK;
+    }
+    save::session().btrace.record(save::BStage::native_start, out.outcome == SC_ARSENAL_OUTCOME_DEFERRED ? save::BStatus::refused : save::BStatus::succeeded,
+                                  "mastery_projection_state", 0,
+                                  {{"requested", request.masteries},
+                                   {"desired", mastery_state.desired},
+                                   {"applied", mastery_state.applied},
+                                   {"target_unavailable", mastery_state.target_unavailable},
+                                   {"host_missing", mastery_state.host_missing},
+                                   {"mod_missing", mastery_state.mod_missing},
+                                   {"apply_failed", mastery_state.apply_failed},
+                                   {"player", mastery_state.player},
+                                   {"generation", mastery_state.generation},
+                                   {"projected", mastery_state.projected}});
+    return;
+}
 void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
     if (!valid(request)) { out.outcome = SC_ARSENAL_OUTCOME_REJECTED; return; }
     if (!admitted(request.namespace_id)) { out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE; return; }
@@ -802,138 +770,20 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
     if (fixture_namespace[0]) { execute(request, out, calls); return; }
 #endif
     // the intrinsic super shotgun detours consume this shared authorization
-    if (request.kind == SC_ARSENAL_ENSURE_MODS &&
-        request.mods == SC_ARSENAL_ATTACHMENT_MEAT_HOOK) {
+    if (request.kind == SC_ARSENAL_ENSURE_MODS && request.mods == SC_ARSENAL_ATTACHMENT_MEAT_HOOK) {
         out.mods_before = shared_mods();
         authorize_hook(request.mods);
         out.mods_after = shared_mods();
-        out.flags |= SC_ARSENAL_FLAG_BEFORE_VALID | SC_ARSENAL_FLAG_AFTER_VALID |
-            SC_ARSENAL_FLAG_SELECTION_PRESERVED;
+        out.flags |= SC_ARSENAL_FLAG_BEFORE_VALID | SC_ARSENAL_FLAG_AFTER_VALID | SC_ARSENAL_FLAG_SELECTION_PRESERVED;
         if (out.mods_after != out.mods_before) out.flags |= SC_ARSENAL_FLAG_MUTATED;
-        out.outcome = (out.mods_after & SC_ARSENAL_ATTACHMENT_MEAT_HOOK) ?
-            SC_ARSENAL_OUTCOME_OK : SC_ARSENAL_OUTCOME_UNAVAILABLE;
+        out.outcome = (out.mods_after & SC_ARSENAL_ATTACHMENT_MEAT_HOOK) ? SC_ARSENAL_OUTCOME_OK : SC_ARSENAL_OUTCOME_UNAVAILABLE;
         return;
     }
-    if (request.kind == SC_ARSENAL_PROJECT_MASTERY) {
-        if (!mastery_ready.load(std::memory_order_acquire) || !inventory::available() ||
-            !request.masteries || request.mods || request.upgrades || request.select_weapon ||
-            request.select_mod || request.challenge_index || request.challenge_progress ||
-            request.challenge_completed) {
-            out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE;
-            return;
-        }
-        if (std::memcmp(mastery_state.namespace_id, request.namespace_id, 65)) {
-            mastery_state = {};
-            std::memcpy(mastery_state.namespace_id, request.namespace_id, 65);
-        }
-        out.masteries_ap_before = mastery_state.desired;
-        mastery_state.desired |= static_cast<uint16_t>(request.masteries);
-        mastery_state.next_check_ms = 0;
-        tick_masteries(request.execution.expected.lifecycle_generation, player(nullptr));
-        out.masteries_ap_after = mastery_state.desired;
-        out.flags |= SC_ARSENAL_FLAG_BEFORE_VALID | SC_ARSENAL_FLAG_AFTER_VALID |
-            SC_ARSENAL_FLAG_SELECTION_PRESERVED | SC_ARSENAL_FLAG_EFFECTIVE_UNOBSERVED;
-        if (out.masteries_ap_before != out.masteries_ap_after) out.flags |= SC_ARSENAL_FLAG_MUTATED;
-        if ((mastery_state.applied & request.masteries) != request.masteries) {
-            out.flags |= SC_ARSENAL_FLAG_DEFERRED;
-            out.outcome = SC_ARSENAL_OUTCOME_DEFERRED;
-        } else {
-            out.outcome = out.masteries_ap_before == out.masteries_ap_after ?
-                SC_ARSENAL_OUTCOME_NOOP : SC_ARSENAL_OUTCOME_OK;
-        }
-        save::session().btrace.record(save::BStage::native_start,
-            out.outcome == SC_ARSENAL_OUTCOME_DEFERRED ? save::BStatus::refused : save::BStatus::succeeded,
-            "mastery_projection_state", 0,
-            {{"requested", request.masteries}, {"desired", mastery_state.desired},
-             {"applied", mastery_state.applied}, {"target_unavailable", mastery_state.target_unavailable},
-             {"host_missing", mastery_state.host_missing}, {"mod_missing", mastery_state.mod_missing},
-             {"apply_failed", mastery_state.apply_failed}, {"player", mastery_state.player},
-             {"generation", mastery_state.generation}, {"projected", mastery_state.projected}});
-        return;
-    }
+    if (request.kind == SC_ARSENAL_PROJECT_MASTERY) return request_mastery(request, out);
     out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE;
 }
 
 #ifdef SC_NATIVE_TESTING
-bool test_invalid_fire_mode() {
-    const auto saved_ready = ready.load();
-    const auto saved_fixture = fixture_namespace[0];
-    fixture_namespace[0] = 'a'; ready.store(true);
-    const bool invalid_mode_refused = !fire_hook(0, 1, 0, nullptr, 0) && !ready.load();
-    ready.store(saved_ready); fixture_namespace[0] = saved_fixture;
-    return invalid_mode_refused;
-}
-bool test_mastery_selection() {
-    const auto previous_screen=menu::clicked_mod_screen;
-    uintptr_t widget[0x2c0/sizeof(uintptr_t)]{},family[6]{},perk[2]{},base[2]{};
-    const auto address=reinterpret_cast<uintptr_t>(widget);
-    widget[0x2b8/sizeof(uintptr_t)]=reinterpret_cast<uintptr_t>(family);
-    family[0]=reinterpret_cast<uintptr_t>(base); family[5]=reinterpret_cast<uintptr_t>(perk);
-    menu::clicked_mod_screen=0;
-    bool selection=!menu::clicked_mastery(1,address);
-    menu::clicked_mod_screen=1;
-    for (const auto& mod:mastery_families) {
-        perk[1]=reinterpret_cast<uintptr_t>(mod.mastery); base[1]=reinterpret_cast<uintptr_t>(mod.base);
-        selection&=menu::clicked_mastery(1,address)==mod.mastery;
-        selection&=!menu::clicked_mastery(2,address) && !menu::clicked_mastery(1,0);
-        base[1]=reinterpret_cast<uintptr_t>("foreign/mod");
-        selection&=!menu::clicked_mastery(1,address);
-    }
-    family[5]=0; selection&=!menu::clicked_mastery(1,address);
-    menu::clicked_mod_screen=previous_screen;
-    if (!selection) { std::fprintf(stderr,"mastery canonical selection failed\n"); return false; }
-    return true;
-}
-bool test_mastery_masks() {
-    if (!test_invalid_fire_mode()) return false;
-    if (!test_mastery_selection()) return false;
-    uintptr_t family[6]{}, perk[2]{}, base[2]{};
-    family[0] = reinterpret_cast<uintptr_t>(base);
-    const auto saved = mastery_state;
-    mastery_state = {};
-    std::array<unsigned char,0x20> ui{};
-    const auto ui_address=reinterpret_cast<uintptr_t>(ui.data());
-    perk[1]=reinterpret_cast<uintptr_t>(mastery_families[0].mastery);
-    base[1]=reinterpret_cast<uintptr_t>(mastery_families[0].base);
-    family[5]=reinterpret_cast<uintptr_t>(perk);
-    *reinterpret_cast<uint32_t*>(ui.data()+0x18)=2;
-    *reinterpret_cast<uint16_t*>(ui.data()+0x12)=0;
-    *reinterpret_cast<uint16_t*>(ui.data()+0x14)=1;
-    mastery_state.desired=593;
-    project_mastery_ui(ui_address,reinterpret_cast<uintptr_t>(family));
-    bool ui_ok=ui[0x1c]==0;
-    mastery_state.applied=593;
-    project_mastery_ui(ui_address,reinterpret_cast<uintptr_t>(family));
-    ui_ok &= ui[0x1c]==1 && *reinterpret_cast<uint32_t*>(ui.data()+0x18)==2 &&
-        *reinterpret_cast<uint16_t*>(ui.data()+0x12)==0 && *reinterpret_cast<uint16_t*>(ui.data()+0x14)==1;
-    ui[0x1c]=0;
-    base[1]=reinterpret_cast<uintptr_t>("foreign/mod");
-    project_mastery_ui(ui_address,reinterpret_cast<uintptr_t>(family));
-    ui_ok &= ui[0x1c]==0;
-    mastery_state = {};
-    const auto check = [](uint16_t target, uint16_t failed, uint16_t applied, uintptr_t component) {
-        return mastery_state.target_unavailable == target && mastery_state.apply_failed == failed &&
-            mastery_state.applied == applied && mastery_state.components[0] == component;
-    };
-    mastery_result(0, 0, false, false);
-    const bool a = check(1, 0, 0, 0);
-    mastery_result(0, 0x100, true, false);
-    const bool b = check(0, 1, 0, 0);
-    mastery_result(0, 0x100, true, true);
-    const bool c = check(0, 0, 1, 0x100);
-    mastery_result(0, 0x100, true, false);
-    const bool d = check(0, 1, 0, 0);
-    mastery_result(0, 0x100, true, true);
-    const bool e = check(0, 0, 1, 0x100);
-    mastery_result(0, 0x200, true, true);
-    const bool f = check(0, 0, 1, 0x200);
-    mastery_result(0, 0, false, false);
-    const bool g = check(1, 0, 0, 0);
-    mastery_state = saved;
-    if (!ui_ok || !(a && b && c && d && e && f && g))
-        std::fprintf(stderr,"mastery UI=%d masks=%d%d%d%d%d%d%d\n",ui_ok,a,b,c,d,e,f,g);
-    return ui_ok && a && b && c && d && e && f && g;
-}
 void use_fixture(Calls value, const char* id) {
     calls = value;
     std::memcpy(fixture_namespace, id, 65);
@@ -941,6 +791,75 @@ void use_fixture(Calls value, const char* id) {
 }
 #endif
 
+struct InstallSite : builds::Site {
+    void* detour;
+    void** original;
+};
+
+static const char* mastery_site_failure(uint32_t rva) {
+    switch (rva) {
+    case 0x1631f90: return "mastery_typeinfo_leaf_refused";
+    case 0xfe3830: return "mastery_base_reader_refused";
+    case 0x1650d80: return "mastery_reset_target_refused";
+    case 0x164fc20: return "mastery_apply_target_refused";
+    case 0x164e9b0: return "mastery_replay_hook_refused";
+    default: return "mastery_activation_hook_refused";
+    }
+}
+
+static bool validate_mastery_site(engine::Memory& memory, const engine::Binding& binding, const InstallSite& s, HANDLE stop, uint64_t mastery_deadline) {
+    const auto reason = s.rva == 0x1631f90 || s.rva == 0xfe3830 ? native::validate_leaf_target(memory, binding.image,
+                                           native::target_from_hex(image_base + s.rva, s.prefix), s.rva == 0x1631f90 ? 8 : 63, stop, mastery_deadline)
+            : native::validate_target(memory, binding.image, native::target_from_hex(image_base + s.rva, s.prefix), stop, mastery_deadline);
+    if (reason) {
+        const char* diagnostic = mastery_site_failure(s.rva);
+        installation_trace.record(save::BStage::native_start, save::BStatus::refused, diagnostic, 0,
+                                  {{"rva", s.rva}, {"reason", reason}});
+        return false;
+    }
+    return true;
+}
+
+static void install_mastery_hooks(engine::Memory& memory, const engine::Binding& binding, HANDLE stop) {
+    mastery_ready.store(false, std::memory_order_release);
+    if (!inventory::available()) return;
+    const auto mastery_deadline = GetTickCount64() + 10000;
+    const InstallSite mastery_sites[] = {
+        {builds::steam_20260818().arsenal_mastery[0], nullptr, nullptr},
+        {builds::steam_20260818().arsenal_mastery[1], nullptr, nullptr},
+        {builds::steam_20260818().arsenal_mastery[2], nullptr, nullptr},
+        {builds::steam_20260818().arsenal_mastery[3], nullptr, nullptr},
+        {builds::steam_20260818().arsenal_mastery[4], reinterpret_cast<void*>(upgrade_replay_hook_entry), reinterpret_cast<void**>(&original_upgrade_replay)},
+        {builds::steam_20260818().arsenal_mastery[5], reinterpret_cast<void*>(upgrade_activate_hook_entry),
+         reinterpret_cast<void**>(&original_upgrade_activate)},
+    };
+    for (const auto& s : mastery_sites) { if (!validate_mastery_site(memory, binding, s, stop, mastery_deadline)) return; }
+    std::vector<hooks::HookSpec> mastery_specs;
+    for (const auto& s : mastery_sites) if (s.detour) mastery_specs.push_back({image_base + s.rva, s.detour, s.original});
+    if (!mastery_hooks.install(mastery_specs.data(), mastery_specs.size(), stop)) {
+        installation_trace.record(save::BStage::native_start, save::BStatus::refused, "mastery_hook_install_failed");
+        return;
+    }
+    mastery_ready.store(true, std::memory_order_release);
+    installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "mastery_installed", 0,
+                              {{"hooks", 2}});
+}
+
+static void install_arsenal_ui(engine::Memory& memory, const engine::Binding& binding, HANDLE stop) {
+    auto ui_target = native::target_from_hex( image_base + 0xf1f420, "48895c240848896c241048897424184c894c24205741544155415641574883ec");
+    ui_target.signature_offset = 0x20;
+    ui_target.signature = native::target_from_hex(image_base + 0, "20488911498da9403b00004c8941084c8bf9498b10488bcd4d8bf0e8d0430c00") .bytes;
+    const auto ui_reason = native::validate_target(memory, binding.image, ui_target, stop, GetTickCount64() + 10000);
+    if (ui_reason) {
+        heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::refused, "heat_blast_ui_site_refused", 0, {{"reason", ui_reason}});
+    } else {
+        const hooks::HookSpec ui_specs[]{
+            hooks::bind(ui_target.address, arsenal_ui_hook_entry, original_arsenal_ui)};
+        const bool installed = ui_hooks.install(ui_specs, stop);
+        heat_blast_ui_trace.record( save::BStage::native_start, installed ? save::BStatus::succeeded : save::BStatus::refused,
+            installed ? "heat_blast_ui_observer_installed" : "heat_blast_ui_hook_refused");
+    }
+}
 void install(const engine::Binding& binding, HANDLE stop) {
     installation_trace.record(save::BStage::native_start, save::BStatus::entered, "validating");
     image_base = binding.image.base;
@@ -948,15 +867,14 @@ void install(const engine::Binding& binding, HANDLE stop) {
     engine_root = binding.root;
 
     engine::LocalMemory memory;
-    struct Site : builds::Site { void* detour; void** original; };
-    const Site sites[] = {
+    const InstallSite sites[] = {
         {builds::steam_20260818().arsenal_fire[0], reinterpret_cast<void*>(is_ready_hook_entry), reinterpret_cast<void**>(&original_is_ready)},
         {builds::steam_20260818().arsenal_fire[1], reinterpret_cast<void*>(fire_hook_entry), reinterpret_cast<void**>(&original_fire)},
         {builds::steam_20260818().arsenal_fire[2], reinterpret_cast<void*>(update_aim_hook_entry), reinterpret_cast<void**>(&original_update_aim)},
     };
     const auto deadline = GetTickCount64() + 10000;
     for (const auto& s : sites) {
-        const auto target = make_target(image_base, s.rva, s.prefix);
+        const auto target = native::target_from_hex(image_base + s.rva, s.prefix);
         const auto reason = native::validate_target(memory, binding.image, target, stop, deadline);
         std::array<uint8_t, 32> actual{};
         const auto read = memory.copy(target.address, actual.data(), actual.size());
@@ -981,64 +899,11 @@ void install(const engine::Binding& binding, HANDLE stop) {
     ready.store(true, std::memory_order_release);
     installation_trace.record(save::BStage::native_start, save::BStatus::succeeded, "installed", 0, {{"hooks", 3}});
 
-    auto ui_target = make_target(image_base, 0xf1f420,
-        "48895c240848896c241048897424184c894c24205741544155415641574883ec");
-    ui_target.signature_offset = 0x20;
-    ui_target.signature = make_target(image_base, 0,
-        "20488911498da9403b00004c8941084c8bf9498b10488bcd4d8bf0e8d0430c00").bytes;
-    const auto ui_reason = native::validate_target(memory, binding.image, ui_target, stop, GetTickCount64() + 10000);
-    if (ui_reason) {
-        heat_blast_ui_trace.record(save::BStage::native_start, save::BStatus::refused,
-            "heat_blast_ui_site_refused", 0, {{"reason", ui_reason}});
-    } else {
-        const hooks::HookSpec ui_specs[]{hooks::bind(ui_target.address, arsenal_ui_hook_entry, original_arsenal_ui)};
-        const bool installed = ui_hooks.install(ui_specs, stop);
-        heat_blast_ui_trace.record(save::BStage::native_start,
-            installed ? save::BStatus::succeeded : save::BStatus::refused,
-            installed ? "heat_blast_ui_observer_installed" : "heat_blast_ui_hook_refused");
-    }
+    install_arsenal_ui(memory, binding, stop);
 
     menu::install(binding, stop);
 
-    mastery_ready.store(false, std::memory_order_release);
-    if (!inventory::available()) return;
-    const auto mastery_deadline = GetTickCount64() + 10000;
-    const Site mastery_sites[] = {
-        {builds::steam_20260818().arsenal_mastery[0], nullptr, nullptr},
-        {builds::steam_20260818().arsenal_mastery[1], nullptr, nullptr},
-        {builds::steam_20260818().arsenal_mastery[2], nullptr, nullptr},
-        {builds::steam_20260818().arsenal_mastery[3], nullptr, nullptr},
-        {builds::steam_20260818().arsenal_mastery[4], reinterpret_cast<void*>(upgrade_replay_hook_entry), reinterpret_cast<void**>(&original_upgrade_replay)},
-        {builds::steam_20260818().arsenal_mastery[5], reinterpret_cast<void*>(upgrade_activate_hook_entry), reinterpret_cast<void**>(&original_upgrade_activate)},
-    };
-    for (const auto& s : mastery_sites) {
-        const auto reason = s.rva == 0x1631f90 || s.rva == 0xfe3830 ?
-            native::validate_leaf_target(memory, binding.image,
-                make_target(image_base, s.rva, s.prefix),
-                s.rva == 0x1631f90 ? 8 : 63, stop, mastery_deadline) :
-            native::validate_target(memory, binding.image,
-                make_target(image_base, s.rva, s.prefix), stop, mastery_deadline);
-        if (reason) {
-            const char* diagnostic = s.rva == 0x1631f90 ? "mastery_typeinfo_leaf_refused" :
-                s.rva == 0xfe3830 ? "mastery_base_reader_refused" :
-                s.rva == 0x1650d80 ? "mastery_reset_target_refused" :
-                s.rva == 0x164fc20 ? "mastery_apply_target_refused" :
-                s.rva == 0x164e9b0 ? "mastery_replay_hook_refused" : "mastery_activation_hook_refused";
-            installation_trace.record(save::BStage::native_start, save::BStatus::refused,
-                diagnostic, 0, {{"rva", s.rva}, {"reason", reason}});
-            return;
-        }
-    }
-    std::vector<hooks::HookSpec> mastery_specs;
-    for (const auto& s : mastery_sites) if (s.detour)
-        mastery_specs.push_back({image_base + s.rva, s.detour, s.original});
-    if (!mastery_hooks.install(mastery_specs.data(), mastery_specs.size(), stop)) {
-        installation_trace.record(save::BStage::native_start, save::BStatus::refused, "mastery_hook_install_failed");
-        return;
-    }
-    mastery_ready.store(true, std::memory_order_release);
-    installation_trace.record(save::BStage::native_start, save::BStatus::succeeded,
-        "mastery_installed", 0, {{"hooks", 2}});
+    install_mastery_hooks(memory, binding, stop);
 }
 
 save::BSnapshot installation_diagnostics() { return installation_trace.snapshot(); }

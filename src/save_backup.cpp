@@ -69,6 +69,39 @@ bool backup_file_metadata(const SdkWriteObservation& manifest, storage::Transpor
     }
     return true;
 }
+BackupFailure BackupJob::copy_transport(Session& owner, engine::Memory& memory, const SdkWriteObservation& manifest, const std::vector<uintptr_t>& buffers, storage::Backup& output, storage::Result& result, bool& attempted) {
+    auto failure = BackupFailure::none;
+    storage::TransportMetadata metadata;
+    metadata.directory = manifest.directory; metadata.process_id = pid_;
+    metadata.process_created = created_; metadata.operation_id = manifest.operation;
+    if (owner.campaign_run.enabled()) {
+        metadata.automatic = automatic_;
+        metadata.steam_user = owner_ ? owner_(manifest.remote) : 0;
+        metadata.provider = recovery_provider;
+        if (!metadata.steam_user || !owner.collecting(manifest.remote, owner.native_root()) ||
+            !owner.campaign_run.backup_continuity(manifest, metadata)) failure = BackupFailure::native;
+    }
+    if (!backup_file_metadata(manifest, metadata)) failure = BackupFailure::native;
+    if (failure == BackupFailure::none) {
+        struct Source {
+            BackupJob& job; engine::Memory& memory;
+            const std::vector<uintptr_t>& buffers;
+            BackupFailure stopped = BackupFailure::none;
+        } source{*this, memory, buffers};
+        const auto read = [](void* opaque, size_t index, uint32_t offset, char* bytes, uint32_t count) -> bool {
+            auto& reader = *static_cast<Source*>(opaque);
+            reader.stopped = reader.job.stopped();
+            // storage checks the index and length; use the checked private read buffers, not the writer buffers
+            return reader.stopped == BackupFailure::none &&
+                !reader.memory.copy(reader.buffers[index] + offset, bytes, count).reason;
+        };
+        attempted = true;
+        result = owner.lease_ ? owner.lease_->backup_transport(metadata, read, &source, output) :
+            storage::Result{storage::Outcome::namespace_missing};
+        if (!result.ok()) failure = source.stopped != BackupFailure::none ? source.stopped : BackupFailure::storage;
+    }
+    return failure;
+}
 void BackupJob::copy(Session& owner, engine::Memory& memory, const SdkWriteObservation& manifest,
         const std::vector<uintptr_t>& buffers) {
     LARGE_INTEGER started{}, frequency{}; QueryPerformanceCounter(&started); QueryPerformanceFrequency(&frequency);
@@ -83,35 +116,7 @@ void BackupJob::copy(Session& owner, engine::Memory& memory, const SdkWriteObser
     storage::Backup output; storage::Result result{}; bool attempted = false;
     auto failure = stopped();
     if (failure == BackupFailure::none) try {
-        storage::TransportMetadata metadata;
-        metadata.directory = manifest.directory; metadata.process_id = pid_;
-        metadata.process_created = created_; metadata.operation_id = manifest.operation;
-        if (owner.campaign_run.enabled()) {
-            metadata.automatic = automatic_;
-            metadata.steam_user = owner_ ? owner_(manifest.remote) : 0;
-            metadata.provider = recovery_provider;
-            if (!metadata.steam_user || !owner.collecting(manifest.remote, owner.native_root()) ||
-                !owner.campaign_run.backup_continuity(manifest, metadata)) failure = BackupFailure::native;
-        }
-        if (!backup_file_metadata(manifest, metadata)) failure = BackupFailure::native;
-        if (failure == BackupFailure::none) {
-            struct Source {
-                BackupJob& job; engine::Memory& memory;
-                const std::vector<uintptr_t>& buffers;
-                BackupFailure stopped = BackupFailure::none;
-            } source{*this, memory, buffers};
-            const auto read = [](void* opaque, size_t index, uint32_t offset, char* bytes, uint32_t count) -> bool {
-                auto& reader = *static_cast<Source*>(opaque);
-                reader.stopped = reader.job.stopped();
-                // storage checks the index and length; use the checked private read buffers, not the writer buffers
-                return reader.stopped == BackupFailure::none &&
-                    !reader.memory.copy(reader.buffers[index] + offset, bytes, count).reason;
-            };
-            attempted = true;
-            result = owner.lease_ ? owner.lease_->backup_transport(metadata, read, &source, output) :
-                storage::Result{storage::Outcome::namespace_missing};
-            if (!result.ok()) failure = source.stopped != BackupFailure::none ? source.stopped : BackupFailure::storage;
-        }
+        failure = copy_transport(owner, memory, manifest, buffers, output, result, attempted);
     } catch (const std::bad_alloc&) {
         failure = BackupFailure::storage;
         result = {storage::Outcome::io_error, ERROR_NOT_ENOUGH_MEMORY};

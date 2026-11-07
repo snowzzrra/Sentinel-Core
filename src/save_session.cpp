@@ -20,14 +20,21 @@ bool Session::is_profile_request(uintptr_t data) const {
     std::lock_guard<std::mutex> guard(profile_trace_mutex_);
     return data && data == profile_data_;
 }
+static bool same_profile_step(const ProfileStep& step, ProfileStatus status, const char* predicate,
+                              bool attempted, int64_t state, int64_t outcome, uint32_t value,
+                              const ProfileRead& read) {
+    return step.status == status && step.predicate == predicate && step.native_attempted == attempted &&
+           step.native_state == state && step.native_outcome == outcome && step.native_value == value &&
+           step.read.reason == read.reason && step.read.error == read.error &&
+           step.read.requested == read.requested && step.read.offset == read.offset &&
+           step.read.size == read.size;
+}
+
 void Session::profile_step(ProfileStage stage, ProfileStatus status, const char* predicate,
         bool attempted, int64_t state, int64_t outcome, uint32_t value, ProfileRead read) {
     std::lock_guard<std::mutex> guard(profile_trace_mutex_);
     auto& step = profile_trace_.steps[static_cast<size_t>(stage)];
-    if (step.status == status && step.predicate == predicate && step.native_attempted == attempted &&
-        step.native_state == state && step.native_outcome == outcome && step.native_value == value &&
-        step.read.reason == read.reason && step.read.error == read.error && step.read.requested == read.requested &&
-        step.read.offset == read.offset && step.read.size == read.size) return;
+    if (same_profile_step(step, status, predicate, attempted, state, outcome, value, read)) return;
     const auto now = GetTickCount64();
     if (!step.first_ms) step.first_ms = now;
     step.changed_ms = now; step.status = status; step.predicate = predicate;
@@ -146,6 +153,15 @@ void Session::install(uintptr_t root, uintptr_t startup_return, uint32_t routes)
     if (state_ != SessionState::prepared) return;
     root_ = root; caller_ = startup_return; routes_ = routes;
 }
+static const char* startup_context_error(uintptr_t expected_root, uintptr_t expected_caller, uintptr_t root,
+                                         uintptr_t caller, uint32_t thread) {
+    if (!expected_root) return "startup_expected_root_missing";
+    if (!expected_caller) return "startup_expected_caller_missing";
+    if (root != expected_root) return "startup_root_mismatch";
+    if (caller != expected_caller) return "startup_caller_mismatch";
+    return thread ? nullptr : "startup_thread_missing";
+}
+
 bool Session::startup_enter(uintptr_t root, uintptr_t caller, uint32_t thread) {
     installation.startup(1);
     std::lock_guard<std::mutex> guard(mutex_);
@@ -162,15 +178,14 @@ bool Session::startup_enter(uintptr_t root, uintptr_t caller, uint32_t thread) {
     trace(BStatus::entered,"startup_context_enter",SessionFault::none);
     SessionFault why = SessionFault::none;
     const char* predicate="startup_context_qualified";
-    if (!entered_ && state_ == SessionState::prepared && root_ && caller_ &&
-        root == root_ && caller == caller_ && thread) qualified_ = true;
+    const auto context_error = startup_context_error(root_, caller_, root, caller, thread);
+    if (!entered_ && state_ == SessionState::prepared && !context_error) qualified_ = true;
     if (entered_ || state_ != SessionState::prepared) {
         why = SessionFault::repeated_startup;
         predicate=entered_?"startup_already_entered":"startup_state_not_prepared";
-    } else if (!root_ || !caller_ || root != root_ || caller != caller_ || !thread) {
+    } else if (context_error) {
         why = SessionFault::startup_context;
-        predicate=!root_?"startup_expected_root_missing":!caller_?"startup_expected_caller_missing":
-            root!=root_?"startup_root_mismatch":caller!=caller_?"startup_caller_mismatch":"startup_thread_missing";
+        predicate = context_error;
     } else if (routes_ != required_routes) {
         why = SessionFault::incomplete_routes; predicate="startup_routes_incomplete";
     }
@@ -228,6 +243,19 @@ bool Session::pre_root_profile_query(uintptr_t expected_caller, uintptr_t identi
         0, 0, identity, native_route_caller, true, native_route_rva};
     return true;
 }
+static void capture_unrouted_stack(UnroutedTrace& trace) {
+    if (native_route_rva && native_route_caller >= native_route_rva) {
+        const uintptr_t image = native_route_caller - native_route_rva;
+        void* frames[32]{};
+        const auto count = RtlCaptureStackBackTrace(1, 32, frames, nullptr);
+        for (USHORT i = 0; i < count && trace.stack_count < trace.stack_rvas.size(); ++i) {
+            const auto address = reinterpret_cast<uintptr_t>(frames[i]);
+            if (address >= image && address - image < 0x7431000)
+                trace.stack_rvas[trace.stack_count++] = static_cast<uint32_t>(address - image);
+        }
+    }
+}
+
 void Session::unrouted_import(const char* route, const char* operation, uintptr_t provider, uintptr_t identity,
         const UnroutedSource& source) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -246,16 +274,7 @@ void Session::unrouted_import(const char* route, const char* operation, uintptr_
             unrouted_.source = source;
             // Retain only supported-image RVAs, never foreign-module addresses.
             // The immediate caller is independent evidence when unwinding is incomplete.
-            if (native_route_rva && native_route_caller >= native_route_rva) {
-                const uintptr_t image = native_route_caller - native_route_rva;
-                void* frames[32]{};
-                const auto count = RtlCaptureStackBackTrace(1, 32, frames, nullptr);
-                for (USHORT i = 0; i < count && unrouted_.stack_count < unrouted_.stack_rvas.size(); ++i) {
-                    const auto address = reinterpret_cast<uintptr_t>(frames[i]);
-                    if (address >= image && address - image < 0x7431000)
-                        unrouted_.stack_rvas[unrouted_.stack_count++] = static_cast<uint32_t>(address-image);
-                }
-            }
+            capture_unrouted_stack(unrouted_);
         }
         installation.startup(2);
         if (fault_ == SessionFault::none) fault_ = SessionFault::missed_startup;
@@ -416,11 +435,8 @@ bool slot_name(std::string_view name) {
     return (suffix.size() == 1 && suffix[0] >= '0' && suffix[0] <= '9') || suffix == "10" || suffix == "11";
 }
 }
-bool Session::publish_profile_catalog(uintptr_t provider, std::string_view ownership,
-        std::vector<std::string> entries, std::string_view selected, int32_t index, bool prospective, unsigned campaign) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    if (!routed() || provider != provider_ || ownership != ownership_ || profile_failed_ ||
-        entries.size() > 12 || !slot_name(selected) || index < 0 || index >= 12 || campaign >= 3) return false;
+static bool valid_catalog_choice(const std::vector<std::string>& entries, std::string_view selected,
+                                 int32_t index, bool prospective) {
     for (size_t i = 0; i < entries.size(); ++i) {
         if (!slot_name(entries[i])) return false;
         for (size_t j = 0; j < i; ++j) if (steam_name_equal(entries[i], entries[j])) return false;
@@ -428,6 +444,17 @@ bool Session::publish_profile_catalog(uintptr_t provider, std::string_view owner
     }
     if (prospective ? static_cast<size_t>(index) != entries.size() :
         (static_cast<size_t>(index) >= entries.size() || !steam_name_equal(entries[index], selected))) return false;
+    return true;
+}
+
+bool Session::publish_profile_catalog(uintptr_t provider, std::string_view ownership,
+                                      std::vector<std::string> entries, std::string_view selected,
+                                      int32_t index, bool prospective, unsigned campaign) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!routed() || provider != provider_ || ownership != ownership_ || profile_failed_ ||
+        entries.size() > 12 || !slot_name(selected) || index < 0 || index >= 12 || campaign >= 3)
+        return false;
+    if (!valid_catalog_choice(entries, selected, index, prospective)) return false;
     ProfileChoice choice{};
     std::memcpy(choice.name.data(), selected.data(), selected.size()); choice.index = index;
     const bool bound = bind_profile_choice(choice, campaign);
@@ -441,15 +468,24 @@ bool Session::profile_choice(ProfileChoice& out) const {
     if (!choice_ready_ || profile_failed_) return false;
     out = profile_choice_; return true;
 }
+static const char* profile_choice_reason(bool ready, bool failed, int32_t index, bool shape, bool listed,
+                                         bool prospective) {
+    return !ready                    ? "choice_not_ready"
+           : failed                  ? "choice_after_profile_refusal"
+           : index < 0               ? "choice_negative_index"
+           : !shape                  ? "choice_name_not_slot"
+           : !listed && !prospective ? "choice_pair_not_catalog_or_prospective"
+                                     : "choice_observed";
+}
+
 bool Session::observe_profile_choice(std::string_view name, int32_t index) {
     std::lock_guard<std::mutex> guard(mutex_);
     const bool shape=slot_name(name);
     const bool listed = index>=0 && static_cast<size_t>(index) < profile_catalog_.size() && steam_name_equal(profile_catalog_[index], name);
     const bool prospective = prospective_choice_ && index == profile_choice_.index && steam_name_equal(profile_choice_.name.data(), name);
     const bool valid=choice_ready_ && !profile_failed_ && index>=0 && shape && (listed || prospective);
-    const char* why=!choice_ready_ ? "choice_not_ready" : profile_failed_ ? "choice_after_profile_refusal" :
-        index<0 ? "choice_negative_index" : !shape ? "choice_name_not_slot" : !listed && !prospective ?
-        "choice_pair_not_catalog_or_prospective" : "choice_observed";
+    const char* why =
+        profile_choice_reason(choice_ready_, profile_failed_, index, shape, listed, prospective);
     btrace.record(BStage::profile_choice,valid?BStatus::succeeded:BStatus::refused,why,0,
         {{"actual_index",index},{"expected_index",profile_choice_.index},{"catalog_count",profile_catalog_.size()},
          {"name_length",name.size()},{"slot_shape",shape},{"name_matches",steam_name_equal(name,profile_choice_.name.data())},
@@ -505,6 +541,13 @@ void Session::forget_save_data(uintptr_t data) {
     { std::lock_guard<std::mutex> guard(profile_trace_mutex_); if (data == profile_data_) profile_data_ = 0; }
     native_writes.invalidate_source(data);
 }
+static bool same_baseline(const ProfileOwner& owner, const ProfileOwner& expected, const std::string& name,
+                          const std::string& vanilla_name, int32_t index, int32_t vanilla_index) {
+    return owner.profile == expected.profile && owner.manager == expected.manager &&
+           owner.shell == expected.shell && owner.user == expected.user && name == vanilla_name &&
+           index == vanilla_index;
+}
+
 bool Session::capture_profile_baseline(const ProfileOwner& owner, std::string name, int32_t index) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (!native_io() || !choice_ready_ || profile_failed_ || !owner.profile || !owner.manager || !owner.shell ||
@@ -512,8 +555,8 @@ bool Session::capture_profile_baseline(const ProfileOwner& owner, std::string na
         (!name.empty() && !steam_name_equal(name, "AUTOSAVE") && !slot_name(name))) return false;
     // Only the initial native read can capture the vanilla pair. Later serializers
     // never recapture AP/default selection, even when native recreates the shell.
-    if (baseline_ready_) return owner.profile == profile_owner_.profile && owner.manager == profile_owner_.manager &&
-        owner.shell == profile_owner_.shell && owner.user == profile_owner_.user && name == vanilla_name_ && index == vanilla_index_;
+    if (baseline_ready_)
+        return same_baseline(owner, profile_owner_, name, vanilla_name_, index, vanilla_index_);
     vanilla_name_ = std::move(name); vanilla_index_ = index; profile_owner_ = owner;
     baseline_ready_ = true; return true;
 }

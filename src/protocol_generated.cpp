@@ -264,7 +264,6 @@ struct Reader {
 
 namespace {
 template<class C> bool transfer(C& c, campaign_reward& v) {
-    (void)c; (void)v;
     return c.item(v.location_id) &&
         c.item(v.kind) &&
         c.item(v.checked) &&
@@ -273,7 +272,6 @@ template<class C> bool transfer(C& c, campaign_reward& v) {
         c.sequence(v.text);
 }
 template<class C> bool transfer(C& c, scope& v) {
-    (void)c; (void)v;
     return c.item(v.pid) &&
         v.pid >= 1ULL &&
         c.item(v.process_created) &&
@@ -282,7 +280,6 @@ template<class C> bool transfer(C& c, scope& v) {
         c.item(v.generation);
 }
 template<class C> bool transfer(C& c, command_reference& v) {
-    (void)c; (void)v;
     return c.item(v.scope) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
         c.text(v.command_id, 1, 128, SIZE_MAX) &&
@@ -293,7 +290,6 @@ template<class C> bool transfer(C& c, command_reference& v) {
         c.sequence(v.fingerprint);
 }
 template<class C> bool transfer(C& c, submission_identity& v) {
-    (void)c; (void)v;
     return c.item(v.scope) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
         c.text(v.command_id, 1, 128, SIZE_MAX) &&
@@ -303,7 +299,6 @@ template<class C> bool transfer(C& c, submission_identity& v) {
         v.payload_revision >= 1ULL;
 }
 template<class C> bool transfer(C& c, submission& v) {
-    (void)c; (void)v;
     return c.item(v.reference) &&
         c.sequence(v.save_binding) &&
         c.item(v.deadline_ms) &&
@@ -311,12 +306,10 @@ template<class C> bool transfer(C& c, submission& v) {
         v.deadline_ms <= 5000ULL;
 }
 template<class C> bool transfer(C& c, ack& v) {
-    (void)c; (void)v;
     return c.item(v.reference) &&
         c.sequence(v.result_token);
 }
 template<class C> bool transfer(C& c, result_dimensions& v) {
-    (void)c; (void)v;
     return c.item(v.progress) &&
         (v.progress == 0 || v.progress == 1 || v.progress == 2 || v.progress == 3) &&
         c.item(v.execution) &&
@@ -328,7 +321,6 @@ template<class C> bool transfer(C& c, result_dimensions& v) {
         c.sequence(v.result_token);
 }
 template<class C> bool transfer(C& c, sc_status& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.capabilities) &&
         c.item(v.state) &&
@@ -339,14 +331,12 @@ template<class C> bool transfer(C& c, sc_status& v) {
         c.sequence(v.build_id);
 }
 template<class C> bool transfer(C& c, sc_engine_field& v) {
-    (void)c; (void)v;
     return c.item(v.validity) &&
         c.item(v.reason) &&
         c.item(v.value) &&
         c.item(v.win32_error);
 }
 template<class C> bool transfer(C& c, sc_engine_snapshot& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.sequence) &&
         c.item(v.sampled_at_ms) &&
@@ -368,7 +358,6 @@ template<class C> bool transfer(C& c, sc_engine_snapshot& v) {
         c.sequence(v.fields);
 }
 template<class C> bool transfer(C& c, sc_context_map& v) {
-    (void)c; (void)v;
     return c.item(v.validity) &&
         c.item(v.reason) &&
         c.item(v.win32_error) &&
@@ -376,14 +365,12 @@ template<class C> bool transfer(C& c, sc_context_map& v) {
         c.sequence(v.bytes);
 }
 template<class C> bool transfer(C& c, sc_context_field& v) {
-    (void)c; (void)v;
     return c.item(v.validity) &&
         c.item(v.reason) &&
         c.item(v.value) &&
         c.item(v.win32_error);
 }
 template<class C> bool transfer(C& c, sc_context_snapshot& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.pid) &&
         c.item(v.process_created) &&
@@ -402,14 +389,12 @@ template<class C> bool transfer(C& c, sc_context_snapshot& v) {
         c.sequence(v.fields);
 }
 template<class C> bool transfer(C& c, sc_native_scope& v) {
-    (void)c; (void)v;
     return c.item(v.pid) &&
         c.item(v.process_created) &&
         c.sequence(v.instance_id) &&
         c.item(v.lifecycle_generation);
 }
 template<class C> bool transfer(C& c, sc_native_event& v) {
-    (void)c; (void)v;
     return c.item(v.sequence) &&
         c.item(v.generation) &&
         c.item(v.at_ms) &&
@@ -419,7 +404,6 @@ template<class C> bool transfer(C& c, sc_native_event& v) {
         c.item(v.depth);
 }
 template<class C> bool transfer(C& c, sc_native_snapshot& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.scope) &&
         c.item(v.availability) &&
@@ -456,7 +440,6 @@ template<class C> bool transfer(C& c, sc_native_snapshot& v) {
         c.sequence(v.events);
 }
 template<class C> bool transfer(C& c, sc_diagnostic_result& v) {
-    (void)c; (void)v;
     return c.item(v.state) &&
         c.item(v.reason) &&
         c.item(v.cancel_requested) &&
@@ -479,7 +462,6 @@ template<class C> bool transfer(C& c, sc_diagnostic_result& v) {
         c.item(v.current_map);
 }
 template<class C> bool transfer(C& c, sc_save_field& v) {
-    (void)c; (void)v;
     return c.item(v.validity) &&
         c.item(v.reason) &&
         c.item(v.value) &&
@@ -487,7 +469,6 @@ template<class C> bool transfer(C& c, sc_save_field& v) {
         c.item(v.reserved);
 }
 template<class C> bool transfer(C& c, sc_save_snapshot& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.pid) &&
         c.item(v.profile) &&
@@ -504,7 +485,6 @@ template<class C> bool transfer(C& c, sc_save_snapshot& v) {
         c.sequence(v.fields);
 }
 template<class C> bool transfer(C& c, sc_save_admission_snapshot& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.state) &&
         c.item(v.fault) &&
@@ -517,7 +497,6 @@ template<class C> bool transfer(C& c, sc_save_admission_snapshot& v) {
         c.sequence(v.reserved_bytes);
 }
 template<class C> bool transfer(C& c, sc_save_write_snapshot& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.state) &&
         c.item(v.flags) &&
@@ -537,7 +516,6 @@ template<class C> bool transfer(C& c, sc_save_write_snapshot& v) {
         c.sequence(v.reserved_bytes);
 }
 template<class C> bool transfer(C& c, sc_save_backup_snapshot& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.state) &&
         c.item(v.failure) &&
@@ -555,7 +533,6 @@ template<class C> bool transfer(C& c, sc_save_backup_snapshot& v) {
         c.item(v.slot);
 }
 template<class C> bool transfer(C& c, sc_install_event& v) {
-    (void)c; (void)v;
     return c.item(v.sequence) &&
         c.item(v.at_ms) &&
         c.item(v.duration_ms) &&
@@ -576,7 +553,6 @@ template<class C> bool transfer(C& c, sc_install_event& v) {
         c.sequence(v.actual_bytes);
 }
 template<class C> bool transfer(C& c, sc_save_installation_snapshot& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.attempt) &&
         c.item(v.phase) &&
@@ -594,7 +570,6 @@ template<class C> bool transfer(C& c, sc_save_installation_snapshot& v) {
         c.item(v.cleanup_failure);
 }
 template<class C> bool transfer(C& c, sc_weapon_points_result& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.execution) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
@@ -611,7 +586,6 @@ template<class C> bool transfer(C& c, sc_weapon_points_result& v) {
         c.item(v.suppressed_grants);
 }
 template<class C> bool transfer(C& c, sc_campaign_result& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.scope) &&
         c.item(v.request_id) &&
@@ -627,7 +601,6 @@ template<class C> bool transfer(C& c, sc_campaign_result& v) {
         c.sequence(v.intent_ids);
 }
 template<class C> bool transfer(C& c, sc_inventory_result& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.execution) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
@@ -668,7 +641,6 @@ template<class C> bool transfer(C& c, sc_inventory_result& v) {
         c.item(v.perks_owned);
 }
 template<class C> bool transfer(C& c, sc_arsenal_result& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.execution) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
@@ -699,7 +671,6 @@ template<class C> bool transfer(C& c, sc_arsenal_result& v) {
         c.item(v.operations_applied);
 }
 template<class C> bool transfer(C& c, sc_runes_result& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.execution) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
@@ -724,7 +695,6 @@ template<class C> bool transfer(C& c, sc_runes_result& v) {
         c.item(v.operations_applied);
 }
 template<class C> bool transfer(C& c, sc_special_result& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.execution) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
@@ -754,7 +724,6 @@ template<class C> bool transfer(C& c, sc_special_result& v) {
         c.item(v.operations_applied);
 }
 template<class C> bool transfer(C& c, sc_deathlink_result& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.execution) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
@@ -781,7 +750,6 @@ template<class C> bool transfer(C& c, sc_deathlink_result& v) {
         c.item(v.operations_applied);
 }
 template<class C> bool transfer(C& c, sc_automap_result& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.scope) &&
         c.item(v.request_id) &&
@@ -797,7 +765,6 @@ template<class C> bool transfer(C& c, sc_automap_result& v) {
         c.item(v.completed_passes);
 }
 template<class C> bool transfer(C& c, sc_command_result& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.execution) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
@@ -806,7 +773,6 @@ template<class C> bool transfer(C& c, sc_command_result& v) {
         c.item(v.native_exception);
 }
 template<class C> bool transfer(C& c, sc_combat_snapshot& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.scope) &&
         c.item(v.availability) &&
@@ -816,7 +782,6 @@ template<class C> bool transfer(C& c, sc_combat_snapshot& v) {
         c.item(v.qualified_kills);
 }
 template<class C> bool transfer(C& c, sc_combat_presentation_result& v) {
-    (void)c; (void)v;
     return c.item(v.abi_version) &&
         c.item(v.scope) &&
         c.item(v.request_id) &&
@@ -828,45 +793,35 @@ template<class C> bool transfer(C& c, sc_combat_presentation_result& v) {
         c.item(v.milestone) &&
         c.item(v.visible);
 }
-template<class C> bool transfer(C& c, inspect_inspect_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, inspect_inspect_payload&) {
     return true;
 }
-template<class C> bool transfer(C& c, engine_engine_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, engine_engine_payload&) {
     return true;
 }
-template<class C> bool transfer(C& c, context_context_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, context_context_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, native_native_payload& v) {
-    (void)c; (void)v;
     return c.item(v.after_event);
 }
-template<class C> bool transfer(C& c, diagnostic_diagnostic_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, diagnostic_diagnostic_payload&) {
     return true;
 }
-template<class C> bool transfer(C& c, diagnostic_detail_diagnostic_detail_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, diagnostic_detail_diagnostic_detail_payload&) {
     return true;
 }
-template<class C> bool transfer(C& c, save_save_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, save_save_payload&) {
     return true;
 }
-template<class C> bool transfer(C& c, save_admission_save_admission_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, save_admission_save_admission_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, save_write_save_write_payload& v) {
-    (void)c; (void)v;
     return c.item(v.operation_id) &&
         v.operation_id >= 0ULL;
 }
 template<class C> bool transfer(C& c, save_backup_save_backup_payload& v) {
-    (void)c; (void)v;
     return c.item(v.campaign) &&
         v.campaign <= 2ULL &&
         c.item(v.slot) &&
@@ -875,16 +830,13 @@ template<class C> bool transfer(C& c, save_backup_save_backup_payload& v) {
         v.work_deadline_ms >= 1ULL &&
         v.work_deadline_ms <= 60000ULL;
 }
-template<class C> bool transfer(C& c, save_installation_save_installation_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, save_installation_save_installation_payload&) {
     return true;
 }
-template<class C> bool transfer(C& c, weapon_points_observe_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, weapon_points_observe_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, weapon_points_grant_payload& v) {
-    (void)c; (void)v;
     return c.item(v.amount) &&
         v.amount >= 1ULL &&
         v.amount <= 117ULL &&
@@ -893,7 +845,6 @@ template<class C> bool transfer(C& c, weapon_points_grant_payload& v) {
         sum_fits(2147483647ULL, {uint64_t(v.amount), uint64_t(v.expected_gained)});
 }
 template<class C> bool transfer(C& c, sc_campaign_row& v) {
-    (void)c; (void)v;
     return c.item(v.id) &&
         c.item(v.flags) &&
         c.item(v.native_index) &&
@@ -901,14 +852,12 @@ template<class C> bool transfer(C& c, sc_campaign_row& v) {
         c.sequence(v.title);
 }
 template<class C> bool transfer(C& c, sc_physical_challenge& v) {
-    (void)c; (void)v;
     return c.sequence(v.unlockable) &&
         c.item(v.found) &&
         c.item(v.required) &&
         c.item(v.checked);
 }
 template<class C> bool transfer(C& c, sc_campaign_summary& v) {
-    (void)c; (void)v;
     return c.item(v.known) &&
         c.item(v.found) &&
         c.item(v.total) &&
@@ -916,7 +865,6 @@ template<class C> bool transfer(C& c, sc_campaign_summary& v) {
         c.sequence(v.challenges);
 }
 template<class C> bool transfer(C& c, campaign_row_campaign_row_payload& v) {
-    (void)c; (void)v;
     return c.item(v.revision) &&
         c.item(v.index) &&
         v.index <= 20ULL &&
@@ -930,26 +878,21 @@ template<class C> bool transfer(C& c, campaign_row_campaign_row_payload& v) {
         unique_by(v.rewards, [](const auto& item) { return item.unlockable; });
 }
 template<class C> bool transfer(C& c, campaign_commit_campaign_commit_payload& v) {
-    (void)c; (void)v;
     return c.item(v.revision);
 }
 template<class C> bool transfer(C& c, campaign_campaign_payload& v) {
-    (void)c; (void)v;
     return c.item(v.revision);
 }
-template<class C> bool transfer(C& c, inventory_observe_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, inventory_observe_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, inventory_ensure_payload& v) {
-    (void)c; (void)v;
     return c.item(v.weapons) &&
         (uint64_t(v.weapons) & ~1023ULL) == 0 &&
         c.item(v.equipment) &&
         (uint64_t(v.equipment) & ~31ULL) == 0;
 }
 template<class C> bool transfer(C& c, inventory_set_capacity_payload& v) {
-    (void)c; (void)v;
     return c.item(v.health_tier) &&
         v.health_tier <= 4ULL &&
         c.item(v.armor_tier) &&
@@ -957,17 +900,14 @@ template<class C> bool transfer(C& c, inventory_set_capacity_payload& v) {
         c.item(v.ammo_tier) &&
         v.ammo_tier <= 4ULL;
 }
-template<class C> bool transfer(C& c, arsenal_observe_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, arsenal_observe_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, arsenal_ensure_mods_payload& v) {
-    (void)c; (void)v;
     return c.item(v.mods) &&
         (uint64_t(v.mods) & ~8191ULL) == 0;
 }
 template<class C> bool transfer(C& c, arsenal_select_mod_payload& v) {
-    (void)c; (void)v;
     return c.item(v.weapon) &&
         v.weapon <= 6ULL &&
         (v.weapon == 0 || v.weapon == 2 || v.weapon == 3 || v.weapon == 4 || v.weapon == 5 || v.weapon == 6) &&
@@ -975,26 +915,21 @@ template<class C> bool transfer(C& c, arsenal_select_mod_payload& v) {
         v.mod <= 2ULL;
 }
 template<class C> bool transfer(C& c, arsenal_project_mastery_payload& v) {
-    (void)c; (void)v;
     return c.item(v.masteries) &&
         (uint64_t(v.masteries) & ~8191ULL) == 0;
 }
-template<class C> bool transfer(C& c, runes_observe_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, runes_observe_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, runes_ensure_normal_payload& v) {
-    (void)c; (void)v;
     return c.item(v.normal_runes) &&
         (uint64_t(v.normal_runes) & ~511ULL) == 0;
 }
 template<class C> bool transfer(C& c, runes_ensure_support_payload& v) {
-    (void)c; (void)v;
     return c.item(v.support_runes) &&
         (uint64_t(v.support_runes) & ~7ULL) == 0;
 }
 template<class C> bool transfer(C& c, runes_select_normal_payload& v) {
-    (void)c; (void)v;
     return c.item(v.slot) &&
         v.slot <= 2ULL &&
         c.item(v.rune) &&
@@ -1002,17 +937,14 @@ template<class C> bool transfer(C& c, runes_select_normal_payload& v) {
         v.rune <= 8;
 }
 template<class C> bool transfer(C& c, runes_select_support_payload& v) {
-    (void)c; (void)v;
     return c.item(v.rune) &&
         v.rune >= -1 &&
         v.rune <= 2;
 }
-template<class C> bool transfer(C& c, special_observe_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, special_observe_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, special_ensure_ownership_payload& v) {
-    (void)c; (void)v;
     return c.item(v.crucible) &&
         v.crucible <= 1ULL &&
         c.item(v.hammer) &&
@@ -1021,66 +953,54 @@ template<class C> bool transfer(C& c, special_ensure_ownership_payload& v) {
         v.hammer_tier <= 2ULL;
 }
 template<class C> bool transfer(C& c, special_select_payload& v) {
-    (void)c; (void)v;
     return c.item(v.selected) &&
         v.selected >= 1ULL &&
         v.selected <= 2ULL;
 }
-template<class C> bool transfer(C& c, special_refill_status_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, special_refill_status_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, special_refill_publish_payload& v) {
-    (void)c; (void)v;
     return c.item(v.balance) &&
         v.balance <= 1000ULL &&
         c.item(v.flags) &&
         (uint64_t(v.flags) & ~7ULL) == 0;
 }
-template<class C> bool transfer(C& c, special_refill_take_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, special_refill_take_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, special_refill_execute_payload& v) {
-    (void)c; (void)v;
     return c.item(v.request_id) &&
         v.request_id >= 1ULL &&
         c.item(v.authorize) &&
         (uint64_t(v.authorize) & ~1ULL) == 0;
 }
-template<class C> bool transfer(C& c, deathlink_observe_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, deathlink_observe_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, deathlink_configure_payload& v) {
-    (void)c; (void)v;
     return c.item(v.enabled) &&
         v.enabled <= 1ULL &&
         c.item(v.mode) &&
         (v.mode == 0 || v.mode == 1);
 }
 template<class C> bool transfer(C& c, deathlink_apply_remote_payload& v) {
-    (void)c; (void)v;
     return c.item(v.event_id) &&
         v.event_id >= 1ULL &&
         c.sequence(v.event_hash);
 }
-template<class C> bool transfer(C& c, deathlink_poll_local_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, deathlink_poll_local_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, deathlink_ack_local_payload& v) {
-    (void)c; (void)v;
     return c.item(v.sequence) &&
         v.sequence >= 1ULL;
 }
 template<class C> bool transfer(C& c, deathlink_cancel_remote_payload& v) {
-    (void)c; (void)v;
     return c.item(v.event_id) &&
         v.event_id >= 1ULL;
 }
 template<class C> bool transfer(C& c, automap_publish_payload& v) {
-    (void)c; (void)v;
     return c.item(v.known) &&
         v.known <= 1ULL &&
         c.item(v.revision) &&
@@ -1088,67 +1008,53 @@ template<class C> bool transfer(C& c, automap_publish_payload& v) {
         c.sequence(v.checked_locations);
 }
 template<class C> bool transfer(C& c, automap_publish_arena_payload& v) {
-    (void)c; (void)v;
     return c.item(v.known) &&
         v.known <= 1ULL &&
         c.item(v.revision) &&
         c.sequence(v.checked_locations);
 }
-template<class C> bool transfer(C& c, automap_observe_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, automap_observe_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, command_activate_payload& v) {
-    (void)c; (void)v;
     return c.text(v.entity, 1, 255, SIZE_MAX);
 }
 template<class C> bool transfer(C& c, command_player_perk_payload& v) {
-    (void)c; (void)v;
     return c.text(v.perk, 1, 255, SIZE_MAX);
 }
-template<class C> bool transfer(C& c, command_ammo_refill_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, command_ammo_refill_payload&) {
     return true;
 }
-template<class C> bool transfer(C& c, command_crucible_refill_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, command_crucible_refill_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, command_echo_payload& v) {
-    (void)c; (void)v;
     return c.text(v.text, 1, 2042, SIZE_MAX);
 }
 template<class C> bool transfer(C& c, command_condump_payload& v) {
-    (void)c; (void)v;
     return c.text(v.filename, 8, 128, SIZE_MAX);
 }
-template<class C> bool transfer(C& c, command_list_inventory_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, command_list_inventory_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, command_transient_policy_payload& v) {
-    (void)c; (void)v;
     return c.item(v.variable) &&
         (v.variable == 0 || v.variable == 1 || v.variable == 2) &&
         c.text(v.value, 1, 32, SIZE_MAX);
 }
 template<class C> bool transfer(C& c, combat_map_identifier& v) {
-    (void)c; (void)v;
     return c.text(v.value, 1, 255, SIZE_MAX);
 }
 template<class C> bool transfer(C& c, combat_combat_payload& v) {
-    (void)c; (void)v;
     return c.sequence(v.maps, 64);
 }
 template<class C> bool transfer(C& c, sc_diagnostic_request& v) {
-    (void)c; (void)v;
     return c.item(v.expected) &&
         c.item(v.request_id) &&
         c.sequence(v.nonce) &&
         c.item(v.deadline_ms);
 }
 template<class C> bool transfer(C& c, sc_combat_presentation_request& v) {
-    (void)c; (void)v;
     return c.item(v.execution) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
         c.item(v.total) &&
@@ -1159,15 +1065,12 @@ template<class C> bool transfer(C& c, sc_combat_presentation_request& v) {
         c.item(v.visible);
 }
 template<class C> bool transfer(C& c, combat_presentation_combat_presentation_payload& v) {
-    (void)c; (void)v;
     return c.item(v.presentation);
 }
-template<class C> bool transfer(C& c, support_dump_support_dump_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, support_dump_support_dump_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, sc_diagnostic_detail& v) {
-    (void)c; (void)v;
     return c.item(v.revision) &&
         c.item(v.stage) &&
         c.item(v.observation_attempted) &&
@@ -1193,17 +1096,14 @@ template<class C> bool transfer(C& c, sc_diagnostic_detail& v) {
         c.item(v.pending_after_error);
 }
 template<class C> bool transfer(C& c, diagnostic_detail_result& v) {
-    (void)c; (void)v;
     return c.item(v.execution) &&
         c.item(v.detail);
 }
 template<class C> bool transfer(C& c, save_admission_result& v) {
-    (void)c; (void)v;
     return c.item(v.observation) &&
         c.sequence(v.save_binding);
 }
 template<class C> bool transfer(C& c, campaign_row_base_payload& v) {
-    (void)c; (void)v;
     return c.item(v.revision) &&
         c.item(v.index) &&
         v.index <= 20ULL &&
@@ -1213,7 +1113,6 @@ template<class C> bool transfer(C& c, campaign_row_base_payload& v) {
         c.item(v.row);
 }
 template<class C> bool transfer(C& c, campaign_row_presentation_payload& v) {
-    (void)c; (void)v;
     return c.item(v.revision) &&
         c.item(v.index) &&
         v.index <= 20ULL &&
@@ -1224,7 +1123,6 @@ template<class C> bool transfer(C& c, campaign_row_presentation_payload& v) {
         c.item(v.summary);
 }
 template<class C> bool transfer(C& c, read_envelope& v) {
-    (void)c; (void)v;
     return c.item(v.scope) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
         c.item(v.command_type) &&
@@ -1234,20 +1132,17 @@ template<class C> bool transfer(C& c, read_envelope& v) {
         c.sequence(v.save_binding);
 }
 template<class C> bool transfer(C& c, command_reply& v) {
-    (void)c; (void)v;
     return c.sequence(v.actual_instance_id) && std::any_of(v.actual_instance_id.begin(), v.actual_instance_id.end(), [](auto item) { return item != 0; }) &&
         c.item(v.reference) &&
         c.item(v.dimensions);
 }
 template<class C> bool transfer(C& c, supported_command& v) {
-    (void)c; (void)v;
     return c.item(v.command_type) &&
         v.command_type >= 1ULL &&
         c.item(v.payload_revision) &&
         v.payload_revision >= 1ULL;
 }
 template<class C> bool transfer(C& c, hello_result& v) {
-    (void)c; (void)v;
     return c.item(v.scope) &&
         c.sequence(v.supported, 256) &&
         c.item(v.max_frame) &&
@@ -1256,7 +1151,6 @@ template<class C> bool transfer(C& c, hello_result& v) {
         c.item(v.identity_capacity);
 }
 template<class C> bool transfer(C& c, immutable_submission& v) {
-    (void)c; (void)v;
     return c.item(v.scope) &&
         c.sequence(v.namespace_id) && hex_namespace(v.namespace_id) &&
         c.item(v.command_type) &&
@@ -1269,14 +1163,12 @@ template<class C> bool transfer(C& c, immutable_submission& v) {
         v.deadline_ms <= 5000ULL;
 }
 template<class C> bool transfer(C& c, command_response& v) {
-    (void)c; (void)v;
     return c.item(v.reply) &&
         c.item(v.error) &&
         (v.error == 0 || v.error == 1 || v.error == 2 || v.error == 3 || v.error == 4 || v.error == 5 || v.error == 6 || v.error == 7 || v.error == 8) &&
         c.item(v.execution);
 }
 template<class C> bool transfer(C& c, sc_evidence_scope& v) {
-    (void)c; (void)v;
     return c.item(v.process) &&
         c.sequence(v.namespace_id) &&
         c.sequence(v.save_binding) &&
@@ -1285,7 +1177,6 @@ template<class C> bool transfer(C& c, sc_evidence_scope& v) {
         (v.readiness == 0 || v.readiness == 1);
 }
 template<class C> bool transfer(C& c, sc_currency_result& v) {
-    (void)c; (void)v;
     return c.item(v.execution) &&
         c.item(v.before_scope) &&
         c.item(v.after_scope) &&
@@ -1302,12 +1193,10 @@ template<class C> bool transfer(C& c, sc_currency_result& v) {
         c.item(v.gained_after);
 }
 template<class C> bool transfer(C& c, currencies_observe_payload& v) {
-    (void)c; (void)v;
     return c.item(v.currency) &&
         (v.currency == 0 || v.currency == 1 || v.currency == 2 || v.currency == 4);
 }
 template<class C> bool transfer(C& c, currencies_grant_payload& v) {
-    (void)c; (void)v;
     return c.item(v.currency) &&
         v.currency == 4ULL &&
         c.item(v.amount) &&
@@ -1317,12 +1206,10 @@ template<class C> bool transfer(C& c, currencies_grant_payload& v) {
         v.expected_gained <= 2147483647ULL &&
         sum_fits(2147483647ULL, {uint64_t(v.amount), uint64_t(v.expected_gained)});
 }
-template<class C> bool transfer(C& c, progression_observe_payload& v) {
-    (void)c; (void)v;
+template<class C> bool transfer(C&, progression_observe_payload&) {
     return true;
 }
 template<class C> bool transfer(C& c, sc_progression_result& v) {
-    (void)c; (void)v;
     return c.item(v.execution) &&
         c.item(v.before_scope) &&
         c.item(v.after_scope) &&
@@ -1337,12 +1224,10 @@ template<class C> bool transfer(C& c, sc_progression_result& v) {
         c.sequence(v.mastery_proof) && std::all_of(v.mastery_proof.begin(), v.mastery_proof.end(), [](auto item) { return (item == 0); });
 }
 template<class C> bool transfer(C& c, mission_access_observe_payload& v) {
-    (void)c; (void)v;
     return c.item(v.stage_id) &&
         v.stage_id >= 1ULL;
 }
 template<class C> bool transfer(C& c, sc_mission_access_result& v) {
-    (void)c; (void)v;
     return c.item(v.execution) &&
         c.item(v.menu_scope) &&
         c.item(v.destination_scope) &&
@@ -1357,7 +1242,6 @@ template<class C> bool transfer(C& c, sc_mission_access_result& v) {
         (v.destination_ready == 0 || v.destination_ready == 1);
 }
 template<class C> bool transfer(C& c, campaign_row_known_rewards_payload& v) {
-    (void)c; (void)v;
     return c.item(v.revision) &&
         c.item(v.index) &&
         v.index <= 20ULL &&
@@ -1373,7 +1257,6 @@ template<class C> bool transfer(C& c, campaign_row_known_rewards_payload& v) {
         unique_by(v.rewards, [](const auto& item) { return item.unlockable; });
 }
 template<class C> bool transfer(C& c, campaign_commit_selection_payload& v) {
-    (void)c; (void)v;
     return c.item(v.revision) &&
         c.item(v.count) &&
         v.count >= 1ULL &&
@@ -1381,7 +1264,6 @@ template<class C> bool transfer(C& c, campaign_commit_selection_payload& v) {
         c.item(v.selected_id);
 }
 template<class C> bool transfer(C& c, campaign_row_stage_payload& v) {
-    (void)c; (void)v;
     return c.item(v.revision) &&
         c.item(v.index) &&
         v.index <= 26ULL &&
@@ -1397,7 +1279,6 @@ template<class C> bool transfer(C& c, campaign_row_stage_payload& v) {
         unique_by(v.rewards, [](const auto& item) { return item.unlockable; });
 }
 template<class C> bool transfer(C& c, campaign_commit_stage_payload& v) {
-    (void)c; (void)v;
     return c.item(v.revision) &&
         c.item(v.count) &&
         v.count >= 1ULL &&
@@ -1405,7 +1286,6 @@ template<class C> bool transfer(C& c, campaign_commit_stage_payload& v) {
         c.item(v.selected_id);
 }
 template<class C> bool transfer(C& c, wire_header_2& v) {
-    (void)c; (void)v;
     return c.item(v.magic) &&
         v.magic == 1346978643ULL &&
         c.item(v.version) &&

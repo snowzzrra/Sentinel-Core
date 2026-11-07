@@ -68,7 +68,8 @@ bool player_position(uintptr_t player, float (&position)[3]) {
 }
 const char* effect(const ManualRequest& r, uintptr_t player, uint64_t expected, uint64_t (*current)()) {
     if (r.kind <= 3) {
-        const uint32_t rva = r.kind == 1 ? 0x60b410u : r.kind == 2 ? 0x60b4f0u : 0x60b560u;
+        constexpr uint32_t boon_rvas[] = {0x60b560u, 0x60b410u, 0x60b4f0u, 0x60b560u};
+        const auto rva = boon_rvas[r.kind];
         reinterpret_cast<void (*)(uintptr_t, uintptr_t)>(image.base + rva)(0, player); return nullptr;
     }
     using Type = uintptr_t (*)();

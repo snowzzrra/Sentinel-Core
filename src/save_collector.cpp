@@ -57,6 +57,31 @@ EnumerationFuture** enumerate_scoped(Session& owner, engine::Memory& memory, Enu
     // for this list-valued operation, nor return the original vanilla root.
     return create(out, identity, owner.native_root().c_str(), prefix);
 }
+bool valid_collected_names(engine::Memory& memory, const CollectorResult* out, const std::string& root,
+                           const std::string& prefix, std::array<std::string, 12>& names) {
+    for (size_t i = 0; i < out->files.count; ++i) {
+        const auto& entry = out->files.entries[i];
+        std::string key;
+        if (!text(memory, entry.name, names[i]) || !text(memory, entry.read_key, key) ||
+            names[i] != root + "/" + key || !slot_key(key, prefix) || entry.name.data == entry.read_key.data)
+            return false;
+        for (size_t previous = 0; previous < i; ++previous)
+            if (steam_name_equal(names[previous], names[i])) return false;
+    }
+    return true;
+}
+
+static bool assign_collected_names(engine::Memory& memory, CollectorResult* out, const CollectorCalls& calls, const std::array<std::string, 12>& names) {
+    for (size_t i = 0; i < out->files.count; ++i) {
+        auto& entry = out->files.entries[i];
+        calls.assign(&entry.read_key, names[i].c_str());
+        std::string key, name;
+        if (!text(memory, entry.read_key, key) || key != names[i] ||
+            !text(memory, entry.name, name) || name != names[i] || entry.name.data == entry.read_key.data)
+            return false;
+    }
+    return true;
+}
 CollectorResult* collect_scoped(Session& owner, engine::Memory& memory,
     const CollectorContext* context, CollectorResult* out, const CollectorCalls& calls) {
     if (!owner.routed()) {
@@ -80,25 +105,9 @@ CollectorResult* collect_scoped(Session& owner, engine::Memory& memory,
     if (out->files.count > 12)
         return refuse(owner, out, calls, SessionFault::malformed_entry, true);
     std::array<std::string, 12> names;
-    for (size_t i = 0; i < out->files.count; ++i) {
-        const auto& entry = out->files.entries[i];
-        std::string key;
-        if (!text(memory, entry.name, names[i]) || !text(memory, entry.read_key, key) ||
-            names[i] != root + "/" + key || !slot_key(key, prefix) ||
-            entry.name.data == entry.read_key.data)
-            return refuse(owner, out, calls, SessionFault::malformed_entry, true);
-        for (size_t previous = 0; previous < i; ++previous)
-            if (steam_name_equal(names[previous], names[i]))
-                return refuse(owner, out, calls, SessionFault::malformed_entry, true);
-    }
-    for (size_t i = 0; i < out->files.count; ++i) {
-        auto& entry = out->files.entries[i];
-        calls.assign(&entry.read_key, names[i].c_str());
-        std::string key, name;
-        if (!text(memory, entry.read_key, key) || key != names[i] ||
-            !text(memory, entry.name, name) || name != names[i] || entry.name.data == entry.read_key.data)
-            return refuse(owner, out, calls, SessionFault::native_copy, true);
-    }
+    if (!valid_collected_names(memory, out, root, prefix, names))
+        return refuse(owner, out, calls, SessionFault::malformed_entry, true);
+    if (!assign_collected_names(memory, out, calls, names)) return refuse(owner, out, calls, SessionFault::native_copy, true);
     return out;
 }
 } // namespace sentinel::save

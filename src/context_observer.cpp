@@ -30,6 +30,53 @@ struct Frame {
     engine::ReadResult state_result{}, map_result{};
     sc_context_map name{};
 };
+engine::ReadResult read_map_name(engine::Memory& memory, Frame& f, engine::ReadResult status) {
+    // idStr stores inline and heap capacity in bits 0..29
+    const auto capacity = f.string.allocation & 0x3fffffff;
+    if (f.string.length < 0 || static_cast<uint32_t>(f.string.length) >= capacity) {
+        status.reason = SC_REASON_INVALID_VALUE;
+        return status;
+    }
+    if (!f.string.length) {
+        status.reason = SC_CONTEXT_EMPTY_NAME;
+        return status;
+    }
+    if (static_cast<uint32_t>(f.string.length) >= SC_CONTEXT_MAP_CAPACITY) {
+        status.reason = SC_CONTEXT_NAME_TOO_LONG;
+        return status;
+    }
+    uintptr_t address = 0;
+    const auto width = static_cast<size_t>(f.string.length) + 1;
+    if (!engine::add(f.string.data, 0, width, address))
+        status.reason = SC_REASON_OUT_OF_RANGE;
+    else
+        status = memory.copy(address, f.name.bytes, width);
+    if (status.reason) return status;
+    if (f.name.bytes[f.string.length] != 0) status.reason = SC_REASON_INVALID_VALUE;
+    for (int32_t i = 0; i < f.string.length; ++i)
+        if (static_cast<unsigned char>(f.name.bytes[i]) < 32 ||
+            static_cast<unsigned char>(f.name.bytes[i]) > 126)
+            status.reason = SC_REASON_INVALID_VALUE;
+    if (!status.reason) {
+        f.name.validity = SC_OBSERVATION_OBSERVED;
+        f.name.length = static_cast<uint32_t>(f.string.length);
+    }
+    return status;
+}
+
+engine::ReadResult read_map_frame(engine::Memory& memory, const engine::Binding& b, Frame& f) {
+    const auto& descriptor = *b.descriptor;
+    auto status = read(memory, b.root, descriptor.map_offset, f.map);
+    if (!status.reason && !f.map) status.reason = SC_REASON_PARENT_NULL;
+    if (!status.reason && f.map % 8) status.reason = SC_REASON_INVALID_VALUE;
+    if (!status.reason) status = read(memory, f.map, 0, f.map_vtable);
+    if (!status.reason && f.map_vtable != b.image.base + descriptor.map_vtable)
+        status.reason = SC_REASON_INVALID_VALUE;
+    if (!status.reason) status = read(memory, f.map, descriptor.name_offset, f.string);
+    if (!status.reason) status = read_map_name(memory, f, status);
+    return status;
+}
+
 Frame frame(engine::Memory& memory, const engine::Binding& b) {
     Frame f;
     const auto& descriptor = *b.descriptor;
@@ -45,38 +92,7 @@ Frame frame(engine::Memory& memory, const engine::Binding& b) {
         f.map_result.reason = f.state.value == SC_GAME_LOADING ? SC_REASON_TRANSITION : SC_CONTEXT_MENU_WORLD;
         return f;
     }
-    status = read(memory, b.root, descriptor.map_offset, f.map);
-    if (!status.reason && !f.map) status.reason = SC_REASON_PARENT_NULL;
-    if (!status.reason && f.map % 8) status.reason = SC_REASON_INVALID_VALUE;
-    if (!status.reason) status = read(memory, f.map, 0, f.map_vtable);
-    if (!status.reason && f.map_vtable != b.image.base + descriptor.map_vtable)
-        status.reason = SC_REASON_INVALID_VALUE;
-    if (!status.reason) status = read(memory, f.map, descriptor.name_offset, f.string);
-    if (!status.reason) {
-        // idStr capacity occupies bits 0..29; bit 30 owns the allocation and
-        // bit 31 permits growth. Inline and heap storage use the same data pointer.
-        const auto capacity = f.string.allocation & 0x3fffffff;
-        if (f.string.length < 0 || static_cast<uint32_t>(f.string.length) >= capacity)
-            status.reason = SC_REASON_INVALID_VALUE;
-        else if (!f.string.length) status.reason = SC_CONTEXT_EMPTY_NAME;
-        else if (static_cast<uint32_t>(f.string.length) >= SC_CONTEXT_MAP_CAPACITY) status.reason = SC_CONTEXT_NAME_TOO_LONG;
-        else {
-            uintptr_t address = 0;
-            const auto width = static_cast<size_t>(f.string.length) + 1;
-            if (!engine::add(f.string.data, 0, width, address)) status.reason = SC_REASON_OUT_OF_RANGE;
-            else status = memory.copy(address, f.name.bytes, width);
-            if (!status.reason) {
-                if (f.name.bytes[f.string.length] != 0) status.reason = SC_REASON_INVALID_VALUE;
-                for (int32_t i = 0; i < f.string.length; ++i)
-                    if (static_cast<unsigned char>(f.name.bytes[i]) < 32 ||
-                        static_cast<unsigned char>(f.name.bytes[i]) > 126) status.reason = SC_REASON_INVALID_VALUE;
-                if (!status.reason) {
-                    f.name.validity = SC_OBSERVATION_OBSERVED;
-                    f.name.length = static_cast<uint32_t>(f.string.length);
-                }
-            }
-        }
-    }
+    status = read_map_frame(memory, b, f);
     f.map_result = status;
     return f;
 }
@@ -104,6 +120,56 @@ const Clock& observation_clock() {
         []() -> int64_t { LARGE_INTEGER f{}; return QueryPerformanceFrequency(&f) ? f.QuadPart : 0; }()};
     return clock;
 }
+static void enforce_context_budget(const Clock& clock, bool started, int64_t begin, uint32_t budget_ms,
+                                   Evidence& measured, engine::ReadResult& state_error,
+                                   engine::ReadResult& map_error) {
+    int64_t end = 0;
+    measured.timing_valid = started && clock.counter(end) && end >= begin;
+    measured.state = state_error;
+    measured.map = map_error;
+    if (!measured.timing_valid) {
+        measured.timing_error = ERROR_INVALID_DATA;
+        state_error = map_error = {SC_REASON_INTERNAL_ERROR, measured.timing_error};
+    } else {
+        const double ticks = static_cast<double>(end - begin);
+        measured.elapsed_ns =
+            static_cast<uint64_t>(std::ceil(ticks * 1000000000.0 / static_cast<double>(clock.frequency)));
+        // use the counter clock for the 2 ms check; don't use rounded uptime, round down an overrun or skip
+        // descheduled time
+        if (ticks > static_cast<double>(clock.frequency) * budget_ms / 1000.0)
+            state_error = map_error = {SC_REASON_BUDGET, 0};
+    }
+}
+
+static void publish_context_fields(sc_context_snapshot& s, const Frame& second,
+                                   engine::ReadResult state_error, engine::ReadResult map_error) {
+    s.fields[SC_CONTEXT_GAME_STATE] =
+        state_error.reason ? unknown(state_error.reason, state_error.error) : observed(second.state.value);
+    s.fields[SC_CONTEXT_STATE_CHANGED_MS] = state_error.reason
+                                                ? unknown(state_error.reason, state_error.error)
+                                                : observed(second.state.changed_ms);
+    if (map_error.reason)
+        invalidate_map(s.current_map, map_error.reason, map_error.error);
+    else
+        s.current_map = second.name;
+    s.sample_reason = state_error.reason ? state_error.reason : map_error.reason;
+}
+
+static void observe_context_pair(engine::Memory& memory, const engine::Binding& b, sc_context_snapshot& s,
+                                 HANDLE stop, uint32_t budget_ms, Evidence& measured, const Clock& clock) {
+    int64_t begin = 0;
+    const bool started = clock.frequency > 0 && clock.counter(begin);
+    const auto first = frame(memory, b), second = frame(memory, b);
+    auto state_error = first.state_result.reason ? first.state_result : second.state_result;
+    auto map_error = first.map_result.reason ? first.map_result : second.map_result;
+    if (!state_error.reason && !same_state(first, second)) state_error.reason = SC_REASON_TRANSITION;
+    if (!map_error.reason && !same_map(first, second)) map_error.reason = SC_REASON_TRANSITION;
+    enforce_context_budget(clock, started, begin, budget_ms, measured, state_error, map_error);
+    if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT)
+        state_error.reason = map_error.reason = SC_REASON_CANCELLED;
+    publish_context_fields(s, second, state_error, map_error);
+}
+
 sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uint64_t sequence, HANDLE stop,
                            uint32_t budget_ms, Evidence* evidence, const Clock* supplied_clock) {
     const auto& clock = supplied_clock ? *supplied_clock : observation_clock();
@@ -121,31 +187,7 @@ sc_context_snapshot sample(engine::Memory& memory, const engine::Binding& b, uin
     if (!reason) s.layout_revision = 1;
     if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) reason = SC_REASON_CANCELLED;
     if (!reason) {
-        int64_t begin = 0, end = 0;
-        const bool started = clock.frequency > 0 && clock.counter(begin);
-        const auto first = frame(memory, b), second = frame(memory, b);
-        auto state_error = first.state_result.reason ? first.state_result : second.state_result;
-        auto map_error = first.map_result.reason ? first.map_result : second.map_result;
-        if (!state_error.reason && !same_state(first, second)) state_error.reason = SC_REASON_TRANSITION;
-        if (!map_error.reason && !same_map(first, second)) map_error.reason = SC_REASON_TRANSITION;
-        measured.timing_valid = started && clock.counter(end) && end >= begin;
-        measured.state = state_error; measured.map = map_error;
-        if (!measured.timing_valid) {
-            measured.timing_error = ERROR_INVALID_DATA;
-            state_error = map_error = {SC_REASON_INTERNAL_ERROR, measured.timing_error};
-        } else {
-            const double ticks = static_cast<double>(end - begin);
-            measured.elapsed_ns = static_cast<uint64_t>(std::ceil(ticks * 1000000000.0 / static_cast<double>(clock.frequency)));
-            // use the counter clock for the 2 ms check; don't use rounded uptime, round down an overrun or skip descheduled time
-            if (ticks > static_cast<double>(clock.frequency) * budget_ms / 1000.0)
-                state_error = map_error = {SC_REASON_BUDGET, 0};
-        }
-        if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) state_error.reason = map_error.reason = SC_REASON_CANCELLED;
-        s.fields[SC_CONTEXT_GAME_STATE] = state_error.reason ? unknown(state_error.reason, state_error.error) : observed(second.state.value);
-        s.fields[SC_CONTEXT_STATE_CHANGED_MS] = state_error.reason ? unknown(state_error.reason, state_error.error) : observed(second.state.changed_ms);
-        if (map_error.reason) invalidate_map(s.current_map, map_error.reason, map_error.error);
-        else s.current_map = second.name;
-        s.sample_reason = state_error.reason ? state_error.reason : map_error.reason;
+        observe_context_pair(memory, b, s, stop, budget_ms, measured, clock);
     } else {
         measured.state = measured.map = {reason, 0};
         invalidate_map(s.current_map, reason);

@@ -37,6 +37,8 @@ public:
     void copy(Session&, engine::Memory&, const SdkWriteObservation&, const std::vector<uintptr_t>& buffers);
 private:
     BackupFailure stopped() const;
+    BackupFailure copy_transport(Session&, engine::Memory&, const SdkWriteObservation&, const std::vector<uintptr_t>&,
+                                 storage::Backup&, storage::Result&, bool& attempted);
     void settle(); // mutex_ held; never completes a still-running copy
     const uint32_t pid_;
     const uint64_t created_, deadline_;

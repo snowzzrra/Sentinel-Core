@@ -76,6 +76,60 @@ void Queue::enqueue_console(uint64_t stamp, uint64_t now) {
     attempts_.push_back(std::move(attempt));
     pending_.store(true, std::memory_order_release);
 }
+static bool same_context(const Context& context, const Context& previous) {
+    return context.scope.lifecycle_generation == previous.scope.lifecycle_generation && context.map == previous.map &&
+        context.world == previous.world && context.player == previous.player && context.namespace_id == previous.namespace_id &&
+        context.save == previous.save && context.gameplay;
+}
+static Outcome recovery_context(const Attempt& attempt, const Context& context, uint64_t stamp, uint64_t age) {
+    if (stamp != attempt.stamp || (attempt.started && !same_context(context, attempt.context))) return changed;
+    if (!context.gameplay) return no_active;
+    if (!context.supported) return unsupported;
+    if (age > 250 || !context.readable) return unknown;
+    return pending;
+}
+static void recovery_wait(Attempt& attempt, const Manager& manager) {
+    auto& outcome = attempt.outcome;
+    if (manager.protected_fight) outcome = unsupported;
+    if (manager.noncombat_wait && manager.actors.empty() && attempt.elapsed >= 2000) outcome = unknown;
+    for (const auto& actor : manager.actors) if (actor.protected_actor) outcome = unsupported;
+    if (!manager.wait.empty()) {
+        if (!attempt.wait.empty()) attempt.wait += "; ";
+        attempt.wait += manager.name + ": " + manager.wait;
+    }
+}
+static bool recovery_targets(Attempt& attempt, const Context& context) {
+    auto& outcome = attempt.outcome;
+    bool complete = !attempt.targets.empty();
+    attempt.wait.clear();
+    if (!attempt.targets.empty() && boss_map(context.map)) outcome = unsupported;
+    for (const auto& target : attempt.targets) {
+        const auto found = std::find_if(context.managers.begin(), context.managers.end(), [&](const Manager& manager) {
+            return manager.address == target.address && manager.identifier == target.identifier && manager.name == target.name;
+        });
+        if (found == context.managers.end()) { outcome = changed; break; }
+        if (found->complete) continue;
+        complete = false;
+        recovery_wait(attempt, *found);
+    }
+    return complete;
+}
+static void drain_attempt(Attempt& attempt, const Context& context, bool complete, Drain drain, std::unique_lock<std::mutex>& guard) {
+    auto& outcome = attempt.outcome;
+    if (outcome == pending) {
+        if (!complete && attempt.elapsed >= 60000) outcome = unknown;
+        else {
+            auto working = attempt;
+            const auto sampled = context;
+            guard.unlock();
+            const bool drained = drain && drain(working, sampled);
+            guard.lock();
+            attempt = std::move(working);
+            if (!drained && outcome == pending) outcome = unknown;
+            else if (complete && outcome == pending) outcome = finished;
+        }
+    }
+}
 std::vector<Outcome> Queue::tick(uint64_t stamp, uint64_t now, Drain drain) {
     std::unique_lock<std::mutex> guard(mutex_);
     if (!pending_.load(std::memory_order_relaxed)) return {};
@@ -84,14 +138,8 @@ std::vector<Outcome> Queue::tick(uint64_t stamp, uint64_t now, Drain drain) {
     auto& outcome = attempt.outcome;
     const auto& context = current_;
     if (!attempt.started) attempt.context = context;
-    if (stamp != attempt.stamp || (attempt.started &&
-        (context.scope.lifecycle_generation != attempt.context.scope.lifecycle_generation ||
-         context.map != attempt.context.map || context.world != attempt.context.world ||
-         context.player != attempt.context.player || context.namespace_id != attempt.context.namespace_id ||
-         context.save != attempt.context.save || !context.gameplay))) outcome = changed;
-    else if (!context.gameplay) outcome = no_active;
-    else if (!context.supported) outcome = unsupported;
-    else if (now - sampled_at_ > 250 || !context.readable) outcome = unknown;
+    const auto context_outcome = recovery_context(attempt, context, stamp, now - sampled_at_);
+    if (context_outcome != pending) outcome = context_outcome;
     else {
         if (!attempt.started) {
             attempt.context = context;
@@ -99,37 +147,8 @@ std::vector<Outcome> Queue::tick(uint64_t stamp, uint64_t now, Drain drain) {
             attempt.started = true;
             if (attempt.targets.empty() && outcome == pending) outcome = no_active;
         }
-        bool complete = !attempt.targets.empty();
-        attempt.wait.clear();
-        if (!attempt.targets.empty() && boss_map(context.map)) outcome = unsupported;
-        for (const auto& target : attempt.targets) {
-            const auto found = std::find_if(context.managers.begin(), context.managers.end(), [&](const Manager& manager) {
-                return manager.address == target.address && manager.identifier == target.identifier && manager.name == target.name;
-            });
-            if (found == context.managers.end()) { outcome = changed; break; }
-            if (found->complete) continue;
-            complete = false;
-            if (found->protected_fight) outcome = unsupported;
-            if (found->noncombat_wait && found->actors.empty() && attempt.elapsed >= 2000) outcome = unknown;
-            for (const auto& actor : found->actors) if (actor.protected_actor) outcome = unsupported;
-            if (!found->wait.empty()) {
-                if (!attempt.wait.empty()) attempt.wait += "; ";
-                attempt.wait += found->name + ": " + found->wait;
-            }
-        }
-        if (outcome == pending) {
-            if (!complete && attempt.elapsed >= 60000) outcome = unknown;
-            else {
-                auto working = attempt;
-                const auto sampled = context;
-                guard.unlock();
-                const bool drained = drain && drain(working, sampled);
-                guard.lock();
-                attempt = std::move(working);
-                if (!drained && outcome == pending) outcome = unknown;
-                else if (complete && outcome == pending) outcome = finished;
-            }
-        }
+        const bool complete = recovery_targets(attempt, context);
+        drain_attempt(attempt, context, complete, drain, guard);
     }
     const bool report = repeat_ || outcome != pending || !attempt.last_report || now - attempt.last_report >= 5000;
     repeat_ = false;
