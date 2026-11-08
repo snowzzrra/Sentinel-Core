@@ -6,21 +6,10 @@ PROFILE/settings are not decoded. No restoration, launch or source discovery.
 import argparse
 import contextlib
 import json
-from pathlib import PurePosixPath
-import re
 import stat
 import sys
 
 import prepare_vanilla_backup as protection
-
-
-CAMPAIGN = re.compile(r"(?:GAME|DLC1|DLC2)-AUTOSAVE(?:[0-9]|1[01])", re.IGNORECASE)
-AP_ROOT = re.compile(r"ap-[0-9a-f]{40}", re.IGNORECASE)
-
-
-def is_vanilla_campaign(relative):
-    parts = PurePosixPath(relative).parts
-    return not any(AP_ROOT.fullmatch(part) for part in parts) and any(CAMPAIGN.fullmatch(part) for part in parts)
 
 
 def compare(args):
@@ -36,7 +25,7 @@ def compare(args):
         args.operation_stage = "comparison_reference_integrity"
         entries = protection.verify_backup(destination, identity)
         baseline = {(entry["origin"], entry["relative"]): (entry["bytes"], entry["sha256"])
-                    for entry in entries if is_vanilla_campaign(entry["relative"])}
+                    for entry in entries if protection.is_campaign(entry["relative"])}
         if not baseline:
             raise protection.Refused("backup contains no vanilla campaign files; comparison is inconclusive")
         args.operation_stage = "comparison_inventory"
@@ -49,7 +38,7 @@ def compare(args):
                 if source not in directories:
                     stack.enter_context(protection.pinned(source, directory=True))
                     directories.add(source)
-            elif is_vanilla_campaign(relative):
+            elif protection.is_campaign(relative):
                 handles[(label, relative)] = stack.enter_context(protection.pinned(source))
                 acquired[(label, relative)] = protection.handle_metadata(handles[(label, relative)])
         protection.inventory_guard(sources, before, handles, acquired, "comparison_acquisition", "source changed while establishing campaign comparison")
@@ -59,7 +48,7 @@ def compare(args):
         added = len(current.keys() - baseline.keys())
         removed = len(baseline.keys() - current.keys())
         modified = sum(current[key] != baseline[key] for key in current.keys() & baseline.keys())
-        detail, rows = protection.differences([e for e in entries if is_vanilla_campaign(e["relative"])], current, before, "run_campaign_reference")
+        detail, rows = protection.differences([e for e in entries if protection.is_campaign(e["relative"])], current, before, "run_campaign_reference")
         args.private_comparison = {"summary": detail, "differences": rows}
         return {"result": "vanilla_campaign_changed" if added or removed or modified else "vanilla_campaign_unchanged",
                 "baseline_campaign_files": len(baseline), "current_campaign_files": len(current),
