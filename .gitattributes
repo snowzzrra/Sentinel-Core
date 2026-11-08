@@ -1,3 +1,5 @@
+# generated files are compared byte for byte, also from the Mod's Windows CI
+* text=auto eol=lf
 /protocol/schema.json text eol=lf
 /include/sentinel_protocol_generated.h text eol=lf
 /src/protocol_generated.cpp text eol=lf
