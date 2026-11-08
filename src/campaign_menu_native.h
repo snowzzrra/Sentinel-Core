@@ -11,7 +11,6 @@
 namespace sentinel::campaign_menu {
 // check the bindings before the domain hooks patch shared functions
 bool install(const engine::Binding&,HANDLE stop);
-std::array<native::Target,46> native_targets(uintptr_t base);
 bool validate_native_targets(save::Installation&,engine::Memory&,const engine::Image&,
                              HANDLE,const std::array<native::Target,46>&);
 bool available();

@@ -1,3 +1,4 @@
+#include "namespace_id.h"
 #include "native_model.h"
 #include "protocol_v2.h"
 #include <algorithm>
@@ -53,20 +54,7 @@ uint32_t backup_submission_flags(const save::SubmissionResult& submission) {
         (submission.task_returned ? SC_BACKUP_TASK_RETURNED : 0u) |
         (submission.matched ? SC_BACKUP_SOURCE_MATCHED : 0u);
 }
-struct CanonicalWriter {
-    generated::Bytes& bytes;
-    bool valid = true;
-    template<class T> void scalar(const T& value, size_t width) {
-        auto n = static_cast<uint64_t>(value);
-        for (size_t i = 0; i < width; ++i) { bytes.push_back(static_cast<uint8_t>(n)); n >>= 8; }
-    }
-    template<size_t N> void text(const char (&value)[N]) {
-        const auto count = strnlen(value, N);
-        if (count == N) { valid = false; return; }
-        scalar(count, 2);
-        bytes.insert(bytes.end(), value, value + count);
-    }
-};
+struct CanonicalWriter;
 template<class T, class = void> struct HasNativeTransfer : std::false_type {};
 template<class T> struct HasNativeTransfer<T, std::void_t<decltype(generated::native_transfer(
     std::declval<CanonicalWriter&>(), std::declval<const T&>()))>> : std::true_type {};
@@ -160,11 +148,7 @@ bool same_backup(const Diagnostics::Slot& s, const sc_save_backup_request* b) {
 }
 bool backup_options(const sc_save_backup_request& b) {
     if (b.campaign > 2 || b.slot > 11 || !b.work_deadline_ms ||
-        b.work_deadline_ms > SC_SAVE_BACKUP_MAX_WORK_MS || b.namespace_id[64]) return false;
-    for (size_t i = 0; i < 64; ++i) {
-        const auto c = b.namespace_id[i];
-        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
-    }
+        b.work_deadline_ms > SC_SAVE_BACKUP_MAX_WORK_MS || !valid_namespace_id(b.namespace_id)) return false;
     return true;
 }
 template<class T> bool valid_request(const T& value) {
@@ -197,21 +181,6 @@ void bind_execution(Diagnostics::Slot& slot) {
 }
 bool same_points(const Diagnostics::Slot& s, const sc_weapon_points_request* p) {
     return s.is<sc_weapon_points_request>() == (p != nullptr) && (!p || weapon_points::same(s.get<sc_weapon_points_request>(), *p));
-}
-bool same_inventory(const Diagnostics::Slot& s, const sc_inventory_request* inv) {
-    return s.is<sc_inventory_request>() == (inv != nullptr) && (!inv || inventory::same(s.get<sc_inventory_request>(), *inv));
-}
-bool same_arsenal(const Diagnostics::Slot& s, const sc_arsenal_request* ars) {
-    return s.is<sc_arsenal_request>() == (ars != nullptr) && (!ars || arsenal::same(s.get<sc_arsenal_request>(), *ars));
-}
-bool same_runes(const Diagnostics::Slot& s, const sc_runes_request* r) {
-    return s.is<sc_runes_request>() == (r != nullptr) && (!r || runes::same(s.get<sc_runes_request>(), *r));
-}
-bool same_special(const Diagnostics::Slot& s, const sc_special_request* r) {
-    return s.is<sc_special_request>() == (r != nullptr) && (!r || special::same(s.get<sc_special_request>(), *r));
-}
-bool same_deathlink(const Diagnostics::Slot& s, const sc_deathlink_request* r) {
-    return s.is<sc_deathlink_request>() == (r != nullptr) && (!r || deathlink::same(s.get<sc_deathlink_request>(), *r));
 }
 bool same_command(const Diagnostics::Slot& s, const sc_command_request* r) {
     return s.is<sc_command_request>() == (r != nullptr) && (!r || commands::same(s.get<sc_command_request>(), *r));
@@ -483,81 +452,6 @@ sc_weapon_points_result Diagnostics::points_result(const sc_weapon_points_reques
             if (s.state.load(std::memory_order_acquire) >= SC_DIAGNOSTIC_EXECUTED &&
                 same_points(s,&r) && key(s.request,r.execution) && same_scope(s.request.expected,r.execution.expected)) {
                 out = s.output<sc_weapon_points_result>();
-                if (release) retire(s);
-                break;
-            }
-        }
-    }
-    out.execution = execution; return out;
-}
-sc_inventory_result Diagnostics::inventory_result(const sc_inventory_request& r, bool cancel, uint64_t now, bool release) {
-    sc_inventory_result out = inventory::initial(r);
-    const auto execution = retrieve(r.execution, cancel, now, nullptr, nullptr, nullptr, &r, nullptr, nullptr);
-    if (execution.state >= SC_DIAGNOSTIC_EXECUTED) {
-        for (auto& s : slots_) {
-            if (s.state.load(std::memory_order_acquire) >= SC_DIAGNOSTIC_EXECUTED &&
-                same_inventory(s, &r) && key(s.request, r.execution) && same_scope(s.request.expected, r.execution.expected)) {
-                out = s.output<sc_inventory_result>();
-                if (release) retire(s);
-                break;
-            }
-        }
-    }
-    out.execution = execution; return out;
-}
-sc_arsenal_result Diagnostics::arsenal_result(const sc_arsenal_request& r, bool cancel, uint64_t now, bool release) {
-    sc_arsenal_result out{}; arsenal::initial(r, out);
-    const auto execution = retrieve(r.execution, cancel, now, nullptr, nullptr, nullptr, nullptr, &r, nullptr);
-    if (execution.state >= SC_DIAGNOSTIC_EXECUTED) {
-        for (auto& s : slots_) {
-            if (s.state.load(std::memory_order_acquire) >= SC_DIAGNOSTIC_EXECUTED &&
-                same_arsenal(s, &r) && key(s.request, r.execution) && same_scope(s.request.expected, r.execution.expected)) {
-                out = s.output<sc_arsenal_result>();
-                if (release) retire(s);
-                break;
-            }
-        }
-    }
-    out.execution = execution; return out;
-}
-sc_runes_result Diagnostics::runes_result(const sc_runes_request& r, bool cancel, uint64_t now, bool release) {
-    sc_runes_result out = runes::initial(r);
-    const auto execution = retrieve(r.execution, cancel, now, nullptr, nullptr, nullptr, nullptr, nullptr, &r);
-    if (execution.state >= SC_DIAGNOSTIC_EXECUTED) {
-        for (auto& s : slots_) {
-            if (s.state.load(std::memory_order_acquire) >= SC_DIAGNOSTIC_EXECUTED &&
-                same_runes(s, &r) && key(s.request, r.execution) && same_scope(s.request.expected, r.execution.expected)) {
-                out = s.output<sc_runes_result>();
-                if (release) retire(s);
-                break;
-            }
-        }
-    }
-    out.execution = execution; return out;
-}
-sc_special_result Diagnostics::special_result(const sc_special_request& r, bool cancel, uint64_t now, bool release) {
-    sc_special_result out = special::initial(r);
-    const auto execution = retrieve(r.execution, cancel, now, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &r);
-    if (execution.state >= SC_DIAGNOSTIC_EXECUTED) {
-        for (auto& s : slots_) {
-            if (s.state.load(std::memory_order_acquire) >= SC_DIAGNOSTIC_EXECUTED &&
-                same_special(s, &r) && key(s.request, r.execution) && same_scope(s.request.expected, r.execution.expected)) {
-                out = s.output<sc_special_result>();
-                if (release) retire(s);
-                break;
-            }
-        }
-    }
-    out.execution = execution; return out;
-}
-sc_deathlink_result Diagnostics::deathlink_result(const sc_deathlink_request& r, bool cancel, uint64_t now, bool release) {
-    sc_deathlink_result out = deathlink::initial(r);
-    const auto execution = retrieve(r.execution, cancel, now, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &r);
-    if (execution.state >= SC_DIAGNOSTIC_EXECUTED) {
-        for (auto& s : slots_) {
-            if (s.state.load(std::memory_order_acquire) >= SC_DIAGNOSTIC_EXECUTED &&
-                same_deathlink(s, &r) && key(s.request, r.execution) && same_scope(s.request.expected, r.execution.expected)) {
-                out = s.output<sc_deathlink_result>();
                 if (release) retire(s);
                 break;
             }

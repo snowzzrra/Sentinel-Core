@@ -24,12 +24,8 @@ struct Capture {
     uint32_t callback_thread = 0;
 };
 struct DeathRecord {
-    uint32_t victim_spawn_id = 0, attacker_spawn_id = 0, inflictor_spawn_id = 0;
-    int32_t victim_type = -1, attacker_type = -1, attack_type = -1, game_mode = 0;
-    uint64_t victim_ai_type = 0;
-    uintptr_t attacker_player = 0;
-    int64_t death_time = 0;
-    uint8_t possessed_by_spirit = 0, spawned_by_archvile = 0;
+    uint32_t victim_spawn_id = 0;
+    int32_t victim_type = -1, attack_type = -1, game_mode = 0;
 };
 DeathRecord decode_record(const std::array<uint8_t, 0x128>&) noexcept;
 inline bool valid_map_name(const char* name) noexcept {

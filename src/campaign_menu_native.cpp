@@ -1887,7 +1887,6 @@ bool trigger_gate_entry(uintptr_t entity) {
     } __finally { menu_hooks.leave(lease); }
 }
 
-std::array<native::Target,46> native_targets(uintptr_t base) { return builds::steam_20260818().menu_targets(base); }
 bool validate_native_targets(save::Installation& record,engine::Memory& source_memory,
                               const engine::Image& image,HANDLE stop,const std::array<native::Target,46>& targets) {
     if (!image.contains(0x5e05200,sizeof(uintptr_t),IMAGE_SCN_MEM_READ,IMAGE_SCN_MEM_EXECUTE)) return false;
@@ -2006,7 +2005,7 @@ static bool install_hooks(const engine::Binding& binding,HANDLE stop, const std:
 }
 bool install(const engine::Binding& binding,HANDLE stop) {
     if (!save::session().campaign_requested()) return true;
-    return install_hooks(binding,stop,native_targets(binding.image.base));
+    return install_hooks(binding,stop,builds::steam_20260818().menu_targets(binding.image.base));
 }
 #ifdef SC_NATIVE_TESTING
 bool test_install_hooks(const std::array<native::Target,46>& targets,decltype(&MH_EnableHook) enable_hook) {

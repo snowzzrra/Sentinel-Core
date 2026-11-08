@@ -11,12 +11,6 @@
 #include <cstring>
 
 namespace sentinel::native {
-Target profile_target(uintptr_t base, unsigned index) {
-    return builds::steam_20260818().profile_target(base, index);
-}
-Target save_target(uintptr_t base, unsigned index) {
-    return builds::steam_20260818().save_target(base, index);
-}
 namespace {
 // Windows x64 may split a function into chained RUNTIME_FUNCTION fragments.
 // A secondary window must belong to the exact entry's unwind owner throughout;

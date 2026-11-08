@@ -1,3 +1,4 @@
+#include "engine/builds/build_descriptor.h"
 #include "prelaunch.h"
 // Copyright (c) 2026 snowzzrra. MIT; see ../LICENSE.
 #include "save_native_hooks.h"
@@ -801,7 +802,7 @@ static bool publish_save_policy(const engine::Binding& binding, const hooks::Hoo
 static bool validate_remaining_save_targets(Installation& record, engine::LocalMemory& memory, const engine::Binding& binding, HANDLE stop, StartupGate::Completion& gate_completion) {
     auto& targets = save_targets;
     for (unsigned i = 1; i < targets.size(); ++i) {
-        targets[i] = native::save_target(binding.image.base, i);
+        targets[i] = builds::steam_20260818().save_target(binding.image.base, i);
         if (native::validate_recorded(record, memory, binding.image, targets[i], stop, GetTickCount64() + 3000, 2, i)) {
             save_install_cancelled(stop, gate_completion); session().reject(SessionFault::installation); return false;
         }
@@ -830,7 +831,7 @@ void install_native_hooks(const engine::Binding& binding, HANDLE stop) {
     StartupGate::Completion gate_completion(startup_gate,&session().btrace);
     startup_image=binding.image.base; startup_expected_root=binding.root;
     startup_expected_caller=binding.image.base+0x4323fc;
-    targets[0]=native::save_target(binding.image.base,0);
+    targets[0]=builds::steam_20260818().save_target(binding.image.base,0);
     if (native::validate_recorded(record,memory,binding.image,targets[0],stop,GetTickCount64()+3000,2,0)) {
         save_install_cancelled(stop, gate_completion); session().reject(SessionFault::installation); return;
     }

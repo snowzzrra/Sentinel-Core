@@ -6,8 +6,12 @@
 #include "context_observer.h"
 #include "save_observer.h"
 #include "native_runtime.h"
+#include "commands_native.h"
 #include <sddl.h>
 #include <vector>
+#include <cstdio>
+#include <exception>
+#include <new>
 
 namespace sentinel {
 namespace {
@@ -68,34 +72,50 @@ DWORD serve_v2(void* context) {
     } catch (...) { inspection_failed(ERROR_UNHANDLED_EXCEPTION); return 1; }
 }
 
+DWORD observer_failed(const char* stage, const char* error) noexcept {
+    char line[768]{};
+    std::snprintf(line, sizeof(line), "[Sentinel Core] observer stage=%s error=%.512s\n", stage, error);
+    OutputDebugStringA(line);
+    commands::diagnostic_trace("%s", line);
+    publish_engine(engine::unavailable(SC_REASON_INTERNAL_ERROR));
+    publish_context(context::unavailable(SC_REASON_INTERNAL_ERROR));
+    publish_save(save::unavailable(SC_REASON_INTERNAL_ERROR));
+    startup_log::record(current_snapshot(), SC_REASON_INTERNAL_ERROR);
+    return 1;
+}
 DWORD observe(void*) {
     engine::LocalMemory memory;
     engine::Binding binding;
     uint64_t sequence = 0;
     uint64_t diagnostic_at = 0;
+    const char* stage = "bind_host";
     try {
         if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return 0;
         binding = engine::bind_host(memory, stop);
+        stage = "native_start";
         native::start(binding, current_snapshot(), stop);
+        stage = "startup_log";
         startup_log::record(current_snapshot(), binding.metadata.sample_reason);
         do {
+            stage = "engine_sample";
             publish_engine(engine::sample(memory, binding, ++sequence));
+            stage = "context_sample";
             const auto before = native::observation_stamp();
             const auto observed = context::sample(memory, binding, sequence, stop);
+            stage = "context_publish";
             native::publish_context(observed, before);
             publish_context(observed);
+            stage = "save_sample";
             publish_save(save::sample(memory, binding, sequence, stop));
             if (GetTickCount64() >= diagnostic_at) {
+                stage = "startup_log";
                 startup_log::record(current_snapshot(), binding.metadata.sample_reason);
                 diagnostic_at = GetTickCount64() + 1000;
             }
         } while (WaitForSingleObject(stop, 100) == WAIT_TIMEOUT);
-    } catch (...) {
-        binding.metadata = engine::unavailable(SC_REASON_INTERNAL_ERROR);
-        publish_engine(binding.metadata);
-        publish_context(context::unavailable(SC_REASON_INTERNAL_ERROR));
-        publish_save(save::unavailable(SC_REASON_INTERNAL_ERROR));
-    }
+    } catch (const std::bad_alloc&) { return observer_failed(stage, "bad_alloc"); }
+    catch (const std::exception& error) { return observer_failed(stage, error.what()); }
+    catch (...) { return observer_failed(stage, "unknown_exception"); }
     return 0;
 }
 void start_observer() {

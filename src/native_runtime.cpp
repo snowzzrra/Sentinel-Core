@@ -252,7 +252,7 @@ static uintptr_t tick_player_safely(uintptr_t fn, uintptr_t active_map, uint64_t
         player = reinterpret_cast<uintptr_t(*)(uintptr_t, uint32_t)>(fn)(active_map, 0);
         if (player) {
             const auto& id = save::session().namespace_id();
-            if (runes::admitted(id.c_str())) runes::bind_run_state_if_needed(player, generation);
+            if (runes::admitted(id.c_str())) runes::bind_run_state_if_needed(player);
             if (special::admitted(id.c_str())) {
                 special::bind_run_state_if_needed(player, generation);
                 special::poll_input(player, true);
@@ -938,7 +938,7 @@ void validate_menu_targets(uint32_t& why, engine::Memory& memory, save::Installa
     // check menu callees before domain hooks patch shared swf entries
     if (!why && !stopping.load(std::memory_order_acquire) && save::session().campaign_requested() &&
         !campaign_menu::validate_native_targets(installation, memory, binding.image, stop_event,
-                                                campaign_menu::native_targets(binding.image.base))) {
+                                                builds::steam_20260818().menu_targets(binding.image.base))) {
         save::session().campaign_run.refuse("native_campaign_menu_installation_failed");
         why = SC_NATIVE_EXCEPTION;
     }
@@ -1068,7 +1068,7 @@ void start(const engine::Binding& source, const Snapshot& identity, HANDLE stop_
     std::array<Target, 3> targets{};
     const auto deadline = GetTickCount64() + 3000;
     for (unsigned i = 0; i < targets.size(); ++i) {
-        targets[i] = profile_target(binding.image.base, i);
+        targets[i] = builds::steam_20260818().profile_target(binding.image.base, i);
 #ifdef SC_NATIVE_TESTING
         if (fixture_active) targets[i] = fixture.targets[i];
 #endif
@@ -1232,19 +1232,6 @@ Diagnostics::Reply ack(const generated::command_reference& reference, const std:
     auto out = diagnostics.ack(reference, token, GetTickCount64());
     guard.reset(); return out;
 }
-sc_diagnostic_result submit(const sc_diagnostic_request& request, sc_diagnostic_detail* detail) {
-    AcquireSRWLockExclusive(&lock);
-    const auto now = GetTickCount64(); auto why = prerequisite(now);
-    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
-    if (!why && !same_scope(scope, request.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
-    auto out = diagnostics.submit(request, why, now, detail);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_diagnostic_result result(const sc_diagnostic_request& request, bool cancel, sc_diagnostic_detail* detail) {
-    AcquireSRWLockExclusive(&lock);
-    auto out = diagnostics.retrieve(request, cancel, GetTickCount64(), detail);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
 static uint32_t publish_automap(const sc_automap_request& request) {
     uint32_t outcome = SC_AUTOMAP_REFUSED;
     const bool duplicate=request.revision==automap_snapshot.revision && request.known==automap_snapshot.known &&
@@ -1319,92 +1306,6 @@ sc_weapon_points_result weapon_points_result(const sc_weapon_points_request& req
     auto out = diagnostics.points_result(request, cancel, GetTickCount64(), release);
     ReleaseSRWLockExclusive(&lock); return out;
 }
-sc_inventory_result submit_inventory(const sc_inventory_request& request) {
-    AcquireSRWLockExclusive(&lock);
-    const auto now = GetTickCount64(); auto why = prerequisite(now);
-    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
-    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
-    if (!why && !inventory::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
-    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr, &request);
-    auto out = inventory::initial(request);
-    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
-    else out = diagnostics.inventory_result(request, false, now);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_inventory_result inventory_result(const sc_inventory_request& request, bool cancel, bool release) {
-    AcquireSRWLockExclusive(&lock);
-    auto out = diagnostics.inventory_result(request, cancel, GetTickCount64(), release);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_arsenal_result submit_arsenal(const sc_arsenal_request& request) {
-    AcquireSRWLockExclusive(&lock);
-    const auto now = GetTickCount64(); auto why = prerequisite(now);
-    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
-    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
-    if (!why && !arsenal::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
-    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr, nullptr, &request);
-    sc_arsenal_result out{}; arsenal::initial(request, out);
-    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
-    else out = diagnostics.arsenal_result(request, false, now);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_arsenal_result arsenal_result(const sc_arsenal_request& request, bool cancel, bool release) {
-    AcquireSRWLockExclusive(&lock);
-    auto out = diagnostics.arsenal_result(request, cancel, GetTickCount64(), release);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_runes_result submit_runes(const sc_runes_request& request) {
-    AcquireSRWLockExclusive(&lock);
-    const auto now = GetTickCount64(); auto why = prerequisite(now);
-    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
-    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
-    if (!why && !runes::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
-    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr, nullptr, nullptr, &request);
-    sc_runes_result out = runes::initial(request);
-    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
-    else out = diagnostics.runes_result(request, false, now);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_runes_result runes_result(const sc_runes_request& request, bool cancel, bool release) {
-    AcquireSRWLockExclusive(&lock);
-    auto out = diagnostics.runes_result(request, cancel, GetTickCount64(), release);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_special_result submit_special(const sc_special_request& request) {
-    AcquireSRWLockExclusive(&lock);
-    const auto now = GetTickCount64(); auto why = prerequisite(now);
-    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
-    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
-    if (!why && !special::available()) why = SC_NATIVE_BINDING_FAILED;
-    if (!why && !special::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
-    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &request);
-    sc_special_result out = special::initial(request);
-    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
-    else out = diagnostics.special_result(request, false, now);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_special_result special_result(const sc_special_request& request, bool cancel, bool release) {
-    AcquireSRWLockExclusive(&lock);
-    auto out = diagnostics.special_result(request, cancel, GetTickCount64(), release);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_deathlink_result submit_deathlink(const sc_deathlink_request& request) {
-    AcquireSRWLockExclusive(&lock);
-    const auto now = GetTickCount64(); auto why = prerequisite(now);
-    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
-    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
-    if (!why && !deathlink::admitted(request.namespace_id)) why = SC_NATIVE_SCOPE_MISMATCH;
-    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &request);
-    sc_deathlink_result out = deathlink::initial(request);
-    if (admitted.state == SC_DIAGNOSTIC_REJECTED) out.execution = admitted;
-    else out = diagnostics.deathlink_result(request, false, now);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_deathlink_result deathlink_result(const sc_deathlink_request& request, bool cancel, bool release) {
-    AcquireSRWLockExclusive(&lock);
-    auto out = diagnostics.deathlink_result(request, cancel, GetTickCount64(), release);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
 sc_command_result submit_command(const sc_command_request& request) {
     AcquireSRWLockExclusive(&lock);
     const auto now = GetTickCount64(); auto why = prerequisite(now);
@@ -1421,27 +1322,6 @@ sc_command_result submit_command(const sc_command_request& request) {
 sc_command_result command_result(const sc_command_request& request, bool cancel, bool release) {
     AcquireSRWLockExclusive(&lock);
     auto out = diagnostics.command_result(request, cancel, GetTickCount64(), release);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_save_backup_snapshot submit_backup(const sc_save_backup_request& request) {
-    AcquireSRWLockExclusive(&lock);
-    const auto now = GetTickCount64(); auto why = prerequisite(now);
-    auto scope = status.scope; scope.lifecycle_generation = lifetime.generation;
-    if (!why && !same_scope(scope, request.execution.expected)) why = SC_NATIVE_SCOPE_MISMATCH;
-    if (!why) why = backup_prerequisite(request);
-    const auto admitted = diagnostics.submit(request.execution, why, now, nullptr, &request);
-    sc_save_backup_snapshot out{};
-    if (admitted.state == SC_DIAGNOSTIC_REJECTED) {
-        out.size = sizeof(out); out.abi_version = SC_SAVE_BACKUP_ABI_VERSION;
-        out.state = SC_BACKUP_REJECTED; out.execution = admitted;
-        std::memcpy(out.namespace_id, request.namespace_id, sizeof(out.namespace_id));
-        out.campaign = request.campaign; out.slot = request.slot;
-    } else out = diagnostics.backup_result(request, false, now);
-    ReleaseSRWLockExclusive(&lock); return out;
-}
-sc_save_backup_snapshot backup_result(const sc_save_backup_request& request, bool cancel) {
-    AcquireSRWLockExclusive(&lock);
-    auto out = diagnostics.backup_result(request, cancel, GetTickCount64());
     ReleaseSRWLockExclusive(&lock); return out;
 }
 bool stop() {

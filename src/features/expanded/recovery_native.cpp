@@ -1,5 +1,6 @@
 // Encounter recovery scans and execution.
 #include "expanded_internal.h"
+#include <new>
 
 namespace sentinel::expanded::detail {
 using RecoveryNotify = void(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uint8_t);
@@ -357,27 +358,42 @@ static bool kill_recovery_targets(recovery::Attempt& attempt, const recovery::Co
     }
     return true;
 }
+static bool recovery_exception(const char* stage, const char* error, uint32_t code = 0) noexcept {
+    char line[768]{};
+    std::snprintf(line, sizeof(line), "AP_ENCOUNTER_RECOVERY stage=%s error=%.512s code=%08x\n", stage, error, code);
+    OutputDebugStringA(line);
+    commands::diagnostic_trace("%s", line);
+    return false;
+}
 bool drain_recovery_impl(recovery::Attempt& attempt, const recovery::Context& context) {
-    std::vector<const recovery::Manager*> targets;
-    // close every target before deaths can trigger a checkpoint.
-    for (const auto& target : attempt.targets) {
-        const auto found = std::find_if(context.managers.begin(), context.managers.end(), [&](const auto& manager) {
-            return manager.address == target.address && manager.identifier == target.identifier;
-        });
-        if (found == context.managers.end()) return false;
-        if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
-        if (found->complete) continue;
-        if (!unblock_recovery_waits(attempt, *found)) return false;
-        stop_recovery_producers(attempt, *found);
-        targets.push_back(&*found);
-    }
-    return kill_recovery_targets(attempt, context, targets);
-    return true;
+    const char* stage = "collect_targets";
+    try {
+        std::vector<const recovery::Manager*> targets;
+        // close every target before deaths can trigger a checkpoint.
+        for (const auto& target : attempt.targets) {
+            const auto found = std::find_if(context.managers.begin(), context.managers.end(), [&](const auto& manager) {
+                return manager.address == target.address && manager.identifier == target.identifier;
+            });
+            if (found == context.managers.end()) return false;
+            if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
+            if (found->complete) continue;
+            stage = "unblock_waits";
+            if (!unblock_recovery_waits(attempt, *found)) return false;
+            stage = "stop_producers";
+            stop_recovery_producers(attempt, *found);
+            stage = "collect_targets";
+            targets.push_back(&*found);
+        }
+        stage = "kill_targets";
+        return kill_recovery_targets(attempt, context, targets);
+    } catch (const std::bad_alloc&) { return recovery_exception(stage, "bad_alloc"); }
+    catch (const std::exception& error) { return recovery_exception(stage, error.what()); }
+    catch (...) { return recovery_exception(stage, "unknown_exception"); }
 }
 
 bool drain_recovery_safe(recovery::Attempt& attempt, const recovery::Context& context) noexcept {
     __try { return drain_recovery_impl(attempt, context); }
-    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return recovery_exception("native_drain", "seh", GetExceptionCode()); }
 }
 
 }
@@ -395,9 +411,12 @@ recovery::Context recovery_context(uintptr_t world, const char* map) {
 }
 
 bool drain_recovery(recovery::Attempt& attempt, const recovery::Context& context) {
-    std::lock_guard<std::recursive_mutex> admission(admission_mutex);
-    try { return !stopped.load() && recovery_death && drain_recovery_safe(attempt, context); }
-    catch (...) { return false; }
+    try {
+        std::lock_guard<std::recursive_mutex> admission(admission_mutex);
+        return !stopped.load() && recovery_death && drain_recovery_safe(attempt, context);
+    } catch (const std::bad_alloc&) { return recovery_exception("admission", "bad_alloc"); }
+    catch (const std::exception& error) { return recovery_exception("admission", error.what()); }
+    catch (...) { return recovery_exception("admission", "unknown_exception"); }
 }
 
 bool recovery_player_allowed(uintptr_t player) {
@@ -406,9 +425,3 @@ bool recovery_player_allowed(uintptr_t player) {
 }
 
 }
-
-#ifdef SC_NATIVE_TESTING
-
-#include "../../../tests/expanded/recovery.inc"
-
-#endif

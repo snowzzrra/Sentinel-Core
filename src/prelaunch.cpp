@@ -2,7 +2,6 @@
 #include <windows.h>
 #include <charconv>
 #include <sstream>
-#include <bcrypt.h>
 namespace sentinel::prelaunch {
 namespace {
 std::wstring observed_key;
@@ -21,18 +20,10 @@ bool number(const std::string& text, uint64_t& value) {
 }
 const std::wstring& diagnostic_key() { return observed_key; }
 storage::Result lease_key(std::string_view control, std::wstring& key) {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    if (BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0) < 0) return refused(ERROR_GEN_FAILURE);
-    unsigned char hash[32]{};
-    BCRYPT_HASH_HANDLE handle = nullptr;
-    auto status = BCryptCreateHash(algorithm,&handle,nullptr,0,nullptr,0,0);
-    if (status >= 0) status = BCryptHashData(handle,reinterpret_cast<PUCHAR>(const_cast<char*>(control.data())),static_cast<ULONG>(control.size()),0);
-    if (status >= 0) status = BCryptFinishHash(handle,hash,sizeof(hash),0);
-    if (handle) BCryptDestroyHash(handle);
-    BCryptCloseAlgorithmProvider(algorithm,0);
-    if (status < 0) return refused(ERROR_GEN_FAILURE);
+    std::string hash;
+    if (!storage::digest(control, hash).ok()) return refused(ERROR_GEN_FAILURE);
     key = L"Local\\SentinelA-";
-    for (auto byte : hash) { key += L"0123456789abcdef"[byte>>4]; key += L"0123456789abcdef"[byte&15]; }
+    key.append(hash.begin(), hash.end());
     return {};
 }
 static bool read_control_field(std::istream& input, std::string& value, const char* prefix) {

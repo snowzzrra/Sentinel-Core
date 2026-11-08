@@ -214,7 +214,6 @@ bool prepare_name(Session& owner, engine::Memory& memory, SaveReference* referen
         return true;
     }
     return scope_provider_name(owner, memory, data, calls, name, trace);
-    return true;
 }
 UnroutedSource unrouted_source(engine::Memory& memory, SaveReference* reference) {
     UnroutedSource result;

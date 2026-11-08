@@ -28,7 +28,6 @@ struct Calls {
     uint32_t (*ensure_support_runes)(void* context, uintptr_t player_ptr, uint32_t support_mask) = nullptr;
     uint32_t (*select_normal_rune)(void* context, uintptr_t player_ptr, uint8_t slot_idx, int8_t rune_idx) = nullptr;
     uint32_t (*select_support_rune)(void* context, uintptr_t player_ptr, int8_t support_idx) = nullptr;
-    uint32_t (*sync_crystal_pairs)(void* context, uintptr_t player_ptr, uint8_t pair_mask) = nullptr;
     bool (*refresh)(void* context, uintptr_t player_ptr) = nullptr;
     void (*bind_run_state)(void* context, uintptr_t player_ptr) = nullptr;
 };
@@ -44,7 +43,7 @@ void install(const engine::Binding& binding);
 bool available();
 bool admitted(const char* id);
 void execute_native(const sc_runes_request& request, sc_runes_result& out);
-void bind_run_state_if_needed(uintptr_t player, uint64_t generation = 0);
+void bind_run_state_if_needed(uintptr_t player);
 void reset_session(const char* namespace_id);
 
 #ifdef SC_NATIVE_TESTING

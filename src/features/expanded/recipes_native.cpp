@@ -20,7 +20,7 @@ void invoke_recipe_worker(uintptr_t worker, bool maintenance, const std::string*
 void recipe_worker_tick(uintptr_t worker, bool maintenance);
 void prepare_queued_recipe(uintptr_t command);
 bool queue_recipe_delay(uintptr_t manager);
-bool invoke_recipe_dispatch(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
+void invoke_recipe_dispatch(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
                              uintptr_t label, bool group, const std::string* origin, uintptr_t* result, std::unique_lock<std::recursive_mutex>& admission);
 #ifdef SC_NATIVE_TESTING
 bool recipe_fault_call(uintptr_t worker);
@@ -517,7 +517,6 @@ static bool validate_autonomous_request(const RecipeNativeCheckpoint& checkpoint
         key.substr(7, 20) != request.origin || !request.parent_actor.empty() || !request.parent_request.empty() ||
         !recipe_sequence(key, slash + 1, checkpoint.next_request)) return invalid_recipe_checkpoint();
     return autonomous_quantity(key, request, entry);
-    return true;
 }
 static bool validate_independent_request(const RecipeNativeCheckpoint& checkpoint, const std::string& key, const RecipeProgress& progress, const std::map<std::string, NativeRecipe>& recipes) {
     const auto recipe = recipes.find(progress.request.origin);
@@ -618,8 +617,8 @@ static bool apply_recipe_checkpoint(uintptr_t root, const RecipeNativeCheckpoint
 static bool restore_recipe_library_checkpoint(uintptr_t root, const RecipeLibrary& parsed, const std::map<std::string, NativeRecipe>& recipes, RecipeState& loaded) {
     if (!restored_independent) return true;
     auto checkpoint = *restored_independent;
-    if (checkpoint.plan != parsed.plan || checkpoint.map != parsed.map ||
-        !loaded.restore(checkpoint.state, parsed.plan, parsed.map)) return invalid_recipe_checkpoint();
+    if (checkpoint.plan != parsed.plan || checkpoint.map != parsed.map) return invalid_recipe_checkpoint();
+    loaded = std::move(checkpoint.decoded_state);
     if (!validate_checkpoint_shows(checkpoint, recipes)) return false;
     if (!validate_checkpoint_requests(checkpoint, recipes, loaded)) return false;
     if (!validate_checkpoint_actions(checkpoint, loaded)) return false;
@@ -1348,47 +1347,45 @@ static bool dispatch_first_recipe(uintptr_t manager, uintptr_t output, uint64_t 
     }
     return true;
 }
-bool dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
+void dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
                               uintptr_t label, bool group, const std::string& origin, uintptr_t& result) {
     result = output;
-    if (!load_native_recipes()) { if (!recipe_fault.load()) retry_immediate(manager, "recipe_library_unavailable"); return true; }
+    if (!load_native_recipes()) { if (!recipe_fault.load()) retry_immediate(manager, "recipe_library_unavailable"); return; }
     const auto found = native_recipes.find(origin);
-    if (found == native_recipes.end()) { retry_immediate(manager, "recipe_missing"); return true; }
+    if (found == native_recipes.end()) { retry_immediate(manager, "recipe_missing"); return; }
     // preserve native group selection for the bridge's empty source.
     if (vanilla_bridge_group(found->second)) {
         result = original_multiple(manager, output, type, 1, 0, label);
-        return true;
+        return;
     }
     auto& key = pending_recipes[{manager, origin}];
     if (key.empty()) {
         std::string label_text;
         if ((found->second.definition.family != 's' && !native_cstring(label, label_text, 1024)) ||
             !open_native_request(manager, found->second, label_text, key)) {
-            retry_immediate(manager, "request_not_opened"); return true;
+            retry_immediate(manager, "request_not_opened"); return;
         }
     }
     if (!found->second.definition.physical_count) {
         if ((found->second.definition.family == 'i' || found->second.definition.family == 'p') && !queue_recipe_delay(manager)) {
-            retry_immediate(manager, "delay_worker_unavailable"); return true;
+            retry_immediate(manager, "delay_worker_unavailable"); return;
         }
-        recipe_state.complete_empty(key); pending_recipes.erase({manager, origin}); return true;
+        recipe_state.complete_empty(key); pending_recipes.erase({manager, origin}); return;
     }
-    if (!dispatch_first_recipe(manager, output, type, alias, label, group, origin, key, result)) return true;
+    if (!dispatch_first_recipe(manager, output, type, alias, label, group, origin, key, result)) return;
     const auto& birth_label = recipe_state.requests().at(key).request.label;
     if (!queue_recipe_remainder(manager, alias, birth_label.c_str(), key)) {
-        retry_immediate(manager, "remainder_worker_unavailable"); return true;
+        retry_immediate(manager, "remainder_worker_unavailable"); return;
     }
     pending_recipes.erase({manager, origin});
-    return true;
+    return;
 }
 
-bool invoke_recipe_dispatch(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
+void invoke_recipe_dispatch(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
                              uintptr_t label, bool group, const std::string* origin, uintptr_t* result, std::unique_lock<std::recursive_mutex>& admission) {
-    bool handled = false;
     const auto previous_worker = worker_recipe;
-    __try { worker_recipe = nullptr; handled = dispatch_recipe_locked(manager, output, type, alias, label, group, *origin, *result); }
+    __try { worker_recipe = nullptr; dispatch_recipe_locked(manager, output, type, alias, label, group, *origin, *result); }
     __finally { worker_recipe = previous_worker; admission.unlock(); }
-    return handled;
 }
 
 bool dispatch_recipe_immediate(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
@@ -1396,7 +1393,8 @@ bool dispatch_recipe_immediate(uintptr_t manager, uintptr_t output, uint64_t typ
     std::string origin;
     if (stopped.load(std::memory_order_acquire) || !recipe_origin(alias, origin)) return false;
     std::unique_lock<std::recursive_mutex> admission(admission_mutex);
-    return invoke_recipe_dispatch(manager, output, type, alias, label, group, &origin, &result, admission);
+    invoke_recipe_dispatch(manager, output, type, alias, label, group, &origin, &result, admission);
+    return true;
 }
 
 void maintain_tick_detour_entry(uintptr_t worker) {
@@ -1437,9 +1435,3 @@ std::string recipe_fault_diagnostic() {
 }
 
 }
-
-#ifdef SC_NATIVE_TESTING
-
-#include "../../../tests/expanded/recipes.inc"
-
-#endif

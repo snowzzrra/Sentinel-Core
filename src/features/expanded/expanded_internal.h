@@ -413,7 +413,7 @@ void maintain_tick_detour(uintptr_t worker);
 void stagger_tick_detour(uintptr_t worker);
 void queue_command_detour(uintptr_t manager, uintptr_t command);
 bool queue_recipe_remainder(uintptr_t manager, uintptr_t alias, const char* label, const std::string& key);
-bool dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
+void dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
                               uintptr_t label, bool group, const std::string& origin, uintptr_t& result);
 bool dispatch_recipe_immediate(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
                                uintptr_t label, bool group, uintptr_t& result);
@@ -421,9 +421,6 @@ uintptr_t possessed_detour(uintptr_t manager, uintptr_t output, uint64_t type, u
                             uintptr_t spirit, uint64_t hosts, uintptr_t filter, uint8_t flag);
 uintptr_t record_actor(uintptr_t record);
 uintptr_t resurrect_detour(uintptr_t component, int32_t index, const float* position, const float* axis);
-#ifdef SC_NATIVE_TESTING
-uintptr_t post_one_detour(uintptr_t target, uintptr_t event, int32_t delay, uintptr_t argument);
-#endif
 void death_actions_detour(uintptr_t action, uintptr_t context, uintptr_t state, uintptr_t frame);
 void __fastcall remaining_added_detour(uintptr_t command, uintptr_t record);
 void __fastcall remaining_dead_detour(uintptr_t command, uintptr_t record);
@@ -444,9 +441,6 @@ std::string empty_independent_key(std::string_view origin);
 void independent_pose(uintptr_t actor, const float* pose);
 void show_detour(uintptr_t actor);
 void show_now_detour(uintptr_t actor);
-#ifdef SC_NATIVE_TESTING
-void hide_detour(uintptr_t actor);
-#endif
 bool animation_valid_detour(uintptr_t state, const char* message);
 void traversal_enter_detour(uintptr_t state, uintptr_t context, uintptr_t actions, uintptr_t frame);
 void reserve_admission(const SpawnLimits& limits);
@@ -533,12 +527,6 @@ bool read_recipe_actors(uintptr_t world, std::map<uintptr_t, bool>& actors,
                         std::map<std::string, std::vector<RecipeMembership>>& memberships,
                         std::set<uintptr_t>& workers, std::set<uintptr_t>& owners, uint64_t* living=nullptr);
 void prepare_recovery(const engine::Binding& binding, HANDLE stop_event);
-#ifdef SC_NATIVE_TESTING
-bool test_darklord_summon_scope();
-#endif
-#ifdef SC_NATIVE_TESTING
-bool test_darklord_telemetry();
-#endif
 extern uintptr_t darklord_image;
 extern uint64_t darklord_frame;
 void darklord_sample(uintptr_t world, uint64_t now) noexcept;

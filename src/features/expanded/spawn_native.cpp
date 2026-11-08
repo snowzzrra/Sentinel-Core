@@ -55,9 +55,6 @@ uint64_t spawn_marked(uintptr_t manager, uintptr_t record, uintptr_t point, uint
                       const SpawnLimits* limits, const SpawnTracking* tracking);
 void trace_registration(uintptr_t manager, uint64_t* record, uintptr_t actor, uint64_t incoming) noexcept;
 void register_spawn_locked(uintptr_t manager, uint64_t* record);
-#ifdef SC_NATIVE_TESTING
-bool test_supply_headroom();
-#endif
 }
 
 namespace sentinel::expanded::detail {
@@ -440,7 +437,6 @@ static bool population_manager_member(uintptr_t world, uintptr_t actor, uint64_t
         for (const unsigned char character : std::string_view(owner)) hash = (hash ^ character) * 1099511628211ull;
         if (hash != scope) continue;
         return manager_has_actor(manager, actor);
-        return false;
     }
     return false;
 }
@@ -459,7 +455,6 @@ bool population_member(uintptr_t world, uintptr_t actor, uint64_t scope, unsigne
         }
     }
     return population_manager_member(world, actor, scope);
-    return false;
 }
 
 bool special_admission(const SpawnLimits& limits) {
@@ -645,7 +640,6 @@ bool prepare_independent_show_locked(uintptr_t actor, IndependentShow& show) {
         return false;
     }
     return open_independent_show(actor, show, recipe, *frozen, body, key);
-    return true;
 }
 
 bool prepare_independent_show(uintptr_t actor, IndependentShow& show) {
@@ -1605,9 +1599,3 @@ bool animation_valid_detour_entry(uintptr_t state, const char* message) {
 }
 
 }
-
-#ifdef SC_NATIVE_TESTING
-
-#include "../../../tests/expanded/spawn.inc"
-
-#endif

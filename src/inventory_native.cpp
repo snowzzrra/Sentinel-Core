@@ -271,28 +271,7 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-uint32_t ensure_items(void*, uintptr_t, uint32_t, uint32_t, uint32_t, uint32_t) { return 1; }
-uint32_t set_capacity(void*, uintptr_t, uint8_t, uint8_t, uint8_t) { return 1; }
-
-bool refresh(void*, uintptr_t p) {
-    if (!p) return false;
-    __try {
-        const auto hud = reinterpret_cast<uintptr_t(*)(uintptr_t)>(image_base + 0x143c350)(p);
-        if (!hud) return true;
-        const auto id = *reinterpret_cast<int16_t*>(hud + 0xc);
-        const auto manager = *reinterpret_cast<uintptr_t*>(image_base + 0x47dd908);
-        if (id != -1 && manager) {
-            int32_t values[5]{};
-            reinterpret_cast<int32_t*(*)(int32_t*, uintptr_t)>(image_base + 0xf22f00)(values, p);
-            reinterpret_cast<void(*)(uintptr_t, int16_t, uint16_t, const void*)>(image_base + 0x17c1180)(manager, id, 0x11e, values);
-        }
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-
-void bind_run_state(void*, uintptr_t) {}
-
-Calls calls{nullptr, player, read, ensure_items, set_capacity, refresh, bind_run_state};
+Calls calls{nullptr, player, read};
 
 #ifdef SC_NATIVE_TESTING
 char fixture_namespace[65]{};

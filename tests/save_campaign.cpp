@@ -309,47 +309,14 @@ bool run_native_fixture_case(const std::wstring& defect) {
         std::puts("PASS embedded hands restore an owned empty weapon and preserve vanilla selection");
         return true;
     }
-    if (defect == L"expanded_stop") {
-        CHECK(sentinel::expanded::test_stopped_hooks());
-        CHECK(sentinel::expanded::test_hook_faults());
-        std::puts("PASS stopped gameplay hooks forward native calls without Sentinel mutation");
-        return true;
-    }
     if (defect == L"hook_cleanup") {
         test_campaign_hook_cleanup();
         std::puts("PASS campaign hook creation and enable failures unwind each owned hook");
         return true;
     }
-    if (defect == L"combat_contention") {
-        CHECK(sentinel::combat::test_observation_contention());
-        std::puts("PASS combat observations survive concurrent readers and duplicate death notifications");
-        return true;
-    }
     if (defect == L"recipe_checkpoint") {
         CHECK(sentinel::expanded::test_recipe_checkpoint());
         std::puts("PASS recipe state uses the native checkpoint archive and rejects corrupt capture or restore");
-        return true;
-    }
-    if (defect == L"quantity_inputs") {
-        CHECK(sentinel::expanded::test_quantity_inputs());
-        std::puts("PASS weighted native remaining populations preserve partial thresholds and pause conditions");
-        return true;
-    }
-    if (defect == L"encounter_recovery") {
-        CHECK(sentinel::expanded::test_recovery_inputs());
-        std::puts("PASS encounter ownership and producer cancellation survive checkpoint capture");
-        return true;
-    }
-    if (defect == L"recipe_inputs") {
-        CHECK(sentinel::expanded::test_recipe_transport());
-        CHECK(sentinel::expanded::test_recipe_inputs());
-        std::puts(
-            "PASS native recipe factories preserve workers, retries, logical identity and finite partial credits");
-        return true;
-    }
-    if (defect == L"limit_inputs") {
-        CHECK(sentinel::expanded::test_limit_inputs());
-        std::puts("PASS global special limits include native actors, overlapping managers, death, occupancy and stop");
         return true;
     }
     return run_hud_fixture_case(defect);

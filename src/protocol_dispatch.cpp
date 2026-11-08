@@ -20,11 +20,6 @@ registry::Result registry_snapshot(registry::Id id, const registry::Request& req
     default: return std::monostate{};
     }
 }
-template<class T> T registry_result(registry::Id id, const registry::Request& request = generated::NativeRead{}) {
-    registry::Result result{}; registry::ExecutionContext context{}; context.snapshot = registry_snapshot;
-    registry::handler(id)->execute(request, result, context);
-    return std::get<T>(result);
-}
 }
 }
 namespace sentinel {

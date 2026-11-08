@@ -12,6 +12,18 @@ spec.loader.exec_module(codec)
 
 
 class WireV2Tests(unittest.TestCase):
+    def test_every_command_family_round_trips(self):
+        fixtures = json.loads(FIXTURES.with_name('commands.json').read_bytes())['fixtures']
+        covered = set()
+        for fixture in fixtures:
+            command, revision, tag, _ = map(int, fixture['name'].split('_'))
+            data = bytes.fromhex(fixture['fields'][0]['hex'])
+            with self.subTest(family=fixture['family'], tag=tag):
+                self.assertEqual(codec.decode_variant(command, revision, data), (tag, fixture['payload']))
+                self.assertEqual(codec.encode_variant(command, revision, tag, fixture['payload']), data)
+            covered.add(command)
+        self.assertEqual(covered, set(codec.COMMANDS))
+
     def setUp(self):
         self.fixtures = {item['name']: item for item in json.loads(FIXTURES.read_bytes())['fixtures']}
 

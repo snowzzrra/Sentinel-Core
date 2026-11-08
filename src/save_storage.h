@@ -37,6 +37,7 @@ struct Result {
     bool ok() const;
 };
 const char* outcome_name(Outcome outcome);
+Result digest(std::string_view input, std::string& output);
 struct Metadata {
     std::string namespace_id;
     std::wstring path;

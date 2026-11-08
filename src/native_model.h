@@ -99,11 +99,6 @@ public:
                                   const sc_deathlink_request* deathlink = nullptr,
                                   const sc_command_request* command = nullptr);
     sc_weapon_points_result points_result(const sc_weapon_points_request&, bool cancel, uint64_t now, bool release = false);
-    sc_inventory_result inventory_result(const sc_inventory_request&, bool cancel, uint64_t now, bool release = false);
-    sc_arsenal_result arsenal_result(const sc_arsenal_request&, bool cancel, uint64_t now, bool release = false);
-    sc_runes_result runes_result(const sc_runes_request&, bool cancel, uint64_t now, bool release = false);
-    sc_special_result special_result(const sc_special_request&, bool cancel, uint64_t now, bool release = false);
-    sc_deathlink_result deathlink_result(const sc_deathlink_request&, bool cancel, uint64_t now, bool release = false);
     sc_command_result command_result(const sc_command_request&, bool cancel, uint64_t now, bool release = false);
     sc_save_backup_snapshot backup_result(const sc_save_backup_request&, bool cancel, uint64_t now);
     static void await_backup(Slot&, sc_diagnostic_result, sc_diagnostic_detail, save::SubmissionResult);

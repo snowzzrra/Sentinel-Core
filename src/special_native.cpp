@@ -2605,15 +2605,7 @@ void present_selection(uintptr_t p) {
                 player_strings::hud_hammer_selected, text, 3000, 0, 0);
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
-void bind_run_state(void*, uintptr_t p, uint32_t own_crucible, uint32_t own_hammer, uint32_t hammer_tier, uint32_t selected) {
-    if (!p) return;
-    __try {
-        ensure(nullptr, p, own_crucible, own_hammer, hammer_tier);
-        if (selected == SC_SPECIAL_WEAPON_CRUCIBLE || selected == SC_SPECIAL_WEAPON_HAMMER) select(nullptr, p, selected);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-}
-
-Calls calls{nullptr, player, read, ensure, select, refill, present, bind_run_state};
+Calls calls{nullptr, player, read, ensure, select, refill, present};
 
 namespace {
 std::atomic<uint64_t> key_state_checked{0};

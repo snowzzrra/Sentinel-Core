@@ -182,10 +182,6 @@ static bool valid_operation(const sc_deathlink_request& r) {
 
 bool valid(const sc_deathlink_request& r) {
     if (!valid_namespace_id(r.namespace_id) || r.kind > SC_DEATHLINK_CANCEL_REMOTE) return false;
-    for (size_t i = 0; i < 64; ++i) {
-        const auto c = r.namespace_id[i];
-        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
-    }
     if (r.enabled > 1 || r.mode > SC_DEATHLINK_MODE_HARDCORE) return false;
     if (r.flags) return false;
     if (r.reserved0) return false;

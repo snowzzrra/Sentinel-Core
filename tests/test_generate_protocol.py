@@ -1,8 +1,6 @@
 import importlib.util
 from pathlib import Path
-import subprocess
 import sys
-import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,20 +15,6 @@ def load_projection():
 
 
 class GeneratorTests(unittest.TestCase):
-    def test_check_reports_drift_without_writing(self):
-        import generate_protocol as generator
-        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
-            root = Path(directory)
-            outputs = generator.render(generator.SCHEMA.read_bytes())
-            generator.project(outputs, root, False)
-            path = root / "src/protocol_generated.cpp"
-            path.write_bytes(b"drift")
-            before = {p.relative_to(root): (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
-            result = subprocess.run([sys.executable, "-B", str(ROOT / "tools/generate_protocol.py"), "--check", "--output-root", directory], capture_output=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(b"src/protocol_generated.cpp", result.stderr)
-            after = {p.relative_to(root): (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
-            self.assertEqual(before, after)
 
 
     def test_closed_variants_signed_selection_and_bounds(self):

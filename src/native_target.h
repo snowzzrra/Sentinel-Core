@@ -38,8 +38,6 @@ uint32_t validate_target(engine::Memory& memory, const engine::Image& image,
 uint32_t validate_leaf_target(engine::Memory& memory, const engine::Image& image,
                               const Target& target, size_t length, HANDLE stop,
                               uint64_t deadline, ValidationDetail* detail = nullptr);
-Target profile_target(uintptr_t base, unsigned index);
-Target save_target(uintptr_t base, unsigned index);
 uint32_t validate_recorded(save::Installation&, engine::Memory&, const engine::Image&, const Target&,
                             HANDLE stop, uint64_t deadline, uint32_t group, uint32_t index);
 bool function_window(engine::Memory&, const engine::Image&, uintptr_t entry, uintptr_t address,

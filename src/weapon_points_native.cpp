@@ -159,23 +159,24 @@ uint32_t grant(void* context, uintptr_t p, uint32_t amount) {
     bool entered = false;
     return grant_currency(context, p, 0, amount, entered);
 }
-bool refresh(void*, uintptr_t p) {
-    __try {
-        const auto hud = reinterpret_cast<uintptr_t(*)(uintptr_t)>(image_base+0x143c350)(p);
-        if (!hud) return false;
-        const auto id = *reinterpret_cast<int16_t*>(hud+0xc);
-        const auto manager = *reinterpret_cast<uintptr_t*>(image_base+0x47dd908);
-        if (id == -1 || !manager) return false;
-        int32_t values[5]{};
-        reinterpret_cast<int32_t*(*)(int32_t*,uintptr_t)>(image_base+0xf22f00)(values,p);
-        reinterpret_cast<void(*)(uintptr_t,int16_t,uint16_t,const void*)>(image_base+0x17c1180)(manager,id,0x11e,values);
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
+bool refresh(void*, uintptr_t p) { return refresh_hud(image_base, p, false); }
 Calls calls{nullptr, player, read, grant, refresh};
 #ifdef SC_NATIVE_TESTING
 char fixture_namespace[65]{};
 #endif
+}
+bool refresh_hud(uintptr_t base, uintptr_t p, bool allow_missing) {
+    __try {
+        const auto hud = reinterpret_cast<uintptr_t(*)(uintptr_t)>(base+0x143c350)(p);
+        if (!hud) return allow_missing;
+        const auto id = *reinterpret_cast<int16_t*>(hud+0xc);
+        const auto manager = *reinterpret_cast<uintptr_t*>(base+0x47dd908);
+        if (id == -1 || !manager) return allow_missing;
+        int32_t values[5]{};
+        reinterpret_cast<int32_t*(*)(int32_t*,uintptr_t)>(base+0xf22f00)(values,p);
+        reinterpret_cast<void(*)(uintptr_t,int16_t,uint16_t,const void*)>(base+0x17c1180)(manager,id,0x11e,values);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 currencies::Calls currency_calls() { return {nullptr, player, read_currency, grant_currency}; }
 bool available() { return ready.load(std::memory_order_acquire); }

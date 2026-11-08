@@ -155,7 +155,7 @@ sc_result sc_initialize(uint32_t abi, uint64_t required) {
         result = record(SC_ABI_MISMATCH, "[Sentinel Core] initialize: ABI mismatch\n");
     } else if ((required & ~capabilities) != 0) {
         result = record(SC_CAPABILITY_UNAVAILABLE,
-            "[Sentinel Core] initialize: required capability unavailable; no game capabilities implemented\n");
+            "[Sentinel Core] initialize: required capability unavailable\n");
     } else if (sentinel::native::retained() && current.service != sentinel::ServiceState::listening) {
         result = record(SC_UNLOAD_RETAINED, "[Sentinel Core] native hooks retained until process exit\n");
     } else if (current.service == sentinel::ServiceState::stopping) {

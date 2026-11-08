@@ -70,6 +70,7 @@ UpgradeActivate original_upgrade_activate = nullptr;
 using ArsenalUi = uintptr_t(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 ArsenalUi original_arsenal_ui = nullptr;
 
+
 #ifdef SC_NATIVE_TESTING
 char fixture_namespace[65]{};
 #endif
@@ -612,32 +613,6 @@ void install(const engine::Binding& binding, HANDLE stop) {
 }
 } // namespace menu
 
-bool read(void*, uintptr_t, SnapshotFacts&) { return false; }
-uint32_t ensure_mods(void*, uintptr_t, uint32_t) { return 1; }
-uint32_t select_mod(void*, uintptr_t, uint8_t, uint8_t) { return 1; }
-uint32_t purchase_upgrade(void*, uintptr_t, uint32_t) { return 1; }
-uint32_t project_mastery(void*, uintptr_t, uint16_t) { return 1; }
-uint32_t update_challenge(void*, uintptr_t, uint16_t, uint32_t, uint8_t) { return 1; }
-
-bool refresh(void*, uintptr_t p) {
-    if (!p) return false;
-    __try {
-        const auto hud = reinterpret_cast<uintptr_t(*)(uintptr_t)>(image_base + 0x143c350)(p);
-        if (!hud) return true;
-        const auto id = *reinterpret_cast<int16_t*>(hud + 0xc);
-        const auto manager = *reinterpret_cast<uintptr_t*>(image_base + 0x47dd908);
-        if (id != -1 && manager) {
-            int32_t values[5]{};
-            reinterpret_cast<int32_t*(*)(int32_t*, uintptr_t)>(image_base + 0xf22f00)(values, p);
-            reinterpret_cast<void(*)(uintptr_t, int16_t, uint16_t, const void*)>(image_base + 0x17c1180)(manager, id, 0x11e, values);
-        }
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-void bind_run_state(void*, uintptr_t) {}
-
-Calls calls{nullptr, player, read, ensure_mods, select_mod, purchase_upgrade, project_mastery, update_challenge, refresh, bind_run_state};
-
 } // namespace
 
 uint16_t find_selected_masteries(uintptr_t p) {
@@ -712,9 +687,6 @@ void tick_masteries(uint64_t generation, uintptr_t p) {
 bool available() { return ready.load(std::memory_order_acquire); }
 
 bool admitted(const char* id) {
-#ifdef SC_NATIVE_TESTING
-    if (fixture_namespace[0]) return available() && !std::memcmp(id, fixture_namespace, 65);
-#endif
     return available() && save::session().state() == save::SessionState::admitted &&
         save::session().accepts_requests() && !std::memcmp(id, save::session().namespace_id().c_str(), 65);
 }
@@ -766,9 +738,6 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
     if (!valid(request)) { out.outcome = SC_ARSENAL_OUTCOME_REJECTED; return; }
     if (!admitted(request.namespace_id)) { out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE; return; }
     out.flags |= SC_ARSENAL_FLAG_SHARED_STATE_BOUND;
-#ifdef SC_NATIVE_TESTING
-    if (fixture_namespace[0]) { execute(request, out, calls); return; }
-#endif
     // the intrinsic super shotgun detours consume this shared authorization
     if (request.kind == SC_ARSENAL_ENSURE_MODS && request.mods == SC_ARSENAL_ATTACHMENT_MEAT_HOOK) {
         out.mods_before = shared_mods();
@@ -782,14 +751,6 @@ void execute_native(const sc_arsenal_request& request, sc_arsenal_result& out) {
     if (request.kind == SC_ARSENAL_PROJECT_MASTERY) return request_mastery(request, out);
     out.outcome = SC_ARSENAL_OUTCOME_UNAVAILABLE;
 }
-
-#ifdef SC_NATIVE_TESTING
-void use_fixture(Calls value, const char* id) {
-    calls = value;
-    std::memcpy(fixture_namespace, id, 65);
-    ready.store(true, std::memory_order_release);
-}
-#endif
 
 struct InstallSite : builds::Site {
     void* detour;

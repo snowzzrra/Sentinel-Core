@@ -1,3 +1,4 @@
+#include "namespace_id.h"
 #include "commands.h"
 #include <array>
 #include <cstring>
@@ -139,11 +140,7 @@ bool parse_manual(int argc, const char* const* argv, ManualRequest& out) {
     return true;
 }
 bool valid(const sc_command_request& request) {
-    if (request.namespace_id[64]) return false;
-    for (size_t i = 0; i < 64; ++i) {
-        const auto c = request.namespace_id[i];
-        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
-    }
+    if (!valid_namespace_id(request.namespace_id)) return false;
     const auto end = static_cast<const char*>(std::memchr(request.text, 0, sizeof(request.text)));
     if (!end || kind({request.text, static_cast<size_t>(end - request.text)}) != request.kind) return false;
     for (const char* p = end; p < request.text + sizeof(request.text); ++p) if (*p) return false;

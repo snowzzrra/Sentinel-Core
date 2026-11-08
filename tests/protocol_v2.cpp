@@ -11,6 +11,7 @@
 #include <thread>
 #include "wire_fixtures.h"
 #include <filesystem>
+#include <set>
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL v2 line %d: %s (win32=%lu)\n", __LINE__, #x, GetLastError()); std::exit(1); } } while (0)
 namespace {
@@ -249,7 +250,7 @@ void automap_revisions(V2Connection& c) {
 Bytes fixture(const char* name) {
     return wire_fixtures::read(SC_WIRE_V2_FIXTURE_FILE).at(name).bytes;
 }
-generated::NativeCampaign campaign_fixture(const char* name, uint16_t revision = 4, char namespace_first = 'a') {
+generated::NativeCampaign campaign_fixture(const char* name, uint16_t revision = 5, char namespace_first = 'a') {
     const auto bytes = fixture(name); generated::submission input; Bytes payload;
     CHECK(v2::split_submission(Bytes(bytes.begin() + 32, bytes.end()), input, payload));
     input.reference.payload_revision = revision;
@@ -270,14 +271,14 @@ void campaign_upload() {
     const auto hub = campaign_fixture("campaign_row_unknown");
     const auto mission = campaign_fixture("campaign_row_known");
     const auto commit = campaign_fixture("campaign_commit_selection");
-    CHECK(commit.request.count == 2 && commit.request.row.id == 2);
+    CHECK(commit.request.revision == 7 && commit.request.count == 2 && commit.request.row.id == 2);
     CHECK(menu.request(campaign_row_operation, hub.request, true, &hub.summary, &hub.rewards).status == 0);
     const auto incomplete = menu.request(campaign_commit_operation, commit.request, true);
     CHECK(incomplete.status == SC_CAMPAIGN_REFUSED && incomplete.reason == SC_CAMPAIGN_INCOMPLETE);
     CHECK(menu.projection().count == 0);
     CHECK(menu.request(campaign_row_operation, mission.request, true, &mission.summary, &mission.rewards).status == 0);
     CHECK(menu.request(campaign_commit_operation, commit.request, true).committed_revision == 7);
-    const auto wrong = campaign_fixture("campaign_commit_selection", 4, 'b');
+    const auto wrong = campaign_fixture("campaign_commit_selection", 5, 'b');
     CHECK(wrong.request.namespace_id[0] == 'b');
     const bool same_namespace = !std::strcmp(wrong.request.namespace_id, hub.request.namespace_id);
     const auto refused = menu.request(campaign_commit_operation, wrong.request, same_namespace);
@@ -322,6 +323,37 @@ void fixture_requests() {
         generated::ack ack; CHECK(generated::decode(body, ack) && encode(ack) == body);
     }
 }
+void command_families() {
+    const auto path = std::filesystem::path(SC_WIRE_V2_FIXTURE_FILE).parent_path() / "commands.json";
+    std::set<unsigned> covered;
+    for (const auto& [name, fixture] : wire_fixtures::read(path)) {
+        unsigned id, revision, tag, submit;
+        CHECK(sscanf_s(name.c_str(), "%u_%u_%u_%u", &id, &revision, &tag, &submit) == 4);
+        const auto* descriptor = registry::descriptor(static_cast<uint16_t>(id), static_cast<uint16_t>(revision));
+        CHECK(descriptor);
+        generated::Payload payload;
+        Bytes encoded;
+        CHECK(descriptor->decode_payload(fixture.bytes, payload));
+        CHECK(descriptor->encode_payload(payload, encoded) && encoded == fixture.bytes);
+        generated::submission envelope{};
+        envelope.reference.command_type = static_cast<uint16_t>(id);
+        envelope.reference.payload_revision = static_cast<uint16_t>(revision);
+        envelope.reference.namespace_id.fill('a');
+        generated::NativeRequest native;
+        if (!v2::native_payload(*descriptor, encoded, envelope, native,
+                               submit ? generated::Operation::submit : generated::Operation::read)) {
+            std::fprintf(stderr, "FAIL command family %s\n", name.c_str());
+            CHECK(false);
+        }
+        if (id == 23) {
+            const auto& commit = std::get<generated::NativeCampaign>(native).request;
+            CHECK(revision == 5 && commit.revision == 7 && commit.count == 27 && commit.row.id == 7776006);
+        }
+        covered.insert(id);
+    }
+    for (size_t i = 0; i < generated::descriptor_count; ++i)
+        CHECK(covered.count(generated::descriptors[i].id) == 1);
+}
 void fixture_responses() {
     struct Expected { const char* name; uint32_t progress, execution, effect, retention, error; };
     const Expected cases[] = {{"queued_result",0,0,0,0,0}, {"terminal_result",2,1,1,0,0},
@@ -352,7 +384,7 @@ void protocol_v2_contract(const wchar_t* mode, void (*park)(), void (*resume)(),
                           std::atomic<unsigned>& stage, std::atomic<uint64_t>& executions) {
     using namespace sentinel;
     if (std::wcscmp(mode, L"v2")) return;
-    fixture_requests(); fixture_responses(); transient_model(); campaign_upload();
+    fixture_requests(); fixture_responses(); command_families(); transient_model(); campaign_upload();
     park(); V2Connection connection; reconnect(connection);
     const auto hello = connection.exchange(6, {}, 2000); generated::hello_result supported;
     CHECK(hello.transport == ProbeResult::ok && generated::decode(hello.body, supported));

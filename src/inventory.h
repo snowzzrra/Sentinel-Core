@@ -35,10 +35,6 @@ struct Calls {
     void* context = nullptr;
     uintptr_t (*player)(void*) = nullptr;
     bool (*read)(void*, uintptr_t, SnapshotFacts&) = nullptr;
-    uint32_t (*ensure_items)(void*, uintptr_t, uint32_t weapons, uint32_t equipment, uint32_t special, uint32_t upgrades) = nullptr;
-    uint32_t (*set_capacity)(void*, uintptr_t, uint8_t health, uint8_t armor, uint8_t ammo) = nullptr;
-    bool (*refresh)(void*, uintptr_t) = nullptr;
-    void (*bind_run_state)(void*, uintptr_t) = nullptr;
 };
 
 void execute(const sc_inventory_request&, sc_inventory_result&, const Calls&);

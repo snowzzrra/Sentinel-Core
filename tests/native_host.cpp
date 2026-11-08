@@ -528,7 +528,7 @@ int currency_service(bool special_service, std::thread& callback) {
                 },
                 [](void* p, uintptr_t, uint32_t selected) -> uint32_t {
                     static_cast<special::SnapshotFacts*>(p)->native_selected = static_cast<uint8_t>(selected); return 0;
-                }, nullptr, nullptr, nullptr
+                }, nullptr, nullptr
             };
             special::use_fixture(special_calls,namespace_id.c_str());
         }

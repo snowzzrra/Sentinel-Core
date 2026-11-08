@@ -311,20 +311,6 @@ std::string identity_text(const Identity& identity) {
     return "seed_hex=" + hex(identity.seed) + "\nteam=" + std::to_string(*identity.team) +
         "\nslot=" + std::to_string(*identity.slot) + "\ngeneration_fingerprint=" + identity.generation_fingerprint + "\n";
 }
-Result digest(std::string_view input, std::string& output) {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash_handle = nullptr;
-    NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-    if (status >= 0) status = BCryptCreateHash(algorithm, &hash_handle, nullptr, 0, nullptr, 0, 0);
-    if (status >= 0) status = BCryptHashData(hash_handle, reinterpret_cast<PUCHAR>(const_cast<char*>(input.data())), static_cast<ULONG>(input.size()), 0);
-    std::array<unsigned char, 32> bytes{};
-    if (status >= 0) status = BCryptFinishHash(hash_handle, bytes.data(), static_cast<ULONG>(bytes.size()), 0);
-    if (hash_handle) BCryptDestroyHash(hash_handle);
-    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
-    if (status < 0) return {Outcome::io_error, static_cast<uint32_t>(status)};
-    output = hex(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
-    return {};
-}
 void canonical_field(std::string& canonical, std::string_view field) {
     const auto length = static_cast<uint32_t>(field.size());
     for (int shift = 24; shift >= 0; shift -= 8) canonical.push_back(static_cast<char>((length >> shift) & 255));
@@ -413,6 +399,20 @@ Result parse_descriptor(std::string_view text, Descriptor& descriptor) {
     if (!result.ok()) return result;
     if (!valid_root(parsed.root)) return {Outcome::invalid_root};
     descriptor = std::move(parsed);
+    return {};
+}
+Result digest(std::string_view input, std::string& output) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash_handle = nullptr;
+    NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+    if (status >= 0) status = BCryptCreateHash(algorithm, &hash_handle, nullptr, 0, nullptr, 0, 0);
+    if (status >= 0) status = BCryptHashData(hash_handle, reinterpret_cast<PUCHAR>(const_cast<char*>(input.data())), static_cast<ULONG>(input.size()), 0);
+    std::array<unsigned char, 32> bytes{};
+    if (status >= 0) status = BCryptFinishHash(hash_handle, bytes.data(), static_cast<ULONG>(bytes.size()), 0);
+    if (hash_handle) BCryptDestroyHash(hash_handle);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (status < 0) return {Outcome::io_error, static_cast<uint32_t>(status)};
+    output = hex(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
     return {};
 }
 Result namespace_id(const Identity& identity, std::string& id) {

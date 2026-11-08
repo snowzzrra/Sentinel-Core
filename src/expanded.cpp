@@ -151,7 +151,7 @@ static bool population_allowed(const SpawnLimits& limits, const std::array<std::
 bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active) noexcept {
     if (limits.population && !population_allowed(limits, active)) return false;
     if (limits.kind >= 6) return true;
-    if (limits.kind == 3 || limits.kind >= active.size()) return true;
+    if (limits.kind == 3) return true;
     const auto special = uint64_t{active[0]} + active[1] + active[2] + active[4] + active[5];
     const auto individual=limits.kind>=4 ? 1 : limits.kind;
     return active[limits.kind] < limits.maximum[individual] &&

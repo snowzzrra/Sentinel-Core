@@ -31,26 +31,26 @@ template<class T> void namespace_copy(T& out, const submission& input) {
 template<class T> T request(const submission& input, uint32_t kind) {
     T out{}; out.execution = execution(input); out.kind = kind; namespace_copy(out, input); return out;
 }
-NativeRequest points(const Bytes& bytes, const submission& input) {
-    weapon_points_payload payload; decode(bytes, payload);
+NativeRequest points(const Payload& decoded, const submission& input, uint32_t) {
+    const auto& payload = std::get<weapon_points_payload>(decoded);
     auto out = request<::sc_weapon_points_request>(input, static_cast<uint32_t>(payload.index()));
     if (const auto* value = std::get_if<weapon_points_grant_payload>(&payload)) {
         out.amount = value->amount; out.expected_gained = value->expected_gained;
     }
     return out;
 }
-NativeRequest mission_access(const Bytes& bytes, const submission& input) {
-    mission_access_payload payload; decode(bytes, payload);
+NativeRequest mission_access(const Payload& decoded, const submission& input, uint32_t) {
+    const auto& payload = std::get<mission_access_payload>(decoded);
     auto out = request<::sc_mission_access_request>(input, 0);
     out.stage_id = std::get<0>(payload).stage_id;
     std::copy(input.save_binding.begin(), input.save_binding.end(), out.save_binding);
     return out;
 }
-NativeRequest progression(const Bytes&, const submission& input) {
+NativeRequest progression(const Payload&, const submission& input, uint32_t) {
     return request<::sc_progression_request>(input, 0);
 }
-NativeRequest currencies(const Bytes& bytes, const submission& input) {
-    currencies_payload payload; decode(bytes, payload);
+NativeRequest currencies(const Payload& decoded, const submission& input, uint32_t) {
+    const auto& payload = std::get<currencies_payload>(decoded);
     auto out = request<::sc_currency_request>(input, static_cast<uint32_t>(payload.index()));
     std::visit([&](const auto& value) { out.currency = value.currency; }, payload);
     if (const auto* value = std::get_if<currencies_grant_payload>(&payload)) {
@@ -58,8 +58,8 @@ NativeRequest currencies(const Bytes& bytes, const submission& input) {
     }
     return out;
 }
-NativeRequest inventory(const Bytes& bytes, const submission& input) {
-    inventory_payload payload; decode(bytes, payload);
+NativeRequest inventory(const Payload& decoded, const submission& input, uint32_t) {
+    const auto& payload = std::get<inventory_payload>(decoded);
     auto out = request<::sc_inventory_request>(input, static_cast<uint32_t>(payload.index()));
     if (const auto* value = std::get_if<inventory_ensure_payload>(&payload)) {
         out.weapons = value->weapons; out.equipment = value->equipment;
@@ -69,35 +69,35 @@ NativeRequest inventory(const Bytes& bytes, const submission& input) {
     }
     return out;
 }
-NativeRequest arsenal(const Bytes& bytes, const submission& input) {
-    arsenal_payload payload; decode(bytes, payload);
-    auto out = request<::sc_arsenal_request>(input, number(bytes, 0, 4));
+NativeRequest arsenal(const Payload& decoded, const submission& input, uint32_t tag) {
+    const auto& payload = std::get<arsenal_payload>(decoded);
+    auto out = request<::sc_arsenal_request>(input, tag);
     if (const auto* value = std::get_if<arsenal_ensure_mods_payload>(&payload)) out.mods = value->mods;
     if (const auto* value = std::get_if<arsenal_select_mod_payload>(&payload)) { out.select_weapon = value->weapon; out.select_mod = value->mod; }
     if (const auto* value = std::get_if<arsenal_project_mastery_payload>(&payload)) out.masteries = value->masteries;
     return out;
 }
-NativeRequest runes(const Bytes& bytes, const submission& input) {
-    runes_payload payload; decode(bytes, payload);
-    auto out = request<::sc_runes_request>(input, number(bytes, 0, 4));
+NativeRequest runes(const Payload& decoded, const submission& input, uint32_t tag) {
+    const auto& payload = std::get<runes_payload>(decoded);
+    auto out = request<::sc_runes_request>(input, tag);
     if (const auto* value = std::get_if<runes_ensure_normal_payload>(&payload)) out.normal_runes = value->normal_runes;
     if (const auto* value = std::get_if<runes_ensure_support_payload>(&payload)) out.support_runes = value->support_runes;
     if (const auto* value = std::get_if<runes_select_normal_payload>(&payload)) { out.select_slot = value->slot; out.select_rune = value->rune; }
     if (const auto* value = std::get_if<runes_select_support_payload>(&payload)) out.select_rune = value->rune;
     return out;
 }
-NativeRequest special(const Bytes& bytes, const submission& input) {
-    special_payload payload; decode(bytes, payload);
-    auto out = request<::sc_special_request>(input, number(bytes, 0, 4));
+NativeRequest special(const Payload& decoded, const submission& input, uint32_t tag) {
+    const auto& payload = std::get<special_payload>(decoded);
+    auto out = request<::sc_special_request>(input, tag);
     if (const auto* v = std::get_if<special_ensure_ownership_payload>(&payload)) { out.own_crucible = v->crucible; out.own_hammer = v->hammer; out.hammer_tier = v->hammer_tier; }
     if (const auto* v = std::get_if<special_select_payload>(&payload)) out.selected = v->selected;
     if (const auto* v = std::get_if<special_refill_publish_payload>(&payload)) { out.refill_balance = v->balance; out.refill_flags = v->flags; }
     if (const auto* v = std::get_if<special_refill_execute_payload>(&payload)) { out.refill_request_id = v->request_id; out.refill_authorize = v->authorize; }
     return out;
 }
-NativeRequest deathlink(const Bytes& bytes, const submission& input) {
-    deathlink_payload payload; decode(bytes, payload);
-    auto out = request<::sc_deathlink_request>(input, number(bytes, 0, 4));
+NativeRequest deathlink(const Payload& decoded, const submission& input, uint32_t tag) {
+    const auto& payload = std::get<deathlink_payload>(decoded);
+    auto out = request<::sc_deathlink_request>(input, tag);
     if (const auto* v = std::get_if<deathlink_configure_payload>(&payload)) { out.enabled = v->enabled; out.mode = v->mode; }
     if (const auto* v = std::get_if<deathlink_apply_remote_payload>(&payload)) { out.event_id = v->event_id; std::copy(v->event_hash.begin(), v->event_hash.end(), out.event_hash); }
     if (const auto* v = std::get_if<deathlink_ack_local_payload>(&payload)) out.ack_sequence = v->sequence;
@@ -120,11 +120,11 @@ std::string command_text(const command_payload& payload) {
         }
     }, payload);
 }
-NativeRequest command(const Bytes& bytes, const submission& input) {
+NativeRequest command(const Payload& decoded, const submission& input, uint32_t) {
     auto out = request<::sc_command_request>(input, 0);
     bool valid = false;
     if (input.reference.command_type == 52) valid = commands::parse("condump AP_SUPPORT_FILE.txt", out);
-    else { command_payload payload; decode(bytes, payload); valid = commands::parse(command_text(payload), out); }
+    else { const auto& payload = std::get<command_payload>(decoded); valid = commands::parse(command_text(payload), out); }
     return valid ? NativeRequest{out} : NativeRequest{};
 }
 struct CanonicalWriter {
@@ -162,8 +162,7 @@ bool split_read(const Bytes& bytes, read_envelope& out, Bytes& payload) {
     Bytes prefix; return split(bytes, 120, prefix, payload) && decode(prefix, out);
 }
 bool header(const Bytes& bytes, wire_header_2& out, bool response) {
-    return decode(bytes, out) && out.magic == wire_magic && out.version == 2 &&
-        out.flags == (response ? 1u : 0u) && (response || !out.result) && out.payload_length <= max_frame - header_size_2;
+    return decode(bytes, out) && out.flags == (response ? 1u : 0u) && (response || !out.result);
 }
 bool frame(const wire_header_2& input, const Bytes& body, Bytes& out) {
     if (body.size() > max_frame - header_size_2) return false;
@@ -208,13 +207,13 @@ bool command_response(const Bytes& bytes, command_reply& reply, CommandError& er
 }
 namespace sentinel::v2 {
 namespace {
-NativeRequest backup(const Bytes& bytes, const submission& input) {
-    save_backup_payload payload; decode(bytes, payload); const auto& v = std::get<0>(payload);
+NativeRequest backup(const Payload& decoded, const submission& input, uint32_t) {
+    const auto& payload = std::get<save_backup_payload>(decoded); const auto& v = std::get<0>(payload);
     ::sc_save_backup_request out{}; out.execution = execution(input); namespace_copy(out, input);
     out.campaign = v.campaign; out.slot = v.slot; out.work_deadline_ms = v.work_deadline_ms; return out;
 }
-NativeRequest automap(const Bytes& bytes, const submission& input) {
-    auto out = request<::sc_automap_request>(input, number(bytes, 0, 4));
+NativeRequest automap(const Payload& decoded, const submission& input, uint32_t tag) {
+    auto out = request<::sc_automap_request>(input, tag);
     const auto copy = [&](const auto& value) {
         if constexpr (!std::is_same_v<std::decay_t<decltype(value)>, automap_observe_payload>) {
             out.known = value.known; out.revision = value.revision;
@@ -222,10 +221,10 @@ NativeRequest automap(const Bytes& bytes, const submission& input) {
         }
     };
     if (input.reference.payload_revision == 1) {
-        automap_payload_revision1 payload; decode(bytes, payload);
+        const auto& payload = std::get<automap_payload_revision1>(decoded);
         std::visit(copy, payload);
     } else {
-        automap_payload payload; decode(bytes, payload);
+        const auto& payload = std::get<automap_payload>(decoded);
         std::visit(copy, payload);
     }
     return out;
@@ -245,42 +244,52 @@ template<class V> void campaign_rewards(const V& v, NativeCampaign& out, uint32_
         std::copy(row.name.begin(), row.name.end(), to.name); std::copy(row.text.begin(), row.text.end(), to.text);
     }
 }
-NativeRequest campaign(const Bytes& bytes, const submission& input) {
+NativeRequest campaign(const Payload& decoded, const submission& input, uint32_t) {
     NativeCampaign out{}; out.request.execution = execution(input); namespace_copy(out.request, input);
-    if (input.reference.command_type == 23 && input.reference.payload_revision == 4) {
-        campaign_commit_payload payload; decode(bytes, payload); const auto& v = std::get<0>(payload);
-        out.request.revision = v.revision; out.request.count = v.count; out.request.row.id = v.selected_id;
+    if (input.reference.command_type == 23) {
+        if (input.reference.payload_revision == 4) {
+            const auto& v = std::get<0>(std::get<campaign_commit_payload_revision4>(decoded));
+            out.request.revision = v.revision; out.request.count = v.count; out.request.row.id = v.selected_id;
+        } else if (input.reference.payload_revision == 5) {
+            const auto& v = std::get<0>(std::get<campaign_commit_payload>(decoded));
+            out.request.revision = v.revision; out.request.count = v.count; out.request.row.id = v.selected_id;
+        } else if (input.reference.payload_revision < 4) {
+            out.request.revision = std::get<0>(std::get<campaign_commit_payload_revision1>(decoded)).revision;
+        }
         return out;
     }
     if (input.reference.command_type != 22) {
-        campaign_payload payload; decode(bytes, payload); out.request.revision = std::get<0>(payload).revision; return out;
+        const auto& payload = std::get<campaign_payload>(decoded); out.request.revision = std::get<0>(payload).revision; return out;
     }
     if (input.reference.payload_revision == 1) {
-        campaign_row_payload_revision1 payload; decode(bytes, payload); campaign_row(std::get<0>(payload), out);
+        const auto& payload = std::get<campaign_row_payload_revision1>(decoded); campaign_row(std::get<0>(payload), out);
     } else if (input.reference.payload_revision == 2) {
-        campaign_row_payload_revision2 payload; decode(bytes, payload); const auto& v = std::get<0>(payload);
+        const auto& payload = std::get<campaign_row_payload_revision2>(decoded); const auto& v = std::get<0>(payload);
         campaign_row(v, out); out.summary = from_wire(v.summary);
     } else if (input.reference.payload_revision == 3) {
-        campaign_row_payload_revision3 payload; decode(bytes, payload);
+        const auto& payload = std::get<campaign_row_payload_revision3>(decoded);
         campaign_rewards(std::get<0>(payload), out, 1);
+    } else if (input.reference.payload_revision == 4) {
+        const auto& v = std::get<0>(std::get<campaign_row_payload_revision4>(decoded));
+        campaign_rewards(v, out, v.rewards_known);
     } else {
-        campaign_row_payload payload; decode(bytes, payload); const auto& v = std::get<0>(payload);
+        const auto& payload = std::get<campaign_row_payload>(decoded); const auto& v = std::get<0>(payload);
         campaign_rewards(v, out, v.rewards_known);
     }
     return out;
 }
-NativeRequest combat(const Bytes& bytes, const submission& input) {
-    combat_payload payload; decode(bytes, payload); const auto& v = std::get<0>(payload);
+NativeRequest combat(const Payload& decoded, const submission& input, uint32_t) {
+    const auto& payload = std::get<combat_payload>(decoded); const auto& v = std::get<0>(payload);
     ::sc_combat_query out{}; namespace_copy(out, input); out.map_count = static_cast<uint32_t>(v.maps.size());
     for (size_t i = 0; i < v.maps.size(); ++i) std::copy(v.maps[i].value.begin(), v.maps[i].value.end(), out.maps[i]);
     return out;
 }
-NativeRequest presentation(const Bytes& bytes, const submission& input) {
-    combat_presentation_payload payload; decode(bytes, payload);
+NativeRequest presentation(const Payload& decoded, const submission& input, uint32_t) {
+    const auto& payload = std::get<combat_presentation_payload>(decoded);
     auto out = from_wire(std::get<0>(payload).presentation);
     out.execution = execution(input); namespace_copy(out, input); return out;
 }
-using Adapter = NativeRequest (*)(const Bytes&, const submission&);
+using Adapter = NativeRequest (*)(const Payload&, const submission&, uint32_t);
 struct PayloadAdapter { uint16_t id; Adapter convert; };
 const PayloadAdapter adapters[] = {{14, backup}, {18, points}, {22, campaign}, {23, campaign}, {24, campaign},
     {25, inventory}, {29, arsenal}, {33, runes}, {37, special}, {41, deathlink}, {45, automap}, {46, command},
@@ -295,7 +304,7 @@ bool native_payload(const Descriptor& descriptor, const Bytes& bytes, const subm
     if (policy == end || policy->operation != operation) return false;
     const auto adapter = std::find_if(std::begin(adapters), std::end(adapters), [&](const auto& v) { return v.id == descriptor.id; });
     if (adapter != std::end(adapters)) {
-        out = adapter->convert(bytes, input);
+        out = adapter->convert(payload, input, tag);
         return !std::holds_alternative<std::monostate>(out);
     }
     else if (descriptor.id == 5 || descriptor.id == 8) out = execution(input);

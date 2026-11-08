@@ -23,6 +23,7 @@ struct Calls {
 void execute(const sc_weapon_points_request&, sc_weapon_points_result&, const Calls&);
 void install(const engine::Binding&, HANDLE stop);
 bool available();
+bool refresh_hud(uintptr_t base, uintptr_t player, bool allow_missing);
 currencies::Calls currency_calls();
 bool admitted(const char* namespace_id);
 // original native caller while the currency entry detour invokes its trampoline

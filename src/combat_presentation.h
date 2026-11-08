@@ -1,4 +1,5 @@
 #pragma once
+#include "namespace_id.h"
 #include "sentinel_combat.h"
 #include <cstring>
 #include <mutex>
@@ -14,13 +15,9 @@ inline bool valid_milestone(const sc_combat_presentation_request& request) {
 }
 
 inline bool valid_presentation(const sc_combat_presentation_request& request) {
-    if (request.namespace_id[64] || request.visible > 1 || request.milestone > request.total ||
+    if (!valid_namespace_id(request.namespace_id) || request.visible > 1 || request.milestone > request.total ||
         (request.target && request.target <= request.total) || (request.visible && !request.target)) return false;
     if (!valid_milestone(request)) return false;
-    for (unsigned i = 0; i < 64; ++i) {
-        const auto c = request.namespace_id[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-    }
     return true;
 }
 struct ProgressView { uint64_t total = 0, target = 0, milestone = 0; bool visible = false; };

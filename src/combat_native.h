@@ -15,8 +15,5 @@ save::BSnapshot diagnostics();
 bool confirmed_dead(uintptr_t world, uintptr_t actor);
 bool suppress(uint64_t generation, uintptr_t world, uintptr_t actor);
 void stop();
-#ifdef SC_NATIVE_TESTING
-bool test_observation_contention();
-#endif
 }
 #endif

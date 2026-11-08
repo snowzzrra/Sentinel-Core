@@ -226,7 +226,6 @@ bool inspect_remote(Session& owner, engine::Memory& memory, uintptr_t remote,
     }
     if (!verify_remote_marker(owner, remote, methods, scan)) return false;
     return read_remote_selections(owner, remote, methods, catalog, prefix, deadline);
-    return true;
 }
 struct ExistenceFuture : SaveFuture {
     SaveResult result{};

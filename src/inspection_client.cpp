@@ -10,7 +10,7 @@
 
 namespace sentinel {
 Inspection query_native_client(uint32_t, uint32_t, uint16_t, const sc_diagnostic_request&, uint64_t,
-    generated::NativeRequest, const sc_campaign_summary*, const sc_campaign_rewards*, uint64_t);
+    generated::NativeRequest, const sc_campaign_summary*, const sc_campaign_rewards*);
 namespace {
 ProbeResult classify(DWORD error) {
     switch (error) {
@@ -24,7 +24,6 @@ ProbeResult classify(DWORD error) {
 }
 struct ClientRequest {
     uint16_t operation;
-    uint64_t capability;
     sc_diagnostic_request execution{};
     uint64_t cursor = 0;
     generated::NativeRequest payload{};
@@ -92,98 +91,99 @@ Inspection query_operation(uint32_t pid, uint32_t timeout_ms, const ClientReques
     Inspection out;
     if (!pid || timeout_ms < min_timeout_ms || timeout_ms > max_timeout_ms) { out.result = ProbeResult::usage; return out; }
     out = query_native_client(pid, timeout_ms, request.operation, request.execution, request.cursor,
-                              request.payload, request.summary, request.rewards, request.capability);
+                              request.payload, request.summary, request.rewards);
     if (out.result == ProbeResult::ok) out.failure_stage = "none";
     return out;
 }
 
 template<class T>
 Inspection query_family(uint32_t pid, uint32_t timeout_ms, uint16_t operation, uint16_t first, uint16_t last,
-                        uint64_t capability, const T& request) {
+                        const T& request) {
     if (operation < first || operation > last) { Inspection result; result.result = ProbeResult::usage; return result; }
-    return query_operation(pid, timeout_ms, {operation, capability, request.execution, 0, request});
+    return query_operation(pid, timeout_ms, {operation, request.execution, 0, request});
 }
 }
 Inspection query(uint32_t pid, uint32_t timeout_ms, uint64_t required) {
-    return query_operation(pid, timeout_ms, {inspect_operation, required});
+    if (!pid || timeout_ms < min_timeout_ms || timeout_ms > max_timeout_ms) { Inspection result; result.result = ProbeResult::usage; return result; }
+    if (required & ~inspect_capability) { Inspection result; result.result = ProbeResult::capability_unavailable; return result; }
+    return query_operation(pid, timeout_ms, {inspect_operation});
 }
 Inspection query_engine(uint32_t pid, uint32_t timeout_ms) {
-    return query_operation(pid, timeout_ms, {engine_operation, engine_capability});
+    return query_operation(pid, timeout_ms, {engine_operation});
 }
 Inspection query_context(uint32_t pid, uint32_t timeout_ms) {
-    return query_operation(pid, timeout_ms, {context_operation, context_capability});
+    return query_operation(pid, timeout_ms, {context_operation});
 }
 Inspection query_save(uint32_t pid, uint32_t timeout_ms) {
-    return query_operation(pid, timeout_ms, {save_operation, save_capability});
+    return query_operation(pid, timeout_ms, {save_operation});
 }
 Inspection query_save_admission(uint32_t pid, uint32_t timeout_ms) {
-    return query_operation(pid, timeout_ms, {save_admission_operation, save_admission_capability});
+    return query_operation(pid, timeout_ms, {save_admission_operation});
 }
 Inspection query_save_installation(uint32_t pid, uint32_t timeout_ms) {
-    return query_operation(pid, timeout_ms, {save_installation_operation, save_installation_capability});
+    return query_operation(pid, timeout_ms, {save_installation_operation});
 }
 Inspection query_save_write(uint32_t pid, uint32_t timeout_ms, uint64_t operation_id) {
-    return query_operation(pid, timeout_ms, {save_write_operation, save_write_capability, {}, operation_id});
+    return query_operation(pid, timeout_ms, {save_write_operation, {}, operation_id});
 }
 Inspection query_native(uint32_t pid, uint32_t timeout_ms, uint64_t after_event) {
-    return query_operation(pid, timeout_ms, {native_operation, native_capability, {}, after_event});
+    return query_operation(pid, timeout_ms, {native_operation, {}, after_event});
 }
 Inspection query_save_backup(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_save_backup_request& request) {
     return query_family(pid, timeout_ms, operation, save_backup_submit_operation, save_backup_cancel_operation,
-                        save_backup_capability, request);
+                        request);
 }
 Inspection query_weapon_points(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_weapon_points_request& request) {
     return query_family(pid, timeout_ms, operation, weapon_points_submit_operation, weapon_points_release_operation,
-                        weapon_points_capability, request);
+                        request);
 }
 Inspection query_inventory(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_inventory_request& request) {
     return query_family(pid, timeout_ms, operation, inventory_submit_operation, inventory_release_operation,
-                        inventory_capability, request);
+                        request);
 }
 Inspection query_arsenal(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_arsenal_request& request) {
     return query_family(pid, timeout_ms, operation, arsenal_submit_operation, arsenal_release_operation,
-                        arsenal_capability, request);
+                        request);
 }
 Inspection query_runes(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_runes_request& request) {
     return query_family(pid, timeout_ms, operation, runes_submit_operation, runes_release_operation,
-                        runes_capability, request);
+                        request);
 }
 Inspection query_special(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_special_request& request) {
     return query_family(pid, timeout_ms, operation, special_submit_operation, special_release_operation,
-                        special_capability, request);
+                        request);
 }
 Inspection query_deathlink(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_deathlink_request& request) {
     return query_family(pid, timeout_ms, operation, deathlink_submit_operation, deathlink_release_operation,
-                        deathlink_capability, request);
+                        request);
 }
 Inspection query_command(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_command_request& request) {
     if (!commands::valid(request)) { Inspection result; result.result = ProbeResult::usage; return result; }
     return query_family(pid, timeout_ms, operation, command_submit_operation, command_release_operation,
-                        command_capability, request);
+                        request);
 }
 Inspection query_campaign(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_campaign_request& request,
                           const sc_campaign_summary* summary, const sc_campaign_rewards* rewards) {
     if (operation < campaign_row_operation || operation > campaign_inspect_operation) {
         Inspection result; result.result = ProbeResult::usage; return result;
     }
-    const auto capability = rewards ? campaign_rewards_capability : (summary ? campaign_presentation_capability : campaign_menu_capability);
-    return query_operation(pid, timeout_ms, {operation, capability, request.execution, 0, CampaignRequest{request}, summary, rewards});
+    return query_operation(pid, timeout_ms, {operation, request.execution, 0, CampaignRequest{request}, summary, rewards});
 }
 Inspection query_diagnostic(uint32_t pid, uint32_t timeout_ms, uint16_t operation, const sc_diagnostic_request& request) {
     if (operation < diagnostic_submit_operation || operation > diagnostic_detail_cancel_operation) {
         Inspection result; result.result = ProbeResult::usage; return result;
     }
-    return query_operation(pid, timeout_ms, {operation, diagnostic_capability, request});
+    return query_operation(pid, timeout_ms, {operation, request});
 }
 Inspection query_automap(uint32_t pid, uint32_t timeout_ms, const sc_automap_request& request) {
-    return query_operation(pid, timeout_ms, {automap_operation, automap_capability, request.execution, 0, request});
+    return query_operation(pid, timeout_ms, {automap_operation, request.execution, 0, request});
 }
 Inspection query_combat_presentation(uint32_t pid, uint32_t timeout_ms, const sc_combat_presentation_request& request) {
-    return query_operation(pid, timeout_ms, {combat_presentation_operation, combat_presentation_capability, request.execution, 0, request});
+    return query_operation(pid, timeout_ms, {combat_presentation_operation, request.execution, 0, request});
 }
 Inspection query_combat(uint32_t pid, uint32_t timeout_ms, const sc_combat_query& request) {
     if (!combat::valid_query(request)) { Inspection result; result.result = ProbeResult::usage; return result; }
-    ClientRequest value{combat_operation, combat_capability}; value.payload = request;
+    ClientRequest value{combat_operation}; value.payload = request;
     return query_operation(pid, timeout_ms, value);
 }
 }
@@ -467,11 +467,11 @@ Inspection client_command(V2Connection& connection, const ClientRoute& route, co
 }
 Inspection query_native_client(uint32_t pid, uint32_t timeout, uint16_t selector,
         const sc_diagnostic_request& execution, uint64_t cursor, generated::NativeRequest value,
-        const sc_campaign_summary* summary, const sc_campaign_rewards* rewards, uint64_t capability) {
+        const sc_campaign_summary* summary, const sc_campaign_rewards* rewards) {
     Inspection out; V2Connection connection;
     const auto end = std::end(client_routes);
     const auto route = std::find_if(std::begin(client_routes), end, [=](const auto& r) { return r.selector == selector; });
-    if (route == end || (selector == inspect_operation && (capability & ~inspect_capability))) {
+    if (route == end) {
         out.result = ProbeResult::capability_unavailable; return out;
     }
     Handle process;

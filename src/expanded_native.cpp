@@ -438,10 +438,3 @@ void map_freed() {
 }
 
 }
-
-#ifdef SC_NATIVE_TESTING
-namespace sentinel::expanded {
-using namespace detail;
-#include "../tests/expanded_stop.inc"
-}
-#endif

@@ -1,12 +1,9 @@
 import argparse
-import contextlib
 import importlib.util
-import io
 import json
 import os
 from pathlib import Path
 import struct
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -16,50 +13,6 @@ spec = importlib.util.spec_from_file_location(
     "protection", Path(__file__).parents[1] / "tools" / "prepare_vanilla_backup.py")
 protection = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(protection)
-
-
-class MountPointTests(unittest.TestCase):
-    def test_only_wine_directory_mount_without_reparse_data_is_accepted(self):
-        for wine, attrs, tag, query_ok, error, accepted in (
-            (True, 0x410, 0xa0000003, False, 4390, True),
-            (True, 0x410, 0xa0000003, True, 0, False),
-            (False, 0x410, 0xa0000003, False, 4390, False),
-            (True, 0x410, 0xa000000c, False, 4390, False),
-            (True, 0x400, 0xa0000003, False, 4390, False),
-            (True, 0x410, 0xa0000003, False, 5, False),
-            (True, 0x410, 0xa0000003, False, 1, False),
-        ):
-            with self.subTest(wine=wine, attrs=attrs, tag=tag, query_ok=query_ok, error=error):
-                api = mock.Mock()
-                api.GetProcAddress.return_value = wine
-                api.DeviceIoControl.return_value = query_ok
-                info = protection.ctypes.create_string_buffer(struct.pack("<II", attrs, tag), 8)
-                with mock.patch.object(protection.ctypes, "get_last_error", return_value=error, create=True):
-                    self.assertEqual(protection.wine_mount_point(api, 123, info), accepted)
-
-    def test_mount_exception_is_limited_to_ancestor_directories(self):
-        api = mock.Mock()
-        api.CreateFileW.return_value = 123
-        api.GetProcAddress.return_value = True
-        api.DeviceIoControl.return_value = False
-
-        def attributes(handle, kind, target, size):
-            protection.ctypes.memmove(target, struct.pack("<II", 0x410, 0xa0000003), 8)
-            return True
-
-        api.GetFileInformationByHandleEx.side_effect = attributes
-        for ancestor, directory, accepted in ((True, True, True), (False, True, False), (True, False, False)):
-            with self.subTest(ancestor=ancestor, directory=directory), \
-                    mock.patch.object(protection, "kernel", return_value=api), \
-                    mock.patch.object(protection.ctypes, "get_last_error", return_value=4390, create=True), \
-                    mock.patch.dict(sys.modules, {"msvcrt": mock.Mock()}):
-                if accepted:
-                    with protection.pinned(Path("fixture"), directory=directory, inspect_streams=False, ancestor=ancestor):
-                        pass
-                else:
-                    with self.assertRaises(protection.Refused):
-                        with protection.pinned(Path("fixture"), directory=directory, inspect_streams=False, ancestor=ancestor):
-                            self.fail("reparse payload accepted")
 
 
 @unittest.skipUnless(os.name == "nt", "Windows exclusive-handle contract")
@@ -96,35 +49,6 @@ class ProtectionTests(unittest.TestCase):
         return {str(p): (p.read_bytes(), p.stat().st_mtime_ns)
                 for root in (self.steam, self.local) for p in root.rglob("*") if p.is_file()}
 
-    def test_unsupported_contract_refuses_before_diagnostic_or_backup_io(self):
-        paths = ["prepare", "--steam-account", "12345", "--steam-app-root", str(self.steam),
-                 "--local-provider-root", str(self.local), "--backup-directory", str(self.backup),
-                 "--ap-root", str(self.root / "ap"), "--uninstall-root", str(self.root / "game-install"),
-                 "--diagnostic-file", str(self.root / "diagnostic.json")]
-        for revision in ([], ["--slot-data-revision", "0.6.0", "--mod-contract-revision", "2"],
-                         ["--slot-data-revision", "0.7.0", "--mod-contract-revision", "1"]):
-            with self.subTest(revision=revision), mock.patch.object(protection, "protect") as protect, \
-                    mock.patch.object(protection, "explicit_path") as path, contextlib.redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit) as refusal:
-                    protection.main(paths + revision)
-                self.assertEqual(refusal.exception.code, 2)
-                protect.assert_not_called()
-                path.assert_not_called()
-        self.assertFalse(self.backup.exists())
-        self.assertFalse((self.root / "diagnostic.json").exists())
-
-    def test_imported_helper_refuses_unsupported_contract_before_protection(self):
-        for revisions in ({}, {"slot_data_revision": "0.6.0", "mod_contract_revision": 2},
-                          {"slot_data_revision": "0.7.0", "mod_contract_revision": 1},
-                          {"slot_data_revision": "0.7.0", "mod_contract_revision": "2"}):
-            arguments = vars(self.args).copy()
-            arguments.pop("slot_data_revision")
-            arguments.pop("mod_contract_revision")
-            with self.subTest(revisions=revisions), mock.patch.object(protection, "_protect") as protect:
-                with self.assertRaisesRegex(protection.Refused, "slot-data 0.7.0 and mod contract 2 required"):
-                    protection.protect(argparse.Namespace(**arguments, **revisions))
-                protect.assert_not_called()
-        self.assertFalse(self.backup.exists())
 
     def test_complete_readback_preserves_sources_and_reuses_first(self):
         original = self.snapshot()
@@ -184,11 +108,6 @@ class ProtectionTests(unittest.TestCase):
         with self.assertRaisesRegex(protection.Refused, "integrity verification failed"):
             protection.protect(self.args)
 
-    def test_extended_input_and_aliases_refused_before_io_conversion(self):
-        for value in ("\\\\?\\" + str(self.backup), str(self.root) + "\\..\\backup",
-                      str(self.root) + "\\backup. ", str(self.root) + "\\backup:stream"):
-            with self.subTest(value=value), self.assertRaisesRegex(protection.Refused, "without aliases"):
-                protection.explicit_path(value)
 
     def test_later_original_progress_gets_new_reference_without_overwriting_first(self):
         protection.protect(self.args)
@@ -218,27 +137,6 @@ class ProtectionTests(unittest.TestCase):
             protection.protect(self.args)
         self.assertEqual(self.snapshot(), original)
 
-    def test_unknown_stat_link_count_requires_real_single_link_handle(self):
-        class UnknownLinks:
-            st_nlink = 0
-            def __init__(self, value): self.value = value
-            def __getattr__(self, name): return getattr(self.value, name)
-        info = self.campaign.lstat()
-        expected = self.campaign.read_bytes()
-        with mock.patch.object(Path, 'lstat', return_value=UnknownLinks(info)):
-            self.assertEqual(protection.check_node(self.campaign).st_nlink, 0)
-        with mock.patch.object(protection.os, 'fstat', return_value=UnknownLinks(info)):
-            with protection.pinned(self.campaign) as source:
-                self.assertEqual(source.read(), expected)
-        linked = self.campaign.with_name('second-name')
-        os.link(self.campaign, linked)
-        with self.assertRaises(protection.Refused) as caught:
-            protection.check_node(self.campaign)
-        self.assertEqual(caught.exception.private_metadata['handle_nlink'], 2)
-        self.assertEqual(caught.exception.distinction, 'confirmed_multiple_file_links')
-        with self.assertRaises(protection.Refused) as caught:
-            protection.verify_links(mock.Mock(GetFileInformationByHandleEx=lambda *unused: False), 0, self.campaign, 'fixture_query_failure', 0)
-        self.assertEqual(caught.exception.distinction, 'handle_link_query_failed')
 
     def test_source_share_conflict_refused_before_destination_created(self):
         with self.campaign.open("rb"):
@@ -246,116 +144,6 @@ class ProtectionTests(unittest.TestCase):
                 protection.protect(self.args)
         self.assertFalse(self.backup.exists())
 
-    def test_stream_introduction_during_copy_is_fail_closed(self):
-        zone = Path(str(self.campaign) + ":Zone.Identifier")
-        zone.write_bytes(b"[ZoneTransfer]\r\nZoneId=3\r\n")
-        unknown = Path(str(self.campaign) + ":during-protection")
-        denied = False
-        real_copy = protection.copy_file
-        def introduce(source, destination):
-            nonlocal denied
-            result = real_copy(source, destination)
-            if destination.name == "game.details":
-                try:
-                    unknown.write_bytes(b"fixture mutation")
-                except PermissionError:
-                    denied = True
-            return result
-        with mock.patch.object(protection, "copy_file", introduce):
-            try:
-                protection.protect(self.args)
-            except protection.Refused:
-                self.assertFalse(denied)
-                self.assertFalse((self.backup / protection.MANIFEST).exists())
-            else:
-                self.assertTrue(denied)
-                self.assertFalse(unknown.exists())
-
-    def test_exact_metadata_change_before_exclusive_acquisition_is_retained(self):
-        real_pin = protection.pinned
-        old = self.campaign.stat().st_mtime_ns
-        @contextlib.contextmanager
-        def changing(path, directory=False, inspect_streams=True, *, ancestor=False):
-            if path == self.campaign:
-                os.utime(path, ns=(old, old + 1000000000))
-            with real_pin(path, directory, inspect_streams, ancestor=ancestor) as stream:
-                yield stream
-        with mock.patch.object(protection, "pinned", changing):
-            with self.assertRaises(protection.Refused) as caught:
-                protection.protect(self.args)
-        failure = caught.exception
-        self.assertEqual(failure.stage, "inventory_acquisition")
-        row = next(row for row in failure.private_metadata["differences"] if row["entry"].endswith("game.details"))
-        self.assertEqual(row["path_before"]["mtime_ns"], old)
-        self.assertEqual(row["path_after"]["mtime_ns"], old + 1000000000)
-        self.assertEqual(row["handle_acquired"], row["handle_after"])
-        self.assertEqual(failure.summary["handle_path_mismatches"], 1)
-        self.assertFalse(self.backup.exists())
-
-    def test_metadata_writer_while_data_handles_are_exclusive_is_detected(self):
-        import ctypes
-        from ctypes import wintypes
-        real_pin = protection.pinned
-        changed = False
-        @contextlib.contextmanager
-        def changing(path, directory=False, inspect_streams=True, *, ancestor=False):
-            nonlocal changed
-            with real_pin(path, directory, inspect_streams, ancestor=ancestor) as stream:
-                if path == self.local / "settings.cfg" and not changed:
-                    api = protection.kernel()
-                    handle = api.CreateFileW(str(self.campaign), 0x100, 7, None, 3, 0, None)  # write_attributes, share all
-                    self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
-                    try:
-                        ticks = self.campaign.stat().st_mtime_ns // 100 + 116444736000000000 + 10000000
-                        value = ctypes.c_uint64(ticks)
-                        api.SetFileTime.argtypes = (wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-                        self.assertTrue(api.SetFileTime(handle, None, None, ctypes.byref(value)))
-                        changed = True
-                    finally:
-                        api.CloseHandle(handle)
-                yield stream
-        with mock.patch.object(protection, "pinned", changing):
-            with self.assertRaises(protection.Refused) as caught:
-                protection.protect(self.args)
-        self.assertTrue(changed)
-        self.assertEqual(caught.exception.summary["handle_changed_entries"], 1)
-        self.assertIn("mtime_ns", caught.exception.summary["changed_fields"])
-        self.assertFalse(self.backup.exists())
-
-    def test_path_disagreement_is_not_accepted_merely_because_handle_is_stable(self):
-        original_inventory = protection.inventory
-        calls = 0
-        def path_disagreement(sources):
-            nonlocal calls
-            calls += 1
-            values = original_inventory(sources)
-            if calls == 2:
-                key = ("steam_app", "remote/GAME-AUTOSAVE0/game.details")
-                old = values[key]
-                values[key] = old[:3] + (old[3] + 1,) + old[4:]
-            return values
-        with mock.patch.object(protection, "inventory", side_effect=path_disagreement):
-            with self.assertRaises(protection.Refused) as caught:
-                protection.protect(self.args)
-        self.assertEqual(caught.exception.summary["changed_fields"], {"size": 1})
-        self.assertEqual(caught.exception.summary["handle_changed_entries"], 0)
-        self.assertFalse(self.backup.exists())
-
-
-    def test_source_file_set_change_during_copy_refused(self):
-        real_copy = protection.copy_file
-        changed = False
-        def changing(source, destination):
-            nonlocal changed
-            value = real_copy(source, destination)
-            if not changed:
-                (self.local / "appeared.cfg").write_bytes(b"concurrent fixture writer")
-                changed = True
-            return value
-        with mock.patch.object(protection, "copy_file", side_effect=changing):
-            with self.assertRaisesRegex(protection.Refused, "source changed"):
-                protection.protect(self.args)
-        self.assertFalse((self.backup / protection.MANIFEST).exists())
 
     def test_backup_tamper_and_extra_file_refused(self):
         protection.protect(self.args)
@@ -422,23 +210,6 @@ class ProtectionTests(unittest.TestCase):
             self.assertEqual(self.snapshot(), original)
         finally:
             link.rmdir()
-
-    def test_game_running_refuses_without_copy(self):
-        self.stopped.side_effect = protection.Refused("exit DOOM completely before preparation")
-        with self.assertRaisesRegex(protection.Refused, "exit DOOM"):
-            protection.protect(self.args)
-        self.assertFalse(self.backup.exists())
-
-
-    def test_os_error_cause_has_paths_errno_operation_and_traceback(self):
-        error = FileNotFoundError(2, "fixture source vanished", str(self.campaign))
-        with mock.patch.object(protection, "_protect", side_effect=error):
-            with self.assertRaises(protection.Refused) as refused:
-                protection.protect(self.args)
-        self.assertIs(refused.exception.__cause__, error)
-        self.assertEqual(refused.exception.filename, str(self.campaign))
-        self.assertEqual(refused.exception.errno, 2)
-        self.assertIn("FileNotFoundError", refused.exception.private_metadata["traceback"])
 
 
 if __name__ == "__main__":

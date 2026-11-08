@@ -34,8 +34,6 @@ struct Calls {
     uint32_t (*select)(void* context, uintptr_t player_ptr, uint32_t selected) = nullptr;
     uint32_t (*refill)(void* context, uintptr_t player_ptr) = nullptr;
     bool (*present)(void* context, uintptr_t player_ptr, uint32_t balance, uint32_t flags, uint32_t used) = nullptr;
-    void (*bind_run_state)(void* context, uintptr_t player_ptr, uint32_t own_crucible, uint32_t own_hammer,
-                           uint32_t hammer_tier, uint32_t selected) = nullptr;
 };
 
 // Pure acquisition-preservation decision for the native Special path.

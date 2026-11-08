@@ -1,3 +1,4 @@
+#include "namespace_id.h"
 #include "weapon_points.h"
 #include <cstring>
 #include <climits>
@@ -26,11 +27,7 @@ bool suppress(bool active, Source source, uint32_t currency, int32_t delta, bool
     return active && !ap_origin && source != Source::unknown && currency == 0 && delta > 0;
 }
 bool valid(const sc_weapon_points_request& r) {
-    if (r.namespace_id[64] || r.kind > SC_WUP_GRANT) return false;
-    for (size_t i = 0; i < 64; ++i) {
-        const auto c = r.namespace_id[i];
-        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
-    }
+    if (!valid_namespace_id(r.namespace_id) || r.kind > SC_WUP_GRANT) return false;
     return r.kind == SC_WUP_OBSERVE ? !r.amount && !r.expected_gained :
         r.amount > 0 && r.amount <= SC_WEAPON_POINTS_MAX_GRANT && r.expected_gained <= INT_MAX-r.amount;
 }

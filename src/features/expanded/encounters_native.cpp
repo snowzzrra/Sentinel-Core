@@ -919,7 +919,6 @@ uint64_t kill_result(uintptr_t command) {
     publish_kill_count(command, progress, deaths, target);
     if (credit_at_least(deaths, static_cast<uint32_t>(target))) return 1;
     return finish_kill_requirement(command, manager, progress, count, target, deaths, living);
-    return 0;
 }
 
 uint64_t kill_detour(uintptr_t command) {
@@ -1159,9 +1158,3 @@ uintptr_t post_one_detour_entry(uintptr_t target, uintptr_t event, int32_t delay
 }
 
 }
-
-#ifdef SC_NATIVE_TESTING
-
-#include "../../../tests/expanded/encounters.inc"
-
-#endif

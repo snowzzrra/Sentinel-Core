@@ -1,5 +1,6 @@
 #include "engine/builds/build_descriptor.h"
 #include "runes.h"
+#include "weapon_points.h"
 #include "native_target.h"
 #include "save_session.h"
 #include <atomic>
@@ -34,15 +35,6 @@ const char* const SUPPORT_RUNE_PATHS[3] = {
     "perk/player/runes/dlc/weakpoint_concussive_blast",             /* 0: Break Blast (7770145) */
     "perk/player/runes/dlc/blood_punch_low_health_bonus_damage",    /* 1: Desperate Punch (7770146) */
     "perk/player/runes/dlc/extra_life_refund"                      /* 2: Take Back (7770147) */
-};
-
-const char* const CRYSTAL_PAIR_PATHS[6] = {
-    "perk/player/equipment/flame_reduce_cooldown",             /* 0: Quickdraw Belch (H>=1, A>=1) */
-    "perk/player/suit/fundamentals/increase_pickup_radius",   /* 1: Loot Magnet (A>=2, Am>=3) */
-    "perk/player/equipment/flame_extend_duration",            /* 2: Napalm Belch (H>=2, Am>=1) */
-    "perk/player/suit/self_preservation/overhealth",          /* 3: Health for Blood (H>=4, A>=3) */
-    "perk/player/equipment/flame_more_loot",                  /* 4: Belch Armor Boost (H>=3, Am>=2) */
-    "perk/player/suit/self_preservation/overarmor"            /* 5: Armor for Blood (A>=4, Am>=4) */
 };
 
 uintptr_t player(void*) {
@@ -92,7 +84,6 @@ bool read(void*, uintptr_t p, SnapshotFacts& facts) {
     __try {
         const uintptr_t rm = p + 0x19168;
         facts = {};
-        facts.derived_pairs = native_facts.derived_pairs;
 
         int reg_count = 0, support_count = 0;
         if (!read_registered_runes(rm, 0x50, 64, NORMAL_RUNE_PATHS, 9, facts.owned_normal, reg_count))
@@ -125,7 +116,7 @@ uint32_t append_registered_rune(uintptr_t manager, uintptr_t perk, int limit, in
                                 uintptr_t* list) {
     const auto assure_size = reinterpret_cast<char (*)(uintptr_t)>(image_base + 0x357040);
     if (count >= limit) return 3;
-    if (count >= capacity && assure_size) {
+    if (count >= capacity) {
         if (!assure_size(manager)) return 4;
         list = *reinterpret_cast<uintptr_t**>(manager);
     }
@@ -164,8 +155,8 @@ uint32_t ensure_rune_list(uintptr_t p, uint32_t mask, const char* const* paths, 
         bool found = false;
         const auto reason = register_rune(manager, perk, limit, found);
         if (reason) return reason;
-        if (unlock_perk) unlock_perk(p + 0x3b40, perk, 0, 0, 0, 0);
-        if (!found && level_event) level_event(p, 0x457);
+        unlock_perk(p + 0x3b40, perk, 0, 0, 0, 0);
+        if (!found) level_event(p, 0x457);
         owned |= 1u << i;
     }
     return 0;
@@ -198,16 +189,14 @@ uint32_t select_normal_rune(void*, uintptr_t p, uint8_t slot_idx, int8_t rune_id
         const auto equip_rune = reinterpret_cast<uint64_t(*)(uintptr_t, uintptr_t, uint32_t*, char, char)>(image_base + 0x1279be0);
 
         if (rune_idx < 0) {
-            if (unequip_rune) unequip_rune(rm, slot_idx, 0);
+            unequip_rune(rm, slot_idx, 0);
             native_facts.selected_slots[slot_idx] = -1;
         } else if (rune_idx < 9) {
             const auto perk = find_perk(p, NORMAL_RUNE_PATHS[rune_idx]);
             if (!perk) return 2;
-            if (equip_rune) {
-                uint32_t slot = slot_idx;
-                equip_rune(rm, perk, &slot, 0, 0);
-                native_facts.selected_slots[slot_idx] = rune_idx;
-            }
+            uint32_t slot = slot_idx;
+            equip_rune(rm, perk, &slot, 0, 0);
+            native_facts.selected_slots[slot_idx] = rune_idx;
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
     return error;
@@ -222,57 +211,20 @@ uint32_t select_support_rune(void*, uintptr_t p, int8_t support_idx) {
         const auto equip_support = reinterpret_cast<void(*)(uintptr_t, uintptr_t, char)>(image_base + 0x1279eb0);
 
         if (support_idx < 0) {
-            if (unequip_rune) unequip_rune(rm, 3, 0);
+            unequip_rune(rm, 3, 0);
             native_facts.selected_support = -1;
         } else if (support_idx < 3) {
             const auto perk = find_perk(p, SUPPORT_RUNE_PATHS[support_idx]);
             if (!perk) return 2;
-            if (equip_support) {
-                equip_support(rm, perk, 0);
-                native_facts.selected_support = support_idx;
-            }
+            equip_support(rm, perk, 0);
+            native_facts.selected_support = support_idx;
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
-    return error;
-}
-
-uint32_t sync_crystal_pairs(void*, uintptr_t p, uint8_t pair_mask) {
-    if (!p) return 1;
-    uint32_t error = 0;
-    __try {
-        const auto activate_perk = reinterpret_cast<void(*)(uintptr_t, uintptr_t, char, char, char, char, char)>(image_base + 0xfe19b0);
-        const auto unlock_perk = reinterpret_cast<void(*)(uintptr_t, uintptr_t, char, char, uintptr_t, char)>(image_base + 0xfe2500);
-        const auto deactivate_perk = reinterpret_cast<void(*)(uintptr_t, uintptr_t, char)>(image_base + 0xfe2c20);
-
-        for (int i = 0; i < 6; ++i) {
-            const auto perk = find_perk(p, CRYSTAL_PAIR_PATHS[i]);
-            if (!perk) return 2;
-            if (pair_mask & (1u << i)) {
-                if (unlock_perk) unlock_perk(p + 0x3b40, perk, 0, 0, 0, 0);
-                if (activate_perk) activate_perk(p + 0x3b40, perk, 1, 0, 0, 0, 1);
-            } else {
-                if (deactivate_perk) deactivate_perk(p + 0x3b40, perk, 0);
-            }
-        }
-        native_facts.derived_pairs = pair_mask;
     } __except(EXCEPTION_EXECUTE_HANDLER) { error = GetExceptionCode(); }
     return error;
 }
 
 bool refresh(void*, uintptr_t p) {
-    if (!p) return false;
-    __try {
-        const auto hud = reinterpret_cast<uintptr_t(*)(uintptr_t)>(image_base + 0x143c350)(p);
-        if (!hud) return true;
-        const auto id = *reinterpret_cast<int16_t*>(hud + 0xc);
-        const auto manager = *reinterpret_cast<uintptr_t*>(image_base + 0x47dd908);
-        if (id != -1 && manager) {
-            int32_t values[5]{};
-            reinterpret_cast<int32_t*(*)(int32_t*, uintptr_t)>(image_base + 0xf22f00)(values, p);
-            reinterpret_cast<void(*)(uintptr_t, int16_t, uint16_t, const void*)>(image_base + 0x17c1180)(manager, id, 0x11e, values);
-        }
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    return p && weapon_points::refresh_hud(image_base, p, true);
 }
 
 bool register_active_support(uintptr_t rm, uintptr_t perk) {
@@ -284,7 +236,7 @@ bool register_active_support(uintptr_t rm, uintptr_t perk) {
     bool registered = false;
     for (int entry = 0; entry < count; ++entry) registered |= list[entry] == perk;
     if (!registered) {
-        if (count == 16 || (count >= capacity && (!assure_size || !assure_size(rm + 0x68)))) return false;
+        if (count == 16 || (count >= capacity && !assure_size(rm + 0x68))) return false;
         list = *reinterpret_cast<uintptr_t**>(rm + 0x68);
         capacity = *reinterpret_cast<int*>(rm + 0x74);
         if (!list || *reinterpret_cast<int*>(rm + 0x70) != count || capacity <= count) return false;
@@ -326,7 +278,7 @@ void bind_run_state(void*, uintptr_t p) {
 } // namespace
 
 Calls calls{nullptr, player, read, ensure_normal_runes, ensure_support_runes,
-            select_normal_rune, select_support_rune, sync_crystal_pairs,
+            select_normal_rune, select_support_rune,
             refresh, bind_run_state};
 
 bool available() { return ready.load(std::memory_order_acquire); }

@@ -701,6 +701,7 @@ bool RecipeNativeCheckpoint::restore(std::string_view bytes, std::string_view ex
     if (!restore_actions(in, count, restored)) return false;
     if (autonomous && !restore_autonomous(in, restored, checked)) return false;
     if (!in.bytes.empty()) return false;
+    restored.decoded_state = std::move(checked);
     *this = std::move(restored); return true;
 }
 bool RecipeState::capture(std::string& out, std::string_view prefix) const {
@@ -903,10 +904,10 @@ static bool restore_watches(Reader& in, uint64_t count, RecipeState& restored, s
         if (!in.text(key, 191) || !in.integer(watch.mask, 8) || !watch.mask || watch.mask >= (uint64_t{1} << 44) ||
             !in.text(watch.owner, 191) || !in.text(watch.label, 1024) || !in.integer(baselines, 4) ||
             baselines > credits.size() || total_baselines + baselines > max_actors ||
-            watches.find(key) != watches.end() || !restored.watch(key, watch.owner, watch.mask, watch.label)) return false;
-        watch.baseline.clear();
+            !identifier(key) || !valid_member({watch.owner, watch.label}) ||
+            watches.find(key) != watches.end()) return false;
         if (!restore_baselines(in, baselines, watch, credits, restored.requests())) return false;
-        watches.at(key) = std::move(watch); total_baselines += baselines;
+        watches.emplace(std::move(key), std::move(watch)); total_baselines += baselines;
     }
     return true;
 }

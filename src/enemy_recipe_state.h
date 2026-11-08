@@ -108,6 +108,7 @@ private:
 };
 struct RecipeNativeCheckpoint {
     std::string plan, map, state;
+    RecipeState decoded_state;
     std::map<std::string, std::array<float, 12>> shows;
     struct Action { uint64_t units = 0, sent = 0; uint32_t denominator = 0; };
     std::map<std::pair<std::string, std::string>, Action> actions;

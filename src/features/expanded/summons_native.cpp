@@ -1094,9 +1094,3 @@ void darklord_summon_detour_entry(uintptr_t component) {
 }
 
 }
-
-#ifdef SC_NATIVE_TESTING
-
-#include "../../../tests/expanded/summons.inc"
-
-#endif

@@ -14,15 +14,7 @@ DeathRecord decode_record(const std::array<uint8_t, 0x128>& bytes) noexcept {
     DeathRecord r{};
     r.victim_spawn_id = field<uint32_t>(bytes, 0x48);
     r.victim_type = field<int32_t>(bytes, 0x4c);
-    r.victim_ai_type = field<uint64_t>(bytes, 0x50);
-    r.possessed_by_spirit = field<uint8_t>(bytes, 0x6c);
-    r.spawned_by_archvile = field<uint8_t>(bytes, 0x6d);
-    r.attacker_spawn_id = field<uint32_t>(bytes, 0x80);
-    r.attacker_type = field<int32_t>(bytes, 0x84);
-    r.attacker_player = field<uint64_t>(bytes, 0x98);
-    r.inflictor_spawn_id = field<uint32_t>(bytes, 0xb8);
     r.attack_type = field<int32_t>(bytes, 0x38);
-    r.death_time = field<int64_t>(bytes, 0xf0);
     r.game_mode = field<int32_t>(bytes, 0x124);
     return r;
 }

@@ -59,10 +59,6 @@ inline const char* suppression_mismatch(const ScopeFacts& scope, const CallFacts
     return nullptr;
 }
 
-inline bool suppression_match(const ScopeFacts& scope, const CallFacts& call) {
-    return suppression_mismatch(scope, call) == nullptr;
-}
-
 inline bool suppression_diagnostic_candidate(const ScopeFacts& scope, const CallFacts& call) {
     return call.currency == sentinel_battery_currency && call.delta == sentinel_battery_delta &&
         (call.return_site == call.expected_return_site || (scope.active && scope.record_mission));
