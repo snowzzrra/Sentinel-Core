@@ -327,10 +327,10 @@ void dossier_map(uintptr_t screen) {
 sc_physical_challenge challenge_projection(uint32_t id,bool end=false) {
     if (!active() || !id) return {};
     const auto campaign=save::session().campaign_run.snapshot();
-    const auto& map=end && campaign.map=="game/hub/hub" ? campaign.end_summary_map : campaign.map;
+    const auto stage=end && campaign.stage_id==1 ? campaign.end_summary_stage_id : campaign.stage_id;
     const auto projection=menu().projection();
     for (uint32_t i=0;i<projection.count;++i) {
-        if (!(projection.rows[i].flags&SC_CAMPAIGN_DETAILS) || map!=projection.rows[i].map || projection.summaries[i].known!=1) continue;
+        if (!(projection.rows[i].flags&SC_CAMPAIGN_DETAILS) || stage!=projection.rows[i].id || projection.summaries[i].known!=1) continue;
         for (const auto& challenge:projection.summaries[i].challenges) {
             // iddeclunlockable::getdisplayinfo hashes its exact name with unsigned 31*x+c
             uint32_t key=0;
@@ -343,11 +343,11 @@ sc_physical_challenge challenge_projection(uint32_t id,bool end=false) {
 sc_campaign_reward mission_reward(uint32_t id,bool end=false) {
     if (!active() || !id) return {};
     const auto campaign=save::session().campaign_run.snapshot();
-    const auto& map=end && campaign.map=="game/hub/hub" && !campaign.end_summary_map.empty() ? campaign.end_summary_map : campaign.map;
+    const auto stage=end && campaign.stage_id==1 ? campaign.end_summary_stage_id : campaign.stage_id;
     const auto projection=menu().projection();
     if (projection.namespace_id!=save::session().namespace_id()) return {};
     for (uint32_t i=0;i<projection.count;++i) {
-        if (!(projection.rows[i].flags&SC_CAMPAIGN_REVEALED) || map!=projection.rows[i].map) continue;
+        if (!(projection.rows[i].flags&SC_CAMPAIGN_REVEALED) || stage!=projection.rows[i].id) continue;
         for (const auto& reward:projection.rewards[i]) {
             uint32_t key=0;
             for (const auto* p=reward.unlockable;*p;++p) key=key*31+static_cast<uint8_t>(*p);
@@ -378,7 +378,7 @@ void mission_hint_intents(uintptr_t screen) {
     const auto projection=menu().projection();
     const auto& ns=save::session().namespace_id();
     if (projection.namespace_id!=ns) return;
-    for (uint32_t i=0;i<projection.count;++i) if ((projection.rows[i].flags&SC_CAMPAIGN_REVEALED) && campaign.map==projection.rows[i].map)
+    for (uint32_t i=0;i<projection.count;++i) if ((projection.rows[i].flags&SC_CAMPAIGN_REVEALED) && campaign.stage_id==projection.rows[i].id)
             for (const auto& reward:projection.rewards[i]) if ((reward.kind==SC_REWARD_MISSION && reward_represented(screen,reward)) ||
                     (reward.kind==SC_REWARD_AGGREGATE && aggregate_visible(screen)))
                     menu().hint_intent(ns.c_str(),reward.location_id);
@@ -547,10 +547,10 @@ void present_aggregate(uintptr_t root,const sc_campaign_reward& reward,const cha
 }
 sc_campaign_reward aggregate_reward(bool end=false) {
     const auto campaign=save::session().campaign_run.snapshot();
-    const auto& map=end && campaign.map=="game/hub/hub" ? campaign.end_summary_map : campaign.map;
+    const auto stage=end && campaign.stage_id==1 ? campaign.end_summary_stage_id : campaign.stage_id;
     const auto projection=menu().projection();
     if (projection.namespace_id!=save::session().namespace_id()) return {};
-    for (uint32_t i=0;i<projection.count;++i) if ((projection.rows[i].flags&SC_CAMPAIGN_REVEALED) && map==projection.rows[i].map)
+    for (uint32_t i=0;i<projection.count;++i) if ((projection.rows[i].flags&SC_CAMPAIGN_REVEALED) && stage==projection.rows[i].id)
             for (const auto& reward:projection.rewards[i]) if (reward.kind==SC_REWARD_AGGREGATE) return reward;
     return {};
 }
@@ -950,9 +950,9 @@ void category_counts(uintptr_t category) {
         save::session().btrace.record(save::BStage::mission_counts,save::BStatus::blocked,"count_writer_fault");
     }
 }
-const sc_campaign_summary& end_items_summary(const Projection& projection,const std::string& map) {
+const sc_campaign_summary& end_items_summary(const Projection& projection,uint32_t stage) {
     const sc_campaign_summary* summary=nullptr;
-    for (uint32_t i=0;i<projection.count;++i) if ((projection.rows[i].flags&SC_CAMPAIGN_DETAILS) && map==projection.rows[i].map) {
+    for (uint32_t i=0;i<projection.count;++i) if ((projection.rows[i].flags&SC_CAMPAIGN_DETAILS) && stage==projection.rows[i].id) {
             summary=&projection.summaries[i]; break;
         }
     static const sc_campaign_summary unknown{};
@@ -975,7 +975,8 @@ void present_end_items(uintptr_t screen) {
     const auto& map=campaign.map=="game/hub/hub" ? campaign.end_summary_map : campaign.map;
     if (map.empty()) return;
     const auto projection=menu().projection();
-    const auto* summary=&end_items_summary(projection,map);
+    const auto stage=campaign.stage_id==1 ? campaign.end_summary_stage_id : campaign.stage_id;
+    const auto* summary=&end_items_summary(projection,stage);
     uintptr_t root=0,screen_root=0;
     if (!end_items_owner(screen,root,screen_root)) return;
     const bool bound=present_found_counts(root,*summary,"itemsFound",false);
@@ -1488,12 +1489,14 @@ uint32_t descriptor_stage(uintptr_t descriptor,const std::string& map,uint32_t v
     return 0;
 }
 uintptr_t restart_entry(const sc_campaign_row& row) {
+    const auto route=stage_route(row.id);
+    if (!route) return 0;
     uintptr_t campaign=0,list=0,source=0; int32_t count=0;
     const auto definitions=campaign_definitions();
     if (!definitions || !read(definitions,0x148,campaign) || !read(campaign,0x1a8,list) ||
         !read(list,0x88,source) || !read(list,0x90,count) || count<1) return 0;
-    if (row.native_index>=static_cast<uint32_t>(count)) return 0;
-    const auto entry=source+static_cast<size_t>(row.native_index)*sizeof(Entry);
+    if (route->mission_index>=static_cast<uint32_t>(count)) return 0;
+    const auto entry=source+static_cast<size_t>(route->mission_index)*sizeof(Entry);
     const std::string map=row.map;
     save::NativeString native_name{}; char actual[192]{};
     if (!read(entry,0,native_name) || native_name.length!=static_cast<int32_t>(map.size()) ||

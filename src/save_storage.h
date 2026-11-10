@@ -22,6 +22,7 @@ struct CampaignOptions {
     uint32_t difficulty = 4;
     std::string recovery_basename; // explicit kept transport archive; never latest
     bool restart_stage = false;
+    bool unified = true;
 };
 struct Descriptor { Identity identity; std::wstring root; CampaignOptions campaign; };
 enum class Outcome {
@@ -152,6 +153,7 @@ public:
     Result publish_campaign_record(bool checkpoint, std::string_view text, bool create);
     Result restart_record(bool confirmed, std::string& text) const;
     Result publish_restart_record(bool confirmed, std::string_view text);
+    Result clear_restart_records();
     Result checkpoint_plan(const Descriptor&, CheckpointPlan&);
     Result begin_checkpoint(const Descriptor&, uint64_t steam_user, CheckpointWrite&);
     Result stage_checkpoint(CheckpointWrite&, std::wstring_view archive);
@@ -164,6 +166,7 @@ public:
     Result prune_checkpoints();
     Result recovery_record(bool complete, std::string& text) const;
     Result publish_recovery_record(bool complete, std::string_view text, bool replace = false);
+    Result clear_recovery_records();
 private:
     struct Impl;
     explicit Namespace(std::unique_ptr<Impl> impl);

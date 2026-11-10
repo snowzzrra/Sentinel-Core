@@ -1,6 +1,32 @@
 #include "../src/campaign_menu_native.cpp"
 
 namespace sentinel::campaign_menu {
+bool test_stage_presentation(uint32_t stage,bool end) {
+    const auto projection=menu().projection();
+    for (uint32_t i=0;i<projection.count;++i) if (projection.rows[i].id==stage) {
+        const auto& expected=projection.summaries[i];
+        const auto challenge=challenge_projection(unlockable_id("shared/challenge"),end);
+        const auto mission=mission_reward(unlockable_id("shared/mission"),end);
+        const auto aggregate=aggregate_reward(end);
+        if (challenge.found!=expected.challenges[0].found ||
+            mission.location_id!=projection.rewards[i][0].location_id ||
+            aggregate.location_id!=projection.rewards[i][1].location_id ||
+            end_items_summary(projection,stage).found!=expected.found) return false;
+        if (end) return true;
+        std::array<unsigned char,0x660> screen{};
+        std::array<unsigned char,0x2c0> widget{};
+        const auto address=reinterpret_cast<uintptr_t>(screen.data());
+        *reinterpret_cast<uintptr_t*>(screen.data()+0x640)=reinterpret_cast<uintptr_t>(widget.data());
+        *reinterpret_cast<uint32_t*>(widget.data()+0x2b0)=unlockable_id("shared/mission");
+        widget[0x2b4]='x';
+        mission_hint_intents(address);
+        sc_campaign_request request{}; request.reward_presentation=1;
+        strcpy_s(request.namespace_id,projection.namespace_id.c_str());
+        const auto hints=menu().request(campaign_inspect_operation,request,true);
+        return hints.intent_count==1 && hints.intent_ids[0]==mission.location_id;
+    }
+    return false;
+}
 bool test_hud_score_root() {
     std::array<unsigned char,0x180> score{},swf{},widget{},root{};
     const auto owner=reinterpret_cast<uintptr_t>(score.data());

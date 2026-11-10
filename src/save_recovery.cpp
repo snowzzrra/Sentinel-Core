@@ -8,6 +8,9 @@
 #include <map>
 
 namespace sentinel::save {
+namespace {
+bool valid_recovery_record(const std::string&,const std::string&);
+}
 uint64_t current_steam_owner(uintptr_t remote) {
     // Do not initialize Steam, load a DLL or select a different account. The
     // native initializer uses this exact HSteamUser/interface pair (141bd87d0).
@@ -134,9 +137,16 @@ bool snapshot_campaign_files(const RecoveryTransport& transport,const std::strin
     Payloads payloads;
     return capture(transport,directory,metadata,payloads);
 }
-bool recovery_clear(storage::Namespace& lease) {
+bool recovery_clear(storage::Namespace& lease,bool* cleared) {
     std::string pending,complete;
     const auto p=lease.recovery_record(false,pending),c=lease.recovery_record(true,complete);
+    if (p.outcome==storage::Outcome::corrupt_manifest || c.outcome==storage::Outcome::corrupt_manifest ||
+        (p.ok() && !valid_recovery_record(pending,lease.metadata().namespace_id)) ||
+        (p.win32_error==ERROR_FILE_NOT_FOUND && c.ok())) {
+        const bool ok=lease.clear_recovery_records().ok();
+        if (cleared) *cleared=ok;
+        return ok;
+    }
     if (!p.ok()) return p.win32_error==ERROR_FILE_NOT_FOUND && !c.ok() && c.win32_error==ERROR_FILE_NOT_FOUND;
     return !pending.empty() && c.ok() && pending==complete;
 }
@@ -290,20 +300,15 @@ static bool write_recovery_selection(const RecoveryOwnership& owned, const std::
         selection_check!=selection || !owned.matches()) return recovery_failure(result, "recovery_selection_verification_failed");
     return true;
 }
-static bool publish_recovery_checkpoint(storage::Namespace& lease, const storage::Descriptor& descriptor, uint64_t user, const std::string& basename, const storage::TransportMetadata& source, const Checkpoint& saved, bool ab, const storage::CheckpointPlan& ab_plan, const storage::Result& r, RecoveryResult& result) {
+static bool publish_recovery_checkpoint(storage::Namespace& lease, storage::CheckpointWrite& next, const storage::TransportMetadata& source, bool ab, const storage::CheckpointPlan& ab_plan, const storage::Result& r, RecoveryResult& result) {
     if (ab && source.checkpoint!=ab_plan.text) {
-        storage::CheckpointWrite next;
-        if (!lease.begin_checkpoint(descriptor,user,next).ok() || next.number!=saved.number ||
-            !lease.stage_checkpoint(next,std::wstring(basename.begin(),basename.end())).ok() ||
-            !lease.receipt_checkpoint(next).ok() || !lease.commit_checkpoint(next).ok()) return recovery_failure(result, "recovery_continuity_publication_failed");
+        if (!lease.receipt_checkpoint(next).ok() || !lease.commit_checkpoint(next).ok()) return recovery_failure(result, "recovery_continuity_publication_failed");
     } else if (!ab && !lease.publish_campaign_record(true,source.checkpoint,!r.ok()).ok()) return recovery_failure(result, "recovery_continuity_publication_failed");
     return true;
 }
 static bool open_recovery_archive(const storage::Descriptor& descriptor, storage::Namespace& lease, const RecoveryTransport& t, std::unique_ptr<storage::TransportArchive>& archive, uint64_t& user, RecoveryResult& result) {
     if (descriptor.campaign.intent!=storage::CampaignIntent::recover || descriptor.campaign.recovery_basename.empty()) return recovery_failure(result, "recovery_explicit_archive_required");
-    std::string old_journal;
-    auto r=lease.recovery_record(false,old_journal);
-    if(r.ok() || r.win32_error!=ERROR_FILE_NOT_FOUND) return recovery_failure(result, "recovery_previous_attempt_requires_review");
+    if(!recovery_clear(lease,&result.record_cleared)) return recovery_failure(result, "recovery_previous_attempt_requires_review");
     if(!recovery_provider_available(t)) return recovery_failure(result, "recovery_provider_unavailable");
     user=t.owner(t.remote);
     const auto& basename=descriptor.campaign.recovery_basename;
@@ -327,6 +332,16 @@ struct RecoveryTarget {
     storage::CheckpointPlan plan;
     bool ab = false;
 };
+static bool begin_recovery_checkpoint(storage::Namespace& lease, const storage::Descriptor& descriptor, uint64_t user,
+        const Checkpoint& saved, const RecoveryTarget& target, const storage::TransportMetadata& source,
+        storage::CheckpointWrite& next, RecoveryResult& result) {
+    if (!target.ab || source.checkpoint==target.plan.text) return true;
+    if (target.plan.checkpoint==UINT64_MAX || saved.number!=target.plan.checkpoint+1 ||
+        !lease.begin_checkpoint(descriptor,user,next).ok() ||
+        !lease.stage_checkpoint(next,std::wstring(descriptor.campaign.recovery_basename.begin(),descriptor.campaign.recovery_basename.end())).ok())
+        return recovery_failure(result,"recovery_continuity_publication_failed");
+    return true;
+}
 static bool inspect_recovery_target(const storage::Descriptor& descriptor, storage::Namespace& lease, const RecoveryTransport& t, const storage::TransportMetadata& source, const std::string& contract, const std::string& directory, const Checkpoint& saved, RecoveryTarget& state, RecoveryResult& result) {
     auto& current = state.current; auto& expected_after = state.expected_after; auto& before = state.before;
     auto& current_record = state.record; auto& r = state.status; auto& ab_plan = state.plan; auto& ab = state.ab;
@@ -384,11 +399,13 @@ RecoveryResult recover_campaign(storage::Namespace& lease,const storage::Descrip
     if (!quarantine_recovery_target(lease, target.current, target.before, result)) return result;
     const auto journal = recovery_journal(id, basename, result.quarantine, target.record, had_selection, previous_selection);
     if (!recovery_target_unchanged(lease, owned, source, target.current, target.record, target.status, target.ab, target.plan, selection_key, had_selection, previous_selection, result)) return result;
-    if(!lease.publish_recovery_record(false,journal).ok()) return refuse("recovery_journal_failed");
+    storage::CheckpointWrite next;
+    if (!begin_recovery_checkpoint(lease,descriptor,user,saved,target,source,next,result)) return result;
+    if(!lease.publish_recovery_record(false,journal,true).ok()) return refuse("recovery_journal_failed");
     if (!write_recovery_payloads(owned, source, target.expected_after, replacement, result)) return result;
     if (!write_recovery_selection(owned, id, selection_key, result)) return result;
-    if (!publish_recovery_checkpoint(lease, descriptor, user, basename, source, saved, target.ab, target.plan, target.status, result)) return result;
-    if(!lease.publish_recovery_record(true,journal).ok()) return refuse("recovery_completion_publication_failed");
+    if (!publish_recovery_checkpoint(lease, next, source, target.ab, target.plan, target.status, result)) return result;
+    if(!lease.publish_recovery_record(true,journal,true).ok()) return refuse("recovery_completion_publication_failed");
     result.complete=true; result.reason="recovery_native_payload_verified"; return result;
 }
 namespace {
@@ -431,6 +448,24 @@ bool journal_fields(const std::string& journal,const std::string& id,std::string
     if (!journal_action(body, action, discard)) return false;
     if (!take(body,"sha256=",part) || !body.empty() || journal.size()<72) return false;
     return sign_journal(journal.substr(0,journal.size()-72))==journal;
+}
+bool recovery_hex_field(std::string_view& body,std::string_view key) {
+    std::string_view part;
+    return take(body,key,part) && part.size()%2==0 && part.find_first_not_of("0123456789abcdef")==part.npos;
+}
+bool legacy_recovery_fields(const std::string& text,const std::string& id) {
+    std::string_view body(text),part;
+    if (!take(body,"sentinel-recovery-v1",part) || !part.empty() ||
+        !take(body,"namespace=",part) || part!=id || !take(body,"backup=",part) || part.empty() ||
+        !take(body,"quarantine=",part) || !recovery_hex_field(body,"previous_checkpoint_hex=")) return false;
+    if (!take(body,"previous_selection_present=",part) || (part!="0" && part!="1") ||
+        !recovery_hex_field(body,"previous_selection_hex=") || !body.empty()) return false;
+    return true;
+}
+bool valid_recovery_record(const std::string& text,const std::string& id) {
+    std::string source,quarantine,action,discard,selection;
+    bool present=false;
+    return journal_fields(text,id,source,quarantine,action,discard,present,selection) || legacy_recovery_fields(text,id);
 }
 bool known_target(const storage::TransportMetadata& current,const Payloads& bytes,storage::TransportArchive& source,storage::TransportArchive* before) {
     for (size_t i=0;i<current.files.size();++i) {
@@ -567,17 +602,27 @@ struct CheckpointRestore {
         if (resuming && !had_selection && journal_selection_present) return refuse("recovery_selection_changed");
         return true;
     }
-    bool read_journal() {
+    bool read_journal_records() {
         pending = lease.recovery_record(false, journal);
         finished = lease.recovery_record(true, complete);
+        if (pending.outcome==storage::Outcome::corrupt_manifest || finished.outcome==storage::Outcome::corrupt_manifest ||
+            (pending.ok() && !valid_recovery_record(journal,id)) ||
+            (pending.win32_error==ERROR_FILE_NOT_FOUND && finished.ok())) {
+            if (!recovery_clear(lease,&result.record_cleared)) return refuse("recovery_journal_cleanup_failed");
+            pending={storage::Outcome::io_error,ERROR_FILE_NOT_FOUND};
+            journal.clear(); complete.clear(); resuming=false;
+        }
+        return true;
+    }
+    bool read_journal() {
+        if (!read_journal_records()) return false;
         resuming = pending.ok() && (!finished.ok() || journal != complete) &&
                    journal_fields(journal, id, source_name, quarantine_name, action, discard, journal_selection_present,
-                                  journal_selection);
+                                   journal_selection);
         if (!pending.ok() && pending.win32_error != ERROR_FILE_NOT_FOUND &&
             pending.outcome != storage::Outcome::corrupt_manifest)
             return refuse("recovery_journal_unavailable");
-        if (pending.ok() && journal != complete && journal.substr(0, 32) != "sentinel-checkpoint-recovery-v1\n" &&
-            !recovery_clear(lease))
+        if (pending.ok() && journal != complete && !resuming)
             return refuse("recovery_journal_unknown");
         if (!resuming) {
             source_name = plan.archive;
@@ -597,11 +642,6 @@ struct CheckpointRestore {
                !source_archive->metadata().quarantine;
     }
     bool choose_source() {
-        if (!resuming && !plan.committed && plan.previous_archive.empty() && !source_name.empty()) {
-            std::string quarantine;
-            if (!preserve(quarantine)) return refuse("recovery_preservation_failed");
-            return refuse("recovery_no_confirmed_predecessor");
-        }
         if (source_name.empty()) {
             std::string quarantine;
             if (!preserve(quarantine)) return refuse("recovery_preservation_failed");
@@ -783,7 +823,7 @@ bool Session::recover_startup(const RecoveryTransport& transport) {
     }
     btrace.record(BStage::resume,result.complete?BStatus::succeeded:BStatus::refused,result.reason,0,
         {{"classification",result.state},{"mutated",result.mutated},{"complete",result.complete},{"quarantined",!result.quarantine.empty()},
-         {"preserved_auxiliaries",result.preserved_auxiliaries}});
+         {"preserved_auxiliaries",result.preserved_auxiliaries},{"record_cleared",result.record_cleared}});
     btrace.record(BStage::checkpoint_recovery,result.complete?BStatus::succeeded:BStatus::refused,result.reason,0,
         {{"classification",result.state},{"mutated",result.mutated},{"complete",result.complete},{"quarantined",!result.quarantine.empty()}});
     if(!result.complete) { fail(SessionFault::native_campaign); return false; }

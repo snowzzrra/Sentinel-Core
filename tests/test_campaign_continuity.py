@@ -31,6 +31,11 @@ def checkpoint_text(path):
     return max(records)[1] if records else path.read_text()
 
 
+def restart_text(path):
+    data = path.read_bytes()
+    return data.split(b'\n', 2)[2] if data.startswith(b'sentinel-durable-record-v1\n') else data
+
+
 @unittest.skipUnless(os.name == 'nt', 'Windows native contracts')
 class CampaignContinuity(unittest.TestCase):
     def test_final_death_survives_exit_and_only_confirmed_load_clears_restart(self):
@@ -39,12 +44,12 @@ class CampaignContinuity(unittest.TestCase):
                 self.stage('create', root, 3, mode)
                 pending, = Path(root).rglob('stage.restart.pending')
                 if mode == 'restart_recovered':
-                    head, _, tail = pending.read_bytes().partition(b'\ncheckpoint=')
+                    head, _, tail = restart_text(pending).partition(b'\ncheckpoint=')
                     checkpoint, separator, rest = tail.partition(b'\n')
                     pending.write_bytes(head + b'\ncheckpoint=' + str(int(checkpoint) + 1).encode() + separator + rest)
-                marker = pending.read_bytes()
+                marker = restart_text(pending)
                 self.stage('resume', root, 3, 'restart_failed')
-                self.assertEqual(pending.read_bytes().split(b'\ncheckpoint=')[0], marker.split(b'\ncheckpoint=')[0])
+                self.assertEqual(restart_text(pending).split(b'\ncheckpoint=')[0], marker.split(b'\ncheckpoint=')[0])
                 marker = pending.read_bytes()
                 self.assertFalse(pending.with_name('stage.restart.loaded').exists())
                 pending.with_name('stage.restart.loaded').write_bytes(b'')

@@ -13,6 +13,7 @@
 #include <limits>
 #include <mutex>
 #include <winioctl.h>
+#include <winternl.h>
 
 namespace sentinel::storage {
 namespace {
@@ -181,7 +182,6 @@ Result validate_streams(HANDLE handle, bool directory) {
 }
 Result open_directory(const std::wstring& path, Handle& handle, bool payload = false) {
     if (path.size() > path_limit) return {Outcome::limit_exceeded};
-    // block write and delete sharing with the read-only directory handle
     handle = Handle(CreateFileW(path.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | (path.size() == 3 ? 0 : FILE_FLAG_OPEN_REPARSE_POINT), nullptr));
     if (!handle) return io_error();
@@ -234,7 +234,6 @@ Result write_bytes(HANDLE file, const char* bytes, DWORD count) {
     return {};
 }
 Result publish_metadata(const std::wstring& directory, const std::wstring& name, const std::string& text) {
-    // renaming requires a parent write handle that conflicts with the retained lease
     Handle file;
     auto result = open_file(directory + L"\\" + name, GENERIC_WRITE, 0, CREATE_NEW, file);
     if (!result.ok()) return result;
@@ -370,6 +369,7 @@ bool campaign_options(std::string_view& text, CampaignOptions& options) {
     std::string_view value;
     if (!line(text, "campaign=", value) || (value != "base" && value != "unified")) return false;
     const bool unified = value == "unified";
+    options.unified = unified;
     if (!line(text, "starting_stage=", value) || value != (unified ? "hub" : "base_start") ||
         !line(text, "difficulty=", value) || value.size() != 1 || value[0] < '0' || value[0] > '3') return false;
     options.difficulty = static_cast<uint32_t>(value[0] - '0');
@@ -703,42 +703,98 @@ Result Namespace::publish_campaign_record(bool checkpoint, std::string_view text
     if (!SetEndOfFile(file.value) || !FlushFileBuffers(file.value)) return io_error();
     return {};
 }
-Result Namespace::recovery_record(bool complete, std::string& text) const {
+namespace {
+Result read_durable_record(const std::wstring& path, std::string& text, size_t limit) {
     text.clear(); Handle file;
-    const auto path = impl_->lease.metadata.path + (complete ? L"\\recovery.complete" : L"\\recovery.pending");
-    auto result = open_file(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, file);
-    return result.ok() ? read_metadata(file.value, text, 32768) : result;
+    auto r = open_file(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, file);
+    if (!r.ok()) return r;
+    r = read_metadata(file.value, text, limit + 128);
+    if (!r.ok()) return r;
+    constexpr std::string_view magic = "sentinel-durable-record-v1\nsha256=";
+    if (text.compare(0, magic.size(), magic) == 0) {
+        const auto offset = magic.size() + 65;
+        std::string actual;
+        if (text.size() <= offset || text[offset - 1] != '\n' ||
+            !digest(std::string_view(text).substr(offset), actual).ok() ||
+            text.substr(magic.size(), 64) != actual) return {Outcome::corrupt_manifest};
+        text.erase(0, offset);
+    } else if (text.substr(0, 24) == "sentinel-durable-record-") return {Outcome::unsupported_manifest};
+    return text.empty() || text.size() > limit ? Result{Outcome::corrupt_manifest} : Result{};
+}
+Result rename_durable_record(HANDLE file, const std::wstring& path) {
+    using Rename = NTSTATUS (NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
+    using Error = ULONG (NTAPI*)(NTSTATUS);
+    const auto module = GetModuleHandleW(L"ntdll.dll");
+    const auto rename = reinterpret_cast<Rename>(GetProcAddress(module, "NtSetInformationFile"));
+    const auto error = reinterpret_cast<Error>(GetProcAddress(module, "RtlNtStatusToDosError"));
+    if (!rename || !error) return io_error(ERROR_PROC_NOT_FOUND);
+    const auto name = path.substr(path.find_last_of(L'\\') + 1);
+    alignas(FILE_RENAME_INFO) std::array<unsigned char, sizeof(FILE_RENAME_INFO) + path_limit * sizeof(wchar_t)> buffer{};
+    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+    info->ReplaceIfExists = TRUE;
+    info->FileNameLength = static_cast<DWORD>(name.size() * sizeof(wchar_t));
+    std::memcpy(info->FileName, name.data(), info->FileNameLength);
+    IO_STATUS_BLOCK status{};
+    // a same-directory native rename avoids opening a writable parent handle
+    const auto result = rename(file, &status, info, static_cast<ULONG>(offsetof(FILE_RENAME_INFO, FileName) + info->FileNameLength),
+                               static_cast<FILE_INFORMATION_CLASS>(10));
+    return result >= 0 ? Result{} : io_error(error(result));
+}
+Result publish_durable_record(const std::wstring& path, std::string_view text) {
+    std::string hash;
+    auto r = digest(text, hash); if (!r.ok()) return r;
+    const auto bytes = "sentinel-durable-record-v1\nsha256=" + hash + "\n" + std::string(text);
+    const auto temporary = path + L".tmp";
+    Handle file;
+    r = open_file(temporary, GENERIC_READ | GENERIC_WRITE | DELETE, 0, OPEN_ALWAYS, file);
+    if (!r.ok()) return r;
+    r = write_bytes(file.value, bytes.data(), static_cast<DWORD>(bytes.size())); if (!r.ok()) return r;
+    if (!SetEndOfFile(file.value) || !FlushFileBuffers(file.value)) return io_error();
+    std::string actual; r = read_metadata(file.value, actual, 32768 + 128);
+    if (!r.ok() || actual != bytes) return r.ok() ? Result{Outcome::payload_mismatch} : r;
+    return rename_durable_record(file.value, path);
+}
+Result clear_metadata(const std::wstring& path) {
+    Handle file;
+    auto r = open_file(path, DELETE, 0, OPEN_EXISTING, file);
+    if (!r.ok()) return r.win32_error == ERROR_FILE_NOT_FOUND ? Result{} : r;
+    FILE_DISPOSITION_INFO disposition{TRUE};
+    return SetFileInformationByHandle(file.value, FileDispositionInfo, &disposition, sizeof(disposition)) ? Result{} : io_error();
+}
+}
+Result Namespace::recovery_record(bool complete, std::string& text) const {
+    return read_durable_record(metadata().path + (complete ? L"\\recovery.complete" : L"\\recovery.pending"), text, 32768);
 }
 Result Namespace::restart_record(bool confirmed, std::string& text) const {
-    text.clear(); Handle file;
-    const auto path=metadata().path+(confirmed?L"\\stage.restart.loaded":L"\\stage.restart.pending");
-    const auto result=open_file(path,GENERIC_READ,FILE_SHARE_READ,OPEN_EXISTING,file);
-    return result.ok()?read_metadata(file.value,text,2048):result;
+    return read_durable_record(metadata().path+(confirmed?L"\\stage.restart.loaded":L"\\stage.restart.pending"),text,2048);
 }
 Result Namespace::publish_restart_record(bool confirmed,std::string_view text) {
     if (text.empty() || text.size()>2048) return {Outcome::invalid_descriptor};
-    Handle file;
     const auto path=metadata().path+(confirmed?L"\\stage.restart.loaded":L"\\stage.restart.pending");
-    auto result=open_file(path,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ,OPEN_ALWAYS,file);
-    if (!result.ok()) return result;
-    result=write_bytes(file.value,text.data(),static_cast<DWORD>(text.size()));
-    if (!result.ok()) return result;
-    if (!SetEndOfFile(file.value) || !FlushFileBuffers(file.value)) return io_error();
-    std::string actual; result=read_metadata(file.value,actual,2048);
-    return result.ok() && actual!=text?Result{Outcome::payload_mismatch}:result;
+    return publish_durable_record(path,text);
 }
 Result Namespace::publish_recovery_record(bool complete, std::string_view text, bool replace) {
     if (text.empty() || text.size() > 32768) return {Outcome::invalid_descriptor};
-    if (replace) {
-        Handle file;
-        auto r = open_file(metadata().path + (complete ? L"\\recovery.complete" : L"\\recovery.pending"), GENERIC_READ | GENERIC_WRITE, 0, OPEN_ALWAYS, file);
-        if (!r.ok()) return r;
-        r = write_bytes(file.value, text.data(), static_cast<DWORD>(text.size())); if (!r.ok()) return r;
-        if (!SetEndOfFile(file.value) || !FlushFileBuffers(file.value)) return io_error();
-        std::string actual; r = read_metadata(file.value, actual, 32768);
-        return r.ok() && actual != text ? Result{Outcome::payload_mismatch} : r;
+    const auto path = metadata().path + (complete ? L"\\recovery.complete" : L"\\recovery.pending");
+    if (!replace) {
+        Handle existing;
+        const auto r = open_file(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, existing);
+        if (r.ok()) return {Outcome::io_error, ERROR_FILE_EXISTS};
+        if (r.win32_error != ERROR_FILE_NOT_FOUND) return r;
     }
-    return publish_metadata(impl_->lease.metadata.path, complete ? L"recovery.complete" : L"recovery.pending", std::string(text));
+    return publish_durable_record(path,text);
+}
+Result Namespace::clear_restart_records() {
+    for (const auto* name : {L"stage.restart.pending", L"stage.restart.loaded"}) {
+        const auto r = clear_metadata(metadata().path + L"\\" + name); if (!r.ok()) return r;
+    }
+    return {};
+}
+Result Namespace::clear_recovery_records() {
+    for (const auto* name : {L"recovery.pending", L"recovery.complete"}) {
+        const auto r = clear_metadata(metadata().path + L"\\" + name); if (!r.ok()) return r;
+    }
+    return {};
 }
 Result prepare(const Descriptor& descriptor, std::unique_ptr<Namespace>& output) {
     output.reset();
@@ -1013,7 +1069,8 @@ Result Namespace::reopen_transport(std::wstring_view basename, std::unique_ptr<T
     if (!result.ok()) return result;
     std::vector<Entry> entries; uint64_t total = 0;
     result = collect(path, L"", 0, entries, total, true); if (!result.ok()) return result;
-    if (entries.size() != owned->metadata.files.size() + 1) return {Outcome::corrupt_manifest};
+    if (entries.size() > owned->metadata.files.size() + 1) return {Outcome::unsafe_path};
+    if (entries.size() < owned->metadata.files.size() + 1) return {Outcome::corrupt_manifest};
     const auto deadline = GetTickCount64() + 10000;
     for (size_t i = 0; i < owned->metadata.files.size(); ++i) {
         const auto found = std::find_if(entries.begin(), entries.end(), [i](const auto& entry) { return entry.relative == payload_name(i); });
@@ -1093,7 +1150,8 @@ Result parse_checkpoint(std::string_view text, std::string_view contract, std::s
 }
 std::string checkpoint_contract(const Descriptor& descriptor, const std::string& id) {
     return "sentinel-campaign-v2\nnamespace=" + id + "\ngeneration=" +
-        descriptor.identity.generation_fingerprint + "\nprovenance=synthetic-fixture\ncampaign=unified\nstarting_stage=hub\ndifficulty=" +
+        descriptor.identity.generation_fingerprint + "\nprovenance=synthetic-fixture\n" +
+        (descriptor.campaign.unified ? "campaign=unified\nstarting_stage=hub\n" : "campaign=base\nstarting_stage=base_start\n") + "difficulty=" +
         std::to_string(descriptor.campaign.difficulty) + "\n" + (descriptor.campaign.restart_stage?"death_policy=restart_stage\n":"") + "slot=AUTOSAVE0\n";
 }
 const char* checkpoint_state_name(CheckpointState state) {
@@ -1299,6 +1357,8 @@ struct CheckpointReader {
         std::unique_ptr<TransportArchive> archive;
         auto result = owner.reopen_transport(std::wstring(generation.archive.begin(), generation.archive.end()), archive);
         if (!result.ok()) {
+            if (result.outcome != Outcome::corrupt_manifest && result.outcome != Outcome::payload_mismatch &&
+                result.outcome != Outcome::interrupted_preparation && result.win32_error != ERROR_FILE_NOT_FOUND) return result;
             damaged = true;
             return {};
         }

@@ -38,6 +38,7 @@ bool test_install_hooks(const std::array<native::Target,46>&,decltype(&MH_Enable
 bool test_hud_score_root();
 bool test_physical_completion_edges();
 bool test_question_material();
+bool test_stage_presentation(uint32_t stage,bool end=false);
 struct NativeCalls {
     void (*populate)(uintptr_t,uintptr_t);
     void (*focus)(uintptr_t);

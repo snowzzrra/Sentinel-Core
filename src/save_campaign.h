@@ -40,7 +40,7 @@ struct CampaignSnapshot {
     uint64_t failure_at_ms=0;
     bool save_ready=false;
     uint32_t native_subtype=1;
-    uint32_t stage_id=0;
+    uint32_t stage_id=0, end_summary_stage_id=0;
     bool archive_complete=false;
     uint64_t archive_bytes=0, archive_copy_us=0;
 };
@@ -112,6 +112,7 @@ private:
     CampaignSnapshot state_;
     BStage diagnostic_stage_=BStage::creation;
     std::string contract_, directory_, mission_destination_, prior_map_;
+    uint32_t prior_stage_id_=0;
     std::vector<SdkFileWrite> expected_;
     uintptr_t load_data_ = 0;
     uintptr_t metadata_data_ = 0;

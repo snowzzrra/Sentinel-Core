@@ -10,11 +10,12 @@
 namespace sentinel::testing {
 void drop_reply(uint16_t operation);
 bool drop_pipe_reply(uint16_t operation);
-enum class FileFault { none, short_write, truncate, flush, after_write, after_truncate, after_flush, erase, after_erase };
+enum class FileFault { none, short_write, truncate, flush, after_write, after_truncate, after_flush, erase, after_erase, timeout };
 constexpr DWORD interrupted_exit = 73;
 void file_fault(FileFault, const std::wstring& suffix, HANDLE entered = nullptr, HANDLE release = nullptr);
 unsigned file_fault_hits();
 BOOL WINAPI write_file(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
+BOOL WINAPI read_file(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 BOOL WINAPI truncate_file(HANDLE);
 BOOL WINAPI flush_file(HANDLE);
 BOOL WINAPI set_file_information(HANDLE, FILE_INFO_BY_HANDLE_CLASS, LPVOID, DWORD);
@@ -41,6 +42,7 @@ uint32_t fault_validate_recorded(save::Installation&, engine::Memory&, const eng
 
 #ifdef SC_FAULT_REDIRECT
 #define WriteFile sentinel::testing::write_file
+#define ReadFile sentinel::testing::read_file
 #define SetEndOfFile sentinel::testing::truncate_file
 #define FlushFileBuffers sentinel::testing::flush_file
 #define SetFileInformationByHandle sentinel::testing::set_file_information

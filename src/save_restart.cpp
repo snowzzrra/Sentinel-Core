@@ -19,7 +19,7 @@ template<class T> bool number(std::string_view& text,std::string_view key,T& val
 }
 bool restart_values(std::string_view text,uint64_t& sequence,uint32_t& stage,uint64_t& checkpoint,std::string& map) {
     std::string_view value;
-    if (!number(text,"sequence=",sequence) || !sequence || !number(text,"stage=",stage) ||
+    if (!number(text,"sequence=",sequence) || !sequence || !number(text,"stage=",stage) || !stage ||
         !number(text,"checkpoint=",checkpoint) || !field(text,"map=",value) || !text.empty()) return false;
     if (value.empty() || value.size()>191 || value.find_first_not_of(
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.")!=value.npos) return false;
@@ -27,35 +27,50 @@ bool restart_values(std::string_view text,uint64_t& sequence,uint32_t& stage,uin
 }
 }
 bool Campaign::read_restart() {
+    const auto discard = [&](const char* reason) {
+        owner_->btrace.record(BStage::resume,BStatus::succeeded,reason);
+        if (!lease_->clear_restart_records().ok()) return reject("restart_record_clear_failed");
+        state_.restart_pending=false; state_.restart_status=0; state_.restart_stage_id=0;
+        state_.restart_map.clear(); restart_record_.clear();
+        return true;
+    };
     auto result=lease_->restart_record(false,restart_record_);
     if (result.win32_error==ERROR_FILE_NOT_FOUND) return true;
     state_.restart_pending=true; state_.restart_status=1;
-    if (!result.ok()) return reject("restart_record_unreadable");
+    if (!result.ok()) return result.outcome==storage::Outcome::corrupt_manifest ?
+        discard("restart_record_invalid") : reject("restart_record_unreadable");
     std::string_view text=restart_record_;
     const auto prefix=contract_+"stage-restart=1\n";
-    if (text.substr(0,prefix.size())!=prefix) return reject("restart_record_identity_mismatch");
+    if (text.substr(0,prefix.size())!=prefix) return discard("restart_record_identity_mismatch");
     text.remove_prefix(prefix.size());
     if (!restart_values(text,state_.restart_sequence,state_.restart_stage_id,restart_checkpoint_,state_.restart_map))
-        return reject("restart_record_invalid");
+        return discard("restart_record_invalid");
+    const auto route=campaign_menu::stage_route(state_.restart_stage_id);
+    if (!route || state_.restart_map!=route->map)
+        return discard("restart_stage_unavailable");
     std::string loaded;
     result=lease_->restart_record(true,loaded);
     if (!result.ok()) loaded.clear();
     // the receipt invalidates the outgoing checkpoint until a newer native save exists
     state_.restart_pending=loaded!=restart_record_ || state_.checkpoint<=restart_checkpoint_;
     state_.restart_status=state_.restart_pending?1u:2u;
+    if (!state_.restart_pending) return discard("restart_record_complete");
     return true;
 }
 bool Campaign::final_death(uint32_t stage_id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!state_.enabled || !options_.restart_stage) return true;
     if (!owner_->accepts_requests() || !state_.map_active || state_.restart_pending) return false;
+    const auto route=campaign_menu::stage_route(stage_id);
+    if (!route || state_.map!=route->map) {
+        owner_->btrace.record(BStage::deathlink,BStatus::succeeded,
+            stage_id==1?"restart_hub_vanilla_reload":"restart_stage_unavailable_vanilla_reload");
+        return true;
+    }
     state_.restart_pending=true; state_.restart_status=1; state_.restart_stage_id=stage_id;
     state_.restart_map=state_.map; state_.restart_reason.clear(); ++state_.restart_sequence;
     restart_checkpoint_=state_.checkpoint;
     if (!persist_restart()) return false;
-    if (!stage_id || state_.restart_map.empty()) {
-        restart_failed("restart_stage_unavailable"); return false;
-    }
     owner_->btrace.record(BStage::deathlink,BStatus::pending,"restart_pending",state_.restart_sequence);
     return true;
 }

@@ -124,7 +124,9 @@ int protocol_child(const wchar_t* root,const wchar_t* phase,const wchar_t* mode,
     std::unique_ptr<Namespace> lease; CHECK(reopen(metadata_descriptor(root),lease).ok());
     NativeDisk disk{fs::path(root)/"provider",{}};
     const auto inject=[&] { file_fault(selected,suffix,entered,release); };
-    if (std::wstring_view(phase)==L"migration" || std::wstring_view(phase)==L"recovery") {
+    if (std::wstring_view(phase)==L"restart") {
+        inject(); lease->publish_restart_record(false,"replacement validated record\n");
+    } else if (std::wstring_view(phase)==L"migration" || std::wstring_view(phase)==L"recovery") {
         inject(); sentinel::save::recover_checkpoint(*lease,metadata_descriptor(root),disk.transport());
     } else {
         if (std::wstring_view(phase)==L"cleanup") CHECK(protocol_save(*lease,disk,L"",[] {}));
@@ -384,7 +386,7 @@ void protocol_auxiliary_change(Fixture& fixture, unsigned& attempts) {
         CHECK(lease->begin_checkpoint(value, NativeDisk::owner(0), transaction).ok());
         disk.write(directory + "/game.details", "interrupted bytes");
     }
-    interrupt_protocol(root, L"recovery", FileFault::after_flush, L"\\recovery.pending");
+    interrupt_protocol(root, L"recovery", FileFault::after_write, L"\\game.details");
     disk.write(directory + "/game.details-BACKUP", "opaque detail");
     std::unique_ptr<Namespace> lease;
     CHECK(reopen(value, lease).ok());
@@ -393,6 +395,130 @@ void protocol_auxiliary_change(Fixture& fixture, unsigned& attempts) {
           std::string_view(refused.reason) == "recovery_concurrent_target_change");
     disk.write(directory + "/game.details-BACKUP", "opaque details");
     CHECK(sentinel::save::recover_checkpoint(*lease, value, disk.transport()).complete);
+}
+void protocol_first_receipt(Fixture& fixture) {
+    const auto root=fixture.path+L"\\first-receipt"; seed_protocol(root);
+    std::unique_ptr<Namespace> lease; const auto value=metadata_descriptor(root); CHECK(reopen(value,lease).ok());
+    CHECK(DeleteFileW((lease->metadata().path+L"\\checkpoint-A.commit").c_str()));
+    NativeDisk disk{fs::path(root)/"provider",{}};
+    const auto recovered=sentinel::save::recover_checkpoint(*lease,value,disk.transport());
+    CHECK(recovered.complete && !recovered.mutated && std::string_view(recovered.reason)=="interrupted_save_recovered");
+    CheckpointPlan plan;
+    CHECK(lease->checkpoint_plan(value,plan).ok() && plan.state==CheckpointState::confirmed && plan.checkpoint==1);
+}
+void protocol_archive_unavailable(Fixture& fixture) {
+    const auto root=fixture.path+L"\\archive-busy"; seed_protocol(root);
+    std::unique_ptr<Namespace> lease; const auto value=metadata_descriptor(root); CHECK(reopen(value,lease).ok());
+    NativeDisk disk{fs::path(root)/"provider",{}};
+    CHECK(protocol_save(*lease,disk,L"",[] {}));
+    CheckpointPlan plan; CHECK(lease->checkpoint_plan(value,plan).ok() && plan.checkpoint==2);
+    const auto archive=fs::path(root)/plan.archive;
+    const auto pending=lease->metadata().path+L"\\checkpoint-B.pending";
+    const auto committed=read(lease->metadata().path+L"\\checkpoint-B.commit");
+    HANDLE busy=CreateFileW((archive/"payload-0.bin").c_str(),GENERIC_READ,0,nullptr,OPEN_EXISTING,0,nullptr);
+    CHECK(busy!=INVALID_HANDLE_VALUE);
+    const auto unavailable=lease->checkpoint_plan(value,plan);
+    CHECK(!unavailable.ok() && unavailable.win32_error==ERROR_SHARING_VIOLATION);
+    const auto refused=sentinel::save::recover_checkpoint(*lease,value,disk.transport());
+    CHECK(!refused.complete && !refused.mutated && fs::exists(pending) && fs::exists(archive));
+    CHECK(read(lease->metadata().path+L"\\checkpoint-B.commit")==committed);
+    CHECK(CloseHandle(busy));
+    using namespace sentinel::testing;
+    file_fault(FileFault::timeout,L"\\payload-0.bin");
+    const auto timed_out=lease->checkpoint_plan(value,plan);
+    CHECK(!timed_out.ok() && timed_out.win32_error==ERROR_TIMEOUT);
+    const auto unknown=sentinel::save::recover_checkpoint(*lease,value,disk.transport());
+    CHECK(!unknown.complete && !unknown.mutated && fs::exists(pending) && fs::exists(archive));
+    file_fault(FileFault::none,L"");
+    write((archive/"unrelated.txt").wstring(),"unrelated");
+    CHECK(!lease->checkpoint_plan(value,plan).ok());
+    CHECK(!sentinel::save::recover_checkpoint(*lease,value,disk.transport()).mutated);
+    CHECK(fs::exists(pending) && fs::exists(archive));
+    CHECK(DeleteFileW((archive/"unrelated.txt").c_str()));
+    CHECK(lease->checkpoint_plan(value,plan).ok() && plan.state==CheckpointState::confirmed && plan.checkpoint==2);
+}
+void protocol_record_replacement(Namespace& lease,bool restart) {
+    using namespace sentinel::testing;
+    const auto publish=[&](const std::string& text) { return restart ? lease.publish_restart_record(false,text) : lease.publish_recovery_record(false,text,true); };
+    const auto load=[&](std::string& text) { return restart ? lease.restart_record(false,text) : lease.recovery_record(false,text); };
+    const auto name=restart?L"\\stage.restart.pending":L"\\recovery.pending";
+    CHECK(publish("previous validated record\n").ok());
+    for (auto fault : {FileFault::short_write,FileFault::truncate,FileFault::flush}) {
+        file_fault(fault,name);
+        CHECK(!publish("replacement validated record\n").ok() && file_fault_hits()==1);
+        file_fault(FileFault::none,L"");
+        std::string text; CHECK(load(text).ok() && text=="previous validated record\n");
+    }
+    CHECK(publish("replacement validated record\n").ok());
+    std::string text; CHECK(load(text).ok() && text=="replacement validated record\n");
+    const auto path=lease.metadata().path+name;
+    auto corrupt=read(path); corrupt.back()='x'; write(path,corrupt);
+    CHECK(load(text).outcome==Outcome::corrupt_manifest);
+    write(path,"legacy record\n"); CHECK(load(text).ok() && text=="legacy record\n");
+}
+void protocol_durable_records(Fixture& fixture) {
+    const auto root=fixture.path+L"\\durable-records"; seed_protocol(root);
+    std::unique_ptr<Namespace> lease; CHECK(reopen(metadata_descriptor(root),lease).ok());
+    Descriptor parsed;
+    CHECK(parse_descriptor("sentinel-test-session-v3\nseed_hex=666978747572652d73656564\nteam=0\nslot=1\ngeneration_fingerprint="+
+        std::string(64,'a')+"\nslot_data_revision=0.7.0\nsession_mod_contract_revision=2\nprovenance=synthetic-fixture\nroot=C:\\synthetic\n"
+        "campaign=base\nstarting_stage=base_start\ndifficulty=1\nintent=create\n",parsed).ok());
+    const auto base=checkpoint_contract(parsed,lease->metadata().namespace_id);
+    CHECK(!parsed.campaign.unified && base.find("campaign=base\nstarting_stage=base_start\n")!=base.npos);
+    using namespace sentinel::testing;
+    protocol_record_replacement(*lease,false);
+    protocol_record_replacement(*lease,true);
+    bool cleared=false;
+    CHECK(sentinel::save::recovery_clear(*lease,&cleared) && cleared);
+    CHECK(lease->publish_recovery_record(false,"sentinel-recovery-v1\ntruncated\n").ok());
+    cleared=false; CHECK(sentinel::save::recovery_clear(*lease,&cleared) && cleared);
+    const auto legacy="sentinel-recovery-v1\nnamespace="+lease->metadata().namespace_id+
+        "\nbackup=fixture\nquarantine=\nprevious_checkpoint_hex=\nprevious_selection_present=0\nprevious_selection_hex=\n";
+    write(lease->metadata().path+L"\\recovery.pending",legacy);
+    write(lease->metadata().path+L"\\recovery.complete",legacy);
+    cleared=false; CHECK(sentinel::save::recovery_clear(*lease,&cleared) && !cleared);
+    for (auto fault : {FileFault::after_write,FileFault::after_truncate,FileFault::after_flush}) {
+        CHECK(lease->publish_restart_record(false,"previous validated record\n").ok());
+        lease.reset();
+        interrupt_protocol(root,L"restart",fault,L"\\stage.restart.pending");
+        CHECK(reopen(metadata_descriptor(root),lease).ok());
+        std::string text;
+        CHECK(lease->restart_record(false,text).ok() && text=="previous validated record\n");
+    }
+}
+void protocol_explicit_recovery(Fixture& fixture) {
+    const auto root=fixture.path+L"\\explicit-recovery"; seed_protocol(root);
+    std::unique_ptr<Namespace> lease; auto value=metadata_descriptor(root); CHECK(reopen(value,lease).ok());
+    NativeDisk disk{fs::path(root)/"provider",{}};
+    for (unsigned attempt=0;attempt<2;++attempt) {
+        CheckpointPlan before; CHECK(lease->checkpoint_plan(value,before).ok());
+        const auto directory=lease->metadata().native_root+"/GAME-AUTOSAVE0/";
+        const auto details=read((disk.path/fs::path(directory+"game.details")).wstring());
+        const auto duration=read((disk.path/fs::path(directory+"game_duration.dat")).wstring());
+        CHECK(protocol_save(*lease,disk,L"",[] {}));
+        CheckpointPlan candidate; CHECK(lease->checkpoint_plan(value,candidate).ok());
+        CHECK(lease->discard_checkpoint(candidate.side).ok());
+        disk.write(directory+"game.details",details); disk.write(directory+"game_duration.dat",duration);
+        value.campaign.intent=CampaignIntent::recover; value.campaign.recovery_basename=candidate.archive;
+        if (!attempt) {
+            CheckpointWrite pending; CHECK(lease->begin_checkpoint(value,NativeDisk::owner(0),pending).ok());
+            const auto missing=(disk.path/fs::path(directory+"game.details")).wstring();
+            CHECK(DeleteFileW(missing.c_str()));
+            const auto refused=sentinel::save::recover_campaign(*lease,value,disk.transport());
+            CHECK(!refused.complete && !refused.mutated &&
+                std::string_view(refused.reason)=="recovery_continuity_publication_failed");
+            CHECK(!fs::exists(missing));
+            std::string journal; CHECK(lease->recovery_record(false,journal).win32_error==ERROR_FILE_NOT_FOUND);
+            CHECK(lease->discard_checkpoint(pending.side).ok());
+            disk.write(directory+"game.details",details);
+        }
+        const auto recovered=sentinel::save::recover_campaign(*lease,value,disk.transport());
+        if (!recovered.complete) std::fprintf(stderr,"explicit recovery: %s\n",recovered.reason);
+        CHECK(recovered.complete && recovered.mutated);
+        CheckpointPlan after; CHECK(lease->checkpoint_plan(value,after).ok() && after.checkpoint==before.checkpoint+1);
+    }
+    auto changed=value; changed.campaign.unified=false;
+    CheckpointPlan plan; CHECK(lease->checkpoint_plan(changed,plan).ok() && plan.state==CheckpointState::identity_mismatch);
 }
 void protocol_faults(Fixture& fixture) {
     using sentinel::testing::FileFault;
@@ -435,5 +561,9 @@ void protocol_faults(Fixture& fixture) {
     protocol_retention(fixture);
     protocol_future_format(fixture);
     protocol_auxiliary_change(fixture, attempts);
+    protocol_first_receipt(fixture);
+    protocol_archive_unavailable(fixture);
+    protocol_durable_records(fixture);
+    protocol_explicit_recovery(fixture);
     std::printf("PASS checkpoint protocol crash windows=%u; migration, payloads, receipt, selection, commit, recovery and retention\n",attempts);
 }

@@ -663,6 +663,7 @@ bool Campaign::map_begin(std::string map,uint64_t generation,uint64_t event_id,u
         state_.native_factory_matched=false;
     }
     prior_map_=state_.map;
+    prior_stage_id_=state_.stage_id;
     state_.map=std::move(map); state_.generation_before=generation; map_pending_=true;
     state_.native_subtype=native_subtype;
     state_.stage_id=stage_id;
@@ -729,9 +730,12 @@ void Campaign::map_end(const CampaignTransition& result) {
 void Campaign::complete_map() {
     if (!confirm_restart()) return;
     map_pending_=false; state_.map_active=true; state_.save_ready=true;
-    if (state_.map=="game/hub/hub" && !prior_map_.empty() && prior_map_!="game/hub/hub")
+    if (state_.map=="game/hub/hub" && !prior_map_.empty() && prior_map_!="game/hub/hub") {
         state_.end_summary_map=prior_map_;
-    else if (state_.map!="game/hub/hub") state_.end_summary_map.clear();
+        state_.end_summary_stage_id=prior_stage_id_;
+    } else if (state_.map!="game/hub/hub") {
+        state_.end_summary_map.clear(); state_.end_summary_stage_id=0;
+    }
     prior_map_.clear();
     if (!state_.operation) state_.phase=state_.resumed ? "reopened" : "native_created";
     owner_->btrace.record(BStage::transition,BStatus::succeeded,"native_map_ready",state_.operation,

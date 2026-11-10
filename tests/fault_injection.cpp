@@ -1,6 +1,7 @@
 #include "engine/builds/build_descriptor.h"
 #include "fault_injection.h"
 #undef WriteFile
+#undef ReadFile
 #undef SetEndOfFile
 #undef FlushFileBuffers
 #undef SetFileInformationByHandle
@@ -79,7 +80,8 @@ bool selected(HANDLE file) {
     std::array<wchar_t, 1024> path{};
     const auto length = GetFinalPathNameByHandleW(file, path.data(), static_cast<DWORD>(path.size()), 0);
     require(length && length < path.size());
-    const std::wstring_view name(path.data(), length);
+    std::wstring_view name(path.data(), length);
+    if (name.size()>4 && name.substr(name.size()-4)==L".tmp") name.remove_suffix(4);
     if (!file_suffix.empty() && file_suffix.back()==L'*') {
         const auto leaf=name.substr(name.find_last_of(L'\\'));
         return leaf.substr(0,file_suffix.size()-1)==std::wstring_view(file_suffix).substr(0,file_suffix.size()-1);
@@ -103,6 +105,12 @@ void file_fault(FileFault mode, const std::wstring& suffix, HANDLE entered, HAND
     file_entered = entered; file_release = release;
 }
 unsigned file_fault_hits() { return file_hits; }
+BOOL WINAPI read_file(HANDLE file, LPVOID bytes, DWORD count, LPDWORD read, LPOVERLAPPED overlap) {
+    if (file_mode==FileFault::timeout && selected(file)) {
+        ++file_hits; SetLastError(ERROR_TIMEOUT); return FALSE;
+    }
+    return ReadFile(file,bytes,count,read,overlap);
+}
 BOOL WINAPI write_file(HANDLE file, LPCVOID bytes, DWORD count, LPDWORD written, LPOVERLAPPED overlap) {
     const bool match = selected(file);
     if (match && file_mode == FileFault::short_write) {

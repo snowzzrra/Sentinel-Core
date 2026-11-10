@@ -22,14 +22,14 @@ struct RecoveryTransport {
 };
 enum class RecoveryState { missing_incomplete, same, older, newer, corrupt_unknown, conflict, unavailable };
 struct RecoveryResult {
-    bool complete = false, mutated = false;
+    bool complete = false, mutated = false, record_cleared = false;
     unsigned preserved_auxiliaries = 0;
     RecoveryState state = RecoveryState::unavailable;
     const char* reason = "not_requested";
     std::wstring quarantine;
 };
 // unfinished journals block import until startup recovery verifies the provider
-bool recovery_clear(storage::Namespace&);
+bool recovery_clear(storage::Namespace&,bool* cleared=nullptr);
 bool snapshot_campaign_files(const RecoveryTransport&, const std::string& directory, storage::TransportMetadata&);
 RecoveryResult recover_campaign(storage::Namespace&, const storage::Descriptor&, const RecoveryTransport&);
 RecoveryResult recover_checkpoint(storage::Namespace&, const storage::Descriptor&, const RecoveryTransport&);

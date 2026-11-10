@@ -299,7 +299,7 @@ void transport_backups(Fixture& fixture) {
     write(complete + L"\\payload-0.bin", "abc");
     for (const auto& extra : {L"owner.lock", L"extra.bin"}) {
         write(complete + L"\\" + extra, "unexpected");
-        CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::corrupt_manifest);
+        CHECK(owner->reopen_transport(basename, archive).outcome == Outcome::unsafe_path);
         CHECK(!archive);
         CHECK(DeleteFileW((complete + L"\\" + extra).c_str()));
     }
