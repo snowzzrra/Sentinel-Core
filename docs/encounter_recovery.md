@@ -17,7 +17,22 @@ An encounter with no live AI left that is stuck in its own `WaitForEventFlag` is
 admitted: recovery sets that local flag (`0x140baef00`), so the script continues and
 completes natively (`0x140bbcc80`). Only the selected manager is touched. A COMMIT
 wait, an unknown wait type or an ambiguous selection is refused, and each refusal
-writes the predicate and the reason to `.recovery.log`. Any other external wait with
+writes the predicate and the reason to `.recovery.log`.
+
+An encounter whose producers are closed but that still sits in `WaitAIRemaining`
+with nobody left to kill is released the same way: for the selected manager only, after
+checking the current stamp, that none of its records or the wait's own records hold a
+live actor, and that no restore is pending. The script then completes natively; recovery
+does not write the manager's completion latch. A cancelled attempt logs which identity
+changed (stamp, generation, map, world, player, namespace, save or manager).
+
+A failed summon does not empty the rest of the map. A failure before any actor exists
+is retried. If the map's recipe fault is set anyway, later requests that are still
+intact spawn their original (vanilla) enemies, logged as `decision=native_fallback
+reason=recipe_fault`; requests already partly emitted, special calls and summons with a
+pending queue are refused with their reason, since repeating them could duplicate a wave.
+
+Any other external wait with
 no live AI ends the attempt as unknown after a two-second grace period. Diagnostics
 name the manager and wait type. Repeating the command reports
 the same attempt. History retains 16 attempts; progress reports run every five seconds.
