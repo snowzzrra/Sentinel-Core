@@ -81,6 +81,22 @@ std::map<std::string, RecipeNativeCheckpoint::Child> summon_children;
 
 std::optional<RecipeNativeCheckpoint> pending_summon_checkpoint;
 
+static bool summon_failure(uintptr_t component, uintptr_t parent, const std::string& origin,
+                           const std::string& key, const char* branch) {
+    const auto found = recipe_state.requests().find(key);
+    const auto progress = found == recipe_state.requests().end() ? nullptr : &found->second;
+    char name[512]{};
+    read_instance_name(parent, name);
+    commands::diagnostic_trace("AP_SUMMON_FAILURE branch=%s component=%llx parent=%llx identifier=%u name=%.191s origin=%s key=%s emitted=%llu reserved=%u actors=%zu map=%s stamp=%llu",
+        branch, component, parent, actor_identifier(parent), name, origin.c_str(), key.c_str(),
+        progress ? progress->emitted : 0, progress && progress->reserved, progress ? progress->actors.size() : 0,
+        recipe_state.map().c_str(), native::observation_stamp());
+    char reason[256];
+    std::snprintf(reason, sizeof(reason), "%s component=%llx parent=%llx", branch, component, parent);
+    set_recipe_fault(__func__, __LINE__, reason, key.c_str(), 0, parent);
+    return false;
+}
+
 NativeUnary original_show = nullptr, original_show_now = nullptr, original_hide = nullptr;
 
 static float actor_spawn_lift(const RecipeCreation& creation) {
@@ -225,10 +241,14 @@ float summon_create_detour(uintptr_t component, uintptr_t entry, uintptr_t posit
     if (stopped.load(std::memory_order_acquire)) return original_summon_create(component, entry, positions, mask, label);
     if (!summon_collection) return original_summon_create(component, entry, positions, mask, label);
     if (protected_summon_definition(entry)) return original_summon_create(component, entry, positions, mask, label);
-    bool accepted = false;
-    try { accepted = collect_summon(component, entry, positions, mask, label); } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
+    bool accepted = false, failed = false;
+    try { accepted = collect_summon(component, entry, positions, mask, label); } catch (...) { failed = true; }
+    if (!accepted && !failed) {
+        trace_spawn_refusal(*reinterpret_cast<const uintptr_t*>(component + 8), "", "summon_not_collected", "native_fallback");
+        return original_summon_create(component, entry, positions, mask, label);
+    }
     destroy_native_text(label);
-    if (!accepted) set_recipe_fault(__func__, __LINE__, "summon_collection_failed");
+    if (!accepted) summon_failure(component, *reinterpret_cast<const uintptr_t*>(component + 8), "", "", "collection_exception");
     return 1.0f;
 }
 
@@ -326,11 +346,11 @@ static bool complete_empty_summon(uintptr_t parent, const std::string& key, cons
         }
         return true;
 }
-static bool queue_component_summon(uintptr_t parent, uint64_t epoch, const RecipeLibraryEntry& definition, const std::string& key, std::vector<SummonSource>& sources, ComponentSummons& pending) {
+static bool queue_component_summon(uintptr_t component, uintptr_t parent, uint64_t epoch, const RecipeLibraryEntry& definition, const std::string& key, std::vector<SummonSource>& sources, ComponentSummons& pending) {
     uint64_t offset = 0;
     if (definition.source.empty()) {
         char name[512];
-        if (!read_recipe_definition(parent, name) && !read_instance_name(parent, name)) return false;
+        if (!read_recipe_definition(parent, name) && !read_instance_name(parent, name)) return summon_failure(component, parent, definition.origin, key, "queue_parent_unreadable");
         offset = 14695981039346656037ull;
         for (auto cursor = name; *cursor; ++cursor) offset = (offset ^ static_cast<unsigned char>(*cursor)) * 1099511628211ull;
         offset = (offset ^ epoch) * 1099511628211ull;
@@ -338,32 +358,34 @@ static bool queue_component_summon(uintptr_t parent, uint64_t epoch, const Recip
     pending.requests.push_back({key, definition.origin, std::move(sources), offset});
     return true;
 }
-static bool open_summon_request(uintptr_t parent, const std::pair<std::string, std::string>& identity, const std::vector<SummonSource>& sources, std::string& key, bool& empty) {
+static bool open_summon_request(uintptr_t component, uintptr_t parent, const std::pair<std::string, std::string>& identity, const std::vector<SummonSource>& sources, std::string& key, bool& empty) {
     const auto& definition = native_recipes.at(identity.first).definition;
     const auto original_count = static_cast<uint32_t>(sources.size());
     const auto numerator = definition.quantity_denominator ? definition.quantity_numerator : definition.physical_count;
     const auto denominator = definition.quantity_denominator ? definition.quantity_denominator : definition.logical_count;
     const auto quantity = (uint64_t{original_count} * numerator + denominator - 1) / denominator;
-    if (quantity > INT32_MAX || next_recipe_request == UINT64_MAX) return false;
+    if (quantity > INT32_MAX || next_recipe_request == UINT64_MAX) return summon_failure(component, parent, definition.origin, key, "request_quantity_or_sequence_overflow");
     char owner[512];
-    if (!read_definition_name(parent, owner)) return false;
+    if (!read_definition_name(parent, owner)) return summon_failure(component, parent, definition.origin, key, "request_owner_unreadable");
     key = "summon/" + definition.origin + "/" + std::to_string(++next_recipe_request);
     if (!recipe_state.request(key, {owner, definition.origin, identity.second, definition.logical_mask, original_count,
             static_cast<uint32_t>(quantity), quantity, static_cast<uint32_t>(quantity), quantity ? original_count : 0,
-            "", ""})) return false;
+            "", ""})) return summon_failure(component, parent, definition.origin, key, "request_state_rejected");
     if (!quantity) {
-        if (!complete_empty_summon(parent, key, identity.second, sources)) return false;
+        if (!complete_empty_summon(parent, key, identity.second, sources)) return summon_failure(component, parent, definition.origin, key, "empty_membership_failed");
         empty = true; return true;
     }
     return true;
 }
-static bool open_summon_groups(uintptr_t parent, uint64_t epoch, std::map<std::pair<std::string, std::string>, std::vector<SummonSource>>& groups, ComponentSummons& pending) {
+static bool open_summon_groups(uintptr_t component, uintptr_t parent, uint64_t epoch, std::map<std::pair<std::string, std::string>, std::vector<SummonSource>>& groups, ComponentSummons& pending) {
     for (auto& [identity, sources] : groups) {
-        const auto& definition = native_recipes.at(identity.first).definition;
         std::string key; bool empty = false;
-        if (!open_summon_request(parent, identity, sources, key, empty)) return false;
-        if (empty) continue;
-        if (!queue_component_summon(parent, epoch, definition, key, sources, pending)) return false;
+        try {
+            const auto& definition = native_recipes.at(identity.first).definition;
+            if (!open_summon_request(component, parent, identity, sources, key, empty)) return false;
+            if (empty) continue;
+            if (!queue_component_summon(component, parent, epoch, definition, key, sources, pending)) return false;
+        } catch (...) { return summon_failure(component, parent, identity.first, key, "open_group_exception"); }
     }
     return true;
 }
@@ -377,15 +399,15 @@ bool open_component_summons(SummonCollection& collection) {
         complete_summon_requests(pending);
         pending = {}; pending.parent = parent; pending.identifier = identifier;
         char name[512];
-        if (!read_instance_name(parent, name) || !*name) return false;
+        if (!read_instance_name(parent, name) || !*name) return summon_failure(collection.component, parent, "", "", "component_parent_unreadable");
         pending.name = name;
     }
     pending.completed = false;
-    if (pending.epoch == UINT64_MAX) return false;
+    if (pending.epoch == UINT64_MAX) return summon_failure(collection.component, parent, "", "", "component_epoch_overflow");
     const auto epoch = pending.epoch++;
     std::map<std::pair<std::string, std::string>, std::vector<SummonSource>> groups;
     for (auto& source : collection.sources) groups[{source.origin, source.label}].push_back(std::move(source));
-    if (!open_summon_groups(parent, epoch, groups, pending)) return false;
+    if (!open_summon_groups(collection.component, parent, epoch, groups, pending)) return false;
     for (const auto& target : collection.notifications) {
         auto& dependencies = pending.notifications[target];
         for (const auto& request : pending.requests)
@@ -409,6 +431,7 @@ void invoke_summon_creation(RecipeCreation* creation, uintptr_t component, const
         creation->creating = true;
         original_summon_create(component, reinterpret_cast<uintptr_t>(entry.data()), reinterpret_cast<uintptr_t>(&positions),
             source->mask, reinterpret_cast<uintptr_t>(&label));
+        if (!creation->actor) recipe_creation_failed(*creation, __func__, __LINE__, "native_summon_empty");
     } __finally { creation->creating = false; end_recipe_creation(*creation); }
 }
 
@@ -758,6 +781,7 @@ bool restore_autonomous_summons(uintptr_t world) {
 
 static bool create_pending_summon(uintptr_t component, uintptr_t parent, SummonRequest& request, const RecipeProgress& progress, bool& created, bool& retry) {
     RecipeCreation creation;
+    creation.summon_component = component;
     const auto previous = worker_recipe; worker_recipe = &request.key;
     const auto previous_offset = worker_body_offset; worker_body_offset = request.body_offset;
     bool ready = false;
@@ -768,10 +792,10 @@ static bool create_pending_summon(uintptr_t component, uintptr_t parent, SummonR
     const auto source_index = static_cast<size_t>(creation.emission.ordinal * request.sources.size() /
         progress.request.maximum_emissions);
     invoke_summon_creation(&creation, component, &request.sources[source_index]);
-    if (recipe_fault.load(std::memory_order_acquire)) return false;
+    if (recipe_fault.load(std::memory_order_acquire)) return summon_failure(component, parent, request.origin, request.key, "creation_fault");
     if (!creation.actor) { retry = true; return true; }
     char parent_name[512];
-    if (!read_instance_name(parent, parent_name) || !*parent_name) return false;
+    if (!read_instance_name(parent, parent_name) || !*parent_name) return summon_failure(component, parent, request.origin, request.key, "created_parent_unreadable");
     auto& child = summon_children[creation.emission.actor];
     child.parent = parent_name;
     child.body = *reinterpret_cast<const char**>(creation.body + 8);
@@ -780,15 +804,17 @@ static bool create_pending_summon(uintptr_t component, uintptr_t parent, SummonR
 }
 static bool drain_summon_requests(uintptr_t component, uintptr_t parent, ComponentSummons& pending, bool& created) {
     for (auto request = pending.requests.begin(); request != pending.requests.end();) {
-        const auto& progress = recipe_state.requests().at(request->key);
-        while (!progress.closed && progress.emitted < progress.request.maximum_emissions) {
-            bool retry = false;
-            if (!create_pending_summon(component, parent, *request, progress, created, retry)) return false;
-            if (retry) break;
-        }
-        if (!progress.closed && progress.emitted < progress.request.maximum_emissions) { ++request; continue; }
-        recipe_state.cancel(request->key);
-        request = pending.requests.erase(request);
+        try {
+            const auto& progress = recipe_state.requests().at(request->key);
+            while (!progress.closed && progress.emitted < progress.request.maximum_emissions) {
+                bool retry = false;
+                if (!create_pending_summon(component, parent, *request, progress, created, retry)) return false;
+                if (retry) break;
+            }
+            if (!progress.closed && progress.emitted < progress.request.maximum_emissions) { ++request; continue; }
+            recipe_state.cancel(request->key);
+            request = pending.requests.erase(request);
+        } catch (...) { return summon_failure(component, parent, request->origin, request->key, "drain_request_exception"); }
     }
     return true;
 }
@@ -819,9 +845,20 @@ void invoke_summon_start(uintptr_t component, SummonCollection* collection) {
     __finally { summon_collection = previous; }
 }
 
+static void summon_native_fallback(uintptr_t component) {
+    const auto pending = component_summons.find(component);
+    const bool untouched = pending == component_summons.end() || pending->second.requests.empty();
+    const auto parent = *reinterpret_cast<const uintptr_t*>(component + 8);
+    if (untouched && !pending_summon_checkpoint && !restored_independent && !independent_memberships_pending) {
+        trace_spawn_refusal(parent, "", "recipe_fault", "native_fallback");
+        original_summon_start(component);
+    } else trace_spawn_refusal(parent, "", "fallback_summon_pending_or_mutated", "fallback_refused");
+}
+
 void summon_start_detour(uintptr_t component) {
     if (stopped.load(std::memory_order_acquire)) { original_summon_start(component); return; }
     std::lock_guard<std::recursive_mutex> lock(admission_mutex);
+    if (recipe_fault.load()) { summon_native_fallback(component); return; }
     uintptr_t root = 0;
     if (recipe_checkpoint_root(root) && !root) { original_summon_start(component); return; }
     try {
@@ -831,9 +868,8 @@ void summon_start_detour(uintptr_t component) {
     SummonCollection collection{component, {}};
     invoke_summon_start(component, &collection);
     try {
-        if (!recipe_fault.load(std::memory_order_acquire) && open_component_summons(collection) && drain_component_summons(component)) return;
-    } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
-    set_recipe_fault(__func__, __LINE__, "summon_drain_failed");
+        if (!recipe_fault.load(std::memory_order_acquire) && open_component_summons(collection)) drain_component_summons(component);
+    } catch (...) { summon_failure(component, *reinterpret_cast<const uintptr_t*>(component + 8), "", "", "open_or_drain_exception"); }
 }
 
 void summon_complete_detour(uintptr_t component) {
@@ -858,8 +894,8 @@ void summon_update_detour(uintptr_t component, uintptr_t frame) {
     original_summon_update(component, frame);
     if (stopped.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(admission_mutex);
-    try { if (drain_component_summons(component)) return; } catch (...) { set_recipe_fault(__func__, __LINE__, "exception"); }
-    set_recipe_fault(__func__, __LINE__, "summon_drain_failed");
+    try { drain_component_summons(component); }
+    catch (...) { summon_failure(component, *reinterpret_cast<const uintptr_t*>(component + 8), "", "", "drain_exception"); }
 }
 
 uint64_t invoke_suspended_recipe(RecipeCreation* scope, uintptr_t manager, uintptr_t record,

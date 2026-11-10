@@ -677,6 +677,13 @@ void trace_remaining_actors(uintptr_t command, const char* owner, int32_t count)
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+static uint64_t observe_remaining_wait(uintptr_t command) {
+    const auto manager = remaining_manager(command);
+    return remaining_wait_started.emplace(command,
+        RemainingWait{GetTickCount64(), *reinterpret_cast<const uintptr_t*>(command), native::observation_stamp(),
+            manager, manager ? actor_identifier(manager) : 0}).first->second.started;
+}
+
 void trace_quantity_wait(uintptr_t command, char kind, uint64_t result) {
     const auto mask = *reinterpret_cast<const uint64_t*>(command + 0x88);
     const auto target_bits = *reinterpret_cast<const uint32_t*>(command + 0xc0);
@@ -690,8 +697,7 @@ void trace_quantity_wait(uintptr_t command, char kind, uint64_t result) {
     if (kind == 'r') {
         if (result & 0xff) remaining_wait_started.erase(command);
         else if (remaining_wait_started.size() < 4096) {
-            const auto started = remaining_wait_started.emplace(command,
-                RemainingWait{GetTickCount64(), *reinterpret_cast<const uintptr_t*>(command)}).first->second.started;
+            const auto started = observe_remaining_wait(command);
             actors_due = !(traced & 16) && GetTickCount64() - started >= 15000;
         }
     }
@@ -707,6 +713,7 @@ void trace_quantity_wait(uintptr_t command, char kind, uint64_t result) {
 }
 
 uint64_t remaining_result(uintptr_t command) {
+    if (recovery_remaining_complete(command)) return 1;
     std::vector<RecipeCredit> total, living;
     std::vector<RemainingItem> present;
     bool tracked = false, blocked = false; int32_t threshold = 0;

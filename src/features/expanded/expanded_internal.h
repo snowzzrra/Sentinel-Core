@@ -125,7 +125,7 @@ struct RecipeCreation {
     SpawnLimits limits{};
     bool reserved = false;
     struct PointState { uintptr_t definitions; int32_t count, index, animation; uint32_t state; } original{}, suspended{};
-    uintptr_t active_point = 0, selecting_manager = 0;
+    uintptr_t active_point = 0, selecting_manager = 0, summon_component = 0;
     RecipeCreation* suspended_by = nullptr;
     bool creating = false, override_active = false, restoring = false, failed = false;
 };
@@ -261,9 +261,17 @@ extern char first_recipe_fault[1536];
 void set_recipe_fault(const char* function, unsigned line, const char* reason, const char* key = nullptr,
                       uintptr_t actor = 0, uintptr_t manager = 0) noexcept;
 void recipe_creation_failed(RecipeCreation& creation, const char* function, unsigned line, const char* reason) noexcept;
+uintptr_t recipe_fallback_source(uintptr_t manager, std::string_view origin);
 extern std::map<std::string, uint8_t> recipe_spawn_traces;
 extern std::map<std::tuple<uintptr_t, char, uint64_t, uint32_t>, uint8_t> quantity_wait_traces;
-struct RemainingWait { uint64_t started; uintptr_t table; };
+struct RemainingWait {
+    uint64_t started; uintptr_t table;
+    uint64_t stamp = 0;
+    uintptr_t manager = 0;
+    uint32_t identifier = 0;
+    bool recovered = false;
+};
+bool recovery_remaining_complete(uintptr_t command);
 extern std::map<uintptr_t, RemainingWait> remaining_wait_started;
 extern std::map<uintptr_t, std::string> recovery_rejections;
 using AllocateWorker = uintptr_t(*)(size_t, uint32_t);

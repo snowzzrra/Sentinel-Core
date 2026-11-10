@@ -119,6 +119,7 @@ RewindTimeline rewind_timeline = nullptr;
 FindEntity find_entity = nullptr;
 
 thread_local const char* admission_diagnostic_reason = "admission_unobserved";
+thread_local char population_diagnostic[768]{};
 
 bool admission_observed(bool allowed, const char* reason) noexcept {
     if (!allowed) admission_diagnostic_reason = reason;
@@ -138,8 +139,9 @@ void trace_spawn_refusal(uintptr_t manager, std::string_view origin, const char*
         else if (manager) read_definition_name(manager, owner);
         engine::LocalMemory memory;
         memory.copy(manager + 0xda0, &cursor, sizeof(cursor));
-        commands::diagnostic_trace("AP_ENEMY_REQUEST manager=%.192s address=%llx cursor=%d origin=%.*s decision=%s reason=%s",
-            owner, static_cast<unsigned long long>(manager), cursor, static_cast<int>((std::min)(origin.size(), size_t{64})), origin.data(), decision, reason);
+        commands::diagnostic_trace("AP_ENEMY_REQUEST manager=%.192s address=%llx cursor=%d origin=%.*s decision=%s reason=%s%s",
+            owner, static_cast<unsigned long long>(manager), cursor, static_cast<int>((std::min)(origin.size(), size_t{64})), origin.data(), decision, reason,
+            std::strcmp(reason, "scope_population_limit") == 0 ? population_diagnostic : "");
     } catch (...) {}
 }
 
@@ -457,6 +459,20 @@ bool population_member(uintptr_t world, uintptr_t actor, uint64_t scope, unsigne
     return population_manager_member(world, actor, scope);
 }
 
+static bool population_admission(const SpawnLimits& limits, const std::array<uint32_t, 9>& active) {
+    const auto reason = spawn_rejection(limits, active);
+    if (!reason) return true;
+    uint64_t population = 0;
+    for (const auto value : active) population += value;
+    std::snprintf(population_diagnostic, sizeof(population_diagnostic),
+        " predicate=%s scope=%llx incoming=%u effective=%u,%u,%u,%u,%u,%u,%u,%u,%u reserved=%u,%u,%u,%u,%u,%u,%u,%u,%u total=%llu caps_population=%u pressure=%u heavy=%u superheavy=%u mixed=%u strict=%u maximum=%u,%u,%u,%u",
+        reason, limits.scope, limits.kind, active[0], active[1], active[2], active[3], active[4], active[5], active[6], active[7], active[8],
+        reserved_special[0], reserved_special[1], reserved_special[2], reserved_special[3], reserved_special[4], reserved_special[5], reserved_special[6], reserved_special[7], reserved_special[8],
+        population, limits.population, limits.pressure, limits.heavy, limits.superheavy, limits.mixed, limits.strict,
+        limits.maximum[0], limits.maximum[1], limits.maximum[2], limits.maximum[3]);
+    return admission_observed(false, "scope_population_limit");
+}
+
 bool special_admission(const SpawnLimits& limits) {
     __try {
         const auto world = *reinterpret_cast<uintptr_t*>(world_global);
@@ -480,7 +496,7 @@ bool special_admission(const SpawnLimits& limits) {
             if (UINT32_MAX - species[kind] < reserved_species[kind]) { admission_diagnostic_reason = "species_counter_overflow"; return false; }
             species[kind] += reserved_species[kind];
         }
-        return admission_observed(spawn_allowed(limits, active), "scope_population_limit") &&
+        return population_admission(limits, active) &&
             admission_observed(species_allowed(limits, species), "scope_species_limit");
     } __except(EXCEPTION_EXECUTE_HANDLER) { admission_diagnostic_reason = "population_read_fault"; return false; }
 }
@@ -513,6 +529,7 @@ bool supply_admission(uintptr_t world) {
 
 bool generated_admission(const SpawnLimits& limits) {
     admission_diagnostic_reason = "admission_unobserved";
+    population_diagnostic[0] = 0;
     __try {
         const auto world = *reinterpret_cast<uintptr_t*>(world_global);
         const auto collection = *reinterpret_cast<uintptr_t*>(world + 0x62088);

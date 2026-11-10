@@ -49,5 +49,6 @@ struct SpawnLimits {
 unsigned special_species_index(std::uint64_t mask) noexcept;
 std::optional<SpawnLimits> spawn_limits(std::string_view definition) noexcept;
 bool spawn_allowed(const SpawnLimits&, const std::array<std::uint32_t, 9>& active) noexcept;
+const char* spawn_rejection(const SpawnLimits&, const std::array<std::uint32_t, 9>& active) noexcept;
 bool species_allowed(const SpawnLimits&, const std::array<std::uint32_t, 9>& active) noexcept;
 }

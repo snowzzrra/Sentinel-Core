@@ -4,6 +4,7 @@
 #include "pipe_io.h"
 #include "fault_injection.h"
 #include "campaign_menu.h"
+#include "features/expanded/expanded_internal.h"
 #include <atomic>
 #include <cstring>
 #include <cstdio>
@@ -14,9 +15,235 @@
 #include <set>
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL v2 line %d: %s (win32=%lu)\n", __LINE__, #x, GetLastError()); std::exit(1); } } while (0)
+namespace sentinel::expanded::detail {
+bool drain_recovery_impl(recovery::Attempt&, const recovery::Context&);
+void invoke_summon_creation(RecipeCreation*, uintptr_t, const SummonSource*);
+void dispatch_recipe_locked(uintptr_t, uintptr_t, uint64_t, uintptr_t, uintptr_t, bool, const std::string&, uintptr_t&);
+void summon_start_detour(uintptr_t);
+extern uintptr_t recovery_image;
+extern uintptr_t (*recovery_stop_maintaining)(uintptr_t, uintptr_t, uint64_t, const char*);
+}
+namespace sentinel::recovery { void select_targets(Attempt&, const Context&); }
 namespace {
 using namespace sentinel;
 using generated::Bytes;
+unsigned native_fallback_calls = 0;
+
+struct SoftlockFixture {
+    using Words = std::vector<uintptr_t>;
+    Words world = Words(0x126680 / 8), manager = Words(0x1000 / 8), worker = Words(0x110 / 8), record = Words(0x68 / 8);
+    std::array<uintptr_t, 4> locator{}, table{};
+    std::array<char, 96> type{};
+    uintptr_t world_address = reinterpret_cast<uintptr_t>(world.data());
+    uintptr_t manager_address = reinterpret_cast<uintptr_t>(manager.data());
+    uintptr_t command = reinterpret_cast<uintptr_t>(worker.data());
+    uint64_t stamp = native::observation_stamp();
+    template<class T> static T& at(Words& words, size_t offset) { return *reinterpret_cast<T*>(reinterpret_cast<uintptr_t>(words.data()) + offset); }
+    SoftlockFixture() {
+        using namespace expanded::detail;
+        strcpy_s(type.data() + 16, type.size() - 16, ".?AVidEncounterEvent_WaitAIRemaining@@");
+        recovery_image = reinterpret_cast<uintptr_t>(type.data());
+        table[0] = reinterpret_cast<uintptr_t>(locator.data()); worker[0] = reinterpret_cast<uintptr_t>(&table[1]);
+        at<uintptr_t>(worker, 0x40) = manager_address;
+        at<uint64_t>(worker, 0x88) = 1;
+        at<uintptr_t>(manager, 0xcc0) = reinterpret_cast<uintptr_t>(&command);
+        at<int32_t>(manager, 0xcc8) = 1;
+        at<uint8_t>(manager, 0xdb2) = at<uint8_t>(manager, 0xba0) = 1;
+        at<uint32_t>(record, 8) = at<uint32_t>(record, 12) = 0x1fffffe;
+        world_global = reinterpret_cast<uintptr_t>(&world_address);
+        recipe_stamp = stamp;
+        CHECK(recipe_state.reset("plan", "map"));
+        recipe_library.plan = "plan"; recipe_library.map = "map";
+        remaining_wait_started[command] = {0, worker[0], stamp, manager_address, 7};
+    }
+    recovery::Manager target() const {
+        recovery::Manager out; out.address = manager_address; out.identifier = 7;
+        out.name = "elevator6"; out.active = true; out.recipe_blocked = true;
+        return out;
+    }
+    void drain() {
+        using namespace expanded::detail;
+        recovery::Context context; context.stamp = stamp; context.world = world_address;
+        context.managers.push_back(target());
+        recovery::Attempt attempt; attempt.stamp = stamp; attempt.targets = context.managers;
+        CHECK(drain_recovery_impl(attempt, context));
+        CHECK(!at<uint8_t>(manager, 0xdb3));
+    }
+};
+
+void empty_combat_recovery(SoftlockFixture& f) {
+    using namespace expanded::detail;
+    CHECK(recipe_state.request("owned", {"elevator6", "origin", "", 1, 1, 1, 1}));
+    CHECK(!recovery_remaining_complete(f.command));
+    f.drain();
+    CHECK(recipe_state.requests().at("owned").closed);
+    CHECK(recovery_remaining_complete(f.command));
+    CHECK(remaining_result(f.command) == 1);
+    SoftlockFixture::at<uintptr_t>(f.worker, 0xa8) = reinterpret_cast<uintptr_t>(f.record.data());
+    SoftlockFixture::at<int32_t>(f.worker, 0xb0) = 1;
+    SoftlockFixture::at<uintptr_t>(f.record, 16) = f.manager_address;
+    CHECK(!recovery_remaining_complete(f.command));
+    SoftlockFixture::at<int32_t>(f.worker, 0xb0) = 0;
+    for (const auto offset : {0xc80, 0xcf0, 0xd08}) {
+        SoftlockFixture::at<uintptr_t>(f.manager, offset) = reinterpret_cast<uintptr_t>(f.record.data());
+        SoftlockFixture::at<int32_t>(f.manager, offset + 8) = 1;
+        CHECK(!recovery_remaining_complete(f.command));
+        SoftlockFixture::at<int32_t>(f.manager, offset + 8) = 0;
+    }
+    SoftlockFixture::at<int32_t>(f.worker, 0xb0) = 1;
+    SoftlockFixture::at<uintptr_t>(f.record, 16) = 0;
+    CHECK(recovery_remaining_complete(f.command));
+    pending_summon_checkpoint.emplace();
+    CHECK(!recovery_remaining_complete(f.command)); pending_summon_checkpoint.reset();
+    ++recipe_stamp; CHECK(!recovery_remaining_complete(f.command)); recipe_stamp = f.stamp;
+    SoftlockFixture::at<uintptr_t>(f.worker, 0x40) = f.manager_address + 8;
+    CHECK(!recovery_remaining_complete(f.command));
+    SoftlockFixture::at<uintptr_t>(f.worker, 0x40) = f.manager_address;
+    strcpy_s(f.type.data() + 16, f.type.size() - 16, "unknown_wait");
+    CHECK(!recovery_remaining_complete(f.command));
+    strcpy_s(f.type.data() + 16, f.type.size() - 16, ".?AVidEncounterEvent_WaitAIRemaining@@");
+    CHECK(recipe_state.request("new_producer", {"elevator6", "origin", "", 1, 1, 1, 1}));
+    CHECK(!recovery_remaining_complete(f.command));
+    CHECK(recipe_state.cancel("new_producer"));
+    CHECK(recovery_remaining_complete(f.command));
+}
+
+void recipe_failure_and_fallback(SoftlockFixture& f) {
+    using namespace expanded::detail;
+    CHECK(recipe_state.request("summon/test/1", {"parent", "origin", "", 1, 1, 1, 1}));
+    RecipeCreation creation; creation.key = "summon/test/1";
+    creation.emission = *recipe_state.reserve(creation.key);
+    std::array<uintptr_t, 4> body{}; body[1] = reinterpret_cast<uintptr_t>("missing_body");
+    creation.body = reinterpret_cast<uintptr_t>(body.data());
+    SummonSource source;
+    invoke_summon_creation(&creation, 0, &source);
+    CHECK(creation.failed && !recipe_fault.load());
+    CHECK(!recipe_state.requests().at(creation.key).reserved);
+    const auto retry = recipe_state.reserve(creation.key);
+    CHECK(retry && retry->ordinal == 0);
+    CHECK(recipe_state.created(creation.key, *retry, "actor"));
+    recipe_creation_failed(creation, __func__, __LINE__, "partial_mutation");
+    CHECK(recipe_fault.load());
+    NativeRecipe recipe; recipe.definition.origin = "fresh"; recipe.definition.family = 'i';
+    recipe.definition.source = "native_source"; recipe.definition.logical_count = 1;
+    native_recipes["fresh"] = recipe;
+    std::array<uintptr_t, 16> native_body{};
+    native_body[1] = reinterpret_cast<uintptr_t>("ai/fodder/imp");
+    *reinterpret_cast<int32_t*>(&native_body[2]) = 13;
+    SoftlockFixture::at<uintptr_t>(f.manager, 0xc38) = reinterpret_cast<uintptr_t>(native_body.data());
+    SoftlockFixture::at<int32_t>(f.manager, 0xc40) = 1;
+    CHECK(recipe_fallback_source(f.manager_address, "fresh") == f.manager_address);
+    uintptr_t result = 0;
+    dispatch_recipe_locked(f.manager_address, 100, 1, 0, 0, false, "fresh", result);
+    CHECK(result == 101 && native_fallback_calls == 1);
+    CHECK(recipe_state.request("partial", {"elevator6", "fresh", "", 1, 1, 1, 1}));
+    const auto emission = recipe_state.reserve("partial"); CHECK(emission);
+    CHECK(recipe_state.created("partial", *emission));
+    pending_recipes[{f.manager_address, "fresh"}] = "partial";
+    CHECK(!recipe_fallback_source(f.manager_address, "fresh"));
+    CHECK(!recipe_state.requests().at("partial").closed);
+    dispatch_recipe_locked(f.manager_address, 100, 1, 0, 0, false, "fresh", result);
+    CHECK(result == 100 && native_fallback_calls == 1);
+    CHECK(recipe_fallback_source(f.manager_address + 8, "fresh") == f.manager_address);
+    pending_summon_checkpoint.emplace();
+    CHECK(!recipe_fallback_source(f.manager_address + 8, "fresh")); pending_summon_checkpoint.reset();
+}
+
+void summon_fallback(SoftlockFixture& f) {
+    using namespace expanded::detail;
+    std::array<uintptr_t, 18> component{}; component[1] = f.manager_address;
+    const auto address = reinterpret_cast<uintptr_t>(component.data());
+    const auto before = native_fallback_calls;
+    summon_start_detour(address);
+    CHECK(native_fallback_calls == before + 1);
+    component_summons[address].requests.push_back({"summon/test/1", "origin"});
+    summon_start_detour(address);
+    CHECK(native_fallback_calls == before + 1 && recipe_fault.load());
+}
+
+void population_refusals() {
+    using namespace expanded;
+    SpawnLimits limits{}; limits.population = 8; limits.pressure = 6; limits.kind = 3;
+    limits.heavy = 4; limits.superheavy = 1; limits.strict = true;
+    std::array<uint32_t, 9> active{};
+    CHECK(spawn_allowed(limits, active));
+    active[3] = 4; CHECK(std::string(spawn_rejection(limits, active)) == "heavy");
+    active = {}; active[7] = 8; CHECK(std::string(spawn_rejection(limits, active)) == "population");
+    limits.pressure = 8; CHECK(std::string(spawn_rejection(limits, active)) == "population"); limits.pressure = 6;
+    active[7] = 5; active[1] = 1; CHECK(std::string(spawn_rejection(limits, active)) == "pressure");
+    active = {}; active[6] = 1; limits.kind = 6;
+    CHECK(std::string(spawn_rejection(limits, active)) == "superheavy");
+    limits.kind = 2; CHECK(std::string(spawn_rejection(limits, active)) == "mixed_special_superheavy");
+    active = {}; limits.maximum = {1, 1, 1, 1}; active[2] = 1;
+    CHECK(std::string(spawn_rejection(limits, active)) == "individual_special");
+    active = {}; active[4] = 1; CHECK(std::string(spawn_rejection(limits, active)) == "combined_special");
+}
+
+void recovery_cancellation_and_selection() {
+    recovery::Context context; context.stamp = 9; context.map = "map";
+    context.gameplay = context.supported = true;
+    recovery::Manager target; target.address = 1; target.identifier = 2; target.name = "elevator6";
+    target.active = target.recipe_blocked = true; context.managers = {target};
+    struct Change { void (*apply)(recovery::Context&); const char* reason; };
+    const Change changes[]{
+        {+[](recovery::Context& c) { ++c.stamp; }, "stamp previous=9 current=10"},
+        {+[](recovery::Context& c) { ++c.scope.lifecycle_generation; }, "generation previous=0 current=1"},
+        {+[](recovery::Context& c) { c.map = "other"; }, "map previous=map current=other"},
+        {+[](recovery::Context& c) { ++c.world; }, "world previous=0 current=1"},
+        {+[](recovery::Context& c) { ++c.player; }, "player previous=0 current=1"},
+        {+[](recovery::Context& c) { c.namespace_id = "other"; }, "namespace previous= current=other"},
+        {+[](recovery::Context& c) { c.save = "other"; }, "save previous= current=other"},
+        {+[](recovery::Context& c) { c.gameplay = false; }, "gameplay=false"},
+        {+[](recovery::Context& c) { ++c.managers[0].identifier; }, "manager_identifier"},
+        {+[](recovery::Context& c) { c.managers[0].name = "other"; }, "manager_name"},
+        {+[](recovery::Context& c) { c.managers.clear(); }, "manager_missing"},
+    };
+    for (const auto& change : changes) {
+        recovery::Queue queue; queue.observe(context, 100); queue.enqueue_console(9, 100);
+        CHECK(queue.tick(9, 100, +[](recovery::Attempt&, const recovery::Context&) { return true; }) == std::vector<recovery::Outcome>{recovery::pending});
+        auto next = context; change.apply(next); queue.observe(next, 101);
+        CHECK(queue.tick(9, 101) == std::vector<recovery::Outcome>{recovery::changed});
+        CHECK(queue.history().back().wait.find(change.reason) != std::string::npos);
+    }
+    context.managers.push_back(target); context.managers.back().address = 3;
+    recovery::Attempt attempt; attempt.context = context;
+    recovery::select_targets(attempt, context);
+    CHECK(attempt.targets.empty());
+}
+
+void softlock_contract() {
+    using namespace expanded::detail;
+    const auto saved = std::make_tuple(world_global, recipe_stamp, definition_name, actor_identifier, find_entity,
+        cast_maintain, cast_stagger, recovery_image, recovery_stop_maintaining, definition_database, lookup_definition,
+        original_single, original_summon_start, stopped.load());
+    CHECK(native_recipes.empty() && recipe_state.requests().empty());
+    SoftlockFixture f;
+    definition_name = +[](uintptr_t) -> const char* { return "elevator6"; };
+    actor_identifier = +[](uintptr_t) -> uint32_t { return 7; };
+    find_entity = +[](uintptr_t, const char*) -> uintptr_t { return 0; };
+    cast_maintain = cast_stagger = +[](uintptr_t) -> uintptr_t { return 0; };
+    recovery_stop_maintaining = +[](uintptr_t, uintptr_t, uint64_t, const char*) -> uintptr_t { return 0; };
+    empty_combat_recovery(f);
+    definition_database = +[]() -> uintptr_t { return 0; };
+    lookup_definition = +[](uintptr_t, const char*, int32_t) -> uintptr_t { return 0; };
+    find_entity = +[](uintptr_t world, const char*) -> uintptr_t { return *reinterpret_cast<const uintptr_t*>(world); };
+    f.world[0] = f.manager_address;
+    original_single = +[](uintptr_t, uintptr_t output, uint64_t, uintptr_t source, uintptr_t) -> uintptr_t {
+        CHECK(source); ++native_fallback_calls; return output + 1;
+    };
+    original_summon_start = +[](uintptr_t) { ++native_fallback_calls; };
+    stopped.store(false);
+    recipe_failure_and_fallback(f);
+    summon_fallback(f);
+    recovery_cancellation_and_selection();
+    population_refusals();
+    expanded::map_freed();
+    bool was_stopped = false;
+    std::tie(world_global, recipe_stamp, definition_name, actor_identifier, find_entity, cast_maintain, cast_stagger,
+        recovery_image, recovery_stop_maintaining, definition_database, lookup_definition, original_single, original_summon_start, was_stopped) = saved;
+    stopped.store(was_stopped);
+    std::puts("PASS empty combat recovery, partial recipe fault, fresh native fallback, cancellation and ambiguous selection");
+}
 struct Reply {
     generated::command_reply envelope{};
     v2::CommandError error{};
@@ -385,7 +612,7 @@ void protocol_v2_contract(const wchar_t* mode, void (*park)(), void (*resume)(),
     using namespace sentinel;
     if (std::wcscmp(mode, L"v2")) return;
     fixture_requests(); fixture_responses(); command_families(); transient_model(); campaign_upload();
-    park(); V2Connection connection; reconnect(connection);
+    park(); softlock_contract(); V2Connection connection; reconnect(connection);
     const auto hello = connection.exchange(6, {}, 2000); generated::hello_result supported;
     CHECK(hello.transport == ProbeResult::ok && generated::decode(hello.body, supported));
     CHECK(supported.max_frame == 16384 && supported.execution_slots == 8 && supported.full_result_ms == 30000 && supported.identity_capacity == 65536);

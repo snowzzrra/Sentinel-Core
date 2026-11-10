@@ -130,7 +130,7 @@ void format_recipe_fault(const char* function, unsigned line, const char* reason
     char body[192]; recipe_fault_body(actor, body);
     const auto scope = native::inspect();
     std::snprintf(first_recipe_fault, sizeof(first_recipe_fault),
-        "function=%.80s reason=%.96s request=%.160s actor=%llx recipe=%.80s manager=%llx owner=%.160s body=%.191s map=%.191s generation=%llu stamp=%llu at_ms=%llu line=%u",
+        "function=%.80s reason=%.256s request=%.160s actor=%llx recipe=%.80s manager=%llx owner=%.160s body=%.191s map=%.191s generation=%llu stamp=%llu at_ms=%llu line=%u",
         function, reason, key, actor, origin, manager, owner, body,
         recipe_state.map().empty() ? scope.current_map.bytes : recipe_state.map().c_str(),
         scope.scope.lifecycle_generation, native::observation_stamp(), GetTickCount64(), line);
@@ -169,8 +169,10 @@ void recipe_creation_failed(RecipeCreation& creation, const char* function, unsi
         set_recipe_fault(function, line, reason, creation.key.c_str(), creation.actor, creation.selecting_manager);
         return;
     }
-    commands::diagnostic_trace("AP_RECIPE_RETRY function=%s reason=%s request=%.160s ordinal=%llu stamp=%llu",
-        function, reason, creation.key.c_str(), creation.emission.ordinal, native::observation_stamp());
+    commands::diagnostic_trace("AP_RECIPE_RETRY function=%s reason=%s request=%.160s origin=%s parent=%llx component=%llx ordinal=%llu emitted=%llu reserved=%u map=%s stamp=%llu",
+        function, reason, creation.key.c_str(), found->second.request.origin.c_str(), creation.selecting_manager,
+        creation.summon_component, creation.emission.ordinal, found->second.emitted,
+        found->second.reserved, recipe_state.map().c_str(), native::observation_stamp());
 }
 
 std::map<std::string, uint8_t> recipe_spawn_traces;
@@ -810,6 +812,7 @@ static bool admit_recipe_creation(RecipeCreation& creation, uintptr_t manager, s
     return true;
 }
 bool begin_recipe_creation(RecipeCreation& creation, uintptr_t manager, std::string_view origin, std::string_view label) {
+    creation.selecting_manager = manager;
     if (recipe_fault.load(std::memory_order_acquire)) { trace_spawn_refusal(manager, origin, "recipe_fault"); return false; }
     if (!load_native_recipes()) { trace_spawn_refusal(manager, origin, "recipe_library_unavailable"); return false; }
     const auto found = native_recipes.find(std::string(origin));
@@ -1124,10 +1127,62 @@ bool recipe_landing_pose(RecipeCreation& creation, float* pose) {
     return true;
 }
 
+static const char* fallback_rejection(uintptr_t manager, const NativeRecipe& recipe) {
+    if (recipe_stamp != native::observation_stamp()) return "fallback_stamp_changed";
+    if (pending_summon_checkpoint || restored_independent || independent_memberships_pending) return "fallback_restore_pending";
+    if (recipe_creation || worker_recipe) return "fallback_creation_or_worker_active";
+    if (std::string_view("igmt").find(recipe.definition.family) == std::string_view::npos) return "fallback_special_call_required";
+    if (recipe.definition.source.empty()) return "fallback_source_missing";
+    const auto pending = pending_recipes.find({manager, recipe.definition.origin});
+    if (pending == pending_recipes.end()) return nullptr;
+    const auto request = recipe_state.requests().find(pending->second);
+    if (request == recipe_state.requests().end()) return "fallback_request_missing";
+    const auto& progress = request->second;
+    if (progress.reserved || progress.emitted || !progress.actors.empty() || progress.closed) return "fallback_request_mutated";
+    return nullptr;
+}
+
+static bool fallback_native_definitions(uintptr_t source, char family) {
+    if (family == 'g') return true;
+    const auto count = *reinterpret_cast<const int32_t*>(source + 0xc40);
+    const auto values = *reinterpret_cast<const uintptr_t*>(source + 0xc38);
+    if (count <= 0 || count > 100000 || !values) return false;
+    for (int32_t i = 0; i < count; ++i) {
+        std::string name;
+        if (!native_text(values + static_cast<uintptr_t>(i) * 0x80, name, 511) || name.empty() || name.rfind("ap_v070_", 0) == 0) return false;
+    }
+    return true;
+}
+
+uintptr_t recipe_fallback_source(uintptr_t manager, std::string_view origin) {
+    const auto found = native_recipes.find(std::string(origin));
+    const auto reason = found == native_recipes.end() ? "fallback_recipe_missing" : fallback_rejection(manager, found->second);
+    if (reason) { trace_spawn_refusal(manager, origin, reason, "fallback_refused"); return 0; }
+    const auto source = find_entity(*reinterpret_cast<const uintptr_t*>(world_global), found->second.definition.source.c_str());
+    char name[512];
+    if (!source || !read_definition_name(source, name) || spawn_limits(name) || std::string_view(name).rfind("ap_v070_", 0) == 0) {
+        trace_spawn_refusal(manager, origin, "fallback_native_source_unavailable", "fallback_refused"); return 0;
+    }
+    if (!fallback_native_definitions(source, found->second.definition.family)) {
+        trace_spawn_refusal(manager, origin, "fallback_native_definitions_unavailable", "fallback_refused"); return 0;
+    }
+    const auto pending = pending_recipes.find({manager, std::string(origin)});
+    if (pending != pending_recipes.end()) { recipe_state.cancel(pending->second); pending_recipes.erase(pending); }
+    trace_spawn_refusal(manager, origin, "recipe_fault", "native_fallback");
+    return source;
+}
+
 bool try_recipe_creation(uintptr_t manager, uintptr_t record, uintptr_t alias, uintptr_t fourth,
                           uintptr_t fifth, bool group, uint64_t& result) {
     std::string origin;
     if (!recipe_origin(alias, origin)) return false;
+    if (recipe_fault.load()) {
+        std::lock_guard<std::recursive_mutex> admission(admission_mutex);
+        const auto source = recipe_fallback_source(manager, origin);
+        result = !source ? 0 : group ? original_group(manager, reinterpret_cast<uint64_t*>(record), source) :
+            original_spawn(manager, record, source, fourth, fifth);
+        return true;
+    }
     result = create_from_recipe(manager, record, fourth, fifth, group, origin);
     return true;
 }
@@ -1205,6 +1260,11 @@ bool prepare_recipe_worker(uintptr_t worker, bool maintenance, bool& marked) {
     const auto alias = *reinterpret_cast<const uintptr_t*>(worker + (maintenance ? 0xd8 : 0xc8));
     std::string origin;
     if (!recipe_origin(alias, origin)) return true;
+    if (recipe_fault.load()) {
+        if (!worker_recipes.count(worker)) return true;
+        trace_spawn_refusal(*reinterpret_cast<const uintptr_t*>(worker + 0x40), origin, "fallback_worker_quantity_modified", "fallback_refused");
+        return false;
+    }
     marked = true;
     if (!load_native_recipes()) { trace_spawn_refusal(*reinterpret_cast<const uintptr_t*>(worker + 0x40), origin, "worker_recipe_library_unavailable"); return false; }
     const auto recipe = native_recipes.find(origin);
@@ -1273,6 +1333,7 @@ void queue_command_detour(uintptr_t manager, uintptr_t command) {
                 worker_diagnostics.erase(command);
             }
             original_queue_command(manager, command);
+            remaining_wait_started.erase(command);
             trace_spawn_refusal(manager, "", "command_queued", "observed");
             prepare_queued_recipe(command);
             if (kill_progress.find(command) != kill_progress.end()) initialize_kill(command, manager);
@@ -1347,10 +1408,33 @@ static bool dispatch_first_recipe(uintptr_t manager, uintptr_t output, uint64_t 
     }
     return true;
 }
+static uintptr_t dispatch_native_fallback(uintptr_t manager, uintptr_t output, uint64_t type,
+                                          uintptr_t label, bool group, const std::string& origin) {
+    const auto recipe = native_recipes.find(origin);
+    if (!group && recipe != native_recipes.end() && recipe->second.definition.logical_count != 1) {
+        trace_spawn_refusal(manager, origin, "fallback_single_quantity_mismatch", "fallback_refused"); return output;
+    }
+    const auto source = recipe_fallback_source(manager, origin);
+    if (!source) return output;
+    const auto& entry = native_recipes.at(origin).definition;
+    return group ? original_multiple(manager, output, type, static_cast<int32_t>(entry.logical_count), source, label) :
+        original_single(manager, output, type, source, label);
+}
+
+static bool dispatch_library_ready(uintptr_t manager) {
+    if (load_native_recipes()) return true;
+    if (!recipe_fault.load()) retry_immediate(manager, "recipe_library_unavailable");
+    return false;
+}
+
 void dispatch_recipe_locked(uintptr_t manager, uintptr_t output, uint64_t type, uintptr_t alias,
                               uintptr_t label, bool group, const std::string& origin, uintptr_t& result) {
     result = output;
-    if (!load_native_recipes()) { if (!recipe_fault.load()) retry_immediate(manager, "recipe_library_unavailable"); return; }
+    if (recipe_fault.load()) {
+        result = dispatch_native_fallback(manager, output, type, label, group, origin);
+        return;
+    }
+    if (!dispatch_library_ready(manager)) return;
     const auto found = native_recipes.find(origin);
     if (found == native_recipes.end()) { retry_immediate(manager, "recipe_missing"); return; }
     // preserve native group selection for the bridge's empty source.

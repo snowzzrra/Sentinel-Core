@@ -76,13 +76,24 @@ void Queue::enqueue_console(uint64_t stamp, uint64_t now) {
     attempts_.push_back(std::move(attempt));
     pending_.store(true, std::memory_order_release);
 }
-static bool same_context(const Context& context, const Context& previous) {
-    return context.scope.lifecycle_generation == previous.scope.lifecycle_generation && context.map == previous.map &&
-        context.world == previous.world && context.player == previous.player && context.namespace_id == previous.namespace_id &&
-        context.save == previous.save && context.gameplay;
+static std::string context_change(const Context& context, const Context& previous) {
+    if (context.stamp != previous.stamp) return "stamp previous=" + std::to_string(previous.stamp) + " current=" + std::to_string(context.stamp);
+    if (context.scope.lifecycle_generation != previous.scope.lifecycle_generation)
+        return "generation previous=" + std::to_string(previous.scope.lifecycle_generation) + " current=" + std::to_string(context.scope.lifecycle_generation);
+    if (context.map != previous.map) return "map previous=" + previous.map + " current=" + context.map;
+    if (context.world != previous.world) return "world previous=" + std::to_string(previous.world) + " current=" + std::to_string(context.world);
+    if (context.player != previous.player) return "player previous=" + std::to_string(previous.player) + " current=" + std::to_string(context.player);
+    if (context.namespace_id != previous.namespace_id) return "namespace previous=" + previous.namespace_id + " current=" + context.namespace_id;
+    if (context.save != previous.save) return "save previous=" + previous.save + " current=" + context.save;
+    return context.gameplay ? "" : "gameplay=false";
 }
-static Outcome recovery_context(const Attempt& attempt, const Context& context, uint64_t stamp, uint64_t age) {
-    if (stamp != attempt.stamp || (attempt.started && !same_context(context, attempt.context))) return changed;
+static Outcome recovery_context(Attempt& attempt, const Context& context, uint64_t stamp, uint64_t age) {
+    if (stamp != attempt.stamp) {
+        attempt.wait = "context_changed stamp previous=" + std::to_string(attempt.stamp) + " current=" + std::to_string(stamp);
+        return changed;
+    }
+    const auto reason = attempt.started ? context_change(context, attempt.context) : "";
+    if (!reason.empty()) { attempt.wait = "context_changed " + reason; return changed; }
     if (!context.gameplay) return no_active;
     if (!context.supported) return unsupported;
     if (age > 250 || !context.readable) return unknown;
@@ -98,6 +109,17 @@ static void recovery_wait(Attempt& attempt, const Manager& manager) {
         attempt.wait += manager.name + ": " + manager.wait;
     }
 }
+static std::string manager_change(const Manager& target, const Context& context) {
+    const auto found = std::find_if(context.managers.begin(), context.managers.end(), [&](const auto& manager) {
+        return manager.address == target.address;
+    });
+    const auto identity = " name=" + target.name + " address=" + std::to_string(target.address);
+    if (found == context.managers.end()) return "manager_missing" + identity + " identifier=" + std::to_string(target.identifier);
+    if (found->identifier != target.identifier) return "manager_identifier" + identity +
+        " previous=" + std::to_string(target.identifier) + " current=" + std::to_string(found->identifier);
+    return "manager_name address=" + std::to_string(target.address) + " previous=" + target.name + " current=" + found->name;
+}
+
 static bool recovery_targets(Attempt& attempt, const Context& context) {
     auto& outcome = attempt.outcome;
     bool complete = !attempt.targets.empty();
@@ -107,7 +129,10 @@ static bool recovery_targets(Attempt& attempt, const Context& context) {
         const auto found = std::find_if(context.managers.begin(), context.managers.end(), [&](const Manager& manager) {
             return manager.address == target.address && manager.identifier == target.identifier && manager.name == target.name;
         });
-        if (found == context.managers.end()) { outcome = changed; break; }
+        if (found == context.managers.end()) {
+            attempt.wait = "context_changed " + manager_change(target, context);
+            outcome = changed; break;
+        }
         if (found->complete) continue;
         complete = false;
         recovery_wait(attempt, *found);

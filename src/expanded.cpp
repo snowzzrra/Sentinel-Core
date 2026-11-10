@@ -129,33 +129,37 @@ bool species_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 
     for (const auto count : active) combined += count;
     return active[incoming] < limits.species_maximum[incoming] && combined < limits.maximum[3];
 }
-static bool pressure_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active,
+static const char* pressure_rejection(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active,
                              uint64_t superheavy, uint64_t special, bool incoming_superheavy, bool incoming_special) noexcept {
-    if (!limits.mixed && ((incoming_superheavy && special) || (incoming_special && superheavy))) return false;
+    if (!limits.mixed && ((incoming_superheavy && special) || (incoming_special && superheavy))) return "mixed_special_superheavy";
     uint64_t population = 0;
     for (const auto count : active) population += count;
-    const auto ceiling = (special || incoming_special || superheavy || incoming_superheavy) ? limits.pressure : limits.population;
-    if (population < ceiling) return true;
-    return !limits.strict && limits.kind == 7 && active[7] < 2;
+    const bool pressure = special + superheavy || incoming_special || incoming_superheavy;
+    const auto ceiling = pressure ? limits.pressure : limits.population;
+    if (population < ceiling) return nullptr;
+    if (!limits.strict && limits.kind == 7 && active[7] < 2) return nullptr;
+    return pressure ? "pressure" : "population";
 }
-static bool population_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active) noexcept {
+static const char* population_rejection(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active) noexcept {
     const auto superheavy = uint64_t{active[0]} + active[1] + active[6];
     const auto special = uint64_t{active[0]} + active[1] + active[2] + active[4] + active[5];
     const bool incoming_superheavy = limits.kind <= 1 || limits.kind == 6;
     const bool incoming_special = limits.kind <= 2 || limits.kind == 4 || limits.kind == 5;
-    if (!pressure_allowed(limits, active, superheavy, special, incoming_superheavy, incoming_special)) return false;
-    if (incoming_superheavy && superheavy >= limits.superheavy) return false;
-    if ((limits.heavy || limits.strict) && limits.kind == 3 && active[3] >= limits.heavy) return false;
-    return true;
+    if (const auto reason = pressure_rejection(limits, active, superheavy, special, incoming_superheavy, incoming_special)) return reason;
+    if (incoming_superheavy && superheavy >= limits.superheavy) return "superheavy";
+    if ((limits.heavy || limits.strict) && limits.kind == 3 && active[3] >= limits.heavy) return "heavy";
+    return nullptr;
 }
-bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active) noexcept {
-    if (limits.population && !population_allowed(limits, active)) return false;
-    if (limits.kind >= 6) return true;
-    if (limits.kind == 3) return true;
+const char* spawn_rejection(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active) noexcept {
+    if (limits.population) if (const auto reason = population_rejection(limits, active)) return reason;
+    if (limits.kind >= 6 || limits.kind == 3) return nullptr;
     const auto special = uint64_t{active[0]} + active[1] + active[2] + active[4] + active[5];
     const auto individual=limits.kind>=4 ? 1 : limits.kind;
-    return active[limits.kind] < limits.maximum[individual] &&
-        special < limits.maximum[3];
+    if (active[limits.kind] >= limits.maximum[individual]) return "individual_special";
+    return special < limits.maximum[3] ? nullptr : "combined_special";
+}
+bool spawn_allowed(const SpawnLimits& limits, const std::array<std::uint32_t, 9>& active) noexcept {
+    return !spawn_rejection(limits, active);
 }
 static bool recipe_credit(std::string_view name, size_t& end, SpawnRecipe& result) noexcept {
     result.credit_units = result.logical_units;

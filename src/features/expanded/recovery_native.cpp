@@ -98,7 +98,10 @@ void scan_recovery_wait(uintptr_t worker, recovery::Manager& manager) {
     const auto type = recovery_type(worker);
     manager.wait += type;
     const auto observed = remaining_wait_started.find(worker);
-    if (observed != remaining_wait_started.end()) return;
+    if (type == ".?AVidEncounterEvent_WaitAIRemaining@@" && observed != remaining_wait_started.end() &&
+        observed->second.table == *reinterpret_cast<const uintptr_t*>(worker) &&
+        observed->second.stamp == native::observation_stamp() && observed->second.manager == manager.address &&
+        observed->second.identifier == manager.identifier) return;
     if (type == ".?AVidEncounterEvent_WaitForEventFlag@@") {
         const auto flag = *reinterpret_cast<const int32_t*>(worker + 0xa8);
         manager.wait += " flag=" + std::to_string(flag);
@@ -125,7 +128,20 @@ const char* recovery_combat_wait(uintptr_t worker, const recovery::Manager& mana
     const auto wait = remaining_wait_started.find(worker);
     if (wait == remaining_wait_started.end()) return "combat_wait_unobserved";
     if (wait->second.table != *reinterpret_cast<const uintptr_t*>(worker)) return "combat_wait_identity_changed";
+    if (wait->second.stamp != native::observation_stamp() || wait->second.identifier != manager.identifier) return "combat_wait_stamp_or_manager_changed";
+    if (recovery_type(worker) != ".?AVidEncounterEvent_WaitAIRemaining@@") return "combat_wait_type_mismatch";
     if (*reinterpret_cast<const uintptr_t*>(worker + 0x40) != manager.address) return "combat_wait_owner_mismatch";
+    auto mask = *reinterpret_cast<const uint64_t*>(worker + 0x88);
+    if (mask & (uint64_t{1} << 44)) mask = encounter_ai_mask;
+    std::string label;
+    if (!native_text(worker + 0x58, label, 1024)) return "combat_wait_label_unreadable";
+    if (pending_summon_checkpoint || restored_independent || independent_memberships_pending) return "combat_wait_restore_pending";
+    if (!(mask & encounter_ai_mask) || *reinterpret_cast<const int32_t*>(worker + 0xc0) < 0) return "combat_wait_not_empty_threshold";
+    return nullptr;
+}
+
+static const char* recovery_owned_request(uintptr_t worker, const recovery::Manager& manager) {
+    if (const auto reason = recovery_combat_wait(worker, manager)) return reason;
     auto mask = *reinterpret_cast<const uint64_t*>(worker + 0x88);
     if (mask & (uint64_t{1} << 44)) mask = encounter_ai_mask;
     std::string label;
@@ -149,7 +165,7 @@ const char* recovery_empty_request(const recovery::Context& context, recovery::M
     for (int32_t j = 0; j < count; ++j) {
         const auto worker = *reinterpret_cast<const uintptr_t*>(workers + static_cast<uintptr_t>(j) * 8);
         if (!worker) continue;
-        reason = recovery_combat_wait(worker, manager);
+        reason = recovery_owned_request(worker, manager);
         if (!reason) { manager.recipe_blocked = true; break; }
     }
     return reason;
@@ -290,11 +306,19 @@ static void cancel_recovery_shows(const std::set<std::string>& closed) {
     }
 }
 
+static bool recovery_stamp_current(recovery::Attempt& attempt, uint64_t expected, const char* stage) {
+    const auto current = native::observation_stamp();
+    if (current == expected) return true;
+    attempt.outcome = recovery::changed;
+    attempt.wait = "context_changed stamp stage=" + std::string(stage) + " previous=" + std::to_string(expected) + " current=" + std::to_string(current);
+    return false;
+}
+
 void stop_recovery_producers(recovery::Attempt& attempt, const recovery::Manager& target) {
     stop_recovery_workers(attempt, target);
     alignas(8) uint8_t output[32]{};
     recovery_stop_maintaining(target.address, reinterpret_cast<uintptr_t>(output), uint64_t{1} << 44, "");
-    if (native::observation_stamp() != attempt.stamp) { attempt.outcome = recovery::changed; return; }
+    if (!recovery_stamp_current(attempt, attempt.stamp, "stop_producers")) return;
     for (auto pending = pending_recipes.begin(); pending != pending_recipes.end();) {
         if (pending->first.first != target.address) { ++pending; continue; }
         recipe_state.cancel(pending->second); ++attempt.producers_stopped;
@@ -317,10 +341,10 @@ bool kill_recovery_actor(recovery::Attempt& attempt, const recovery::Context& co
     if (!declaration || !dispatcher || !combat::suppress(context.scope.lifecycle_generation, context.world, actor.address)) return false;
     ++attempt.kills_suppressed;
     recovery_notify(dispatcher, context.player, actor.address, context.player, declaration + 0x90, declaration + 0x90, 0);
-    if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
+    if (!recovery_stamp_current(attempt, context.stamp, "notify_death")) return false;
     recovery_death(context.world + 0xac660, context.player, context.player, actor.address, -1, 5,
         *reinterpret_cast<const uintptr_t*>(declaration + 0xad8), declaration + 0x9c8, 0.0f);
-    if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
+    if (!recovery_stamp_current(attempt, context.stamp, "actor_death")) return false;
     int64_t step = 0; int32_t delay = 0;
     recovery_clock(context.world + 0x125a60, &step, 1);
     recovery_milliseconds(&delay, static_cast<int64_t>(static_cast<float>(step) * 2.0f));
@@ -347,12 +371,97 @@ bool unblock_recovery_waits(recovery::Attempt& attempt, const recovery::Manager&
     return true;
 }
 
+static bool recovery_records_empty(uintptr_t world, uintptr_t records, int32_t count) {
+    if (count < 0 || count > 1000000 || (count && !records)) return false;
+    for (int32_t i = 0; i < count; ++i) {
+        const auto actor = record_actor(records + static_cast<uintptr_t>(i) * 0x68);
+        if (actor && !combat::confirmed_dead(world, actor)) return false;
+        if (!actor && *reinterpret_cast<const uint32_t*>(records + static_cast<uintptr_t>(i) * 0x68 + 8) != 0x1fffffe) return false;
+    }
+    return true;
+}
+
+static bool recovery_requests_closed(const std::string& owner) {
+    for (const auto& [key, progress] : recipe_state.requests()) {
+        if (progress.closed && !progress.reserved) continue;
+        if (progress.request.owner == owner) return false;
+        const auto members = recipe_state.request_memberships(key);
+        if (std::any_of(members.begin(), members.end(), [&](const auto& member) { return member.owner == owner; })) return false;
+    }
+    return true;
+}
+
+static bool recovery_workers_closed(uintptr_t manager, uintptr_t command) {
+    const auto workers = *reinterpret_cast<const uintptr_t*>(manager + 0xcc0);
+    const auto count = *reinterpret_cast<const int32_t*>(manager + 0xcc8);
+    if (count < 0 || count > 100000 || (count && !workers)) return false;
+    bool present = false;
+    for (int32_t i = 0; i < count; ++i) {
+        const auto worker = *reinterpret_cast<const uintptr_t*>(workers + static_cast<uintptr_t>(i) * 8);
+        present |= worker == command;
+        if (!worker) continue;
+        if (*reinterpret_cast<const uintptr_t*>(worker + 0x40) != manager) return false;
+        if (const auto maintain = cast_maintain(worker)) {
+            if (!*reinterpret_cast<const uint8_t*>(maintain + 0xcc)) return false;
+        } else if (const auto stagger = cast_stagger(worker)) {
+            if (!*reinterpret_cast<const uint8_t*>(stagger + 0xb9)) return false;
+        } else if (!recovery_event_wait(worker, manager) && recovery_type(worker) != ".?AVidEncounterEvent_WaitAIRemaining@@") return false;
+    }
+    return present;
+}
+
+static bool recovery_manager_active(uintptr_t manager) {
+    return *reinterpret_cast<const uint8_t*>(manager + 0xdb2) && *reinterpret_cast<const uint8_t*>(manager + 0xba0) &&
+        !*reinterpret_cast<const uint8_t*>(manager + 0xdb3) && *reinterpret_cast<const int32_t*>(manager + 0xda0) >= 0;
+}
+
+static bool recovery_wait_identity(uintptr_t command, const RemainingWait& wait) {
+    if (wait.stamp != native::observation_stamp() || recipe_stamp != wait.stamp || !wait.manager ||
+        pending_summon_checkpoint || restored_independent || independent_memberships_pending) return false;
+    if (wait.table != *reinterpret_cast<const uintptr_t*>(command) ||
+        *reinterpret_cast<const uintptr_t*>(command + 0x40) != wait.manager ||
+        actor_identifier(wait.manager) != wait.identifier) return false;
+    return recovery_manager_active(wait.manager);
+}
+
+static bool recovery_remaining_ready(uintptr_t command, const RemainingWait& wait) {
+    if (!recovery_wait_identity(command, wait)) return false;
+    recovery::Manager manager;
+    manager.address = wait.manager; manager.identifier = wait.identifier;
+    if (recovery_combat_wait(command, manager)) return false;
+    char name[512];
+    if (!read_definition_name(wait.manager, name) || !recovery_requests_closed(name) ||
+        !recovery_workers_closed(wait.manager, command)) return false;
+    const auto world = *reinterpret_cast<const uintptr_t*>(world_global);
+    for (const auto offset : {0xc80, 0xcf0, 0xd08})
+        if (!recovery_records_empty(world, *reinterpret_cast<const uintptr_t*>(wait.manager + offset),
+                *reinterpret_cast<const int32_t*>(wait.manager + offset + 8))) return false;
+    return recovery_records_empty(world, *reinterpret_cast<const uintptr_t*>(command + 0xa8),
+        *reinterpret_cast<const int32_t*>(command + 0xb0)) && wait.stamp == native::observation_stamp();
+}
+
+bool recovery_remaining_complete(uintptr_t command) {
+    const auto found = remaining_wait_started.find(command);
+    if (found == remaining_wait_started.end() || !found->second.recovered) return false;
+    return recovery_remaining_ready(command, found->second);
+}
+
+static void unblock_recovery_combat(recovery::Attempt& attempt, const recovery::Manager& target) {
+    if (!target.actors.empty() || target.noncombat_wait) return;
+    for (auto& [command, wait] : remaining_wait_started) {
+        if (wait.manager != target.address || wait.identifier != target.identifier || wait.stamp != attempt.stamp || wait.recovered) continue;
+        if (!recovery_remaining_ready(command, wait)) continue;
+        wait.recovered = true;
+        commands::diagnostic_trace("AP_ENCOUNTER_RECOVERY unblocked=%llx manager=%llx wait=empty_combat stamp=%llu", command, target.address, attempt.stamp);
+    }
+}
+
 static bool kill_recovery_targets(recovery::Attempt& attempt, const recovery::Context& context, const std::vector<const recovery::Manager*>& targets) {
     std::set<uintptr_t> killed;
     for (const auto* target : targets) {
         if (target->complete) continue;
         for (const auto& actor : target->actors) {
-            if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
+            if (!recovery_stamp_current(attempt, context.stamp, "kill_targets")) return false;
             if (killed.insert(actor.address).second && !kill_recovery_actor(attempt, context, actor)) return false;
         }
     }
@@ -375,12 +484,15 @@ bool drain_recovery_impl(recovery::Attempt& attempt, const recovery::Context& co
                 return manager.address == target.address && manager.identifier == target.identifier;
             });
             if (found == context.managers.end()) return false;
-            if (native::observation_stamp() != context.stamp) { attempt.outcome = recovery::changed; return false; }
+            if (!recovery_stamp_current(attempt, context.stamp, "collect_targets")) return false;
             if (found->complete) continue;
             stage = "unblock_waits";
             if (!unblock_recovery_waits(attempt, *found)) return false;
             stage = "stop_producers";
             stop_recovery_producers(attempt, *found);
+            if (attempt.outcome != recovery::pending) return false;
+            stage = "unblock_combat_wait";
+            unblock_recovery_combat(attempt, *found);
             stage = "collect_targets";
             targets.push_back(&*found);
         }
