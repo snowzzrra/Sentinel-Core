@@ -9,36 +9,10 @@ def signed(body):
     return body + b"sha256=" + hashlib.sha256(body).hexdigest().encode() + b"\n"
 
 
-def restart_paths(host, base):
-    def run(root, action, mode):
-        result = subprocess.run([host, action, root, "3", mode], capture_output=True, text=True, timeout=45)
-        assert result.returncode == 0, result.stdout + result.stderr
-
-    for master in (False, True):
-        root = base / f"restart-{master}"
-        root.mkdir()
-        run(root, "create", "restart_master_postsave" if master else "restart_postsave")
-        run(root, "resume", "restart_master_loaded" if master else "restart_loaded")
-        if not master:
-            run(root, "resume", "restart_save")
-            run(root, "resume", "restart_normal")
-            assert not list(root.glob("*/stage.restart.pending"))
-    for invalid in (b"stage=0\n", b"stage=1\n", b"stage=999999\n", b"corrupt"):
-        root = base / f"restart-invalid-{invalid.hex()}"
-        root.mkdir()
-        run(root, "create", "restart_pending")
-        pending, = root.glob("*/stage.restart.pending")
-        record = pending.read_bytes().split(b"\n", 2)[2]
-        pending.write_bytes(record.replace(b"stage=7771000\n", invalid) if invalid != b"corrupt" else b"truncated")
-        run(root, "resume", "restart_normal")
-        assert not pending.exists()
-
-
 def main():
     host, temporary = map(Path, sys.argv[1:])
-    with tempfile.TemporaryDirectory(prefix="checkpoint-resume-", dir=temporary) as directory:
+    with tempfile.TemporaryDirectory(prefix="resume-", dir=temporary) as directory:
         base = Path(directory)
-        restart_paths(host, base)
         for candidate, matching in ((False, False), (True, False), (True, True)):
             root = base / f"candidate-{candidate}-{matching}"
             root.mkdir()

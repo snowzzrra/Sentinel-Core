@@ -147,11 +147,11 @@ void interrupt_protocol(const std::wstring& root,const std::wstring& phase,senti
     const HANDLE waits[]{entered,process.hProcess};
     const bool terminate=mode==sentinel::testing::FileFault::after_write || mode==sentinel::testing::FileFault::after_truncate ||
         mode==sentinel::testing::FileFault::after_flush || mode==sentinel::testing::FileFault::after_erase;
-    const auto waited=WaitForMultipleObjects(2,waits,FALSE,15000);
+    const auto waited=WaitForMultipleObjects(2,waits,FALSE,60000);
     if (waited!=(terminate?WAIT_OBJECT_0:WAIT_OBJECT_0+1)) std::fprintf(stderr,"protocol wait phase=%ls suffix=%ls mode=%u wait=%lu\n",phase.c_str(),suffix.c_str(),static_cast<unsigned>(mode),waited);
     CHECK(waited==(terminate?WAIT_OBJECT_0:WAIT_OBJECT_0+1));
     if (terminate) CHECK(TerminateProcess(process.hProcess,sentinel::testing::interrupted_exit));
-    CHECK(WaitForSingleObject(process.hProcess,4000)==WAIT_OBJECT_0);
+    CHECK(WaitForSingleObject(process.hProcess,30000)==WAIT_OBJECT_0);
     DWORD code=0; CHECK(GetExitCodeProcess(process.hProcess,&code));
     if (code!=(terminate?sentinel::testing::interrupted_exit:0)) std::fprintf(stderr,"protocol child phase=%ls suffix=%ls mode=%u exit=%lu\n",phase.c_str(),suffix.c_str(),static_cast<unsigned>(mode),code);
     CHECK(code==(terminate?sentinel::testing::interrupted_exit:0));

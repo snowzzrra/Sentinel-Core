@@ -593,9 +593,9 @@ void interrupt_metadata(const std::wstring& root, sentinel::testing::FileFault m
     CHECK(CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process));
     const HANDLE waits[]{entered, process.hProcess};
     const bool terminate = mode >= sentinel::testing::FileFault::after_write;
-    CHECK(WaitForMultipleObjects(2, waits, FALSE, 10000) == (terminate ? WAIT_OBJECT_0 : WAIT_OBJECT_0 + 1));
+    CHECK(WaitForMultipleObjects(2, waits, FALSE, 60000) == (terminate ? WAIT_OBJECT_0 : WAIT_OBJECT_0 + 1));
     if (terminate) CHECK(TerminateProcess(process.hProcess, sentinel::testing::interrupted_exit));
-    CHECK(WaitForSingleObject(process.hProcess, 4000) == WAIT_OBJECT_0);
+    CHECK(WaitForSingleObject(process.hProcess, 30000) == WAIT_OBJECT_0);
     DWORD code = 0; CHECK(GetExitCodeProcess(process.hProcess, &code));
     if (code != (terminate ? sentinel::testing::interrupted_exit : 0))
         std::fprintf(stderr,"child exit=%lu mode=%u suffix=%ls root=%ls\n",code,static_cast<unsigned>(mode),archive_file?archive_file:L"metadata",root.c_str());

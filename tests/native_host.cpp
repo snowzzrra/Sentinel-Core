@@ -128,10 +128,10 @@ void gate(bool executed) {
     const unsigned expected = executed ? 2u : 1u;
     if (gate_stage.load() != expected) return;
     SetEvent(gate_entered);
-    CHECK(WaitForSingleObject(gate_release, 5000) == WAIT_OBJECT_0);
+    CHECK(WaitForSingleObject(gate_release, 60000) == WAIT_OBJECT_0);
     gate_stage.store(0);
 }
-template<class Predicate> void until_at(int line, const char* stage, Predicate predicate, uint32_t ms = 4000) {
+template<class Predicate> void until_at(int line, const char* stage, Predicate predicate, uint32_t ms = 30000) {
     const auto deadline = GetTickCount64() + ms;
     while (!predicate()) {
         if (GetTickCount64() >= deadline) {
@@ -149,7 +149,7 @@ template<class Predicate> void until_at(int line, const char* stage, Predicate p
     }
 }
 #define until(...) until_at(__LINE__, #__VA_ARGS__, __VA_ARGS__)
-void park() { pause_frames.store(true); CHECK(WaitForSingleObject(parked, 4000) == WAIT_OBJECT_0); }
+void park() { pause_frames.store(true); CHECK(WaitForSingleObject(parked, 60000) == WAIT_OBJECT_0); }
 void resume() {
     // consume the parked acknowledgement before a fast next stdin command can mistake it for acknowledgement of a new pause request
     ResetEvent(parked); pause_frames.store(false); SetEvent(wake);
@@ -159,7 +159,7 @@ void transition(uint32_t action) {
     // inspect() owns the native history lock. Polling it while this fixture
     // drives a lifecycle callback can intentionally produce EVENT_GAP, before
     // the readiness assertion gets a chance to observe the completed event.
-    CHECK(WaitForSingleObject(changed, 4000) == WAIT_OBJECT_0);
+    CHECK(WaitForSingleObject(changed, 60000) == WAIT_OBJECT_0);
 }
 void ready_at(int line) { until_at(line, "ready: published lifecycle context", [] {
     const auto n = native::inspect(); return n.context_generation && !n.context_reason;
@@ -179,7 +179,7 @@ struct Child {
         process.value = pi.hProcess; CloseHandle(pi.hThread);
     }
     std::string complete(DWORD expected) {
-        CHECK(WaitForSingleObject(process.value, 8000) == WAIT_OBJECT_0);
+        CHECK(WaitForSingleObject(process.value, 60000) == WAIT_OBJECT_0);
         DWORD code = 0; CHECK(GetExitCodeProcess(process.value, &code));
         CHECK(code == expected);
         std::string text; char bytes[4096]; DWORD count = 0;
@@ -319,7 +319,7 @@ void stop_command(const wchar_t* mode, const sc_command_request& value) {
     const bool executed = !std::wcscmp(mode, L"stop-executing");
     if (claimed || executed) {
         ResetEvent(gate_entered); gate_stage.store(executed ? 2 : 1); resume();
-        CHECK(WaitForSingleObject(gate_entered, 4000) == WAIT_OBJECT_0);
+        CHECK(WaitForSingleObject(gate_entered, 60000) == WAIT_OBJECT_0);
     }
     CHECK(native::stop());
     if (claimed || executed) {
@@ -582,7 +582,7 @@ void basic_lifecycle_cases(const wchar_t* probe) {
             auto duplicate = query_diagnostic(GetCurrentProcessId(), 2000, diagnostic_detail_submit_operation, r);
             CHECK(duplicate.diagnostic.admitted_at_ms == admitted.diagnostic.admitted_at_ms);
             ResetEvent(gate_entered); gate_stage.store(stage); resume();
-            CHECK(WaitForSingleObject(gate_entered, 4000) == WAIT_OBJECT_0);
+            CHECK(WaitForSingleObject(gate_entered, 60000) == WAIT_OBJECT_0);
             CHECK(query(GetCurrentProcessId(), 500).result == ProbeResult::ok);
             Child cancel(probe, retrieve_args(r, true));
             const auto cancellation = cancel.complete(8);

@@ -179,10 +179,11 @@ target_include_directories(sentinel_campaign_tests PRIVATE tests)
 target_compile_definitions(sentinel_campaign_tests PRIVATE SC_NATIVE_TESTING)
 target_link_libraries(sentinel_campaign_tests PRIVATE sentinel_fault_storage sentinel_native_model sentinel_fault_minhook sentinel_save_session sentinel_protocol)
 
-file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.tmp/campaign-fixtures")
+file(TO_CMAKE_PATH "$ENV{TEMP}/sc" sc_test_temp)
+file(MAKE_DIRECTORY "${sc_test_temp}/campaign-fixtures")
 foreach(case fresh_catalog foreign_catalog foreign_write foreign_erase wrong_slot_write recipe_checkpoint)
-  file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.tmp/campaign-fixtures/${case}")
-  file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/.tmp/campaign-fixtures/${case}" campaign_fixture)
+  file(MAKE_DIRECTORY "${sc_test_temp}/campaign-fixtures/${case}")
+  file(TO_NATIVE_PATH "${sc_test_temp}/campaign-fixtures/${case}" campaign_fixture)
   add_test(NAME native_campaign_${case}_contract COMMAND sentinel_campaign_tests create "${campaign_fixture}" 1 ${case})
   set_tests_properties(native_campaign_${case}_contract PROPERTIES TIMEOUT 15)
 endforeach()
@@ -301,7 +302,7 @@ target_compile_definitions(sentinel_campaign_tests PRIVATE SC_FAULT_HOOK_RUNNER)
 add_test(NAME test_interrupted_metadata_blocks_unsafe_resume COMMAND sentinel_save_storage_tests --metadata)
 add_test(NAME checkpoint_reader_plan_contract COMMAND sentinel_save_storage_tests --checkpoint-plan)
 add_test(NAME checkpoint_probe_archive_contract COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/checkpoint_probe.py"
-  "$<TARGET_FILE:sentinel_campaign_tests>" "$<TARGET_FILE:sentinel_probe>" "${CMAKE_CURRENT_SOURCE_DIR}/.tmp")
+  "$<TARGET_FILE:sentinel_campaign_tests>" "$<TARGET_FILE:sentinel_probe>" "${sc_test_temp}")
 set_tests_properties(checkpoint_probe_archive_contract PROPERTIES TIMEOUT 180)
 add_test(NAME checkpoint_archive_crash_contract COMMAND sentinel_save_storage_tests --archive-faults)
 set_tests_properties(checkpoint_archive_crash_contract PROPERTIES TIMEOUT 120)
@@ -311,8 +312,11 @@ set_tests_properties(previous_checkpoint_generation PROPERTIES TIMEOUT 30 LABELS
 add_test(NAME checkpoint_protocol_crash_contract COMMAND sentinel_save_storage_tests --protocol-faults)
 set_tests_properties(checkpoint_protocol_crash_contract PROPERTIES TIMEOUT 180)
 add_test(NAME checkpoint_recovery_resume_contract COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/checkpoint_resume.py"
-  "$<TARGET_FILE:sentinel_campaign_tests>" "${CMAKE_CURRENT_SOURCE_DIR}/.tmp")
+  "$<TARGET_FILE:sentinel_campaign_tests>" "${sc_test_temp}")
 set_tests_properties(checkpoint_recovery_resume_contract PROPERTIES TIMEOUT 180)
+add_test(NAME stage_restart_record_contract COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/restart_record.py"
+  "$<TARGET_FILE:sentinel_campaign_tests>" "${sc_test_temp}")
+set_tests_properties(stage_restart_record_contract PROPERTIES TIMEOUT 180 LABELS "persisted")
 
 add_executable(sentinel_currency_tests tests/currencies.cpp)
 target_link_libraries(sentinel_currency_tests PRIVATE sentinel_native_model)
@@ -333,10 +337,10 @@ target_compile_options(sentinel_evidence_wire_tests PRIVATE /UNDEBUG)
 add_test(NAME evidence_wire_cpp_contract COMMAND sentinel_evidence_wire_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/wire/evidence_results.json")
 get_property(sc_tests DIRECTORY PROPERTY TESTS)
 set_tests_properties(protocol_v2_contract live_inspection_contract evidence_wire_cpp_contract
-  PROPERTIES LABELS "pillar;wire")
+  PROPERTIES TIMEOUT 180 LABELS "pillar;wire")
 set_tests_properties(previous_checkpoint_generation checkpoint_protocol_crash_contract
   checkpoint_archive_crash_contract checkpoint_recovery_resume_contract
-  PROPERTIES LABELS "pillar;two-generation-checkpoint")
+  PROPERTIES TIMEOUT 180 LABELS "pillar;two-generation-checkpoint")
 set_tests_properties(hook_set_transaction_contract PROPERTIES LABELS "pillar;hooks")
 set_tests_properties(${sc_tests} PROPERTIES ENVIRONMENT
-  "TMP=${CMAKE_CURRENT_SOURCE_DIR}/.tmp;TEMP=${CMAKE_CURRENT_SOURCE_DIR}/.tmp;LOCALAPPDATA=${CMAKE_CURRENT_SOURCE_DIR}/.tmp")
+  "TMP=${sc_test_temp};TEMP=${sc_test_temp};LOCALAPPDATA=${sc_test_temp}")
